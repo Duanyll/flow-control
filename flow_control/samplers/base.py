@@ -1,28 +1,50 @@
-from typing import Callable, cast, Any, TypeVar
+from typing import Any, cast
+
 import torch
 from pydantic import BaseModel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
-from flow_control.adapters import BaseModelAdapter
+from flow_control.adapters import ModelAdapter
+from flow_control.utils.logging import console
 
-T = TypeVar("T", bound=BaseModelAdapter)
+
+def make_sample_progress() -> Progress:
+    return Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(complete_style="blue", finished_style="bold blue"),
+        MofNCompleteColumn(),
+        "•",
+        TimeElapsedColumn(),
+        "•",
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+
 
 class BaseSampler(BaseModel):
     cfg_scale: float = 7.5
 
     def sample(
         self,
-        model: BaseModelAdapter,
+        model: ModelAdapter,
         batch: dict,
         negative_batch: dict | None = None,
         t_start=1.0,
-        t_end=0.0,
-        progress_callback: Callable[[int, int], None] | None = None,
+        t_end=0.0
     ) -> torch.Tensor:
         raise NotImplementedError()
 
     def get_guided_velocity(
         self,
-        model: BaseModelAdapter,
+        model: ModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
         batch: dict,

@@ -1,9 +1,11 @@
 from typing import Any, NotRequired
+
 import torch
-from pydantic import PrivateAttr
 from einops import repeat
+from pydantic import PrivateAttr
 
 from flow_control.utils.loaders import HfModelLoader
+
 from .base import BaseProcessor
 
 

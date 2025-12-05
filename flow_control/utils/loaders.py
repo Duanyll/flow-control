@@ -1,9 +1,14 @@
-from typing import Literal, Any
+from typing import Any, Literal
+
 from pydantic import BaseModel
+
 from .types import TorchDType
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 class HfModelLoader(BaseModel):
-    type: Literal["diffusers", "transformers", "timm"]
+    type: Literal["diffusers", "transformers"]
     class_name: str
     pretrained_model_id: str
     revision: str | None = None
@@ -17,9 +22,6 @@ class HfModelLoader(BaseModel):
         elif self.type == "transformers":
             import transformers
             model_cls = getattr(transformers, self.class_name)
-        elif self.type == "timm":
-            import timm
-            model_cls = getattr(timm, self.class_name)
         else:
             raise ValueError(f"Unknown model type: {self.type}")
         
@@ -29,4 +31,5 @@ class HfModelLoader(BaseModel):
             subfolder=self.subfolder,
             torch_dtype=None if self.dtype == "auto" else self.dtype,
         )
+        logger.info(f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} with dtype {self.dtype}")
         return model

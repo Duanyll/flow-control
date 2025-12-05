@@ -1,7 +1,10 @@
-import torch
 from typing import Callable
+
+import torch
 from pydantic import PrivateAttr
-from flow_control.adapters.base import BaseModelAdapter
+
+from flow_control.adapters import ModelAdapter
+
 from .base import BaseSampler
 
 
@@ -13,21 +16,20 @@ class MomentumGuidedSampler(BaseSampler):
 
     def sample(
         self,
-        model: BaseModelAdapter,
+        model: ModelAdapter,
         batch: dict,
         negative_batch: dict | None = None,
         t_start=1,
         t_end=0,
-        progress_callback: Callable[[int, int], None] | None = None,
     ) -> torch.Tensor:
         self._momentum = None
         return super().sample(
-            model, batch, negative_batch, t_start, t_end, progress_callback
+            model, batch, negative_batch, t_start, t_end
         )
 
     def get_guided_velocity(
         self,
-        model: BaseModelAdapter,
+        model: ModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
         batch: dict,

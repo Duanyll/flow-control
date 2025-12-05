@@ -1,8 +1,9 @@
 import math
-import torch
-from typing import Callable
 
-from flow_control.adapters.base import BaseModelAdapter
+import torch
+
+from flow_control.adapters import ModelAdapter
+
 from .simple_euler import SimpleEulerSampler
 
 
@@ -19,18 +20,17 @@ class ShiftedEulerSampler(SimpleEulerSampler):
 
     def sample(
         self,
-        model: BaseModelAdapter,
+        model: ModelAdapter,
         batch: dict,
         negative_batch: dict | None = None,
         t_start=1.0,
-        t_end=0.0,
-        progress_callback: Callable[[int, int], None] | None = None,
+        t_end=0.0
     ) -> torch.Tensor:
         b, c, h, w = batch["noisy_latents"].shape
         latent_len = (h * w) // 256
         sigmas = self._make_shifted_sigmas(latent_len, t_start, t_end)
         return self._euler_sample(
-            model, batch, sigmas, negative_batch, progress_callback
+            model, batch, sigmas, negative_batch
         )
 
     def _make_shifted_sigmas(

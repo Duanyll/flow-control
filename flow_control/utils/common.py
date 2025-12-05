@@ -1,8 +1,10 @@
-from typing import Tuple
-import torch
-import kornia
-from einops import rearrange
 from collections.abc import MutableMapping
+from typing import Tuple
+
+import kornia
+import torch
+from einops import rearrange
+
 
 def flatten_dict(dictionary, parent_key='', separator='_'):
     items = []
@@ -168,3 +170,14 @@ def cast_trainable_parameters(module: torch.nn.Module, dtype: torch.dtype) -> No
     for name, param in module.named_parameters():
         if param.requires_grad:
             param.data = param.data.to(dtype=dtype)
+
+def parse_checkpoint_step(checkpoint_name: str) -> int:
+    """
+    Parse the checkpoint step from the checkpoint directory name.
+    Assumes the checkpoint name is in the format 'checkpoint-{step}'.
+    """
+    try:
+        step_str = checkpoint_name.split("-")[-1]
+        return int(step_str)
+    except (IndexError, ValueError):
+        return -1

@@ -1,13 +1,23 @@
+from typing import TypedDict
+
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, PrivateAttr
-from typing import TypedDict
+
 
 class BaseModelAdapter(BaseModel):
     """
     Base class for all control adapters.
     """
     transformer: nn.Module = PrivateAttr()
+
+    @property
+    def device(self) -> torch.device:
+        return self.transformer.device # type: ignore
+    
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.transformer.dtype # type: ignore
 
     class BatchType(TypedDict):
         clean_latents: torch.Tensor

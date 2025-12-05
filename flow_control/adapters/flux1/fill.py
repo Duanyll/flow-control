@@ -1,7 +1,8 @@
 import torch
-from einops import rearrange, pack
+from einops import pack, rearrange
 
-from flow_control.utils.common import unpack_bool_tensor, MaybePackedBoolTensor
+from flow_control.utils.common import MaybePackedBoolTensor, unpack_bool_tensor
+
 from .base import BaseFlux1Adapter
 
 

@@ -1,8 +1,8 @@
 from .base import BaseFlux1Adapter
-from .peft_lora import Flux1PeftLoraAdapter
 from .d_concat import Flux1DConcatAdapter
-from .n_concat import Flux1NConcatAdapter
 from .fill import Flux1FillAdapter
+from .n_concat import Flux1NConcatAdapter
+from .peft_lora import Flux1PeftLoraAdapter
 
 ADAPTER_REGISTRY = {
     "base": BaseFlux1Adapter,

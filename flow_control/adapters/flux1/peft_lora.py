@@ -1,15 +1,17 @@
 from typing import Literal, cast
-import logging
+
 import torch
 from diffusers import FluxControlPipeline
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
+from accelerate.utils import extract_model_from_parallel
 
 from flow_control.utils.common import cast_trainable_parameters
+from flow_control.utils.logging import get_logger
 
 from .base import BaseFlux1Adapter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 NORM_LAYER_PREFIXES = ["norm_q", "norm_k", "norm_added_q", "norm_added_k"]
 
 
@@ -17,6 +19,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
     """
     Adapter for LoRA fine-tuning using the PEFT library.
     """
+
     pretrained_lora_id: str | None = None
 
     train_norm_layers: bool = False
@@ -42,7 +45,9 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
         super().load_transformer()
 
         if self.pretrained_lora_id is not None:
-            lora_state_dict = cast(dict, FluxControlPipeline.lora_state_dict(self.pretrained_lora_id))
+            lora_state_dict = cast(
+                dict, FluxControlPipeline.lora_state_dict(self.pretrained_lora_id)
+            )
             self.load_model(lora_state_dict)
             cast_trainable_parameters(self.transformer, self.trainable_dtype)
 
@@ -73,8 +78,13 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
 
         transformer.add_adapter(transformer_lora_config)
 
+    def unwrap_transformer(self):
+        model = extract_model_from_parallel(self.transformer)
+        model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        return model
+
     def save_model(self) -> dict:
-        transformer = self.transformer
+        transformer = self.unwrap_transformer()
 
         layers_to_save = get_peft_model_state_dict(transformer)
         for name, param in transformer.named_parameters():
@@ -85,7 +95,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
 
     def load_model(self, state_dict: dict):
         transformer = self.transformer
-        
+
         lora_state_dict = {}
         other_state_dict = {}
         for k, v in state_dict.items():

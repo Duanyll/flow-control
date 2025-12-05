@@ -1,3 +1,7 @@
+from typing import Annotated
+
+from pydantic import PlainValidator
+
 from .base import BaseModelAdapter
 from .flux1 import parse_adapter as parse_flux1_adapter
 
@@ -12,7 +16,8 @@ def parse_model_adapter(conf: dict):
         raise ValueError(f"Unknown model adapter type: {model_type}")
     return parser(conf)
 
+ModelAdapter = Annotated[BaseModelAdapter, PlainValidator(parse_model_adapter)]
+
 __all__ = [
-    "BaseModelAdapter",
-    "parse_model_adapter",
+    "ModelAdapter",
 ]

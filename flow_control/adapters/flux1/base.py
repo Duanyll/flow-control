@@ -1,14 +1,19 @@
 from typing import NotRequired
+
 import torch
-from einops import rearrange, reduce
 from diffusers import FluxTransformer2DModel
 from diffusers.hooks.layerwise_casting import apply_layerwise_casting
+from einops import rearrange, reduce
 from pydantic import PrivateAttr
 
-from flow_control.utils.common import cast_trainable_parameters
-from flow_control.utils.types import TorchDType
-from flow_control.utils.loaders import HfModelLoader
 from flow_control.adapters.base import BaseModelAdapter
+from flow_control.utils.common import cast_trainable_parameters
+from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.types import TorchDType
+from flow_control.utils.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class BaseFlux1Adapter(BaseModelAdapter):
@@ -41,6 +46,14 @@ class BaseFlux1Adapter(BaseModelAdapter):
         """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
            Will be calculated if not present."""
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return (
+            self.hf_model.dtype
+            if self.hf_model.dtype != "auto"
+            else self.transformer.dtype
+        )
+
     def load_transformer(self):
         self.transformer = self.hf_model.load_model()
         self.transformer.requires_grad_(self.all_trainable)
@@ -55,6 +68,9 @@ class BaseFlux1Adapter(BaseModelAdapter):
                 self.transformer,
                 storage_dtype=self.storage_dtype,
                 compute_dtype=self.hf_model.dtype,
+            )
+            logger.info(
+                f"Applied layerwise casting with storage dtype {self.storage_dtype} and compute dtype {self.hf_model.dtype}"
             )
 
     def predict_velocity(

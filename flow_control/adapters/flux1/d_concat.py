@@ -1,7 +1,9 @@
 from typing import Literal
+
 import torch
 
 from flow_control.utils.common import ensure_trainable
+
 from .peft_lora import Flux1PeftLoraAdapter
 
 
@@ -46,11 +48,7 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
         super().install_modules()
         ensure_trainable(transformer.x_embedder)
 
-    def predict_velocity(
-        self,
-        batch: dict,
-        timestep: torch.Tensor
-    ) -> torch.Tensor:
+    def predict_velocity(self, batch: dict, timestep: torch.Tensor) -> torch.Tensor:
         b, c, h, w = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
