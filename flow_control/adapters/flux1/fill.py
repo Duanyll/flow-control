@@ -1,7 +1,6 @@
 import torch
 from einops import pack, rearrange
 
-from flow_control.utils.common import MaybePackedBoolTensor, unpack_bool_tensor
 
 from .base import BaseFlux1Adapter
 
@@ -16,7 +15,7 @@ class Flux1FillAdapter(BaseFlux1Adapter):
     class BatchType(BaseFlux1Adapter.BatchType):
         inpaint_latents: torch.Tensor
         """`[B, C, H, W]` The latents of the inpainted image."""
-        inpaint_mask: MaybePackedBoolTensor
+        inpaint_mask: torch.Tensor
         """`[B, 1, H, W]` The inpainting mask. Can be a boolean tensor or a tuple of
         (indices, values) for sparse representation."""
 
@@ -68,7 +67,5 @@ class Flux1FillAdapter(BaseFlux1Adapter):
         """
         Pack the mask with PixelShuffle-like operation, as seen in Flux.1 Fill
         """
-        if isinstance(mask, tuple):
-            mask = unpack_bool_tensor(*mask)
         mask = mask.to(torch.bfloat16)
         return rearrange(mask, "b (h ph) (w pw) -> b (ph pw) h w", ph=8, pw=8)

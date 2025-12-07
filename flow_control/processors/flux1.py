@@ -15,6 +15,8 @@ class Flux1Processor(BaseProcessor):
         negative_prompt: NotRequired[str]
         pooled_prompt_embeds: NotRequired[torch.Tensor]
         prompt_embeds: NotRequired[torch.Tensor]
+        clean_image: NotRequired[torch.Tensor]
+        clean_latents: NotRequired[torch.Tensor]
 
     _loading_preset = {
         "vae": ["encode", "decode"],
@@ -154,6 +156,8 @@ class Flux1Processor(BaseProcessor):
             pooled_prompt_embeds, prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["pooled_prompt_embeds"] = pooled_prompt_embeds
             batch["prompt_embeds"] = prompt_embeds
+        if "clean_image" in batch and "clean_latents" not in batch:
+            batch["clean_latents"] = self.encode_latents(batch["clean_image"])
         return batch
 
     def make_negative_batch(self, batch: BatchType) -> BatchType:

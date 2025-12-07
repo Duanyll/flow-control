@@ -65,32 +65,6 @@ def make_grid(h, w, device: torch.device = torch.device("cuda")):
     return grid
 
 
-PackedBoolTensor = Tuple[torch.Tensor, torch.Size]
-MaybePackedBoolTensor = PackedBoolTensor | torch.Tensor
-
-def pack_bool_tensor(tensor: torch.Tensor) -> PackedBoolTensor:
-    if torch.is_floating_point(tensor):
-        tensor = tensor > 0.5
-    tensor = tensor.to(torch.bool)  # 转换为bool类型
-    
-    flat = tensor.flatten()
-    pad_len = (8 - flat.numel() % 8) % 8  # 需要填充的位数，使其能整除8
-    if pad_len > 0:
-        flat = torch.cat([flat, torch.zeros(pad_len, dtype=torch.bool)])
-
-    flat = flat.view(-1, 8)  # 每组8个bool
-    packed = torch.sum(flat * (1 << torch.arange(8, dtype=torch.uint8)), dim=1)
-    return packed, tensor.shape  # 返回原始形状用于解码
-
-
-def unpack_bool_tensor(
-    packed: torch.Tensor, original_shape: torch.Size
-) -> torch.Tensor:
-    unpacked = ((packed.unsqueeze(1) >> torch.arange(8)) & 1).to(torch.bool)
-    unpacked = unpacked.view(-1)[: torch.tensor(original_shape).prod()]
-    return unpacked.view(original_shape)
-
-
 def find_closest_resolution(h, w, all_resolutions) -> Tuple[int, int]:
     """Find the closest supported resolution to the image's dimensions."""
     aspect_ratio = w / h
@@ -181,3 +155,29 @@ def parse_checkpoint_step(checkpoint_name: str) -> int:
         return int(step_str)
     except (IndexError, ValueError):
         return -1
+    
+def deep_apply_tensor_fn(data, fn):
+    """
+    Recursively apply a function to all tensors in a nested structure.
+    Args:
+        data: A nested structure (dict, list, tuple) containing tensors.
+        fn: A function to apply to each tensor.
+    Returns:
+        The nested structure with the function applied to all tensors.
+    """
+    if isinstance(data, torch.Tensor):
+        return fn(data)
+    elif isinstance(data, dict):
+        return {k: deep_apply_tensor_fn(v, fn) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [deep_apply_tensor_fn(v, fn) for v in data]
+    elif isinstance(data, tuple):
+        return tuple(deep_apply_tensor_fn(v, fn) for v in data)
+    else:
+        return data
+    
+def deep_move_to_device(data, device: torch.device):
+    return deep_apply_tensor_fn(data, lambda x: x.to(device))
+
+def deep_move_to_shared_memory(data):
+    return deep_apply_tensor_fn(data, lambda x: x.cpu().share_memory_())

@@ -105,7 +105,7 @@ class SimpleFintuner(BaseModel):
             if file.endswith(".pkl"):
                 with open(os.path.join(self.sample_pickle_dir, file), "rb") as f:
                     batch = pickle.load(f)
-                    batch["__file_name__"] = file
+                    batch["__key__"] = file
                     self._sample_batch.append(batch)
         if len(self._sample_batch) == 0:
             raise ValueError(
@@ -337,7 +337,7 @@ class SimpleFintuner(BaseModel):
         for batch in self._sample_batch[self.accelerator.process_index :: self.accelerator.num_processes]:
             clean_latents = self.sampler.sample(self.model, batch)
             image = self.processor.decode_output(clean_latents, batch) # type: ignore
-            self.accelerator.log({f"sample/{batch['__file_name__']}": aim.Image(image)}, step=current_step)
+            self.accelerator.log({f"sample/{batch['__key__']}": aim.Image(image)}, step=current_step)
 
         if self.ema is not None:
             self.ema.restore()
