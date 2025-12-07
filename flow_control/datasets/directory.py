@@ -5,6 +5,9 @@ import gzip
 from torch.utils.data import Dataset
 
 from flow_control.utils.pipeline import DataSink
+from flow_control.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 class DirectoryDataset(Dataset):
     def __init__(self, path: str):
@@ -15,6 +18,7 @@ class DirectoryDataset(Dataset):
                 if entry.is_file() and (entry.name.endswith(".pt") or entry.name.endswith(".pt.gz")):
                     self.files.append(entry.name)
         self.files.sort()
+        logger.info(f"Loaded {len(self.files)} files from directory: {path}")
 
     def __len__(self):
         return len(self.files)
@@ -31,10 +35,12 @@ class DirectoryDataset(Dataset):
 
 
 class DirectoryDataSink(DataSink):
-    def __init__(self, path: str, use_compression: bool = False):
+    def __init__(self, worker_id, path: str, use_compression: bool = False):
+        self.worker_id = worker_id
         self.path = path
         self.use_compression = use_compression
         os.makedirs(path, exist_ok=True)
+        logger.info(f"Initialized DirectoryDataSink for worker {worker_id} at path: {path}")
 
     def write(self, item: dict):
         if "__key__" not in item:

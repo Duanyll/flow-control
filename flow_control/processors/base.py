@@ -1,12 +1,14 @@
 from typing import Literal, TypedDict
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from flow_control.utils.types import TorchDevice
 
 
 class BaseProcessor(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     class BatchType(TypedDict):
         pass
 

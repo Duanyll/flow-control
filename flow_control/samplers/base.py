@@ -1,7 +1,7 @@
 from typing import Any, cast
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -30,6 +30,8 @@ def make_sample_progress() -> Progress:
 
 
 class BaseSampler(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     cfg_scale: float = 7.5
 
     def sample(

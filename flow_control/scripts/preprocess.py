@@ -2,6 +2,7 @@ import torch
 from typing import Any, Iterator
 from flow_control.datasets import parse_dataset, DATASINK_REGISTRY
 from flow_control.processors import parse_processor
+from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.pipeline import (
     Pipeline,
     PipelineStage,
@@ -14,8 +15,8 @@ from flow_control.utils.logging import get_logger
 from pydantic import BaseModel
 
 class TorchDatasetSource(DataSource):
-    def __init__(self, **kwargs):
-        self.dataset = parse_dataset(kwargs)
+    def __init__(self, dataset_args: dict = {}):
+        self.dataset = parse_dataset(dataset_args)
         self.total = len(self.dataset) # type: ignore
 
     def scan(self) -> Iterator[tuple[Any, int | None]]:
@@ -24,44 +25,43 @@ class TorchDatasetSource(DataSource):
 
 
 class TorchDatasetLoaderStage(PipelineStage):
-    def __init__(self, worker_id: int, device: int | None = None, **kwargs):
+    def __init__(self, worker_id: int, device: int | None = None, dataset_args: dict = {}):
         self.worker_id = worker_id
         self.logger = get_logger(f"TorchDatasetLoaderStage-{worker_id}")
-        self.dataset = parse_dataset(kwargs)
+        self.dataset = parse_dataset(dataset_args)
 
     def process(self, item: Any) -> Any:
         data = self.dataset[item]  # type: ignore
         self.logger.debug(f"Loaded item {item} by worker {self.worker_id}")
-        return data
+        return [data]
 
 
 class ProcessorStage(PipelineStage):
-    def __init__(self, worker_id: int, device: int | None = None, **kwargs):
+    def __init__(self, worker_id: int, device: int | None = None, processor_args: dict = {}):
         self.worker_id = worker_id
         self.logger = get_logger(f"ProcessorStage-{worker_id}")
 
-        if device is not None:
-            self.device = torch.cuda.device(device)
-        else:
-            self.device = torch.device('cpu')
+        self.device = torch.device(f"cuda:{device}" if device is not None else "cpu")
         self.logger.info(f"Using device: {self.device}")
-        kwargs['device'] = self.device
-        self.processor = parse_processor(kwargs)
+        processor_args['device'] = self.device
+        self.processor = parse_processor(processor_args)
         self.logger.info(f"Initialized processor: {self.processor.__class__.__name__}")
 
-        self.processor.load_models(['encode'])
+        self.processor.load_models(['encode'], device=self.device)
         self.logger.info("Processor models loaded.")
 
-    def process(self, item: Any) -> Any:
-        result = self.processor.preprocess_batch(item)
+    def process(self, batch: Any) -> Any:
+        batch = deep_move_to_device(batch, self.device)
+        batch = self.processor.preprocess_batch(batch)
+        batch = deep_move_to_device(batch, torch.device("cpu"))
         self.logger.debug(f"Processed item by worker {self.worker_id}")
-        return result
+        return [batch]
 
 
 class PreprocessConfig(BaseModel):
     dataset: dict
     processor: dict
-    datasink: dict
+    output: dict
 
     num_loader_workers: int = 1
     processor_devices: list[int] = [0]
@@ -73,14 +73,14 @@ def main(config_path: str):
     from flow_control.utils.loaders import load_config_file
 
     config = PreprocessConfig(**load_config_file(config_path))
-    datasink_type = config.datasink.pop("type")
+    datasink_type = config.output.pop("type")
 
     pipeline = Pipeline(
         source=SourceConfig(
             source=TorchDatasetSource,
             name="Scanning",
             queue_size=config.queue_size,
-            init_kwargs=config.dataset,
+            init_kwargs={"dataset_args": config.dataset},
         ),
         stages=[
             StageConfig(
@@ -89,25 +89,23 @@ def main(config_path: str):
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
                 name="Loading",
-                init_kwargs=config.dataset,
+                init_kwargs={"dataset_args": config.dataset},
             ),
             StageConfig(
                 stage=ProcessorStage,
                 num_workers=len(config.processor_devices),
+                gpu_ids=config.processor_devices,
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
                 name="Processing",
-                init_kwargs={
-                    **config.processor,
-                    "device": None,  # Device will be set in the stage
-                },
+                init_kwargs={"processor_args": config.processor}
             ),
         ],
         sink=SinkConfig(
             sink=DATASINK_REGISTRY.get(datasink_type), # type: ignore
             name="Saving",
             queue_size=config.queue_size,
-            init_kwargs=config.datasink,
+            init_kwargs=config.output,
         ),
     )
 
@@ -119,9 +117,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Preprocess dataset using a pipeline.")
     parser.add_argument(
-        "--config",
+        "config",
         type=str,
-        required=True,
         help="Path to the preprocessing configuration file (YAML or JSON).",
     )
     args = parser.parse_args()

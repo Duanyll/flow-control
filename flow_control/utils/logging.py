@@ -51,16 +51,17 @@ console = Console(quiet=process_type != 'main')
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 rich_handler = RichHandler(console=console, rich_tracebacks=True)
 
-def setup_global_handler(handler, format=None):
-    transformers.utils.logging.disable_default_handler()
-    transformers.utils.logging.disable_progress_bar()
-    transformers.utils.logging.add_handler(handler)
-    transformers.utils.logging.set_verbosity_warning()
+transformers.utils.logging.disable_default_handler()
+transformers.utils.logging.disable_progress_bar()
+transformers.utils.logging.set_verbosity_warning()
 
-    diffusers.utils.logging.disable_default_handler()
-    diffusers.utils.logging.disable_progress_bar()
+diffusers.utils.logging.disable_default_handler()
+diffusers.utils.logging.disable_progress_bar()
+diffusers.utils.logging.set_verbosity_warning()
+
+def setup_global_handler(handler, format=None):
+    transformers.utils.logging.add_handler(handler)
     diffusers.utils.logging.add_handler(handler)
-    diffusers.utils.logging.set_verbosity_warning()
     if format is None:
         logging.basicConfig(level=log_level, handlers=[handler])
     else:

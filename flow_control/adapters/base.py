@@ -2,13 +2,15 @@ from typing import TypedDict
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 
 class BaseModelAdapter(BaseModel):
     """
     Base class for all control adapters.
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     transformer: nn.Module = PrivateAttr()
 
     @property

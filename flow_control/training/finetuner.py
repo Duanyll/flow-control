@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import aim
 import torch
-from pydantic import BaseModel, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from accelerate import Accelerator, DistributedType, DataLoaderConfiguration
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import FluxControlPipeline
@@ -31,6 +31,8 @@ logger = get_logger(__name__)
 
 
 class SimpleFintuner(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     # Utility classes
     model: ModelAdapter
     sampler: Sampler

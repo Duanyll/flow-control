@@ -3,7 +3,7 @@ import yaml
 import tomllib
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .types import TorchDType
 from .logging import get_logger
@@ -11,6 +11,8 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 class HfModelLoader(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     type: Literal["diffusers", "transformers"]
     class_name: str
     pretrained_model_id: str
