@@ -297,6 +297,16 @@ def _source_worker(
             if total != last_total:
                 last_total = total
                 _safe_put(progress_queue, ("source", 0, "total", total))
+
+        # Mark scanning as complete immediately
+        done_event.set()
+
+        # But don't exit yet - wait for shutdown signal
+        # to ensure downstream stages finish consuming our outputs
+        if not shutdown_event.is_set():
+            worker_logger.info("Scanning completed, waiting for pipeline shutdown")
+            while not shutdown_event.is_set():
+                time.sleep(0.5)
     except Exception as e:
         worker_logger.error(f"Source worker fatal error: {e}", exc_info=True)
         # Notify main process of fatal error
@@ -305,7 +315,6 @@ def _source_worker(
         except queue.Full:
             pass
     finally:
-        done_event.set()
         worker_logger.info("Source worker finished")
 
 
@@ -333,6 +342,7 @@ def _stage_worker(
         # Instantiate the stage in the worker process
         stage = stage_class(worker_id, device=device, **init_kwargs)
 
+        work_done = False
         while not shutdown_event.is_set():
             success, item = _safe_get(input_queue, shutdown_event=shutdown_event)
             if not success:
@@ -341,7 +351,12 @@ def _stage_worker(
                     worker_logger.info("Stage worker received shutdown signal")
                     break
                 if upstream_done.is_set() and input_queue.empty():
-                    break
+                    # Work is done, but don't exit yet - wait for shutdown signal
+                    # to ensure downstream stages finish consuming our outputs
+                    if not work_done:
+                        worker_logger.info("Work completed, waiting for pipeline shutdown")
+                        work_done = True
+                    time.sleep(0.5)
                 continue
 
             results = stage.process(item)
@@ -404,6 +419,7 @@ def _sink_worker(
         # Instantiate the sink in the worker process
         sink = sink_class(worker_id, **init_kwargs)
 
+        work_done = False
         while not shutdown_event.is_set():
             success, item = _safe_get(input_queue, shutdown_event=shutdown_event)
             if not success:
@@ -411,7 +427,12 @@ def _sink_worker(
                     worker_logger.info("Sink worker received shutdown signal")
                     break
                 if upstream_done.is_set() and input_queue.empty():
-                    break
+                    # Work is done, but don't exit yet - wait for shutdown signal
+                    # to ensure upstream stages don't exit before we finish
+                    if not work_done:
+                        worker_logger.info("Work completed, waiting for pipeline shutdown")
+                        work_done = True
+                    time.sleep(0.5)
                 continue
 
             result = sink.write(item)
@@ -822,6 +843,8 @@ class Pipeline:
                         )
                         if last_stage_done and pending[-1] == 0:
                             sink_done.set()
+                            # Signal all workers to shutdown now that work is complete
+                            shutdown_event.set()
                             all_done = True
 
             except KeyboardInterrupt:
