@@ -1,12 +1,14 @@
 from collections.abc import MutableMapping
-from typing import Tuple
+from typing import Tuple, Any
 
 import kornia
 import torch
+import numpy as np
 from einops import rearrange
+from PIL import Image
 
 
-def flatten_dict(dictionary, parent_key='', separator='_'):
+def flatten_dict(dictionary, parent_key="", separator="_"):
     items = []
     for key, value in dictionary.items():
         new_key = parent_key + separator + key if parent_key else key
@@ -15,6 +17,7 @@ def flatten_dict(dictionary, parent_key='', separator='_'):
         else:
             items.append((new_key, value))
     return dict(items)
+
 
 def deep_merge_dicts(dict1, dict2):
     """
@@ -65,62 +68,6 @@ def make_grid(h, w, device: torch.device = torch.device("cuda")):
     return grid
 
 
-def find_closest_resolution(h, w, all_resolutions) -> Tuple[int, int]:
-    """Find the closest supported resolution to the image's dimensions."""
-    aspect_ratio = w / h
-    min_diff = float("inf")
-    best_res = (0, 0)
-    
-    all_resolutions = [(res[1], res[0]) for res in all_resolutions] + list(all_resolutions)
-
-    for res in all_resolutions:
-        res_height, res_width = res
-        res_aspect = res_width / res_height
-        # Calculate difference in aspect ratio and total pixels
-        aspect_diff = abs(aspect_ratio - res_aspect)
-        size_diff = abs(w * h - res_width * res_height)
-        total_diff = aspect_diff + size_diff / (
-            w * h
-        )  # Normalize size difference
-
-        if total_diff < min_diff:
-            min_diff = total_diff
-            best_res = (res_height, res_width)
-
-    return best_res
-
-
-def crop_and_resize_image(image, target_size):
-    """
-    Crop and resize image to target size while maintaining aspect ratio.
-    image: (1, C, H, W) or (C, H, W) or (H, W)
-    """
-    if len(image.shape) == 3:
-        image = image.unsqueeze(0)
-    elif len(image.shape) == 2:
-        image = image.unsqueeze(0).unsqueeze(0)
-    
-    img_height, img_width = image.shape[-2:]
-    target_height, target_width = target_size
-    # Calculate aspect ratios
-    img_aspect = img_width / img_height
-    target_aspect = target_width / target_height
-    if img_aspect > target_aspect:
-        # Image is wider than target, crop width
-        new_width = int(img_height * target_aspect)
-        left = (img_width - new_width) // 2
-        image = image[:, :, :, left : left + new_width]
-    else:
-        # Image is taller than target, crop height
-        new_height = int(img_width / target_aspect)
-        top = (img_height - new_height) // 2
-        image = image[:, :, top : top + new_height, :]
-    # Resize to target size
-    image = torch.nn.functional.interpolate(
-        image, size=(target_height, target_width), mode="bilinear", align_corners=False
-    )
-    return image.squeeze()  # Remove batch dimension
-
 def ensure_trainable(module):
     """
     Ensure that all parameters of the module are trainable.
@@ -132,18 +79,6 @@ def ensure_trainable(module):
     else:
         module.requires_grad_(True)
 
-def cast_trainable_parameters(module: torch.nn.Module, dtype: torch.dtype) -> None:
-    r"""
-    Casts the trainable parameters of a given module to a specified dtype.
-    Args:
-        module (`torch.nn.Module`):
-            The module to cast the parameters of.
-        dtype (`torch.dtype`):
-            The dtype to cast the parameters to.
-    """
-    for name, param in module.named_parameters():
-        if param.requires_grad:
-            param.data = param.data.to(dtype=dtype)
 
 def parse_checkpoint_step(checkpoint_name: str) -> int:
     """
@@ -155,8 +90,9 @@ def parse_checkpoint_step(checkpoint_name: str) -> int:
         return int(step_str)
     except (IndexError, ValueError):
         return -1
-    
-def deep_apply_tensor_fn(data, fn):
+
+
+def deep_apply_tensor_fn(data, fn) -> Any:
     """
     Recursively apply a function to all tensors in a nested structure.
     Args:
@@ -175,9 +111,41 @@ def deep_apply_tensor_fn(data, fn):
         return tuple(deep_apply_tensor_fn(v, fn) for v in data)
     else:
         return data
-    
+
+
 def deep_move_to_device(data, device: torch.device):
     return deep_apply_tensor_fn(data, lambda x: x.to(device))
 
+
 def deep_move_to_shared_memory(data):
     return deep_apply_tensor_fn(data, lambda x: x.cpu().share_memory_())
+
+
+def pil_to_tensor(image) -> torch.Tensor:
+    """
+    Convert a PIL Image to a normalized torch Tensor.
+    Args:
+        image: PIL Image
+    Returns:
+        Tensor of shape (1, C, H, W) with values in [0, 1]
+    """
+    image = torch.from_numpy(np.array(image)) / 255.0  # Normalize to [0, 1]
+    image = rearrange(image, "h w c -> 1 c h w")
+    return image
+
+
+def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
+    """
+    Convert a normalized torch Tensor to a PIL Image.
+    Args:
+        tensor: Tensor of shape (1, C, H, W) or (C, H, W) with values in [0, 1]
+    Returns:
+        PIL Image
+    """
+    if tensor.ndim == 4:
+        tensor = tensor.squeeze(0)
+    tensor = tensor.clamp(0, 1)  # Ensure values are in [0, 1]
+    tensor = rearrange(tensor, "c h w -> h w c")
+    array = (tensor.detach().float().cpu().numpy() * 255).astype(np.uint8)
+    image = Image.fromarray(array)
+    return image

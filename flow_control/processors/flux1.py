@@ -1,10 +1,15 @@
-from typing import Any, NotRequired
+from typing import Any, NotRequired, Literal
 
 import torch
 from einops import repeat
 from pydantic import PrivateAttr
 
 from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.resize import (
+    ResolutionList,
+    resize_to_closest_resolution,
+    resize_to_multiple_of,
+)
 
 from .base import BaseProcessor
 
@@ -34,6 +39,8 @@ class Flux1Processor(BaseProcessor):
         dtype=torch.bfloat16,
     )
     _vae: Any = PrivateAttr()
+    # Declaring _vae as AutoencoderKL does not help mypy recognize its type properly,
+    # since huggingface libraries are badly typed.
 
     text_encoder: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -72,6 +79,36 @@ class Flux1Processor(BaseProcessor):
     clip_max_length: int = 77
     t5_max_length: int = 512
     default_negative_prompt: str = "low quality, worst quality, blurry, deformed"
+
+    resize_mode: Literal["list", "multiple_of"] = "list"
+    preferred_resolutions: ResolutionList = [
+        (672, 1568),
+        (688, 1504),
+        (720, 1456),
+        (752, 1392),
+        (800, 1328),
+        (832, 1248),
+        (880, 1184),
+        (944, 1104),
+        (1024, 1024),
+        (1104, 944),
+        (1184, 880),
+        (1248, 832),
+        (1328, 800),
+        (1392, 752),
+        (1456, 720),
+        (1504, 688),
+        (1568, 672),
+    ]
+    multiple_of: int = 32
+
+    def resize_image(self, image: torch.Tensor) -> torch.Tensor:
+        if self.resize_mode == "list":
+            return resize_to_closest_resolution(
+                image, self.preferred_resolutions, crop=True
+            )
+        else:
+            return resize_to_multiple_of(image, self.multiple_of, crop=True)
 
     @torch.no_grad()
     def encode_latents(self, image: torch.Tensor) -> torch.Tensor:
@@ -112,6 +149,7 @@ class Flux1Processor(BaseProcessor):
         image = (image + 1) / 2
         return image
 
+    @torch.no_grad()
     def encode_prompt(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Encode the text prompt into embeddings using the two text encoders.
@@ -157,7 +195,9 @@ class Flux1Processor(BaseProcessor):
             batch["pooled_prompt_embeds"] = pooled_prompt_embeds
             batch["prompt_embeds"] = prompt_embeds
         if "clean_image" in batch and "clean_latents" not in batch:
-            batch["clean_latents"] = self.encode_latents(batch["clean_image"])
+            batch["clean_latents"] = self.encode_latents(
+                self.resize_image(batch["clean_image"])
+            )
         return batch
 
     def make_negative_batch(self, batch: BatchType) -> BatchType:

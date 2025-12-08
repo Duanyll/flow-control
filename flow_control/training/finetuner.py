@@ -1,22 +1,30 @@
 import os
-import pickle
+import copy
 import shutil
 from typing import Any, cast
 
 import aim
 import torch
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
-from accelerate import Accelerator, DistributedType, DataLoaderConfiguration
+from accelerate import Accelerator, DistributedType
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import FluxControlPipeline
 from diffusers.utils.torch_utils import is_compiled_module
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    MofNCompleteColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from flow_control.adapters import ModelAdapter
 from flow_control.samplers import Sampler
 from flow_control.processors import Processor
-from flow_control.datasets import DatasetConfig, parse_dataset
-from flow_control.utils.common import parse_checkpoint_step
+from flow_control.datasets import DatasetConfig, parse_dataset, collate_fn
+from flow_control.utils.common import parse_checkpoint_step, tensor_to_pil, deep_move_to_device
 from flow_control.utils.types import (
     OptimizerConfig,
     parse_optimizer,
@@ -30,7 +38,7 @@ from flow_control.utils.weighting import TimestepWeighting, LossWeighting
 logger = get_logger(__name__)
 
 
-class SimpleFintuner(BaseModel):
+class Fintuner(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # Utility classes
@@ -38,26 +46,28 @@ class SimpleFintuner(BaseModel):
     sampler: Sampler
     processor: Processor
     dataset: DatasetConfig
+    sample_dataset: DatasetConfig | None = None
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
     timestep_weighting: TimestepWeighting
     loss_weighting: LossWeighting
 
-    accelerator: Accelerator = PrivateAttr()
-    ema: EMA | None = PrivateAttr(default=None)
+    _accelerator: Accelerator = PrivateAttr()
+    _ema: EMA | None = PrivateAttr(default=None)
 
     # Loading, saving, and logging parameters
     output_dir: str
     logging_dir: str = "./runs"
     experiment_name: str
     resume_from_checkpoint: str | None = None
-    checkpointing_steps: int = 500
+    checkpoint_steps: int = 500
+    """ Save a checkpoint every N optimizer steps """
     sample_steps: int = 50
-    sample_pickle_dir: str | None = None
+    """ Sample and log every N optimizer steps """
     checkpoint_limit: int | None = None
+    """ Maximum number of checkpoints to keep. None means no limit """
     _resume_checkpoint_path: str | None = None
     _resume_checkpoint_step: int = 0
-    _sample_batch: list[dict] | None = None
 
     @model_validator(mode="after")
     def _check_resume_from_checkpoint(self):
@@ -81,60 +91,27 @@ class SimpleFintuner(BaseModel):
 
         return self
 
-    @model_validator(mode="after")
-    def _check_checkpointing_steps(self):
-        if self.checkpointing_steps % self.gradient_accumulation_steps != 0:
-            raise ValueError(
-                f"Checkpointing steps {self.checkpointing_steps} must be divisible by gradient accumulation steps {self.gradient_accumulation_steps}"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _check_sample_batch(self):
-        if self.sample_pickle_dir is None:
-            return self
-        if self.sample_steps % self.gradient_accumulation_steps != 0:
-            raise ValueError(
-                f"Sample steps {self.sample_steps} must be divisible by gradient accumulation steps {self.gradient_accumulation_steps}"
-            )
-        self._sample_batch = []
-        # Load .pkl files from the sample_pickle_dir
-        if not os.path.exists(self.sample_pickle_dir):
-            raise ValueError(
-                f"Sample pickle dir {self.sample_pickle_dir} does not exist"
-            )
-        for file in os.listdir(self.sample_pickle_dir):
-            if file.endswith(".pkl"):
-                with open(os.path.join(self.sample_pickle_dir, file), "rb") as f:
-                    batch = pickle.load(f)
-                    batch["__key__"] = file
-                    self._sample_batch.append(batch)
-        if len(self._sample_batch) == 0:
-            raise ValueError(
-                f"No .pkl files found in {self.sample_pickle_dir}, please provide a valid directory"
-            )
-        # Make sure the sample batch is a dict of dicts
-        if not isinstance(self._sample_batch, dict):
-            raise ValueError(
-                f"Sample batch must be a dict, got {type(self._sample_batch)}"
-            )
-        for k, v in self._sample_batch.items():
-            if not isinstance(v, dict):
-                raise ValueError(f"Sample batch must be a dict of dicts, got {type(v)}")
-        return self
-
     # Other training parameters
     gradient_checkpointing: bool = True
     num_dataloader_workers: int = 4
 
     # Hyperparameters
     seed: int = 42
-    gradient_accumulation_steps: int = 1
-    total_batch_size: int = 1
+    global_batch_size: int = 1
+    """ How many samples should the model see in one optimizer update across all devices """
     ema_decay: float = 0.999
+    """ Set to 1.0 to disable EMA. Does not affect training but only used for sampling. """
     clip_grad_norm: float = 1.0
 
     # Property shortcuts
+    @property
+    def ema(self) -> EMA | None:
+        return self._ema
+    
+    @property
+    def accelerator(self) -> Accelerator:
+        return self._accelerator
+
     @property
     def transformer(self) -> Any:
         return self.model.transformer
@@ -142,34 +119,39 @@ class SimpleFintuner(BaseModel):
     @property
     def device(self):
         return self.accelerator.device
-    
+
     @property
     def train_steps(self) -> int:
         return self.scheduler["num_training_steps"]
-    
+
     @property
-    def real_batch_size(self) -> int:
-        return self.total_batch_size // (
-            self.accelerator.num_processes * self.gradient_accumulation_steps
-        )
+    def gradient_accumulation_steps(self) -> int:
+        return self.global_batch_size // self.accelerator.num_processes
 
     def __init__(self, **kwargs):
+        conf = copy.deepcopy(kwargs)
+
         super().__init__(**kwargs)
 
-        self.accelerator = Accelerator(
+        self._accelerator = Accelerator(
             mixed_precision="no",
-            gradient_accumulation_steps=self.gradient_accumulation_steps,
             log_with="aim",
             project_config=ProjectConfiguration(
                 project_dir=self.output_dir, logging_dir=self.logging_dir
-            ),
-            dataloader_config=DataLoaderConfiguration(
-                use_stateful_dataloader=True,
             )
         )
+        if self.global_batch_size % self.accelerator.num_processes != 0:
+            raise ValueError(
+                f"Global batch size {self.global_batch_size} must be divisible by number of processes {self.accelerator.num_processes}"
+            )
+        else:
+            logger.info(
+                f"Global batch size: {self.global_batch_size}, gradient accumulation steps: {self.gradient_accumulation_steps}"
+            )
+        self.accelerator.gradient_accumulation_steps = self.gradient_accumulation_steps
         self.accelerator.init_trackers(
             self.experiment_name,
-            config=self.model_dump(mode="json"),
+            config=conf,
         )
         logger.info(f"Experiment name: {self.experiment_name}")
         logger.info(f"Saving model to: {self.output_dir}")
@@ -240,23 +222,39 @@ class SimpleFintuner(BaseModel):
             f"{optimizer.__class__.__name__} created with {num_trainable_params / (1024 * 1024):.2f}M trainable parameters"
         )
         return optimizer
-    
+
     def _make_dataloader(self) -> torch.utils.data.DataLoader:
         with self.accelerator.main_process_first():
             dataset = parse_dataset(self.dataset)
-        logger.info(f"With {self.accelerator.num_processes} processes and gradient accumulation steps of {self.gradient_accumulation_steps}, the real batch size per device is {self.real_batch_size}")
         dataloader = torch.utils.data.DataLoader(
             dataset,
-            batch_size=self.real_batch_size,
+            batch_size=1,
             shuffle=True,
             num_workers=self.num_dataloader_workers,
+            collate_fn=collate_fn,
         )
         return dataloader
-    
+
+    def _make_sample_dataloader(self) -> torch.utils.data.DataLoader | None:
+        if self.sample_dataset is None:
+            return None
+
+        with self.accelerator.main_process_first():
+            dataset = parse_dataset(self.sample_dataset)
+        sample_dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=1,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        return sample_dataloader
+
     def _make_ema(self):
         if self.ema_decay != 1.0:
-            self.ema = EMA(self.transformer, self.ema_decay)
-            self.ema.register()
+            self._ema = EMA(self.transformer, self.ema_decay)
+            self._ema.register()
             logger.info(f"EMA created with decay {self.ema_decay}")
 
     def _try_resume_from_checkpoint(self) -> int:
@@ -265,7 +263,7 @@ class SimpleFintuner(BaseModel):
         self.accelerator.load_state(self._resume_checkpoint_path)
         logger.info(f"Resumed from checkpoint {self._resume_checkpoint_path}")
         return self._resume_checkpoint_step
-    
+
     def _try_remove_extra_checkpoints(self):
         if self.checkpoint_limit is None:
             return
@@ -308,7 +306,7 @@ class SimpleFintuner(BaseModel):
             logger.info(f"Final model saved to {self.output_dir}")
 
     def _train_step(self, batch) -> torch.Tensor:
-        timesteps = self.timestep_weighting.sample_timesteps(self.real_batch_size)
+        timesteps = self.timestep_weighting.sample_timesteps(1)
         timesteps = timesteps.to(device=self.model.device, dtype=self.model.dtype)
         loss = self.model.train_step(batch, timesteps)
         weighting = self.loss_weighting.get_weights(timesteps)
@@ -326,20 +324,39 @@ class SimpleFintuner(BaseModel):
             logger.info(f"Dumped batch to {save_path}")
             self.accelerator.end_training()
             raise ValueError(f"Step {global_step} on rank {rank} loss is NaN or Inf")
-    
+
     @torch.no_grad()
-    def _sample_and_log(self, current_step: int):
+    def _sample_and_log(self, dataloader, current_step: int):
         self.transformer.eval()
-        if self._sample_batch is None:
+        if dataloader is None:
             return
-        
+
         if self.ema is not None:
             self.ema.apply_shadow()
 
-        for batch in self._sample_batch[self.accelerator.process_index :: self.accelerator.num_processes]:
+        logger.info(f"Sampling at step {current_step}...")
+
+        for batch in dataloader:
+            batch = deep_move_to_device(batch, self.device)
             clean_latents = self.sampler.sample(self.model, batch)
-            image = self.processor.decode_output(clean_latents, batch) # type: ignore
-            self.accelerator.log({f"sample/{batch['__key__']}": aim.Image(image)}, step=current_step)
+            image = self.processor.decode_output(clean_latents, batch)  # type: ignore
+            key = batch.get("__key__", "unknown")
+            gathered_images = self.accelerator.gather_for_metrics(
+                image, use_gather_object=True
+            )
+            gathered_keys = self.accelerator.gather_for_metrics(
+                key, use_gather_object=True
+            )
+            if self.accelerator.is_main_process:
+                # Deduplicate gathered results by keys
+                unique_dict = {}
+                for k, img in zip(gathered_keys, gathered_images):
+                    unique_dict[k] = img
+                for k, img in unique_dict.items():
+                    pil_image = tensor_to_pil(img)
+                    self.accelerator.log(
+                        {f"sample/{k}": aim.Image(pil_image)}, step=current_step
+                    )
 
         if self.ema is not None:
             self.ema.restore()
@@ -352,7 +369,7 @@ class SimpleFintuner(BaseModel):
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Epoch: {task.epoch}"),
+            TextColumn(" Epoch: {task.fields[epoch]}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
@@ -378,19 +395,27 @@ class SimpleFintuner(BaseModel):
         optimizer = self._make_optimizer()
         dataloader = self._make_dataloader()
         lr_scheduler = parse_scheduler(self.scheduler, optimizer)
-
-        self.model.transformer, optimizer, dataloader, lr_scheduler = self.accelerator.prepare(
-            self.model.transformer, optimizer, dataloader, lr_scheduler
+        self.model.transformer, optimizer, dataloader, lr_scheduler = (
+            self.accelerator.prepare(
+                self.model.transformer, optimizer, dataloader, lr_scheduler
+            )
         )
+
+        sample_dataloader = self._make_sample_dataloader()
+        if sample_dataloader is not None:
+            self.accelerator.prepare(sample_dataloader)
+
         self._make_ema()
         starting_step = self._try_resume_from_checkpoint()
         starting_epoch = starting_step // len(dataloader)
         total_epochs = self.train_steps // len(dataloader) + 1
         current_step = starting_step
 
-        self._sample_and_log(current_step)
+        self._sample_and_log(sample_dataloader, current_step)
 
-        logger.info(f"Starting training from step {starting_step}, epoch {starting_epoch}/{total_epochs}")
+        logger.info(
+            f"Starting training from step {starting_step}, epoch {starting_epoch}/{total_epochs}"
+        )
         progress, progress_task = self._make_progress_bar(starting_step, starting_epoch)
         progress.start()
 
@@ -399,6 +424,8 @@ class SimpleFintuner(BaseModel):
                 dataloader.sampler.set_epoch(epoch)
 
             for step, batch in enumerate(dataloader):
+                batch = deep_move_to_device(batch, self.device)
+
                 with self.accelerator.accumulate(self.transformer):
                     loss = self._train_step(batch) / self.gradient_accumulation_steps
                     self._check_loss_validity(loss, current_step, batch)
@@ -414,6 +441,7 @@ class SimpleFintuner(BaseModel):
                     optimizer.zero_grad()
 
                     if self.accelerator.sync_gradients and self.ema is not None:
+                        current_step += 1
                         self.ema.update()
 
                 logs = {
@@ -424,15 +452,14 @@ class SimpleFintuner(BaseModel):
                 progress.update(progress_task, advance=1, epoch=epoch, **logs)
 
                 if current_step % self.sample_steps == 0:
-                    self._sample_and_log(current_step)
+                    self._sample_and_log(sample_dataloader, current_step)
 
-                if current_step % self.checkpointing_steps == 0:
+                if current_step % self.checkpoint_steps == 0:
                     self._save_checkpoint(current_step)
 
-                current_step += 1
                 if current_step >= self.train_steps:
                     break
-            
+
         progress.stop()
         self._final_save()
 

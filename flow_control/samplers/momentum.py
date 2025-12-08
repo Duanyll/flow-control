@@ -1,7 +1,4 @@
-from typing import Callable
-
 import torch
-from pydantic import PrivateAttr
 
 from flow_control.adapters import ModelAdapter
 
@@ -12,7 +9,7 @@ class MomentumGuidedSampler(BaseSampler):
     alpha: float
     beta: float
 
-    _momentum: torch.Tensor | None = PrivateAttr(None)
+    _momentum: torch.Tensor | None = None
 
     def sample(
         self,

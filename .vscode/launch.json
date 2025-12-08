@@ -1,12 +1,21 @@
 {
     "configurations": [
         {
-            "name": "Python Debugger: Module",
+            "name": "Python Debugger: Preprocess",
             "type": "debugpy",
             "request": "launch",
             "module": "flow_control.scripts.preprocess",
             "args": [
                 "workspace/civitai-283235-flux1-preprocess.toml"
+            ]
+        },
+        {
+            "name": "Python Debugger: Finetune",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "flow_control.scripts.finetune",
+            "args": [
+                "workspace/civitai-283235-flux1-train.toml"
             ]
         }
     ]

@@ -215,7 +215,7 @@ class PipelineResult:
 def _setup_worker_logging(name: str, log_queue: mp.Queue):
     """Set up logging for a worker process."""
     handler = QueueHandler(log_queue)
-    setup_global_handler(handler, format=f"{name} - %(message)s")
+    setup_global_handler(handler)
     return get_logger(name)
 
 

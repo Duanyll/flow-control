@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 from einops import rearrange
 
+from flow_control.utils.common import pil_to_tensor
 from flow_control.utils.logging import get_logger
 logger = get_logger(__name__)
 
@@ -41,8 +42,7 @@ class CivitaiDataset(Dataset):
         # Load image
         image_path = os.path.join(self.path, image_file)
         image = Image.open(image_path).convert("RGB")
-        image = torch.from_numpy(np.array(image)) / 255.0  # Normalize to [0, 1]
-        image = rearrange(image, "h w c -> 1 c h w")
+        image = pil_to_tensor(image)
         
         # Load prompt
         text_path = os.path.join(self.path, text_file)

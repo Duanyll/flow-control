@@ -6,7 +6,7 @@ from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
 from accelerate.utils import extract_model_from_parallel
 
-from flow_control.utils.common import cast_trainable_parameters
+from flow_control.utils.upcasting import cast_trainable_parameters
 from flow_control.utils.logging import get_logger
 
 from .base import BaseFlux1Adapter
@@ -37,7 +37,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
         "ff_context.net.0.proj",
         "ff_context.net.2",
     ]
-    rank = 128
+    rank: int = 128
     gaussian_init_lora: bool = False
     use_lora_bias: bool = False
 
@@ -51,7 +51,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
             self.load_model(lora_state_dict)
             cast_trainable_parameters(self.transformer, self.trainable_dtype)
 
-    def install_modules(self):
+    def _install_modules(self):
         transformer = self.transformer
 
         if self.train_norm_layers:

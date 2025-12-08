@@ -17,15 +17,15 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
 
     train_norm_layers: bool = True
     lora_layers: Literal["all-linear"] | list[str] = "all-linear"
-    rank = 128
+    rank: int = 128
     use_lora_bias: bool = True
-    input_dimension = 128
+    input_dimension: int = 128
 
     class BatchType(Flux1PeftLoraAdapter.BatchType):
         control_latents: torch.Tensor
         """`[B, C, H, W]` The VAE encoded control condition image."""
 
-    def install_modules(self):
+    def _install_modules(self):
         transformer = self.transformer
         # Change shape of x_embedder layer before loading LoRA
         with torch.no_grad():
@@ -45,7 +45,7 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
                 new_linear.bias.copy_(transformer.x_embedder.bias)
             transformer.x_embedder = new_linear
 
-        super().install_modules()
+        super()._install_modules()
         ensure_trainable(transformer.x_embedder)
 
     def predict_velocity(self, batch: dict, timestep: torch.Tensor) -> torch.Tensor:

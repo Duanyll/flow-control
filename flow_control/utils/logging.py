@@ -1,4 +1,8 @@
 """
+IMPORTANT for other modules:
+1. Always use get_logger from this module to get loggers. Never call plain `print`.
+2. Explicitly pass `console` from this module to Rich progress bars and other Rich components. 
+
 Logging behavior:
 
 - Single process or main process in multiprocessing or accelerate:
@@ -9,9 +13,6 @@ Logging behavior:
   - Import and call setup_global_handler as early as possible in the child process.
 - Child processes launched by accelerate:
   - Due to limitations, just silence all logs to avoid clutter.
-
-Always use the get_logger function to obtain loggers. Never `print` directly.
-Always use the global `console` object for any rich console output (especially for progress bars).
 """
 
 import logging
@@ -59,13 +60,14 @@ diffusers.utils.logging.disable_default_handler()
 diffusers.utils.logging.disable_progress_bar()
 diffusers.utils.logging.set_verbosity_warning()
 
-def setup_global_handler(handler, format=None):
+def setup_global_handler(handler):
     transformers.utils.logging.add_handler(handler)
     diffusers.utils.logging.add_handler(handler)
-    if format is None:
-        logging.basicConfig(level=log_level, handlers=[handler])
-    else:
-        logging.basicConfig(level=log_level, format=format, handlers=[handler])
+    logging.basicConfig(
+        level=log_level, 
+        handlers=[handler],
+        format="%(name)s | %(message)s",
+    )
 
 if process_type != 'mp_spawn_child':
     setup_global_handler(rich_handler)

@@ -56,7 +56,7 @@ def parse_optimizer(conf: OptimizerConfig, parameters):
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
-    return ctor(params=parameters, **conf)
+    return ctor(parameters, **conf)
 
 
 class SchedulerConfig(TypedDict):

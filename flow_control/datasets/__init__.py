@@ -1,6 +1,9 @@
+import torch
 from typing import Any
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
+
+from flow_control.utils.common import deep_move_to_device
 
 from .lmdb import LMDBDataset, LMDBDataSink
 from .civitai import CivitaiDataset
@@ -45,3 +48,12 @@ DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,
     "directory": DirectoryDataSink,
 }
+
+# This library is designed to work with batch size 1 datasets.
+# For larger batch sizes, use gradient accumulation.
+# Dataset should return tensors with batch dimension 1.
+def collate_fn(batch: list[dict]) -> dict:
+    if len(batch) != 1:
+        raise ValueError("Batch size greater than 1 is not supported. Use gradient accumulation instead.")
+    item = batch[0]
+    return item

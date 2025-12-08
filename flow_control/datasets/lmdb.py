@@ -4,7 +4,6 @@ import io
 import zlib
 import torch
 from torch.utils.data import Dataset
-import pickle
 
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink

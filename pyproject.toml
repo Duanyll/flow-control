@@ -12,6 +12,7 @@ dependencies = [
     "einops>=0.8.1",
     "ipython>=9.7.0",
     "kornia>=0.8.2",
+    "kornia-rs>=0.1.10",
     "lmdb>=1.7.5",
     "peft>=0.18.0",
     "prodigyopt>=1.1.2",
@@ -22,8 +23,15 @@ dependencies = [
     "timm>=1.0.22",
     "torch>=2.9.1",
     "torchaudio>=2.9.1",
+    "torchdata>=0.11.0",
     "torchvision>=0.24.1",
     "transformers>=4.57.3",
+]
+
+[tool.uv]
+# NCCL 2.28.3 provides fix for https://github.com/pytorch/pytorch/issues/162057
+override-dependencies = [
+  "nvidia-nccl-cu12>=2.28.3"
 ]
 
 [tool.uv.sources]

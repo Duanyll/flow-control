@@ -1,8 +1,7 @@
-from typing import TypedDict
+from typing import TypedDict, Any
 
 import torch
-import torch.nn as nn
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict
 
 
 class BaseModelAdapter(BaseModel):
@@ -11,7 +10,15 @@ class BaseModelAdapter(BaseModel):
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    transformer: nn.Module = PrivateAttr()
+    _transformer: Any
+
+    @property
+    def transformer(self) -> Any:
+        return self._transformer
+    
+    @transformer.setter
+    def transformer(self, value: Any):
+        self._transformer = value
 
     @property
     def device(self) -> torch.device:
@@ -78,6 +85,16 @@ class BaseModelAdapter(BaseModel):
             The predicted velocity in latent space.
         """
         raise NotImplementedError()
+    
+    def generate_noise(
+        self,
+        batch: BatchType,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+    
+    def get_latent_length(self, batch: BatchType) -> int:
+        raise NotImplementedError()
 
     def train_step(
         self,
@@ -101,3 +118,4 @@ class BaseModelAdapter(BaseModel):
             Unweighted loss for each sample in the batch.
         """
         raise NotImplementedError()
+    
