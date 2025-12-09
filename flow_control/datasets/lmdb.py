@@ -1,7 +1,8 @@
-import lmdb
-import uuid
 import io
+import uuid
 import zlib
+
+import lmdb
 import torch
 from torch.utils.data import Dataset
 
@@ -11,6 +12,7 @@ from flow_control.utils.pipeline import DataSink
 logger = get_logger(__name__)
 
 LMDB_MAX_DBS = 16
+
 
 class LMDBDataset(Dataset):
     def __init__(
@@ -22,7 +24,12 @@ class LMDBDataset(Dataset):
     ):
         self.lmdb_path = path
         self.env = lmdb.open(
-            path, readonly=True, lock=False, readahead=False, meminit=False, max_dbs=LMDB_MAX_DBS
+            path,
+            readonly=True,
+            lock=False,
+            readahead=False,
+            meminit=False,
+            max_dbs=LMDB_MAX_DBS,
         )
         self.db_name = db_name
         self.db = self.env.open_db(db_name.encode()) if db_name else self.env.open_db()
@@ -65,7 +72,14 @@ class LMDBDataset(Dataset):
 
 
 class LMDBDataSink(DataSink):
-    def setup(self, worker_id: int, path: str, db_name: str | None = None, map_size: int = 1 << 40, use_compression: bool = False):
+    def setup(
+        self,
+        worker_id: int,
+        path: str,
+        db_name: str | None = None,
+        map_size: int = 1 << 40,
+        use_compression: bool = False,
+    ):
         self.lmdb_path = path
         self.env = lmdb.open(
             path,
@@ -75,13 +89,12 @@ class LMDBDataSink(DataSink):
         self.db_name = db_name
         self.db = self.env.open_db(db_name.encode()) if db_name else self.env.open_db()
         self.use_compression = use_compression
-        logger.info(f"LMDBDataSink initialized at {path} (db: {db_name}) for worker {worker_id}")
+        logger.info(
+            f"LMDBDataSink initialized at {path} (db: {db_name}) for worker {worker_id}"
+        )
 
     def write(self, item: dict):
-        if "__key__" in item:
-            key = item["__key__"].encode()
-        else:
-            key = uuid.uuid4().bytes
+        key = item["__key__"].encode() if "__key__" in item else uuid.uuid4().bytes
         with self.env.begin(write=True, db=self.db) as txn:
             buffer = io.BytesIO()
             torch.save(item, buffer)
@@ -92,7 +105,7 @@ class LMDBDataSink(DataSink):
             txn.put(key, buffer)
 
         return True
-    
+
     def cleanup(self):
         if hasattr(self, "env") and self.env is not None:
             self.env.close()

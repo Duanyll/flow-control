@@ -11,6 +11,7 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
 
     This is used by the PhotoDoddle model.
     """
+
     class BatchType(Flux1PeftLoraAdapter.BatchType):
         control_latents: torch.Tensor
         """`[B, C, H, W]` The VAE encoded control condition image."""

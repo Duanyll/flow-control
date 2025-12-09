@@ -9,12 +9,14 @@ MODEL_ADAPTER_PARSERS = {
     "flux1": parse_flux1_adapter,
 }
 
+
 def parse_model_adapter(conf: dict):
     model_type = conf.pop("arch")
     parser = MODEL_ADAPTER_PARSERS.get(model_type)
     if parser is None:
         raise ValueError(f"Unknown model adapter type: {model_type}")
     return parser(conf)
+
 
 ModelAdapter = Annotated[BaseModelAdapter, PlainValidator(parse_model_adapter)]
 

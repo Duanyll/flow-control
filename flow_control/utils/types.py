@@ -1,8 +1,8 @@
-from typing import Annotated, Any, TypedDict, NotRequired
+from typing import Annotated, Any, NotRequired, TypedDict
 
 import torch
+from diffusers.optimization import SchedulerType, get_scheduler
 from pydantic import BeforeValidator, PlainSerializer
-from diffusers.optimization import get_scheduler, SchedulerType
 
 
 def validate_torch_dtype(v: Any) -> torch.dtype:
@@ -17,8 +17,10 @@ def validate_torch_dtype(v: Any) -> torch.dtype:
             pass
     raise ValueError(f"Invalid torch dtype: {v}")
 
+
 def serialize_torch_dtype(v: torch.dtype) -> str:
     return str(v).split(".")[-1]  # 将 torch.float32 转为 "float32"
+
 
 def validate_torch_device(v: Any) -> torch.device:
     if isinstance(v, torch.device):
@@ -26,6 +28,7 @@ def validate_torch_device(v: Any) -> torch.device:
     if isinstance(v, (str, int)):
         return torch.device(v)
     raise ValueError(f"Invalid torch device: {v}")
+
 
 def serialize_torch_device(v: torch.device) -> str:
     return str(v)
@@ -46,13 +49,16 @@ TorchDevice = Annotated[
 
 OptimizerConfig = dict[str, Any]
 
+
 def parse_optimizer(conf: OptimizerConfig, parameters):
     class_name = conf.pop("class_name")
     if class_name == "Prodigy":
         from prodigyopt import Prodigy
+
         ctor = Prodigy
     elif class_name.endswith("8bit") or class_name.startswith("Paged"):
-        import bitsandbytes as bnb # type: ignore
+        import bitsandbytes as bnb  # type: ignore
+
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
@@ -67,6 +73,7 @@ class SchedulerConfig(TypedDict):
     num_cycles: NotRequired[int]
     power: NotRequired[float]
     last_epoch: NotRequired[int]
+
 
 def parse_scheduler(conf: SchedulerConfig, optimizer: torch.optim.Optimizer):
     return get_scheduler(optimizer=optimizer, **conf)

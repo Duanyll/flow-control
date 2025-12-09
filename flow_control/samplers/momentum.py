@@ -2,10 +2,10 @@ import torch
 
 from flow_control.adapters import ModelAdapter
 
-from .base import BaseSampler
+from .simple_euler import SimpleEulerSampler
 
 
-class MomentumGuidedSampler(BaseSampler):
+class MomentumGuidedSampler(SimpleEulerSampler):
     alpha: float
     beta: float
 
@@ -20,9 +20,7 @@ class MomentumGuidedSampler(BaseSampler):
         t_end=0,
     ) -> torch.Tensor:
         self._momentum = None
-        return super().sample(
-            model, batch, negative_batch, t_start, t_end
-        )
+        return super().sample(model, batch, negative_batch, t_start, t_end)
 
     def get_guided_velocity(
         self,
@@ -37,7 +35,6 @@ class MomentumGuidedSampler(BaseSampler):
         )
         if self._momentum is None:
             self._momentum = velocity
-        else:
-            guided_velocity = velocity + self.alpha * (velocity - self._momentum)
+        guided_velocity = velocity + self.alpha * (velocity - self._momentum)
         self._momentum = (1 - self.beta) * velocity + self.beta * self._momentum
         return guided_velocity

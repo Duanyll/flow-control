@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Literal, TypedDict
 
 import torch
@@ -6,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from flow_control.utils.types import TorchDevice
 
 
-class BaseProcessor(BaseModel):
+class BaseProcessor(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     class BatchType(TypedDict):
@@ -38,12 +39,15 @@ class BaseProcessor(BaseModel):
             elif "always" not in field_preset:
                 setattr(self, f"_{field_name}", None)
 
+    @abstractmethod
     def preprocess_batch(self, batch: BatchType) -> BatchType:
         raise NotImplementedError()
 
+    @abstractmethod
     def make_negative_batch(self, batch: BatchType) -> BatchType:
         raise NotImplementedError()
 
+    @abstractmethod
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:

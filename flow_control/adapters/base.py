@@ -1,13 +1,15 @@
-from typing import TypedDict, Any
+from abc import ABC, abstractmethod
+from typing import Any, TypedDict
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 
-class BaseModelAdapter(BaseModel):
+class BaseModelAdapter(BaseModel, ABC):
     """
     Base class for all control adapters.
     """
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _transformer: Any
@@ -15,18 +17,18 @@ class BaseModelAdapter(BaseModel):
     @property
     def transformer(self) -> Any:
         return self._transformer
-    
+
     @transformer.setter
     def transformer(self, value: Any):
         self._transformer = value
 
     @property
     def device(self) -> torch.device:
-        return self.transformer.device # type: ignore
-    
+        return self.transformer.device  # type: ignore
+
     @property
     def dtype(self) -> torch.dtype:
-        return self.transformer.dtype # type: ignore
+        return self.transformer.dtype  # type: ignore
 
     class BatchType(TypedDict):
         clean_latents: torch.Tensor
@@ -34,6 +36,7 @@ class BaseModelAdapter(BaseModel):
         noisy_latents: torch.Tensor
         """`[B, C, H, W]` The noisy latents to denoise."""
 
+    @abstractmethod
     def load_transformer(self):
         pass
 
@@ -62,7 +65,8 @@ class BaseModelAdapter(BaseModel):
         :param state_dict: The state_dict containing the layers to load.
         """
         pass
-
+    
+    @abstractmethod
     def predict_velocity(
         self,
         batch: BatchType,
@@ -85,17 +89,20 @@ class BaseModelAdapter(BaseModel):
             The predicted velocity in latent space.
         """
         raise NotImplementedError()
-    
+
+    @abstractmethod
     def generate_noise(
         self,
         batch: BatchType,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError()
-    
+
+    @abstractmethod
     def get_latent_length(self, batch: BatchType) -> int:
         raise NotImplementedError()
 
+    @abstractmethod
     def train_step(
         self,
         batch: BatchType,
@@ -118,4 +125,3 @@ class BaseModelAdapter(BaseModel):
             Unweighted loss for each sample in the batch.
         """
         raise NotImplementedError()
-    

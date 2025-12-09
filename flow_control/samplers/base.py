@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Any, cast
 
 import torch
@@ -16,6 +17,7 @@ from flow_control.utils.logging import console, get_logger
 
 logger = get_logger(__name__)
 
+
 def make_sample_progress() -> Progress:
     return Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -30,19 +32,20 @@ def make_sample_progress() -> Progress:
     )
 
 
-class BaseSampler(BaseModel):
+class BaseSampler(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     cfg_scale: float = 7.5
     seed: int = 42
 
+    @abstractmethod
     def sample(
         self,
         model: ModelAdapter,
         batch: dict,
         negative_batch: dict | None = None,
         t_start=1.0,
-        t_end=0.0
+        t_end=0.0,
     ) -> torch.Tensor:
         raise NotImplementedError()
 
@@ -74,7 +77,8 @@ class BaseSampler(BaseModel):
             generator = torch.Generator(device=device).manual_seed(self.seed)
             timestep = torch.tensor([t_start], device=device, dtype=dtype)
             noise = model.generate_noise(
-                batch, generator=generator # type: ignore
+                cast(Any, batch),
+                generator=generator,  
             )
             if "clean_latents" in batch:
                 clean = batch["clean_latents"]

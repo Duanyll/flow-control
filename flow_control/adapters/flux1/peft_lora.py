@@ -1,13 +1,13 @@
 from typing import Literal, cast
 
 import torch
+from accelerate.utils import extract_model_from_parallel
 from diffusers import FluxControlPipeline
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
-from accelerate.utils import extract_model_from_parallel
 
-from flow_control.utils.upcasting import cast_trainable_parameters
 from flow_control.utils.logging import get_logger
+from flow_control.utils.upcasting import cast_trainable_parameters
 
 from .base import BaseFlux1Adapter
 
@@ -59,6 +59,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter):
                 if any(k in name for k in NORM_LAYER_PREFIXES):
                     param.requires_grad = True
 
+        target_modules = []
         if self.lora_layers != "all-linear":
             target_modules = [layer.strip() for layer in self.lora_layers]
         elif self.lora_layers == "all-linear":

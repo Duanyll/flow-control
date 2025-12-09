@@ -1,9 +1,9 @@
 from collections.abc import MutableMapping
-from typing import Tuple, Any
+from typing import Any
 
 import kornia
-import torch
 import numpy as np
+import torch
 from einops import rearrange
 from PIL import Image
 
@@ -60,7 +60,7 @@ def meshgrid_to_ij(grid: torch.Tensor, h: int, w: int):
     return ij
 
 
-def make_grid(h, w, device: torch.device = torch.device("cuda")):
+def make_grid(h, w, device: torch.device) -> torch.Tensor:
     grid_array = kornia.utils.create_meshgrid(
         h, w, normalized_coordinates=True, device=device
     )
@@ -73,7 +73,7 @@ def ensure_trainable(module):
     Ensure that all parameters of the module are trainable.
     """
     # Check if LoRA is installed
-    for name, param in module.named_parameters():
+    for name, _param in module.named_parameters():
         if "lora" in name:
             break
     else:

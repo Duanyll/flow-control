@@ -1,23 +1,29 @@
+from collections.abc import Iterator
+from typing import Any
+
 import torch
-from typing import Any, Iterator
-from flow_control.datasets import parse_dataset, DATASINK_REGISTRY
-from flow_control.processors import parse_processor
-from flow_control.utils.common import deep_move_to_device
-from flow_control.utils.pipeline import (
-    Pipeline,
-    PipelineStage,
-    DataSource,
-    SourceConfig,
-    StageConfig,
-    SinkConfig,
-)
-from flow_control.utils.logging import get_logger
 from pydantic import BaseModel
 
+from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
+from flow_control.processors import parse_processor
+from flow_control.utils.common import deep_move_to_device
+from flow_control.utils.logging import get_logger
+from flow_control.utils.pipeline import (
+    DataSource,
+    Pipeline,
+    PipelineStage,
+    SinkConfig,
+    SourceConfig,
+    StageConfig,
+)
+
+
 class TorchDatasetSource(DataSource):
-    def __init__(self, dataset_args: dict = {}):
+    def __init__(self, dataset_args: dict | None = None):
+        if dataset_args is None:
+            dataset_args = {}
         self.dataset = parse_dataset(dataset_args)
-        self.total = len(self.dataset) # type: ignore
+        self.total = len(self.dataset)  # type: ignore
 
     def scan(self) -> Iterator[tuple[Any, int | None]]:
         for idx in range(len(self.dataset)):  # type: ignore
@@ -25,7 +31,11 @@ class TorchDatasetSource(DataSource):
 
 
 class TorchDatasetLoaderStage(PipelineStage):
-    def __init__(self, worker_id: int, device: int | None = None, dataset_args: dict = {}):
+    def __init__(
+        self, worker_id: int, device: int | None = None, dataset_args: dict | None = None
+    ):
+        if dataset_args is None:
+            dataset_args = {}
         self.worker_id = worker_id
         self.logger = get_logger(f"TorchDatasetLoaderStage-{worker_id}")
         self.dataset = parse_dataset(dataset_args)
@@ -37,17 +47,21 @@ class TorchDatasetLoaderStage(PipelineStage):
 
 
 class ProcessorStage(PipelineStage):
-    def __init__(self, worker_id: int, device: int | None = None, processor_args: dict = {}):
+    def __init__(
+        self, worker_id: int, device: int | None = None, processor_args: dict | None = None
+    ):
+        if processor_args is None:
+            processor_args = {}
         self.worker_id = worker_id
         self.logger = get_logger(f"ProcessorStage-{worker_id}")
 
         self.device = torch.device(f"cuda:{device}" if device is not None else "cpu")
         self.logger.info(f"Using device: {self.device}")
-        processor_args['device'] = self.device
+        processor_args["device"] = self.device
         self.processor = parse_processor(processor_args)
         self.logger.info(f"Initialized processor: {self.processor.__class__.__name__}")
 
-        self.processor.load_models(['encode'], device=self.device)
+        self.processor.load_models(["encode"], device=self.device)
         self.logger.info("Processor models loaded.")
 
     def process(self, batch: Any) -> Any:
@@ -98,11 +112,11 @@ def main(config_path: str):
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
                 name="Processing",
-                init_kwargs={"processor_args": config.processor}
+                init_kwargs={"processor_args": config.processor},
             ),
         ],
         sink=SinkConfig(
-            sink=DATASINK_REGISTRY.get(datasink_type), # type: ignore
+            sink=DATASINK_REGISTRY.get(datasink_type),  # type: ignore
             name="Saving",
             queue_size=config.queue_size,
             init_kwargs=config.output,

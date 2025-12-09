@@ -1,4 +1,4 @@
-from typing import Any, NotRequired, Literal
+from typing import Any, Literal, NotRequired
 
 import torch
 from einops import repeat

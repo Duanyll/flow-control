@@ -1,39 +1,43 @@
-import os
 import copy
+import os
 import shutil
 from typing import Any, cast
 
 import aim
 import torch
-from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import FluxControlPipeline
 from diffusers.utils.torch_utils import is_compiled_module
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
-    BarColumn,
-    MofNCompleteColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
 
 from flow_control.adapters import ModelAdapter
-from flow_control.samplers import Sampler
+from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
 from flow_control.processors import Processor
-from flow_control.datasets import DatasetConfig, parse_dataset, collate_fn
-from flow_control.utils.common import parse_checkpoint_step, tensor_to_pil, deep_move_to_device
-from flow_control.utils.types import (
-    OptimizerConfig,
-    parse_optimizer,
-    SchedulerConfig,
-    parse_scheduler,
+from flow_control.samplers import Sampler
+from flow_control.utils.common import (
+    deep_move_to_device,
+    parse_checkpoint_step,
+    tensor_to_pil,
 )
 from flow_control.utils.ema import EMA
-from flow_control.utils.logging import get_logger, console
-from flow_control.utils.weighting import TimestepWeighting, LossWeighting
+from flow_control.utils.logging import console, get_logger
+from flow_control.utils.types import (
+    OptimizerConfig,
+    SchedulerConfig,
+    parse_optimizer,
+    parse_scheduler,
+)
+from flow_control.utils.weighting import LossWeighting, TimestepWeighting
 
 logger = get_logger(__name__)
 
@@ -107,7 +111,7 @@ class Fintuner(BaseModel):
     @property
     def ema(self) -> EMA | None:
         return self._ema
-    
+
     @property
     def accelerator(self) -> Accelerator:
         return self._accelerator
@@ -138,15 +142,17 @@ class Fintuner(BaseModel):
             log_with="aim",
             project_config=ProjectConfiguration(
                 project_dir=self.output_dir, logging_dir=self.logging_dir
-            )
+            ),
         )
         if self.global_batch_size % self.accelerator.num_processes != 0:
             raise ValueError(
-                f"Global batch size {self.global_batch_size} must be divisible by number of processes {self.accelerator.num_processes}"
+                f"Global batch size {self.global_batch_size} must be divisible"
+                f" by number of processes {self.accelerator.num_processes}"
             )
         else:
             logger.info(
-                f"Global batch size: {self.global_batch_size}, gradient accumulation steps: {self.gradient_accumulation_steps}"
+                f"Global batch size: {self.global_batch_size}, "
+                f"gradient accumulation steps: {self.gradient_accumulation_steps}"
             )
         self.accelerator.gradient_accumulation_steps = self.gradient_accumulation_steps
         self.accelerator.init_trackers(
@@ -219,7 +225,8 @@ class Fintuner(BaseModel):
         optimizer = parse_optimizer(self.optimizer, params)
         num_trainable_params = sum(p.numel() for p in params)
         logger.info(
-            f"{optimizer.__class__.__name__} created with {num_trainable_params / (1024 * 1024):.2f}M trainable parameters"
+            f"{optimizer.__class__.__name__} created with "
+            f"{num_trainable_params / (1024 * 1024):.2f}M trainable parameters"
         )
         return optimizer
 
@@ -350,10 +357,11 @@ class Fintuner(BaseModel):
             if self.accelerator.is_main_process:
                 # Deduplicate gathered results by keys
                 unique_dict = {}
-                for k, img in zip(gathered_keys, gathered_images):
+                for k, img in zip(gathered_keys, gathered_images, strict=False):
                     unique_dict[k] = img
                 for k, img in unique_dict.items():
                     pil_image = tensor_to_pil(img)
+                    # FIXME: Broken logging key in aim
                     self.accelerator.log(
                         {f"sample/{k}": aim.Image(pil_image)}, step=current_step
                     )
@@ -423,7 +431,7 @@ class Fintuner(BaseModel):
             if hasattr(dataloader.sampler, "set_epoch"):
                 dataloader.sampler.set_epoch(epoch)
 
-            for step, batch in enumerate(dataloader):
+            for _step, batch in enumerate(dataloader):
                 batch = deep_move_to_device(batch, self.device)
 
                 with self.accelerator.accumulate(self.transformer):
@@ -437,19 +445,18 @@ class Fintuner(BaseModel):
                         )
 
                     optimizer.step()
-                    lr_scheduler.step()
                     optimizer.zero_grad()
 
                     if self.accelerator.sync_gradients and self.ema is not None:
+                        logs = {
+                            "loss": loss.item(),
+                            "lr": lr_scheduler.get_last_lr()[0],
+                        }
+                        self.accelerator.log(logs, step=current_step)
+                        progress.update(progress_task, advance=1, epoch=epoch, **logs)
                         current_step += 1
                         self.ema.update()
-
-                logs = {
-                    "loss": loss.item(),
-                    "lr": lr_scheduler.get_last_lr()[0],
-                }
-                self.accelerator.log(logs, step=current_step)
-                progress.update(progress_task, advance=1, epoch=epoch, **logs)
+                        lr_scheduler.step()
 
                 if current_step % self.sample_steps == 0:
                     self._sample_and_log(sample_dataloader, current_step)

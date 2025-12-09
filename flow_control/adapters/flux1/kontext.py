@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import Literal
 
 import torch
 
@@ -10,7 +10,7 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
     pe_index_scale: int = 1
 
     class BatchType(BaseFlux1Adapter.BatchType):
-        reference_latents: List[torch.Tensor]
+        reference_latents: list[torch.Tensor]
         """List of `[B, C, H, W]` Tensors representing VAE encoded reference images."""
 
     def predict_velocity(
@@ -54,7 +54,9 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
                     cur_h = max(cur_h, h_ref + h_offset)
                     cur_w = max(cur_w, w_ref + w_offset)
                     img_ids_list.append(
-                        self._make_img_ids(ref, index=0, h_offset=h_offset, w_offset=w_offset)
+                        self._make_img_ids(
+                            ref, index=0, h_offset=h_offset, w_offset=w_offset
+                        )
                     )
             batch["img_ids"] = torch.cat(img_ids_list, dim=0)
 

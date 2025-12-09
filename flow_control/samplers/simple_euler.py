@@ -1,5 +1,4 @@
 import torch
-from einops import repeat
 
 from flow_control.adapters.base import BaseModelAdapter
 

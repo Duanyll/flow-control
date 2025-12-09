@@ -14,12 +14,14 @@ SAMPLER_REGISTRY = {
     "shifted_euler": ShiftedEulerSampler,
 }
 
+
 def parse_sampler(conf: dict) -> BaseSampler:
     sampler_type = conf.pop("type")
     sampler_class = SAMPLER_REGISTRY.get(sampler_type)
     if sampler_class is None:
         raise ValueError(f"Unknown sampler type: {sampler_type}")
     return sampler_class(**conf)
+
 
 Sampler = Annotated[BaseSampler, PlainValidator(parse_sampler)]
 

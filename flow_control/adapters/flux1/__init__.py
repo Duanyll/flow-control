@@ -12,6 +12,7 @@ ADAPTER_REGISTRY = {
     "fill": Flux1FillAdapter,
 }
 
+
 def parse_adapter(conf: dict) -> BaseFlux1Adapter:
     adapter_type = conf.pop("type")
     adapter_class = ADAPTER_REGISTRY.get(adapter_type)

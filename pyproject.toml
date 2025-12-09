@@ -28,6 +28,13 @@ dependencies = [
     "transformers>=4.57.3",
 ]
 
+[dependency-groups]
+dev = [
+    "lefthook>=2.0.9",
+    "pyright>=1.1.407",
+    "ruff>=0.14.8",
+]
+
 [tool.uv]
 # NCCL 2.28.3 provides fix for https://github.com/pytorch/pytorch/issues/162057
 override-dependencies = [
@@ -56,3 +63,31 @@ default = true
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+ignore = [
+    "E501",  # line too long
+    "B027",  # empty function in abstract class
+]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+# HuggingFace officially uses private imports a lot, so we disable the check here.
+reportPrivateImportUsage = false
+# Python lacks proper support for generic types and type infer. We do incompatible 
+# method override to provide better type hints within subclasses.
+reportIncompatibleMethodOverride = false

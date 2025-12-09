@@ -1,6 +1,7 @@
 import torch
 
-class EMA():
+
+class EMA:
     model: torch.nn.Module
     decay: float
     shadow: dict[str, torch.Tensor]
@@ -46,14 +47,14 @@ class EMA():
                 assert name in self.backup
                 param.data = self.backup[name]
         self.backup = {}
-        
+
     def to(self, device):
         for name, param in self.shadow.items():
             if param.device != device:
                 self.shadow[name] = param.to(device)
-    
+
     def state_dict(self):
         return self.shadow
-    
+
     def load_state_dict(self, state_dict):
         self.shadow = state_dict

@@ -1,7 +1,8 @@
-from typing import Annotated
-from pydantic import BaseModel, PlainValidator
-import torch
 import math
+from typing import Annotated
+
+import torch
+from pydantic import BaseModel, PlainValidator
 
 
 class BaseTimestepWeighting(BaseModel):
@@ -56,26 +57,31 @@ TimestepWeighting = Annotated[
 class BaseLossWeighting(BaseModel):
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
-    
+
+
 class UniformLossWeighting(BaseLossWeighting):
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(timesteps)
-    
+
+
 class SigmaSquaredLossWeighting(BaseLossWeighting):
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
-        return (timesteps ** (-2.0))
-    
+        return timesteps ** (-2.0)
+
+
 class CosmapLossWeighting(BaseLossWeighting):
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
-        bot = 1 - 2 * timesteps + 2 * (timesteps ** 2)
+        bot = 1 - 2 * timesteps + 2 * (timesteps**2)
         weights = 2 / (math.pi * bot)
         return weights
-    
+
+
 LOSS_WEIGHTING_REGISTRY = {
     "uniform": UniformLossWeighting,
     "sigma_squared": SigmaSquaredLossWeighting,
     "cosmap": CosmapLossWeighting,
 }
+
 
 def parse_loss_weighting(conf: dict) -> BaseLossWeighting:
     weighting_type = conf.pop("type")
@@ -84,8 +90,8 @@ def parse_loss_weighting(conf: dict) -> BaseLossWeighting:
         raise ValueError(f"Unknown loss weighting type: {weighting_type}")
     return weighting_class(**conf)
 
-LossWeighting = Annotated[
-    BaseLossWeighting, PlainValidator(parse_loss_weighting)]
+
+LossWeighting = Annotated[BaseLossWeighting, PlainValidator(parse_loss_weighting)]
 
 __all__ = [
     "TimestepWeighting",

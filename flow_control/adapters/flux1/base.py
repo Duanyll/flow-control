@@ -1,18 +1,17 @@
-from typing import NotRequired, Any
+from typing import Any, NotRequired
 
 import torch
 from diffusers import FluxTransformer2DModel
 from einops import rearrange, reduce
 
 from flow_control.adapters.base import BaseModelAdapter
-from flow_control.utils.upcasting import (
-    cast_trainable_parameters,
-    apply_layerwise_upcasting,
-)
 from flow_control.utils.loaders import HfModelLoader
-from flow_control.utils.types import TorchDType
 from flow_control.utils.logging import get_logger
-
+from flow_control.utils.types import TorchDType
+from flow_control.utils.upcasting import (
+    apply_layerwise_upcasting,
+    cast_trainable_parameters,
+)
 
 logger = get_logger(__name__)
 
@@ -130,7 +129,7 @@ class BaseFlux1Adapter(BaseModelAdapter):
                 generator=generator,
             )
             return noise
-    
+
     def get_latent_length(self, batch: BatchType) -> int:
         b, c, h, w = batch["noisy_latents"].shape
         latent_len = (h // self.patch_size) * (w // self.patch_size)

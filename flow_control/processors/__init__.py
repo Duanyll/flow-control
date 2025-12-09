@@ -10,12 +10,14 @@ PROCESSOR_REGISTRY = {
     "flux1": Flux1Processor,
 }
 
+
 def parse_processor(conf: dict) -> BaseProcessor:
     processor_type = conf.pop("type")
     processor_class = PROCESSOR_REGISTRY.get(processor_type)
     if processor_class is None:
         raise ValueError(f"Unknown processor type: {processor_type}")
     return processor_class(**conf)
+
 
 Processor = Annotated[BaseProcessor, PlainValidator(parse_processor)]
 

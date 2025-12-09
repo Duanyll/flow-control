@@ -14,26 +14,29 @@ Usage:
     See the `pipeline_demo.py` section for a complete example.
 """
 
+import contextlib
 import queue
 import time
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from logging.handlers import QueueHandler, QueueListener
+from multiprocessing.synchronize import Event as EventType
+from typing import Any
+
 import torch
 import torch.multiprocessing as mp
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Iterator, List, Optional, Type, Tuple
-from logging.handlers import QueueListener, QueueHandler
-from multiprocessing.synchronize import Event as EventType
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
-    BarColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
-    TaskID,
 )
 
-from .logging import get_logger, setup_global_handler, rich_handler, console
+from .logging import console, get_logger, rich_handler, setup_global_handler
 
 logger = get_logger(__name__)
 
@@ -47,7 +50,7 @@ class PipelineStage(ABC):
     """Abstract base class for pipeline processing stages."""
 
     @abstractmethod
-    def __init__(self, worker_id: int, device: Optional[int] = None, **kwargs):
+    def __init__(self, worker_id: int, device: int | None = None, **kwargs):
         """
         Initialize the stage in the worker process.
 
@@ -62,7 +65,7 @@ class PipelineStage(ABC):
         pass
 
     @abstractmethod
-    def process(self, item: Any) -> List[Any]:
+    def process(self, item: Any) -> list[Any]:
         """
         Process a single input item.
 
@@ -149,7 +152,7 @@ class DataSink(ABC):
 class SourceConfig:
     """Configuration for the data source."""
 
-    source: Type[DataSource]
+    source: type[DataSource]
     name: str = "Scanning"
     queue_size: int = 8
     init_kwargs: dict = field(default_factory=dict)
@@ -159,9 +162,9 @@ class SourceConfig:
 class StageConfig:
     """Configuration for a processing stage."""
 
-    stage: Type[PipelineStage]
+    stage: type[PipelineStage]
     num_workers: int = 1
-    gpu_ids: Optional[List[int]] = None  # None=CPU, [0,1,2]=assign to GPUs
+    gpu_ids: list[int] | None = None  # None=CPU, [0,1,2]=assign to GPUs
     num_threads: int = 8  # torch.set_num_threads per worker
     queue_size: int = 4  # Output queue size for backpressure
     name: str = ""  # Display name for progress bar (defaults to class name)
@@ -176,7 +179,7 @@ class StageConfig:
 class SinkConfig:
     """Configuration for the data sink."""
 
-    sink: Type[DataSink]
+    sink: type[DataSink]
     num_workers: int = 1
     num_threads: int = 8
     queue_size: int = 4
@@ -199,12 +202,12 @@ class PipelineResult:
     """Result of pipeline execution."""
 
     source_total: int
-    stage_stats: List[dict]
+    stage_stats: list[dict]
     sink_success: int
     sink_skipped: int
     elapsed_time: float
     aborted: bool = False  # True if pipeline was aborted due to error/interrupt
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 # =============================================================================
@@ -224,7 +227,7 @@ def _safe_put(
     item: Any,
     timeout: float = 1.0,
     logger=None,
-    shutdown_event: Optional[EventType] = None,
+    shutdown_event: EventType | None = None,
 ) -> bool:
     """
     Put item to queue with timeout and backpressure handling.
@@ -250,8 +253,8 @@ def _safe_put(
 def _safe_get(
     q: mp.Queue,
     timeout: float = 0.5,
-    shutdown_event: Optional[EventType] = None,
-) -> Tuple[bool, Any]:
+    shutdown_event: EventType | None = None,
+) -> tuple[bool, Any]:
     """
     Get item from queue with timeout.
 
@@ -268,7 +271,7 @@ def _safe_get(
 
 
 def _source_worker(
-    source_class: Type[DataSource],
+    source_class: type[DataSource],
     source_kwargs: dict,
     output_queue: Any,
     progress_queue: Any,
@@ -310,10 +313,8 @@ def _source_worker(
     except Exception as e:
         worker_logger.error(f"Source worker fatal error: {e}", exc_info=True)
         # Notify main process of fatal error
-        try:
+        with contextlib.suppress(queue.Full):
             progress_queue.put(("fatal", 0, "error", str(e)), timeout=5)
-        except queue.Full:
-            pass
     finally:
         worker_logger.info("Source worker finished")
 
@@ -321,7 +322,7 @@ def _source_worker(
 def _stage_worker(
     stage_index: int,
     worker_id: int,
-    stage_class: Type[PipelineStage],
+    stage_class: type[PipelineStage],
     input_queue: Any,
     output_queue: Any,
     progress_queue: Any,
@@ -329,7 +330,7 @@ def _stage_worker(
     upstream_done: EventType,
     shutdown_event: EventType,
     num_threads: int,
-    device: Optional[int],
+    device: int | None,
     init_kwargs: dict,
 ):
     """Worker that processes items through a pipeline stage."""
@@ -337,6 +338,7 @@ def _stage_worker(
     worker_name = f"Stage{stage_index}-W{worker_id}"
     worker_logger = _setup_worker_logging(worker_name, log_queue)
     worker_logger.info(f"Stage worker started (device={device}, threads={num_threads})")
+    stage = None
 
     try:
         # Instantiate the stage in the worker process
@@ -354,7 +356,9 @@ def _stage_worker(
                     # Work is done, but don't exit yet - wait for shutdown signal
                     # to ensure downstream stages finish consuming our outputs
                     if not work_done:
-                        worker_logger.info("Work completed, waiting for pipeline shutdown")
+                        worker_logger.info(
+                            "Work completed, waiting for pipeline shutdown"
+                        )
                         work_done = True
                     time.sleep(0.5)
                 continue
@@ -381,7 +385,7 @@ def _stage_worker(
     except Exception as e:
         # Fatal error (e.g., in __init__) - notify main process
         worker_logger.error(f"Stage worker fatal error: {e}", exc_info=True)
-        try:
+        with contextlib.suppress(queue.Full):
             progress_queue.put(
                 (
                     "fatal",
@@ -391,16 +395,15 @@ def _stage_worker(
                 ),
                 timeout=5,
             )
-        except queue.Full:
-            pass
     finally:
-        stage.cleanup()
+        if stage is not None:
+            stage.cleanup()
         worker_logger.info("Stage worker finished")
 
 
 def _sink_worker(
     worker_id: int,
-    sink_class: Type[DataSink],
+    sink_class: type[DataSink],
     input_queue: Any,
     progress_queue: Any,
     log_queue: Any,
@@ -414,6 +417,7 @@ def _sink_worker(
     worker_name = f"Sink-W{worker_id}"
     worker_logger = _setup_worker_logging(worker_name, log_queue)
     worker_logger.info(f"Sink worker started (threads={num_threads})")
+    sink = None
 
     try:
         # Instantiate the sink in the worker process
@@ -430,7 +434,9 @@ def _sink_worker(
                     # Work is done, but don't exit yet - wait for shutdown signal
                     # to ensure upstream stages don't exit before we finish
                     if not work_done:
-                        worker_logger.info("Work completed, waiting for pipeline shutdown")
+                        worker_logger.info(
+                            "Work completed, waiting for pipeline shutdown"
+                        )
                         work_done = True
                     time.sleep(0.5)
                 continue
@@ -444,15 +450,14 @@ def _sink_worker(
     except Exception as e:
         # Fatal error (e.g., in __init__) - notify main process
         worker_logger.error(f"Sink worker fatal error: {e}", exc_info=True)
-        try:
+        with contextlib.suppress(queue.Full):
             progress_queue.put(
                 ("fatal", 0, "error", f"Sink-W{worker_id}: {e}"),
                 timeout=5,
             )
-        except queue.Full:
-            pass
     finally:
-        sink.cleanup()
+        if sink is not None:
+            sink.cleanup()
         worker_logger.info("Sink worker finished")
 
 
@@ -476,7 +481,7 @@ class Pipeline:
     def __init__(
         self,
         source: SourceConfig,
-        stages: List[StageConfig],
+        stages: list[StageConfig],
         sink: SinkConfig,
     ):
         """
@@ -672,7 +677,7 @@ class Pipeline:
         self,
         progress_queue: Any,
         source_done: EventType,
-        stage_done_events: List[EventType],
+        stage_done_events: list[EventType],
         sink_done: EventType,
         shutdown_event: EventType,
     ) -> PipelineResult:
@@ -710,7 +715,7 @@ class Pipeline:
                 extra="",
             )
 
-            stage_tasks: List[TaskID] = []
+            stage_tasks: list[TaskID] = []
             for stage_cfg in self.stages:
                 task = progress.add_task(
                     f"[green]{stage_cfg.name}",
@@ -761,9 +766,7 @@ class Pipeline:
                             source_total = count
                             progress.update(source_task, total=source_total)
                             if self.stages:
-                                progress.update(
-                                    stage_tasks[0], total=source_total
-                                )
+                                progress.update(stage_tasks[0], total=source_total)
                         elif event_type == "produced":
                             source_count += count
                             pending[0] += count
@@ -800,7 +803,9 @@ class Pipeline:
 
                         delta = 0
                         for i in range(len(self.stages)):
-                            delta += stage_stats[i].total_output - stage_stats[i].completed
+                            delta += (
+                                stage_stats[i].total_output - stage_stats[i].completed
+                            )
                             display_total = (
                                 source_total + delta
                                 if source_total is not None

@@ -3,13 +3,13 @@ diffusers's built-in layerwise casting hooks does not support training parameter
 This module provides an improved version of layerwise upcasting hooks that properly
 handles trainable parameters.
 """
+
 import re
 from enum import Enum
-from typing import Any, List, Type, cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
-from torch.utils._python_dispatch import is_traceable_wrapper_subclass  # type: ignore[import]
 from accelerate.hooks import ModelHook, add_hook_to_module
 from diffusers.models.attention import FeedForward, LuminaFeedForward
 from diffusers.models.embeddings import (
@@ -23,6 +23,9 @@ from diffusers.models.embeddings import (
     TimestepEmbedding,
 )
 from diffusers.utils import logging
+from torch.utils._python_dispatch import (
+    is_traceable_wrapper_subclass,  # type: ignore[import]
+)
 
 logger = logging.get_logger(__name__)
 
@@ -31,8 +34,8 @@ logger = logging.get_logger(__name__)
 # Modified to distinguish between parameters and their gradients
 def _module_apply_advanced(module, fn, recurse=True):
     if recurse:
-        for module in module.children():
-            _module_apply_advanced(module, fn)
+        for m in module.children():
+            _module_apply_advanced(m, fn)
 
     def compute_should_use_set_data(tensor, tensor_applied):
         if torch._has_compatible_shallow_copy_type(tensor, tensor_applied):
@@ -256,9 +259,13 @@ def apply_layerwise_upcasting(
     storage_dtype: torch.dtype,
     compute_dtype: torch.dtype,
     granularity: LayerwiseUpcastingGranularity = LayerwiseUpcastingGranularity.PYTORCH_LAYER,
-    skip_modules_pattern: List[str] = [],
-    skip_modules_classes: List[Type[torch.nn.Module]] = [],
+    skip_modules_pattern: list[str] | None = None,
+    skip_modules_classes: list[type[torch.nn.Module]] | None = None,
 ) -> torch.nn.Module:
+    if skip_modules_classes is None:
+        skip_modules_classes = []
+    if skip_modules_pattern is None:
+        skip_modules_pattern = []
     if torch.__version__ >= "2.8.0":
         logger.warning(
             "PyTorch 2.8+ has known issues with using fp8 upcasting hooks during DDP training. "
@@ -307,9 +314,11 @@ def _apply_layerwise_upcasting_diffusers_layer(
     module: torch.nn.Module,
     storage_dtype: torch.dtype,
     compute_dtype: torch.dtype,
-    skip_modules_pattern: List[str] = _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
-    skip_modules_classes: List[Type[torch.nn.Module]] = [],
+    skip_modules_pattern: list[str] = _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
+    skip_modules_classes: list[type[torch.nn.Module]] | None = None,
 ) -> torch.nn.Module:
+    if skip_modules_classes is None:
+        skip_modules_classes = []
     for name, submodule in module.named_modules():
         if (
             any(re.search(pattern, name) for pattern in skip_modules_pattern)
@@ -330,9 +339,11 @@ def _apply_layerwise_upcasting_pytorch_layer(
     module: torch.nn.Module,
     storage_dtype: torch.dtype,
     compute_dtype: torch.dtype,
-    skip_modules_pattern: List[str] = _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
-    skip_modules_classes: List[Type[torch.nn.Module]] = [],
+    skip_modules_pattern: list[str] = _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
+    skip_modules_classes: list[type[torch.nn.Module]] | None = None,
 ) -> torch.nn.Module:
+    if skip_modules_classes is None:
+        skip_modules_classes = []
     count = 0
     for name, submodule in module.named_modules():
         if (
@@ -361,6 +372,6 @@ def cast_trainable_parameters(module: torch.nn.Module, dtype: torch.dtype) -> No
         dtype (`torch.dtype`):
             The dtype to cast the parameters to.
     """
-    for name, param in module.named_parameters():
+    for _name, param in module.named_parameters():
         if param.requires_grad:
             param.data = param.data.to(dtype=dtype)

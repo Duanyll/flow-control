@@ -6,18 +6,18 @@ Run with: uv run -m flow_control.utils.pipeline_demo
 
 import random
 import time
-from typing import Iterator, List, Optional
+from collections.abc import Iterator
 
+from .logging import get_logger
 from .pipeline import (
+    DataSink,
+    DataSource,
     Pipeline,
     PipelineStage,
-    DataSource,
-    DataSink,
+    SinkConfig,
     SourceConfig,
     StageConfig,
-    SinkConfig,
 )
-from .logging import get_logger
 
 
 class MockDataSource(DataSource):
@@ -35,12 +35,18 @@ class MockDataSource(DataSource):
 class MockLoader(PipelineStage):
     """Simulate loading data with random filtering."""
 
-    def __init__(self, worker_id: int, device: Optional[int] = None, filter_rate: float = 0.1, **kwargs):
+    def __init__(
+        self,
+        worker_id: int,
+        device: int | None = None,
+        filter_rate: float = 0.1,
+        **kwargs,
+    ):
         self.worker_id = worker_id
         self.filter_rate = filter_rate
         self.logger = get_logger(f"MockLoader-{worker_id}")
 
-    def process(self, item: str) -> List[dict]:
+    def process(self, item: str) -> list[dict]:
         time.sleep(random.uniform(0.05, 0.15))  # Simulate I/O
 
         # Random filtering
@@ -61,13 +67,20 @@ class MockLoader(PipelineStage):
 class MockProcessor(PipelineStage):
     """Simulate processing with random splitting."""
 
-    def __init__(self, worker_id: int, device: Optional[int] = None, split_rate: float = 0.2, max_split: int = 3, **kwargs):
+    def __init__(
+        self,
+        worker_id: int,
+        device: int | None = None,
+        split_rate: float = 0.2,
+        max_split: int = 3,
+        **kwargs,
+    ):
         self.worker_id = worker_id
         self.split_rate = split_rate
         self.max_split = max_split
         self.logger = get_logger(f"MockProcessor-{worker_id}")
 
-    def process(self, item: dict) -> List[dict]:
+    def process(self, item: dict) -> list[dict]:
         time.sleep(random.uniform(0.1, 0.3))  # Simulate computation
 
         # Determine how many outputs
@@ -114,14 +127,20 @@ class MockSink(DataSink):
 class FaultyProcessor(PipelineStage):
     """Processor that throws a fatal error during setup."""
 
-    def __init__(self, worker_id: int, device: Optional[int] = None, fail_on_setup: bool = False, **kwargs):
+    def __init__(
+        self,
+        worker_id: int,
+        device: int | None = None,
+        fail_on_setup: bool = False,
+        **kwargs,
+    ):
         if fail_on_setup:
             raise RuntimeError("Simulated setup failure!")
         self.worker_id = worker_id
         self.logger = get_logger(f"FaultyProcessor-{worker_id}")
         self.count = 0
 
-    def process(self, item: dict) -> List[dict]:
+    def process(self, item: dict) -> list[dict]:
         self.count += 1
         if self.count >= 5:
             raise RuntimeError("I am tired of processing!")
