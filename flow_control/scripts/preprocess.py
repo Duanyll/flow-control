@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
 from flow_control.processors import parse_processor
 from flow_control.utils.common import deep_move_to_device
+from flow_control.utils.loaders import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import (
     DataSource,
@@ -32,7 +33,10 @@ class TorchDatasetSource(DataSource):
 
 class TorchDatasetLoaderStage(PipelineStage):
     def __init__(
-        self, worker_id: int, device: int | None = None, dataset_args: dict | None = None
+        self,
+        worker_id: int,
+        device: int | None = None,
+        dataset_args: dict | None = None,
     ):
         if dataset_args is None:
             dataset_args = {}
@@ -48,7 +52,10 @@ class TorchDatasetLoaderStage(PipelineStage):
 
 class ProcessorStage(PipelineStage):
     def __init__(
-        self, worker_id: int, device: int | None = None, processor_args: dict | None = None
+        self,
+        worker_id: int,
+        device: int | None = None,
+        processor_args: dict | None = None,
     ):
         if processor_args is None:
             processor_args = {}
@@ -83,8 +90,17 @@ class PreprocessConfig(BaseModel):
     queue_size: int = 16
 
 
-def main(config_path: str):
-    from flow_control.utils.loaders import load_config_file
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Preprocess dataset using a pipeline.")
+    parser.add_argument(
+        "config_path",
+        type=str,
+        help="Path to the preprocessing configuration file (YAML or JSON).",
+    )
+    args = parser.parse_args()
+    config_path = args.config_path
 
     config = PreprocessConfig(**load_config_file(config_path))
     datasink_type = config.output.pop("type")
@@ -127,13 +143,4 @@ def main(config_path: str):
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Preprocess dataset using a pipeline.")
-    parser.add_argument(
-        "config",
-        type=str,
-        help="Path to the preprocessing configuration file (YAML or JSON).",
-    )
-    args = parser.parse_args()
-    main(args.config)
+    main()

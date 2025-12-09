@@ -2,13 +2,7 @@ from flow_control.training.finetuner import Fintuner
 from flow_control.utils.loaders import load_config_file
 
 
-def main(config_path: str):
-    config = load_config_file(config_path)
-    finetuner = Fintuner(**config)
-    finetuner.train()
-
-
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -18,5 +12,12 @@ if __name__ == "__main__":
         "config_path", type=str, help="Path to the finetuning configuration file."
     )
     args = parser.parse_args()
+    config_path = args.config_path
 
-    main(args.config_path)
+    config = load_config_file(config_path)
+    finetuner = Fintuner(**config)
+    finetuner.train()
+
+
+if __name__ == "__main__":
+    main()

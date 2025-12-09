@@ -7,6 +7,7 @@ requires-python = "==3.12.*"
 dependencies = [
     "accelerate>=1.12.0",
     "aim>=3.29.1",
+    "bitsandbytes>=0.48.2 ; sys_platform == 'linux' or sys_platform == 'win32'",
     "datasets>=4.4.1",
     "diffusers>=0.35.2",
     "einops>=0.8.1",
@@ -35,11 +36,16 @@ dev = [
     "ruff>=0.14.8",
 ]
 
+[project.scripts]
+preprocess = "flow_control.scripts.preprocess:main"
+finetune = "flow_control.scripts.finetune:main"
+
 [tool.uv]
 # NCCL 2.28.3 provides fix for https://github.com/pytorch/pytorch/issues/162057
 override-dependencies = [
-  "nvidia-nccl-cu12>=2.28.3"
+  "nvidia-nccl-cu12>=2.28.3; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
+package = true
 
 [tool.uv.sources]
 torch = [
