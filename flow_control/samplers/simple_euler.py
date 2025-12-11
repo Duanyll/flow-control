@@ -17,7 +17,6 @@ class SimpleEulerSampler(BaseSampler):
         t_start=1.0,
         t_end=0.0,
     ) -> torch.Tensor:
-        self._init_noise_maybe(model, batch, t_start)
         sigmas = torch.linspace(t_start, t_end, self.steps + 1)
         return self._euler_sample(model, batch, sigmas, negative_batch)
 

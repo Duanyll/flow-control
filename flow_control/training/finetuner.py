@@ -329,7 +329,6 @@ class Fintuner(BaseModel):
             self.accelerator.save_state(save_path)
             torch.save(batch, os.path.join(save_path, "batch.pt"))
             logger.info(f"Dumped batch to {save_path}")
-            self.accelerator.end_training()
             raise ValueError(f"Step {global_step} on rank {rank} loss is NaN or Inf")
 
     @torch.no_grad()

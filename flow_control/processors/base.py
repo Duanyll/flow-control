@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Literal, TypedDict
 
 import torch
+from einops import rearrange
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.utils.types import TorchDevice
@@ -15,6 +16,10 @@ class BaseProcessor(BaseModel, ABC):
 
     _loading_preset: dict[str, list[Literal["encode", "decode", "always"]]] = {}
     device: TorchDevice = torch.device("cuda")
+
+    vae_scale_factor: int = 8
+    patch_size: int = 2
+    latent_channels: int = 16
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -52,3 +57,24 @@ class BaseProcessor(BaseModel, ABC):
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
         raise NotImplementedError()
+
+    def _pack_latents(self, latents):
+        return rearrange(
+            latents,
+            "b c (h ph) (w pw) -> b (h w) (c ph pw)",
+            ph=self.patch_size,
+            pw=self.patch_size,
+        )
+
+    def _unpack_latents(self, latents, size: tuple[int, int]):
+        h, w = size
+        h = h // self.vae_scale_factor
+        w = w // self.vae_scale_factor
+        return rearrange(
+            latents,
+            "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+            h=h // self.patch_size,
+            w=w // self.patch_size,
+            ph=self.patch_size,
+            pw=self.patch_size,
+        )

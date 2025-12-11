@@ -5,7 +5,12 @@ from torch.utils.data import ConcatDataset, Dataset
 from datasets import load_dataset
 
 from .civitai import CivitaiDataset
-from .directory import DirectoryDataset, DirectoryDataSink
+from .directory import (
+    PickleDirectoryDataset,
+    PickleDirectoryDataSink,
+    RawDirectoryDataset,
+    RawDirectoryDataSink,
+)
 from .lmdb import LMDBDataset, LMDBDataSink
 
 DatasetConfig = dict[str, Any]
@@ -13,7 +18,8 @@ DatasetConfig = dict[str, Any]
 DATASET_REGISTRY = {
     "lmdb": LMDBDataset,
     "civitai": CivitaiDataset,
-    "directory": DirectoryDataset,
+    "pickle_directory": PickleDirectoryDataset,
+    "raw_directory": RawDirectoryDataset,
 }
 
 
@@ -46,7 +52,8 @@ def parse_dataset(dataset_config: DatasetConfig) -> Dataset:
 
 DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,
-    "directory": DirectoryDataSink,
+    "pickle_directory": PickleDirectoryDataSink,
+    "raw_directory": RawDirectoryDataSink,
 }
 
 

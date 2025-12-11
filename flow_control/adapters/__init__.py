@@ -4,9 +4,11 @@ from pydantic import PlainValidator
 
 from .base import BaseModelAdapter
 from .flux1 import parse_adapter as parse_flux1_adapter
+from .qwen import parse_adapter as parse_qwen_adapter
 
 MODEL_ADAPTER_PARSERS = {
     "flux1": parse_flux1_adapter,
+    "qwen": parse_qwen_adapter,
 }
 
 

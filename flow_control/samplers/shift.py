@@ -16,7 +16,6 @@ class ShiftedEulerSampler(SimpleEulerSampler):
     base_shift: float = 0.5
     max_image_seq_len: int = 4096
     max_shift: float = 1.15
-    shift: float = 3.0
 
     def sample(
         self,
@@ -26,8 +25,7 @@ class ShiftedEulerSampler(SimpleEulerSampler):
         t_start=1.0,
         t_end=0.0,
     ) -> torch.Tensor:
-        self._init_noise_maybe(model, batch, t_start)
-        latent_len = model.get_latent_length(batch)  # type: ignore
+        latent_len = batch["noisy_latents"].shape[1]
         sigmas = self._make_shifted_sigmas(latent_len, t_start, t_end)
         return self._euler_sample(model, batch, sigmas, negative_batch)
 

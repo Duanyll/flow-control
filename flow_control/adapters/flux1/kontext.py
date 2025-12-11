@@ -11,35 +11,39 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
 
     class BatchType(BaseFlux1Adapter.BatchType):
         reference_latents: list[torch.Tensor]
-        """List of `[B, C, H, W]` Tensors representing VAE encoded reference images."""
+        """List of `[B, N, D]` Tensors representing VAE encoded reference images."""
+        reference_sizes: list[tuple[int, int]]
+        """List of `(H, W)` tuples representing the sizes of the reference images."""
 
     def predict_velocity(
         self, batch: BatchType, timestep: torch.Tensor
     ) -> torch.Tensor:
-        b, c, h, w = batch["noisy_latents"].shape
+        b, n, d = batch["noisy_latents"].shape
+        h, w = batch["image_size"]
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
 
-        model_input_list = [self._pack_latents(batch["noisy_latents"])] + [
-            self._pack_latents(ref) for ref in batch["reference_latents"]
-        ]
+        model_input_list = [batch["noisy_latents"]] + batch["reference_latents"]
         concatenated_model_input = torch.cat(model_input_list, dim=1)
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            img_ids_list = [self._make_img_ids(batch["noisy_latents"])]
+            img_ids_list = [self._make_img_ids(batch["image_size"])]
             cur_h = 0
             cur_w = 0
             cur_index = 0
-            for ref in batch["reference_latents"]:
-                b, c, h_ref, w_ref = ref.shape
+            for size in batch["reference_sizes"]:
+                h_ref, w_ref = size
                 if self.pe_mode == "3d":
                     cur_index += self.pe_index_scale
-                    img_ids_list.append(self._make_img_ids(ref, index=cur_index))
+                    img_ids_list.append(self._make_img_ids(size, index=cur_index))
                 elif self.pe_mode == "diagonal":
                     img_ids_list.append(
                         self._make_img_ids(
-                            ref, index=0, h_offset=h + cur_h, w_offset=w + cur_w
+                            size,
+                            index=0,
+                            h_offset=h + cur_h,
+                            w_offset=w + cur_w,
                         )
                     )
                     cur_h += h_ref
@@ -55,7 +59,10 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
                     cur_w = max(cur_w, w_ref + w_offset)
                     img_ids_list.append(
                         self._make_img_ids(
-                            ref, index=0, h_offset=h_offset, w_offset=w_offset
+                            size,
+                            index=0,
+                            h_offset=h_offset,
+                            w_offset=w_offset,
                         )
                     )
             batch["img_ids"] = torch.cat(img_ids_list, dim=0)
@@ -71,7 +78,6 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
             return_dict=False,
         )[0]
 
-        latent_len = (h // self.patch_size) * (w // self.patch_size)
-        model_pred = model_pred[:, :latent_len, :]
+        model_pred = model_pred[:, :n, :]
 
         return self._unpack_latents(model_pred, h, w)

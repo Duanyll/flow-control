@@ -14,12 +14,11 @@ from flow_control.utils.resize import (
 from .base import BaseProcessor
 
 
-class Flux1Processor(BaseProcessor):
+class QwenImageProcessor(BaseProcessor):
     class BatchType(BaseProcessor.BatchType):
         prompt: str
         image_size: tuple[int, int]
         negative_prompt: NotRequired[str]
-        pooled_prompt_embeds: NotRequired[torch.Tensor]
         prompt_embeds: NotRequired[torch.Tensor]
         clean_image: NotRequired[torch.Tensor]
         clean_latents: NotRequired[torch.Tensor]
@@ -27,79 +26,47 @@ class Flux1Processor(BaseProcessor):
     _loading_preset = {
         "vae": ["encode", "decode"],
         "text_encoder": ["encode"],
-        "text_encoder_2": ["encode"],
         "tokenizer": ["always"],
-        "tokenizer_2": ["always"],
     }
 
     vae: HfModelLoader = HfModelLoader(
         type="diffusers",
         class_name="AutoencoderKL",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
+        pretrained_model_id="Qwen/Qwen-Image",
         subfolder="vae",
         dtype=torch.bfloat16,
     )
     _vae: Any = PrivateAttr()
-    # Declaring _vae as AutoencoderKL does not help mypy recognize its type properly,
-    # since huggingface libraries are badly typed.
 
     text_encoder: HfModelLoader = HfModelLoader(
         type="transformers",
-        class_name="CLIPTextModel",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
+        class_name="Qwen2_5_VLForConditionalGeneration",
+        pretrained_model_id="Qwen/Qwen-Image",
         subfolder="text_encoder",
         dtype=torch.bfloat16,
     )
     _text_encoder: Any = PrivateAttr()
 
-    text_encoder_2: HfModelLoader = HfModelLoader(
-        type="transformers",
-        class_name="T5EncoderModel",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
-        subfolder="text_encoder_2",
-        dtype=torch.bfloat16,
-    )
-    _text_encoder_2: Any = PrivateAttr()
-
     tokenizer: HfModelLoader = HfModelLoader(
         type="transformers",
-        class_name="CLIPTokenizer",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
+        class_name="Qwen2Tokenizer",
+        pretrained_model_id="Qwen/Qwen-Image",
         subfolder="tokenizer",
     )
     _tokenizer: Any = PrivateAttr()
 
-    tokenizer_2: HfModelLoader = HfModelLoader(
-        type="transformers",
-        class_name="T5TokenizerFast",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
-        subfolder="tokenizer_2",
-    )
-    _tokenizer_2: Any = PrivateAttr()
-
-    clip_max_length: int = 77
-    t5_max_length: int = 512
+    max_sequence_length: int = 512
     default_negative_prompt: str = "low quality, worst quality, blurry, deformed"
 
     resize_mode: Literal["list", "multiple_of"] = "list"
     preferred_resolutions: ResolutionList = [
-        (672, 1568),
-        (688, 1504),
-        (720, 1456),
-        (752, 1392),
-        (800, 1328),
-        (832, 1248),
-        (880, 1184),
-        (944, 1104),
-        (1024, 1024),
-        (1104, 944),
-        (1184, 880),
-        (1248, 832),
-        (1328, 800),
-        (1392, 752),
-        (1456, 720),
-        (1504, 688),
-        (1568, 672),
+        (1328, 1328),
+        (1664, 928),
+        (928, 1664),
+        (1472, 1104),
+        (1104, 1472),
+        (1584, 1056),
+        (1056, 1584),
     ]
     multiple_of: int = 32
 
@@ -125,12 +92,18 @@ class Flux1Processor(BaseProcessor):
 
         image = image * 2 - 1
         image = image.to(torch.bfloat16)
-        latent = self._vae.encode(image).latent_dist.sample()
-        latent = (
-            latent - self._vae.config.shift_factor
-        ) * self._vae.config.scaling_factor
-        latent = self._pack_latents(latent)
-        return latent
+        latents = self._vae.encode(image).latent_dist.sample()
+        latents_mean = (
+            torch.tensor(self._vae.config.latents_mean)
+            .view(1, self._vae.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
+            1, self._vae.config.z_dim, 1, 1, 1
+        ).to(latents.device, latents.dtype)
+        latents = (latents - latents_mean) * latents_std
+        latents = self._pack_latents(latents)
+        return latents
 
     @torch.no_grad()
     def decode_latents(
@@ -143,15 +116,25 @@ class Flux1Processor(BaseProcessor):
         :return: Reconstructed image [B, C, H, W]
         """
         latents = self._unpack_latents(latents, size)
-        latents = (
-            latents / self._vae.config.scaling_factor
-        ) + self._vae.config.shift_factor
+        latents_mean = (
+            torch.tensor(self._vae.config.latents_mean)
+            .view(1, self._vae.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
+            1, self._vae.config.z_dim, 1, 1, 1
+        ).to(latents.device, latents.dtype)
+        latents = latents / latents_std + latents_mean
         image = self._vae.decode(latents).sample
         image = (image + 1) / 2
         return image
 
+    tokenizer_max_length = 1024
+    prompt_template_encode = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_template_encode_start_idx = 34
+
     @torch.no_grad()
-    def encode_prompt(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_prompt(self, prompt: str):
         """
         Encode the text prompt into embeddings using the two text encoders.
 
@@ -159,41 +142,27 @@ class Flux1Processor(BaseProcessor):
         :return: Tuple of embeddings from both text encoders
         """
 
-        # CLIP Text Encoder -> pooled_prompt_embeds
-        clip_inputs = self._tokenizer(
-            [prompt],
-            padding="max_length",
-            max_length=self.clip_max_length,
+        template = self.prompt_template_encode
+        drop_idx = self.prompt_template_encode_start_idx
+        txt = [template.format(e) for e in prompt]
+        txt_tokens = self._tokenizer(
+            txt,
+            max_length=self.tokenizer_max_length + drop_idx,
+            padding=True,
             truncation=True,
-            return_overflowing_tokens=False,
-            return_length=False,
             return_tensors="pt",
+        ).to(self.device)
+        encoder_hidden_states = self._text_encoder(
+            input_ids=txt_tokens.input_ids,
+            attention_mask=txt_tokens.attention_mask,
+            output_hidden_states=True,
         )
-        clip_input_ids = clip_inputs.input_ids
-        pooled_prompt_embeds = self._text_encoder(
-            clip_input_ids.to(self.device), output_hidden_states=False
-        ).pooler_output
-
-        # T5 Text Encoder -> prompt_embeds
-        t5_inputs = self._tokenizer_2(
-            [prompt],
-            padding="max_length",
-            truncation=True,
-            return_length=False,
-            return_overflowing_tokens=False,
-            return_tensors="pt",
-        )
-        t5_input_ids = t5_inputs.input_ids
-        prompt_embeds = self._text_encoder_2(
-            t5_input_ids.to(self.device), output_hidden_states=False
-        )[0]
-
-        return pooled_prompt_embeds, prompt_embeds
+        hidden_states = encoder_hidden_states.hidden_states[-1]
+        return hidden_states[:, drop_idx:, :]
 
     def preprocess_batch(self, batch: BatchType) -> BatchType:
         if "pooled_prompt_embeds" not in batch or "prompt_embeds" not in batch:
-            pooled_prompt_embeds, prompt_embeds = self.encode_prompt(batch["prompt"])
-            batch["pooled_prompt_embeds"] = pooled_prompt_embeds
+            prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["prompt_embeds"] = prompt_embeds
         if "clean_image" in batch and "clean_latents" not in batch:
             batch["clean_image"] = self.resize_image(batch["clean_image"])
@@ -208,7 +177,6 @@ class Flux1Processor(BaseProcessor):
         batch["prompt"] = batch.get("negative_prompt", self.default_negative_prompt)
         del batch["negative_prompt"]
         del batch["prompt_embeds"]
-        del batch["pooled_prompt_embeds"]
         return self.preprocess_batch(batch)
 
     def decode_output(

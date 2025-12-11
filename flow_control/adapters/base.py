@@ -2,7 +2,18 @@ from abc import ABC, abstractmethod
 from typing import Any, TypedDict
 
 import torch
+from einops import rearrange, reduce
 from pydantic import BaseModel, ConfigDict
+
+from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.logging import get_logger
+from flow_control.utils.types import TorchDType
+from flow_control.utils.upcasting import (
+    apply_layerwise_upcasting,
+    cast_trainable_parameters,
+)
+
+logger = get_logger(__name__)
 
 
 class BaseModelAdapter(BaseModel, ABC):
@@ -26,19 +37,49 @@ class BaseModelAdapter(BaseModel, ABC):
     def device(self) -> torch.device:
         return self.transformer.device  # type: ignore
 
+    hf_model: HfModelLoader
+    storage_dtype: TorchDType | None = None
+    trainable_dtype: TorchDType = torch.bfloat16
+    all_trainable: bool = False
+
+    patch_size: int = 2
+    latent_channels: int = 16
+
     @property
     def dtype(self) -> torch.dtype:
-        return self.transformer.dtype  # type: ignore
+        # Ensure we are getting the correct dtype even after upcasting
+        return (
+            self.hf_model.dtype
+            if self.hf_model.dtype != "auto"
+            else self.transformer.dtype
+        )
 
     class BatchType(TypedDict):
+        image_size: tuple[int, int]
+        """`(H, W)` The size of the image to generate."""
         clean_latents: torch.Tensor
         """`[B, C, H, W]` The clean latents. Only available during training."""
         noisy_latents: torch.Tensor
         """`[B, C, H, W]` The noisy latents to denoise."""
 
-    @abstractmethod
     def load_transformer(self):
-        pass
+        self.transformer = self.hf_model.load_model()  # type: ignore
+        self.transformer.requires_grad_(self.all_trainable)
+        self._install_modules()
+        cast_trainable_parameters(self.transformer, self.trainable_dtype)
+        if (
+            self.hf_model.dtype != "auto"
+            and self.storage_dtype is not None
+            and self.storage_dtype != self.hf_model.dtype
+        ):
+            apply_layerwise_upcasting(
+                self.transformer,
+                storage_dtype=self.storage_dtype,
+                compute_dtype=self.hf_model.dtype,
+            )
+            logger.info(
+                f"Applied layerwise casting with storage dtype {self.storage_dtype} and compute dtype {self.hf_model.dtype}"
+            )
 
     def _install_modules(self):
         """
@@ -65,7 +106,7 @@ class BaseModelAdapter(BaseModel, ABC):
         :param state_dict: The state_dict containing the layers to load.
         """
         pass
-    
+
     @abstractmethod
     def predict_velocity(
         self,
@@ -90,38 +131,38 @@ class BaseModelAdapter(BaseModel, ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
-    def generate_noise(
-        self,
-        batch: BatchType,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError()
-
-    @abstractmethod
-    def get_latent_length(self, batch: BatchType) -> int:
-        raise NotImplementedError()
-
-    @abstractmethod
     def train_step(
         self,
         batch: BatchType,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Run forward pass and compute loss for the given batch. May call `predict_velocity`
-        internally.
+        clean = batch["clean_latents"]
+        if "noisy_latents" not in batch:
+            noise = torch.randn_like(clean)
+            batch["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
+        noise = batch["noisy_latents"]
 
-        Parameters
-        ----------
-        batch : dict
-            Input batch containing the data.
-        timestep : torch.Tensor([B])
-            The current timestep. Range is [0, 1], 0 for clean image, 1 for noise.
+        model_pred = self.predict_velocity(batch, timestep)
+        target = noise - clean
+        loss = reduce(
+            (model_pred.float() - target.float()) ** 2, "b c h w -> b", reduction="mean"
+        )  # Must use float() here
+        return loss
 
-        Returns
-        -------
-        torch.Tensor([B])
-            Unweighted loss for each sample in the batch.
-        """
-        raise NotImplementedError()
+    def _pack_latents(self, latents):
+        return rearrange(
+            latents,
+            "b c (h ph) (w pw) -> b (h w) (c ph pw)",
+            ph=self.patch_size,
+            pw=self.patch_size,
+        )
+
+    def _unpack_latents(self, latents, h, w):
+        return rearrange(
+            latents,
+            "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+            h=h // self.patch_size,
+            w=w // self.patch_size,
+            ph=self.patch_size,
+            pw=self.patch_size,
+        )

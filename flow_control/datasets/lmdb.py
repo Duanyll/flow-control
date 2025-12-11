@@ -64,6 +64,8 @@ class LMDBDataset(Dataset):
                 value = zlib.decompress(value)
             buffer = io.BytesIO(value)
             sample = torch.load(buffer)
+        if "__key__" not in sample:
+            sample["__key__"] = key.decode()
         return sample
 
     def __del__(self):

@@ -4,10 +4,12 @@ from pydantic import PlainValidator
 
 from .base import BaseProcessor
 from .flux1 import Flux1Processor
+from .qwen import QwenImageProcessor
 
 PROCESSOR_REGISTRY = {
     "base": BaseProcessor,
     "flux1": Flux1Processor,
+    "qwen": QwenImageProcessor,
 }
 
 

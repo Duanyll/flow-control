@@ -17,6 +17,7 @@ Logging behavior:
 
 import logging
 import os
+from functools import lru_cache
 
 import diffusers
 import torch.multiprocessing as mp
@@ -91,6 +92,17 @@ def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
     return logger
+
+
+@lru_cache(None)
+def warn_once(logger: logging.Logger, message: str):
+    """Log a warning message only once per unique message.
+
+    Args:
+        logger (logging.Logger): The logger to use.
+        message (str): The warning message to log.
+    """
+    logger.warning(message)
 
 
 __all__ = ["get_logger", "setup_global_handler", "console", "rich_handler"]

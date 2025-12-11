@@ -21,12 +21,12 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
         batch: BatchType,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        b, c, h, w = batch["noisy_latents"].shape
+        b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
 
-        noisy_model_input = self._pack_latents(batch["noisy_latents"])
-        control_model_input = self._pack_latents(batch["control_latents"])
+        noisy_model_input = batch["noisy_latents"]
+        control_model_input = batch["control_latents"]
         concatenated_model_input = torch.cat(
             (noisy_model_input, control_model_input), dim=1
         )
@@ -34,7 +34,7 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
             batch["img_ids"] = repeat(
-                self._make_img_ids(batch["noisy_latents"]), "n d -> (r n) d", r=2
+                self._make_img_ids(batch["image_size"]), "n d -> (r n) d", r=2
             )
 
         model_pred = self.transformer(
@@ -48,7 +48,6 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
             return_dict=False,
         )[0]
 
-        b, n, d = model_pred.shape
-        model_pred = model_pred[:, : (n // 2), :]
+        model_pred = model_pred[:, :n, :]
 
-        return self._unpack_latents(model_pred, h, w)
+        return model_pred

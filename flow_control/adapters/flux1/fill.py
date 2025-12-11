@@ -13,7 +13,7 @@ class Flux1FillAdapter(BaseFlux1Adapter):
 
     class BatchType(BaseFlux1Adapter.BatchType):
         inpaint_latents: torch.Tensor
-        """`[B, C, H, W]` The latents of the inpainted image."""
+        """`[B, N, D]` The latents of the inpainted image."""
         inpaint_mask: torch.Tensor
         """`[B, 1, H, W]` The inpainting mask. Can be a boolean tensor or a tuple of
         (indices, values) for sparse representation."""
@@ -23,20 +23,20 @@ class Flux1FillAdapter(BaseFlux1Adapter):
         batch: BatchType,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        b, c, h, w = batch["noisy_latents"].shape
+        b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
 
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            batch["img_ids"] = self._make_img_ids(batch["noisy_latents"])
+            batch["img_ids"] = self._make_img_ids(batch["image_size"])
 
         mask = self._pack_mask(batch["inpaint_mask"])
         inputs = pack(
             [
-                self._pack_latents(batch["noisy_latents"]),
-                self._pack_latents(batch["inpaint_latents"]),
+                batch["noisy_latents"],
+                batch["inpaint_latents"],
                 self._pack_latents(mask),
             ],
             "b n *",
@@ -53,14 +53,7 @@ class Flux1FillAdapter(BaseFlux1Adapter):
             return_dict=False,
         )[0]
 
-        velocity = self._unpack_latents(model_pred, h, w)
-        if self.enforce_mask:
-            velocity = velocity.to(torch.float32)
-            target_velocity = (
-                batch["inpaint_latents"].float() - batch["noisy_latents"].float()
-            ) / timestep
-            velocity = velocity * mask + target_velocity * (1 - mask)
-        return velocity
+        return model_pred
 
     def _pack_mask(self, mask) -> torch.Tensor:
         """

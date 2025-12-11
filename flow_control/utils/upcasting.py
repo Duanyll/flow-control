@@ -22,12 +22,13 @@ from diffusers.models.embeddings import (
     PixArtAlphaTextProjection,
     TimestepEmbedding,
 )
-from diffusers.utils import logging
 from torch.utils._python_dispatch import (
     is_traceable_wrapper_subclass,  # type: ignore[import]
 )
 
-logger = logging.get_logger(__name__)
+from .logging import get_logger, warn_once
+
+logger = get_logger(__name__)
 
 
 # Copied from torch.nn.Module._apply
@@ -267,7 +268,7 @@ def apply_layerwise_upcasting(
     if skip_modules_pattern is None:
         skip_modules_pattern = []
     if torch.__version__ >= "2.8.0":
-        logger.warning(
+        warn_once(
             "PyTorch 2.8+ has known issues with using fp8 upcasting hooks during DDP training. "
             "Consider using PyTorch 2.7.x, or force-installing nvidia-nccl-cu12>=2.28.3 in your environment. "
             "Please refer to https://github.com/pytorch/pytorch/issues/162057 for more details. "

@@ -49,18 +49,18 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
         ensure_trainable(transformer.x_embedder)
 
     def predict_velocity(self, batch: dict, timestep: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = batch["noisy_latents"].shape
+        b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
 
         noisy_model_input = torch.cat(
-            (batch["noisy_latents"], batch["control_latents"]), dim=1
+            (batch["noisy_latents"], batch["control_latents"]), dim=2
         )
 
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            batch["img_ids"] = self._make_img_ids(batch["noisy_latents"])
+            batch["img_ids"] = self._make_img_ids(batch["image_size"])
 
         model_pred = self.transformer(
             hidden_states=noisy_model_input,
@@ -73,4 +73,4 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
             return_dict=False,
         )[0]
 
-        return self._unpack_latents(model_pred, h, w)
+        return model_pred
