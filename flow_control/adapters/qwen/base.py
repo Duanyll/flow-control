@@ -27,8 +27,6 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         dtype=torch.bfloat16,
     )
 
-    default_latent_resolution: tuple[int, int] = (83, 83)  # 1328x1328 / 16
-
     class BatchType(BaseModelAdapter.BatchType):
         prompt_embeds: torch.Tensor
         """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
@@ -48,7 +46,7 @@ class BaseQwenImageAdapter(BaseModelAdapter):
                 batch["prompt_embeds"]
             )
 
-        img_shapes = [(h // 16, w // 16)] * b
+        img_shapes = [(1, h // 16, w // 16)] * b
         txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
 
         model_pred = self.transformer(

@@ -185,8 +185,6 @@ class LayerwiseUpcastingGranularity(str, Enum):
             to cause quality issues. This method will not reduce the memory required for the forward pass (which
             comprises of intermediate activations and gradients) of a given modeling component, but may be useful in
             cases like lowering the memory footprint of text encoders in a pipeline.
-        - `DIFFUSERS_BLOCK`:
-            TODO???
         - `DIFFUSERS_LAYER`:
             Applies layerwise upcasting to the lower-level diffusers layers of the model. This is more granular than
             the `DIFFUSERS_MODEL` level, but less granular than the `PYTORCH_LAYER` level. This method is applied to

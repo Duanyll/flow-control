@@ -8,19 +8,19 @@ def parse_resolution_list(resolutions: list[str]) -> list[tuple[int, int]]:
     result = []
     for res in resolutions:
         try:
-            width_str, height_str = res.lower().split("x")
+            height_str, width_str = res.lower().split("x")
             width = int(width_str)
             height = int(height_str)
-            result.append((width, height))
+            result.append((height, width))
         except ValueError as e:
             raise ValueError(
-                f"Invalid resolution format: {res}. Expected format 'WIDTHxHEIGHT'."
+                f"Invalid resolution format: {res}. Expected format 'HEIGHTxWIDTH'."
             ) from e
     return result
 
 
 def serialize_resolution_list(resolutions: list[tuple[int, int]]) -> list[str]:
-    return [f"{width}x{height}" for width, height in resolutions]
+    return [f"{height}x{width}" for height, width in resolutions]
 
 
 ResolutionList = Annotated[
@@ -35,13 +35,14 @@ def resize_to_resolution(
 ) -> torch.Tensor:
     """
     Resize an image to a specific resolution.
+    target_resolution should be in (height, width) format.
     If crop is True, the image will be center-cropped to match the target aspect ratio before resizing.
     """
     if image.dim() != 4:
         raise ValueError("Image tensor must have 4 dimensions (B, C, H, W).")
 
     _, _, orig_height, orig_width = image.shape
-    target_width, target_height = target_resolution
+    target_height, target_width = target_resolution
     orig_aspect_ratio = orig_width / orig_height
     target_aspect_ratio = target_width / target_height
     if crop:
@@ -64,6 +65,7 @@ def resize_to_closest_resolution(
 ) -> torch.Tensor:
     """
     Resize an image to the closest aspect ratio from a list of target resolutions.
+    target_resolutions should be a list of (height, width) tuples.
     If crop is True, the image will be center-cropped to match the target aspect ratio before resizing.
     """
 
@@ -76,18 +78,18 @@ def resize_to_closest_resolution(
     closest_resolution = (0, 0)
     smallest_diff = float("inf")
 
-    for target_width, target_height in target_resolutions:
+    for target_height, target_width in target_resolutions:
         target_aspect_ratio = target_width / target_height
         aspect_ratio_diff = abs(orig_aspect_ratio - target_aspect_ratio)
 
         if aspect_ratio_diff < smallest_diff:
             smallest_diff = aspect_ratio_diff
-            closest_resolution = (target_width, target_height)
+            closest_resolution = (target_height, target_width)
 
-    target_width, target_height = closest_resolution
+    target_height, target_width = closest_resolution
 
     return resize_to_resolution(
-        image, target_resolution=(target_width, target_height), crop=crop
+        image, target_resolution=(target_height, target_width), crop=crop
     )
 
 

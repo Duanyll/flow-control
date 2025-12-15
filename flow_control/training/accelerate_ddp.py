@@ -9,6 +9,7 @@ from accelerate import Accelerator, DistributedType
 from accelerate.utils import ProjectConfiguration, set_seed
 from diffusers import FluxControlPipeline
 from diffusers.utils.torch_utils import is_compiled_module
+from einops import reduce
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from rich.progress import (
     BarColumn,
@@ -42,7 +43,7 @@ from flow_control.utils.weighting import LossWeighting, TimestepWeighting
 logger = get_logger(__name__)
 
 
-class Fintuner(BaseModel):
+class AccelerateDdpFinetuner(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # Utility classes
@@ -315,7 +316,15 @@ class Fintuner(BaseModel):
     def _train_step(self, batch) -> torch.Tensor:
         timesteps = self.timestep_weighting.sample_timesteps(1)
         timesteps = timesteps.to(device=self.model.device, dtype=self.model.dtype)
-        loss = self.model.train_step(batch, timesteps)
+        clean = batch["clean_latents"]
+        noise = torch.randn_like(clean)
+        batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
+
+        model_pred = self.model.predict_velocity(batch, timesteps).float()
+        target = noise.float() - clean.float()
+        loss = (model_pred - target) ** 2
+        loss = reduce(loss, "b n d -> b", reduction="mean")
+
         weighting = self.loss_weighting.get_weights(timesteps)
         weighting = weighting.to(device=loss.device, dtype=loss.dtype)
         weighted_loss = (loss * weighting).mean()
@@ -344,7 +353,11 @@ class Fintuner(BaseModel):
 
         for batch in dataloader:
             batch = deep_move_to_device(batch, self.device)
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(self.seed)
+            self.processor.initialize_latents(batch, generator=generator)
             clean_latents = self.sampler.sample(self.model, batch)
+
             image = self.processor.decode_output(clean_latents, batch)  # type: ignore
             key = batch.get("__key__", "unknown")
             gathered_images = self.accelerator.gather_for_metrics(

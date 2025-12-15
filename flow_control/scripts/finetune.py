@@ -1,4 +1,4 @@
-from flow_control.training.finetuner import Fintuner
+from flow_control.training.accelerate_ddp import AccelerateDdpFinetuner
 from flow_control.utils.loaders import load_config_file
 
 
@@ -15,7 +15,7 @@ def main():
     config_path = args.config_path
 
     config = load_config_file(config_path)
-    finetuner = Fintuner(**config)
+    finetuner = AccelerateDdpFinetuner(**config)
     finetuner.train()
 
 

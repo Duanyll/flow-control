@@ -1,7 +1,9 @@
 from .base import BaseQwenImageAdapter
+from .edit import QwenImageEditAdapter
 
 ADAPTER_REGISTRY = {
     "base": BaseQwenImageAdapter,
+    "edit": QwenImageEditAdapter,
 }
 
 

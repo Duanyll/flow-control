@@ -17,7 +17,6 @@ from .base import BaseProcessor
 class QwenImageProcessor(BaseProcessor):
     class BatchType(BaseProcessor.BatchType):
         prompt: str
-        image_size: tuple[int, int]
         negative_prompt: NotRequired[str]
         prompt_embeds: NotRequired[torch.Tensor]
         clean_image: NotRequired[torch.Tensor]
@@ -58,6 +57,7 @@ class QwenImageProcessor(BaseProcessor):
     max_sequence_length: int = 512
     default_negative_prompt: str = "low quality, worst quality, blurry, deformed"
 
+    default_resolution: tuple[int, int] = (1328, 1328)
     resize_mode: Literal["list", "multiple_of"] = "list"
     preferred_resolutions: ResolutionList = [
         (1328, 1328),
@@ -129,9 +129,9 @@ class QwenImageProcessor(BaseProcessor):
         image = (image + 1) / 2
         return image
 
-    tokenizer_max_length = 1024
-    prompt_template_encode = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-    prompt_template_encode_start_idx = 34
+    tokenizer_max_length: int = 1024
+    prompt_template_encode: str = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_template_encode_start_idx: int = 34
 
     @torch.no_grad()
     def encode_prompt(self, prompt: str):
@@ -144,7 +144,7 @@ class QwenImageProcessor(BaseProcessor):
 
         template = self.prompt_template_encode
         drop_idx = self.prompt_template_encode_start_idx
-        txt = [template.format(e) for e in prompt]
+        txt = [template.format(prompt)]
         txt_tokens = self._tokenizer(
             txt,
             max_length=self.tokenizer_max_length + drop_idx,
@@ -164,6 +164,7 @@ class QwenImageProcessor(BaseProcessor):
         if "pooled_prompt_embeds" not in batch or "prompt_embeds" not in batch:
             prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["prompt_embeds"] = prompt_embeds
+
         if "clean_image" in batch and "clean_latents" not in batch:
             batch["clean_image"] = self.resize_image(batch["clean_image"])
             batch["image_size"] = (
@@ -171,6 +172,9 @@ class QwenImageProcessor(BaseProcessor):
                 batch["clean_image"].shape[3],
             )
             batch["clean_latents"] = self.encode_latents(batch["clean_image"])
+
+        if "image_size" not in batch:
+            batch["image_size"] = self.default_resolution
         return batch
 
     def make_negative_batch(self, batch: BatchType) -> BatchType:
@@ -182,4 +186,4 @@ class QwenImageProcessor(BaseProcessor):
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
-        return self.decode_latents(output_latent, batch["image_size"])
+        return self.decode_latents(output_latent, batch["image_size"])  # type: ignore

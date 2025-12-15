@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 import torch
 from einops import rearrange
@@ -12,7 +12,7 @@ class BaseProcessor(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     class BatchType(TypedDict):
-        pass
+        image_size: NotRequired[tuple[int, int]]
 
     _loading_preset: dict[str, list[Literal["encode", "decode", "always"]]] = {}
     device: TorchDevice = torch.device("cuda")
@@ -20,6 +20,7 @@ class BaseProcessor(BaseModel, ABC):
     vae_scale_factor: int = 8
     patch_size: int = 2
     latent_channels: int = 16
+    default_resolution: tuple[int, int] = (1024, 1024)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -78,3 +79,18 @@ class BaseProcessor(BaseModel, ABC):
             ph=self.patch_size,
             pw=self.patch_size,
         )
+
+    def initialize_latents(
+        self, batch: BatchType, generator: torch.Generator | None = None, device=None
+    ) -> torch.Tensor:
+        if device is None:
+            device = self.device
+        if "image_size" in batch:
+            h, w = batch["image_size"]
+        else:
+            h, w = self.default_resolution
+        c = self.latent_channels
+        h = h // self.vae_scale_factor
+        w = w // self.vae_scale_factor
+        latents = torch.randn((1, c, h, w), generator=generator, device=device)
+        return self._pack_latents(latents)

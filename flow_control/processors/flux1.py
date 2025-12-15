@@ -17,7 +17,6 @@ from .base import BaseProcessor
 class Flux1Processor(BaseProcessor):
     class BatchType(BaseProcessor.BatchType):
         prompt: str
-        image_size: tuple[int, int]
         negative_prompt: NotRequired[str]
         pooled_prompt_embeds: NotRequired[torch.Tensor]
         prompt_embeds: NotRequired[torch.Tensor]
@@ -202,6 +201,8 @@ class Flux1Processor(BaseProcessor):
                 batch["clean_image"].shape[3],
             )
             batch["clean_latents"] = self.encode_latents(batch["clean_image"])
+        if "image_size" not in batch:
+            batch["image_size"] = self.default_resolution
         return batch
 
     def make_negative_batch(self, batch: BatchType) -> BatchType:
@@ -214,4 +215,4 @@ class Flux1Processor(BaseProcessor):
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
-        return self.decode_latents(output_latent, batch["image_size"])
+        return self.decode_latents(output_latent, batch["image_size"])  # type: ignore

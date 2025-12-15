@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, TypedDict
 
 import torch
-from einops import rearrange, reduce
+from einops import rearrange
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.utils.loaders import HfModelLoader
@@ -130,24 +130,6 @@ class BaseModelAdapter(BaseModel, ABC):
             The predicted velocity in latent space.
         """
         raise NotImplementedError()
-
-    def train_step(
-        self,
-        batch: BatchType,
-        timestep: torch.Tensor,
-    ) -> torch.Tensor:
-        clean = batch["clean_latents"]
-        if "noisy_latents" not in batch:
-            noise = torch.randn_like(clean)
-            batch["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
-        noise = batch["noisy_latents"]
-
-        model_pred = self.predict_velocity(batch, timestep)
-        target = noise - clean
-        loss = reduce(
-            (model_pred.float() - target.float()) ** 2, "b c h w -> b", reduction="mean"
-        )  # Must use float() here
-        return loss
 
     def _pack_latents(self, latents):
         return rearrange(
