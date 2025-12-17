@@ -194,6 +194,7 @@ class Flux1Processor(BaseProcessor):
             pooled_prompt_embeds, prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["pooled_prompt_embeds"] = pooled_prompt_embeds
             batch["prompt_embeds"] = prompt_embeds
+
         if "clean_image" in batch and "clean_latents" not in batch:
             batch["clean_image"] = self.resize_image(batch["clean_image"])
             batch["image_size"] = (
@@ -201,6 +202,7 @@ class Flux1Processor(BaseProcessor):
                 batch["clean_image"].shape[3],
             )
             batch["clean_latents"] = self.encode_latents(batch["clean_image"])
+
         if "image_size" not in batch:
             batch["image_size"] = self.default_resolution
         return batch
