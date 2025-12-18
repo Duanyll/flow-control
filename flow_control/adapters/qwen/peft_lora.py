@@ -37,6 +37,11 @@ class QwenPeftLoraAdapter(BaseQwenImageAdapter):
         "txt_mlp.net.2",
         "txt_mod.1",
     ]
+    exclude_lora_layers: list[str] = [
+        # Exclude the last layer's text layers
+        "59.txt_mlp.net.2",
+        "59.attn.to_add_out",
+    ]
     rank: int = 16
     gaussian_init_lora: bool = False
     use_lora_bias: bool = False
@@ -74,6 +79,7 @@ class QwenPeftLoraAdapter(BaseQwenImageAdapter):
             lora_alpha=self.rank,
             init_lora_weights="gaussian" if self.gaussian_init_lora else True,
             target_modules=target_modules,
+            exclude_modules=self.exclude_lora_layers,
             lora_bias=self.use_lora_bias,
         )
 

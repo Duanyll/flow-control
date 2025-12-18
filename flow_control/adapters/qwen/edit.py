@@ -41,8 +41,13 @@ class QwenImageEditAdapter(BaseQwenImageAdapter):
         )
 
         img_shapes = [
-            (1, h // 16, w // 16),
-            *[(1, size[0] // 16, size[1] // 16) for size in batch["reference_sizes"]],
+            [
+                (1, h // 16, w // 16),
+                *[
+                    (1, size[0] // 16, size[1] // 16)
+                    for size in batch["reference_sizes"]
+                ],
+            ]
         ] * b
         txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
 

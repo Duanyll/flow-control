@@ -45,7 +45,6 @@ finetune = "flow_control.scripts.finetune:main"
 override-dependencies = [
   "nvidia-nccl-cu12>=2.28.3; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
-package = true
 
 [tool.uv.sources]
 torch = [

@@ -267,9 +267,10 @@ def apply_layerwise_upcasting(
         skip_modules_pattern = []
     if torch.__version__ >= "2.8.0":
         warn_once(
+            logger,
             "PyTorch 2.8+ has known issues with using fp8 upcasting hooks during DDP training. "
             "Consider using PyTorch 2.7.x, or force-installing nvidia-nccl-cu12>=2.28.3 in your environment. "
-            "Please refer to https://github.com/pytorch/pytorch/issues/162057 for more details. "
+            "Please refer to https://github.com/pytorch/pytorch/issues/162057 for more details. ",
         )
 
     if granularity == LayerwiseUpcastingGranularity.DIFFUSERS_MODEL:

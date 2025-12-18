@@ -217,7 +217,8 @@ class AccelerateDdpFinetuner(BaseModel):
         self.model.load_transformer()
         if self.gradient_checkpointing:
             self.transformer.enable_gradient_checkpointing()
-        self.processor.load_models(["decode"], device=self.device)
+        if self.sample_dataset is not None:
+            self.processor.load_models(["decode"], device=self.device)
         self.accelerator.register_load_state_pre_hook(self._load_model_hook)
         self.accelerator.register_save_state_pre_hook(self._save_model_hook)
 
@@ -267,7 +268,7 @@ class AccelerateDdpFinetuner(BaseModel):
 
     def _try_resume_from_checkpoint(self) -> int:
         if self._resume_checkpoint_path is None:
-            return 0
+            return 1
         self.accelerator.load_state(self._resume_checkpoint_path)
         logger.info(f"Resumed from checkpoint {self._resume_checkpoint_path}")
         return self._resume_checkpoint_step
@@ -323,7 +324,7 @@ class AccelerateDdpFinetuner(BaseModel):
         model_pred = self.model.predict_velocity(batch, timesteps).float()
         target = noise.float() - clean.float()
         loss = (model_pred - target) ** 2
-        loss = reduce(loss, "b n d -> b", reduction="mean")
+        loss = reduce(loss, "b n d -> 1", reduction="mean")
 
         weighting = self.loss_weighting.get_weights(timesteps)
         weighting = weighting.to(device=loss.device, dtype=loss.dtype)
@@ -355,7 +356,9 @@ class AccelerateDdpFinetuner(BaseModel):
             batch = deep_move_to_device(batch, self.device)
             generator = torch.Generator(device=self.device)
             generator.manual_seed(self.seed)
-            self.processor.initialize_latents(batch, generator=generator)
+            batch["noisy_latents"] = self.processor.initialize_latents(
+                batch, generator=generator
+            ).to(self.model.dtype)
             clean_latents = self.sampler.sample(self.model, batch)
 
             image = self.processor.decode_output(clean_latents, batch)  # type: ignore
@@ -476,7 +479,7 @@ class AccelerateDdpFinetuner(BaseModel):
                 if current_step % self.checkpoint_steps == 0:
                     self._save_checkpoint(current_step)
 
-                if current_step >= self.train_steps:
+                if current_step > self.train_steps:
                     break
 
         progress.stop()

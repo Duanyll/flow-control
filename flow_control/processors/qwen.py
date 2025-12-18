@@ -1,7 +1,7 @@
 from typing import Any, Literal, NotRequired
 
 import torch
-from einops import repeat
+from einops import rearrange, repeat
 from pydantic import PrivateAttr
 
 from flow_control.utils.loaders import HfModelLoader
@@ -30,7 +30,7 @@ class QwenImageProcessor(BaseProcessor):
 
     vae: HfModelLoader = HfModelLoader(
         type="diffusers",
-        class_name="AutoencoderKL",
+        class_name="AutoencoderKLQwenImage",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="vae",
         dtype=torch.bfloat16,
@@ -92,6 +92,7 @@ class QwenImageProcessor(BaseProcessor):
 
         image = image * 2 - 1
         image = image.to(torch.bfloat16)
+        image = rearrange(image, "b c h w -> b c 1 h w")
         latents = self._vae.encode(image).latent_dist.sample()
         latents_mean = (
             torch.tensor(self._vae.config.latents_mean)
@@ -102,6 +103,7 @@ class QwenImageProcessor(BaseProcessor):
             1, self._vae.config.z_dim, 1, 1, 1
         ).to(latents.device, latents.dtype)
         latents = (latents - latents_mean) * latents_std
+        latents = rearrange(latents, "b c 1 h w -> b c h w")
         latents = self._pack_latents(latents)
         return latents
 
@@ -116,6 +118,7 @@ class QwenImageProcessor(BaseProcessor):
         :return: Reconstructed image [B, C, H, W]
         """
         latents = self._unpack_latents(latents, size)
+        latents = rearrange(latents, "b c h w -> b c 1 h w")
         latents_mean = (
             torch.tensor(self._vae.config.latents_mean)
             .view(1, self._vae.config.z_dim, 1, 1, 1)
@@ -126,6 +129,7 @@ class QwenImageProcessor(BaseProcessor):
         ).to(latents.device, latents.dtype)
         latents = latents / latents_std + latents_mean
         image = self._vae.decode(latents).sample
+        image = rearrange(image, "b c 1 h w -> b c h w")
         image = (image + 1) / 2
         return image
 

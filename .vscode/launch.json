@@ -15,7 +15,7 @@
             "request": "launch",
             "module": "flow_control.scripts.finetune",
             "args": [
-                "workspace/civitai-283235-flux1-train.toml"
+                "workspace/civitai-283235-qwen-train.toml"
             ]
         }
     ]
