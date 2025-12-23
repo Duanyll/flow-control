@@ -9,58 +9,90 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from flow_control.utils.common import pil_to_tensor
+from flow_control.utils.common import pil_to_tensor, tensor_to_pil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
 
 logger = get_logger(__name__)
 
 
-class CustomJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder that handles special types with __type__ markers."""
+def _serialize_with_field_names(obj: Any, base_path: str, field_path: str = "") -> Any:
+    """
+    Recursively serialize an object, saving special types to external files.
 
-    def __init__(
-        self, *args, base_path: str = "", file_counter: dict | None = None, **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-        self.base_path = base_path
-        self.file_counter = file_counter if file_counter is not None else {}
+    Args:
+        obj: The object to serialize
+        base_path: The directory path where external files will be saved
+        field_path: The current field path (e.g., "latents", "images.0", "metadata.tags")
 
-    def default(self, obj):
-        # Handle tuple
-        if isinstance(obj, tuple):
-            return {"__type__": "tuple", "value": list(obj)}
+    Returns:
+        A JSON-serializable representation of the object
+    """
+    # Handle tuple - must be checked before other types
+    if isinstance(obj, tuple):
+        serialized_items = [
+            _serialize_with_field_names(item, base_path, f"{field_path}.{i}")
+            for i, item in enumerate(obj)
+        ]
+        return {"__type__": "tuple", "value": serialized_items}
 
-        # Handle torch.Tensor
-        if isinstance(obj, torch.Tensor):
-            field_name = self._get_next_field_name("tensor")
-            file_path = os.path.join(self.base_path, f"{field_name}.pt")
-            torch.save(obj, file_path)
-            return {"__type__": "tensor", "file": f"{field_name}.pt"}
+    # Handle torch.Tensor
+    if isinstance(obj, torch.Tensor):
+        # Clean field_path for filename (remove leading dot)
+        clean_path = field_path.lstrip(".")
+        file_name = clean_path if clean_path else "tensor"
 
-        # Handle PIL.Image
-        if isinstance(obj, Image.Image):
-            field_name = self._get_next_field_name("image")
-            file_path = os.path.join(self.base_path, f"{field_name}.png")
-            obj.save(file_path)
-            return {"__type__": "image", "file": f"{field_name}.png"}
-
-        # Handle numpy.ndarray
-        if isinstance(obj, np.ndarray):
-            field_name = self._get_next_field_name("array")
-            file_path = os.path.join(self.base_path, f"{field_name}.npy")
-            np.save(file_path, obj)
-            return {"__type__": "ndarray", "file": f"{field_name}.npy"}
-
-        return super().default(obj)
-
-    def _get_next_field_name(self, prefix: str) -> str:
-        """Generate a unique field name for external files."""
-        if prefix not in self.file_counter:
-            self.file_counter[prefix] = 0
+        # Check if this tensor should be saved as an image
+        if clean_path.endswith("image") or clean_path.endswith("images"):
+            # Convert tensor to PIL image
+            pil_image = tensor_to_pil(obj)
+            file_path = os.path.join(base_path, f"{file_name}.png")
+            pil_image.save(file_path)
+            return {"__type__": "image", "file": f"{file_name}.png"}
         else:
-            self.file_counter[prefix] += 1
-        return f"{prefix}_{self.file_counter[prefix]}"
+            # Save as tensor
+            file_path = os.path.join(base_path, f"{file_name}.pt")
+            torch.save(obj, file_path)
+            return {"__type__": "tensor", "file": f"{file_name}.pt"}
+
+    # Handle PIL.Image
+    if isinstance(obj, Image.Image):
+        clean_path = field_path.lstrip(".")
+        file_name = clean_path if clean_path else "image"
+        file_path = os.path.join(base_path, f"{file_name}.png")
+        obj.save(file_path)
+        return {"__type__": "image", "file": f"{file_name}.png"}
+
+    # Handle numpy.ndarray
+    if isinstance(obj, np.ndarray):
+        clean_path = field_path.lstrip(".")
+        file_name = clean_path if clean_path else "array"
+        file_path = os.path.join(base_path, f"{file_name}.npy")
+        np.save(file_path, obj)
+        return {"__type__": "ndarray", "file": f"{file_name}.npy"}
+
+    # Handle dict
+    if isinstance(obj, dict):
+        return {
+            key: _serialize_with_field_names(
+                value, base_path, f"{field_path}.{key}" if field_path else key
+            )
+            for key, value in obj.items()
+        }
+
+    # Handle list
+    if isinstance(obj, list):
+        return [
+            _serialize_with_field_names(item, base_path, f"{field_path}.{i}")
+            for i, item in enumerate(obj)
+        ]
+
+    # Handle basic JSON-serializable types
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+
+    # Fallback for unknown types
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def custom_json_decode_hook(dct: dict) -> Any:
@@ -306,17 +338,10 @@ class RawDirectoryDataSink(DataSink):
 
             data_to_write[field_name] = data
 
-        # Write index.json with custom encoder
-        file_counter = {}
+        # Serialize data with field names and write to index.json
+        serialized_data = _serialize_with_field_names(data_to_write, sample_dir_path)
         index_json_path = os.path.join(sample_dir_path, "index.json")
         with open(index_json_path, "w", encoding="utf-8") as f:
-            json.dump(
-                data_to_write,
-                f,
-                cls=CustomJSONEncoder,
-                base_path=sample_dir_path,
-                file_counter=file_counter,
-                indent=2,
-            )
+            json.dump(serialized_data, f, indent=2)
 
         return True

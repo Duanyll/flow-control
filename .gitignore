@@ -13,3 +13,6 @@ runs/
 data/
 workspace/
 outputs/
+
+docker-compose.yml
+.devcontainer/
