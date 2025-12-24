@@ -8,8 +8,8 @@ import random
 import time
 from collections.abc import Iterator
 
-from .logging import get_logger
-from .pipeline import (
+from flow_control.utils.logging import get_logger
+from flow_control.utils.pipeline import (
     DataSink,
     DataSource,
     Pipeline,
