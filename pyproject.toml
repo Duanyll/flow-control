@@ -42,11 +42,19 @@ dev = [
 preprocess = "flow_control.scripts.preprocess:main"
 finetune = "flow_control.scripts.finetune:main"
 
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
 [tool.uv]
 # NCCL 2.28.3 provides fix for https://github.com/pytorch/pytorch/issues/162057
 override-dependencies = [
   "nvidia-nccl-cu12>=2.28.3; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
+
+[tool.uv.build-backend]
+module-name = "flow_control"
+module-root = ""
 
 [tool.uv.sources]
 torch = [
