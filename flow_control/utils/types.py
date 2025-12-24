@@ -4,6 +4,8 @@ import torch
 from diffusers.optimization import SchedulerType, get_scheduler
 from pydantic import BeforeValidator, PlainSerializer
 
+from .ema import make_ema_optimizer
+
 
 def validate_torch_dtype(v: Any) -> torch.dtype:
     if isinstance(v, torch.dtype):
@@ -50,7 +52,7 @@ TorchDevice = Annotated[
 OptimizerConfig = dict[str, Any]
 
 
-def parse_optimizer(conf: OptimizerConfig, parameters):
+def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
     class_name = conf.pop("class_name")
     if class_name == "Prodigy":
         from prodigyopt import Prodigy
@@ -62,7 +64,11 @@ def parse_optimizer(conf: OptimizerConfig, parameters):
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
-    return ctor(parameters, **conf)
+    if ema_decay != 1.0:
+        ctor = make_ema_optimizer(ctor)
+        return ctor(parameters, ema_decay=ema_decay, **conf)
+    else:
+        return ctor(parameters, **conf)
 
 
 class SchedulerConfig(TypedDict):

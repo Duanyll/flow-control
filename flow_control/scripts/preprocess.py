@@ -85,6 +85,7 @@ class PreprocessConfig(BaseModel):
     output: dict
 
     num_loader_workers: int = 1
+    num_sink_workers: int = 1
     processor_devices: list[int] = [0]
     num_threads_per_worker: int = 8
     queue_size: int = 16
@@ -134,6 +135,7 @@ def main():
         sink=SinkConfig(
             sink=DATASINK_REGISTRY.get(datasink_type),  # type: ignore
             name="Saving",
+            num_workers=config.num_sink_workers,
             queue_size=config.queue_size,
             init_kwargs=config.output,
         ),

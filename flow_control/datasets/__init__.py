@@ -1,8 +1,7 @@
 from typing import Any
 
-from torch.utils.data import ConcatDataset, Dataset
-
 from datasets import load_dataset
+from torch.utils.data import ConcatDataset, Dataset
 
 from .civitai import CivitaiDataset
 from .directory import (
