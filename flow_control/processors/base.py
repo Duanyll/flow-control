@@ -13,6 +13,13 @@ class BaseProcessor(BaseModel, ABC):
 
     class BatchType(TypedDict):
         image_size: NotRequired[tuple[int, int]]
+        """Height and width of the images in the batch in pixels. Used for initializing latents."""
+        latent_length: NotRequired[int]
+        """Length of the latents in the batch. Used for bucket samplers."""
+        noisy_latents: NotRequired[torch.Tensor]
+        """Noisy latents input to the model."""
+        clean_latents: NotRequired[torch.Tensor]
+        """Clean latents corresponding to the images in the batch, as training targets."""
 
     _loading_preset: dict[str, list[Literal["encode", "decode", "always"]]] = {}
     device: TorchDevice = torch.device("cuda")
@@ -47,16 +54,35 @@ class BaseProcessor(BaseModel, ABC):
 
     @abstractmethod
     def preprocess_batch(self, batch: BatchType) -> BatchType:
+        """
+        Preprocesses the input batch before feeding it to the model.
+
+        Should modify the batch in-place and return it.
+        """
         raise NotImplementedError()
 
     @abstractmethod
     def make_negative_batch(self, batch: BatchType) -> BatchType:
+        """
+        Transforms the input batch into a negative batch for CFG. Should accept both
+        preprocessed and unprocessed batches, and return a preprocessed negative batch
+        that is ready to be fed to the model.
+
+        Should modify the batch in-place and return it. It's caller's responsibility to
+        clone the input batch if needed.
+        """
         raise NotImplementedError()
 
     @abstractmethod
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
+        """
+        Decodes the output latents from the model into images.
+
+        Should return a primary image tensor of shape (B, C, H, W), and optionally
+        save extra data into the batch if needed.
+        """
         raise NotImplementedError()
 
     def _pack_latents(self, latents):
@@ -83,6 +109,12 @@ class BaseProcessor(BaseModel, ABC):
     def initialize_latents(
         self, batch: BatchType, generator: torch.Generator | None = None, device=None
     ) -> torch.Tensor:
+        """
+        Initializes noisy latents for the given batch based on its image size.
+
+        Modifies the batch in-place to add the "noisy_latents" key and returns the
+        initialized latents.
+        """
         if device is None:
             device = self.device
         if "image_size" in batch:
@@ -93,4 +125,5 @@ class BaseProcessor(BaseModel, ABC):
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
         latents = torch.randn((1, c, h, w), generator=generator, device=device)
-        return self._pack_latents(latents)
+        batch["noisy_latents"] = self._pack_latents(latents)
+        return batch["noisy_latents"]

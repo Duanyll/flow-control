@@ -66,3 +66,15 @@ class KontextProcessor(Flux1Processor):
                 reference_latents.append(latents)
             batch["reference_latents"] = reference_latents
             batch["reference_sizes"] = reference_sizes
+
+        ratio = (self.vae_scale_factor * self.patch_size) ** 2
+        batch["latent_length"] = (
+            batch["prompt_embeds"].shape[1]
+            + batch["image_size"][0] * batch["image_size"][1] // ratio
+            + sum(
+                latents.shape[2] * latents.shape[3] // ratio
+                for latents in batch["reference_latents"]
+            )
+        )
+
+        return batch

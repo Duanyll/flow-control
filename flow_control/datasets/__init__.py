@@ -3,6 +3,7 @@ from typing import Any
 from datasets import load_dataset
 from torch.utils.data import ConcatDataset, Dataset
 
+from .bins_directory import BinsDirectoryDataset, BinsDirectoryDataSink
 from .civitai import CivitaiDataset
 from .directory import (
     PickleDirectoryDataset,
@@ -19,6 +20,7 @@ DATASET_REGISTRY = {
     "civitai": CivitaiDataset,
     "pickle_directory": PickleDirectoryDataset,
     "raw_directory": RawDirectoryDataset,
+    "bins_directory": BinsDirectoryDataset,
 }
 
 
@@ -53,6 +55,7 @@ DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,
     "pickle_directory": PickleDirectoryDataSink,
     "raw_directory": RawDirectoryDataSink,
+    "bins_directory": BinsDirectoryDataSink,
 }
 
 

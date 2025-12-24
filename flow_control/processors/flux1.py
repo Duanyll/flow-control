@@ -205,6 +205,10 @@ class Flux1Processor(BaseProcessor):
 
         if "image_size" not in batch:
             batch["image_size"] = self.default_resolution
+
+        latent_h = batch["image_size"][0] // self.vae_scale_factor // self.patch_size
+        latent_w = batch["image_size"][1] // self.vae_scale_factor // self.patch_size
+        batch["latent_length"] = batch["prompt_embeds"].shape[1] + latent_h * latent_w
         return batch
 
     def make_negative_batch(self, batch: BatchType) -> BatchType:
