@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 NORM_LAYER_PREFIXES = ["norm_q", "norm_k", "norm_added_q", "norm_added_k"]
 
 
-class Flux1PeftLoraAdapter(PeftLoraAdapter, BaseFlux1Adapter):
+class Flux1PeftLoraAdapter(BaseFlux1Adapter, PeftLoraAdapter):
     """
     Adapter for LoRA fine-tuning using the PEFT library.
     """
@@ -34,7 +34,7 @@ class Flux1PeftLoraAdapter(PeftLoraAdapter, BaseFlux1Adapter):
         "ff_context.net.0.proj",
         "ff_context.net.2",
     ]
-    rank: int = 128
+    rank: int = 16
     gaussian_init_lora: bool = False
     use_lora_bias: bool = False
 

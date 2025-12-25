@@ -46,7 +46,7 @@ class BaseQwenImageAdapter(BaseModelAdapter):
                 batch["prompt_embeds"]
             )
 
-        img_shapes = [(1, h // 16, w // 16)] * b
+        img_shapes = [[(1, h // 16, w // 16)]] * b
         txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
 
         model_pred = self.transformer(
@@ -64,5 +64,7 @@ class BaseQwenImageAdapter(BaseModelAdapter):
     def _make_attention_mask(self, prompt_embeds):
         b, n, d = prompt_embeds.shape
         return torch.ones(
-            (b, n), dtype=prompt_embeds.dtype, device=prompt_embeds.device
+            (b, n),
+            dtype=torch.long,
+            device=prompt_embeds.device,
         )

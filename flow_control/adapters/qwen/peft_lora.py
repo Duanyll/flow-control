@@ -11,7 +11,7 @@ from .base import BaseQwenImageAdapter
 logger = get_logger(__name__)
 
 
-class QwenPeftLoraAdapter(PeftLoraAdapter, BaseQwenImageAdapter):
+class QwenPeftLoraAdapter(BaseQwenImageAdapter, PeftLoraAdapter):
     """
     Adapter for LoRA fine-tuning using the PEFT library.
     """

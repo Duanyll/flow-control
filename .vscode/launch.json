@@ -15,7 +15,8 @@
             "request": "launch",
             "module": "flow_control.scripts.finetune",
             "args": [
-                "workspace/civitai-283235-qwen-train.toml"
+                "accelerate_ddp",
+                "data/civitai_1612085/train_qwen_ddp.toml"
             ]
         }
     ]

@@ -107,6 +107,7 @@ class AccelerateDdpFinetuner(BaseModel):
     ema_decay: float = 0.999
     """ Set to 1.0 to disable EMA. Does not affect training but only used for sampling. """
     clip_grad_norm: float = 1.0
+    train_steps: int
 
     # Property shortcuts
     @property
@@ -124,10 +125,6 @@ class AccelerateDdpFinetuner(BaseModel):
     @property
     def device(self):
         return self.accelerator.device
-
-    @property
-    def train_steps(self) -> int:
-        return self.scheduler["num_training_steps"]
 
     @property
     def gradient_accumulation_steps(self) -> int:

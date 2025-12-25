@@ -18,6 +18,11 @@ def main():
     parser.add_argument(
         "config_path", type=str, help="Path to the finetuning configuration file."
     )
+    parser.add_argument(
+        "--generate_seed",
+        action="store_true",
+        help="Generate a seed checkpoint before training.",
+    )
     args = parser.parse_args()
     config_path = args.config_path
 
@@ -26,6 +31,9 @@ def main():
         finetuner = AccelerateDdpFinetuner(**config)
     elif args.method == "hsdp":
         finetuner = HsdpTrainer(**config)
+        if args.generate_seed:
+            finetuner.generate_seed_checkpoint()
+            return
     else:
         raise ValueError(f"Unknown finetuning method: {args.method}")
     finetuner.train()

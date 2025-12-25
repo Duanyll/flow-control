@@ -465,11 +465,7 @@ class HsdpTrainer(Stateful):
     def save_dcp_checkpoint(self):
         checkpoint_dir = self.get_checkpoint_dir(self.current_step)
         state_dict = {"app": self}
-        dcp.save(
-            state_dict,
-            checkpoint_id=checkpoint_dir,
-            planner=dcp.default_planner.DefaultSavePlanner(),
-        )
+        dcp.save(state_dict, checkpoint_id=checkpoint_dir)
         logger.info(
             f"Saved DCP checkpoint at step {self.current_step} to {checkpoint_dir}."
         )
@@ -546,3 +542,17 @@ class HsdpTrainer(Stateful):
         logger.info("Training completed.")
 
         self.cleanup()
+
+    def generate_seed_checkpoint(self):
+        if self.conf.seed_checkpoint_dir is None:
+            raise ValueError("seed_checkpoint_dir must be specified to generate seed.")
+
+        logger.info("Reading HuggingFace model weights to generate seed checkpoint...")
+        self.model.load_transformer()
+        logger.info("Writing DCP seed checkpoint...")
+
+        model_sd, _ = get_state_dict(
+            self.transformer, [], options=StateDictOptions(strict=False)
+        )
+        dcp.save(model_sd, checkpoint_id=self.conf.seed_checkpoint_dir)
+        logger.info(f"Saved DCP seed checkpoint to {self.conf.seed_checkpoint_dir}.")
