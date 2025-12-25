@@ -1,7 +1,6 @@
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any
 
 import torch
-from diffusers.optimization import SchedulerType, get_scheduler
 from pydantic import BeforeValidator, PlainSerializer
 
 from .ema import make_ema_optimizer
@@ -71,15 +70,10 @@ def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
         return ctor(parameters, **conf)
 
 
-class SchedulerConfig(TypedDict):
-    name: SchedulerType
-    step_rules: NotRequired[str]
-    num_warmup_steps: NotRequired[int]
-    num_training_steps: int
-    num_cycles: NotRequired[int]
-    power: NotRequired[float]
-    last_epoch: NotRequired[int]
+SchedulerConfig = dict[str, Any]
 
 
 def parse_scheduler(conf: SchedulerConfig, optimizer: torch.optim.Optimizer):
-    return get_scheduler(optimizer=optimizer, **conf)
+    class_name = conf.pop("class_name")
+    ctor = getattr(torch.optim.lr_scheduler, class_name)
+    return ctor(optimizer, **conf)

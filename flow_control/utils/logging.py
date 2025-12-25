@@ -31,12 +31,17 @@ def get_process_type():
     """
     Detect if current process is:
     - 'main': Normal main process import
-    - 'accelerate_child': Subprocess launched by accelerate
+    - 'mpi_child': Subprocess launched by accelerate
     - 'mp_spawn_child': Subprocess spawned by multiprocessing
     """
+    # Check for LOCAL_RANK environment variable set by torchrun
+    if os.getenv("LOCAL_RANK") is not None:
+        local_rank = int(os.getenv("LOCAL_RANK"))  # type: ignore
+        return "main" if local_rank == 0 else "mpi_child"
+
     state = PartialState()
     if not state.is_local_main_process:
-        return "accelerate_child"
+        return "mpi_child"
 
     current = mp.current_process()
     if (

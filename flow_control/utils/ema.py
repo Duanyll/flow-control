@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from typing import Literal
 
 import torch
 from torch.optim import Optimizer
@@ -68,29 +67,15 @@ class EMA:
         self.shadow = state_dict
 
 
-_ema_status: Literal["normal", "apply", "freeze", "restore"] = "normal"
-
-
 @contextmanager
 def apply_ema_maybe(optimizer: Optimizer):
-    if not hasattr(optimizer, "ema_decay"):
-        # Do nothing if the optimizer does not support EMA
-        try:
-            yield
-        finally:
-            pass
-        return
-
-    global _ema_status
-    _ema_status = "apply"
-    optimizer.step()
-    _ema_status = "freeze"
+    if isinstance(optimizer, EMAOptimizer):
+        optimizer.apply_shadow()
     try:
         yield
     finally:
-        _ema_status = "restore"
-        optimizer.step()
-        _ema_status = "normal"
+        if isinstance(optimizer, EMAOptimizer):
+            optimizer.restore()
 
 
 class EMAOptimizer(Optimizer):
@@ -102,6 +87,8 @@ class EMAOptimizer(Optimizer):
     def __init__(self, params, ema_decay, **kwargs):
         super().__init__(params, **kwargs)
         self.ema_decay = ema_decay
+        self.ema_applied = False
+        self.enable_update = True
 
     @torch.no_grad()
     def apply_shadow(self):
@@ -111,6 +98,7 @@ class EMAOptimizer(Optimizer):
                 if "ema_buffer" in param_state:
                     param_state["ema_backup"] = p.clone()
                     p.copy_(param_state["ema_buffer"].to(p.dtype))
+        self.ema_applied = True
 
     @torch.no_grad()
     def restore(self):
@@ -120,6 +108,7 @@ class EMAOptimizer(Optimizer):
                 if "ema_backup" in param_state:
                     p.copy_(param_state["ema_backup"])
                     del param_state["ema_backup"]
+        self.ema_applied = False
 
     @torch.no_grad()
     def update_ema(self):
@@ -135,19 +124,12 @@ class EMAOptimizer(Optimizer):
                 ema_buffer.mul_(self.ema_decay).add_(p_fp32, alpha=1 - self.ema_decay)
 
     def step(self, closure=None):
-        global _ema_status
-        if _ema_status == "apply":
-            self.apply_shadow()
-            return None
-        elif _ema_status == "freeze":
-            raise RuntimeError("Should not call step() when EMA shadow is applied.")
-        elif _ema_status == "restore":
-            self.restore()
-            return None
-        else:
-            loss = super().step(closure)
+        if self.ema_applied:
+            raise RuntimeError("EMA shadow is applied, cannot step optimizer.")
+        loss = super().step(closure)
+        if self.enable_update:
             self.update_ema()
-            return loss
+        return loss
 
 
 def make_ema_optimizer(optimizer_class):

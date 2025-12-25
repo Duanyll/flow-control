@@ -2,6 +2,7 @@ import json
 import tomllib
 from typing import Any, Literal
 
+import torch
 import yaml
 from pydantic import BaseModel, ConfigDict
 
@@ -21,7 +22,7 @@ class HfModelLoader(BaseModel):
     subfolder: str | None = None
     dtype: TorchDType | Literal["auto"] = "auto"
 
-    def load_model(self) -> Any:
+    def load_model(self, use_meta_device: bool = False) -> Any:
         if self.type == "diffusers":
             import diffusers
 
@@ -33,16 +34,31 @@ class HfModelLoader(BaseModel):
         else:
             raise ValueError(f"Unknown model type: {self.type}")
 
-        model = model_cls.from_pretrained(
-            self.pretrained_model_id,
-            revision=self.revision,
-            subfolder=self.subfolder,
-            torch_dtype=None if self.dtype == "auto" else self.dtype,
-        )
-        logger.info(
-            f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
-            f"with dtype {self.dtype}"
-        )
+        if use_meta_device:
+            with torch.device("meta"):
+                config = model_cls.load_config(
+                    self.pretrained_model_id,
+                    revision=self.revision,
+                    subfolder=self.subfolder,
+                )
+                model = model_cls.from_config(config)
+                if self.dtype != "auto":
+                    model.to(dtype=self.dtype)
+            logger.info(
+                f"Initialized model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
+                f"on meta device with dtype {self.dtype}"
+            )
+        else:
+            model = model_cls.from_pretrained(
+                self.pretrained_model_id,
+                revision=self.revision,
+                subfolder=self.subfolder,
+                torch_dtype=None if self.dtype == "auto" else self.dtype,
+            )
+            logger.info(
+                f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
+                f"with dtype {self.dtype}"
+            )
         return model
 
 
