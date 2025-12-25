@@ -4,10 +4,10 @@ import torch
 
 from flow_control.utils.common import ensure_trainable
 
-from .peft_lora import Flux1PeftLoraAdapter
+from .base import BaseFlux1Adapter
 
 
-class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
+class Flux1DConcatAdapter(BaseFlux1Adapter):
     """
     Adapter for applying control to the model through concating the conditional image latent
     to the noisy input latent along the D dimension. It changes the shape of x_embedder layer.
@@ -21,7 +21,7 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
     use_lora_bias: bool = True
     input_dimension: int = 128
 
-    class BatchType(Flux1PeftLoraAdapter.BatchType):
+    class BatchType(BaseFlux1Adapter.BatchType):
         control_latents: torch.Tensor
         """`[B, C, H, W]` The VAE encoded control condition image."""
 
@@ -74,3 +74,10 @@ class Flux1DConcatAdapter(Flux1PeftLoraAdapter):
         )[0]
 
         return model_pred
+
+    def filter_state_dict(self, state_dict):
+        filterd = super().filter_state_dict(state_dict)
+        for k, v in state_dict.items():
+            if "x_embedder" in k:
+                filterd[k] = v
+        return filterd

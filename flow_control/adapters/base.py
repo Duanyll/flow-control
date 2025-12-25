@@ -62,8 +62,8 @@ class BaseModelAdapter(BaseModel, ABC):
         noisy_latents: torch.Tensor
         """`[B, C, H, W]` The noisy latents to denoise."""
 
-    def load_transformer(self):
-        self.transformer = self.hf_model.load_model()  # type: ignore
+    def load_transformer(self, use_meta_device: bool = False):
+        self.transformer = self.hf_model.load_model(use_meta_device=use_meta_device)  # type: ignore
         self.transformer.requires_grad_(self.all_trainable)
         self._install_modules()
         cast_trainable_parameters(self.transformer, self.trainable_dtype)
@@ -96,7 +96,10 @@ class BaseModelAdapter(BaseModel, ABC):
         :param transformer: The adapted transformer model.
         :return: A state_dict containing the layers to save.
         """
-        return {}
+        if self.all_trainable:
+            return self.transformer.state_dict()
+        else:
+            return {}
 
     def load_model(self, state_dict: dict):
         """
@@ -105,7 +108,21 @@ class BaseModelAdapter(BaseModel, ABC):
         :param transformer: The adapted transformer model.
         :param state_dict: The state_dict containing the layers to load.
         """
-        pass
+        self.transformer.load_state_dict(state_dict, strict=False)
+
+    def filter_state_dict(self, state_dict: dict) -> dict:
+        """
+        Filter the state_dict before saving. May be called with FSDP mangled keys, so
+        avoid precise key matching but look for substrings. Do not modify the original
+        state_dict in-place so subclasses can choose to call super().
+
+        :param state_dict: The original state_dict.
+        :return: The filtered state_dict.
+        """
+        if self.all_trainable:
+            return state_dict
+        else:
+            return {}
 
     @abstractmethod
     def predict_velocity(
