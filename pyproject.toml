@@ -40,7 +40,8 @@ dev = [
 
 [project.scripts]
 preprocess = "flow_control.scripts.preprocess:main"
-finetune = "flow_control.scripts.finetune:main"
+generate_dcp_seed = "flow_control.scripts.generate_dcp_seed:main"
+launch = "flow_control.scripts.launch:main"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]

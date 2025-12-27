@@ -134,11 +134,15 @@ class HsdpTrainer(Stateful):
 
     @property
     def total_epochs(self):
-        return math.ceil(self.conf.train_steps / len(self.dataloader))
+        # For consistency, we always count optimizer steps towards epochs
+        # Multiple grad acc steps are counted as one optimizer step
+        return math.ceil(
+            self.conf.train_steps / len(self.dataloader) * self.grad_acc_steps
+        )
 
     @property
     def current_epoch(self):
-        return self.current_step // len(self.dataloader)
+        return self.current_step // len(self.dataloader) * self.grad_acc_steps
 
     def __init__(self, **kwargs):
         self.raw_conf = deepcopy(kwargs)
@@ -150,6 +154,7 @@ class HsdpTrainer(Stateful):
         self.world_size = int(os.environ["WORLD_SIZE"])
         self.rank = int(os.environ["RANK"])
         self.local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(self.local_rank)
         self.mesh = dist.device_mesh.init_device_mesh(
             "cuda",
             mesh_shape=(
@@ -158,7 +163,6 @@ class HsdpTrainer(Stateful):
             ),
             mesh_dim_names=("replicate", "shard"),
         )
-        torch.cuda.set_device(self.local_rank)
         logger.info(
             f"Initialized device mesh: "
             f"world_size={self.world_size}, "
@@ -205,6 +209,8 @@ class HsdpTrainer(Stateful):
                 count += 1
         fully_shard(self.transformer, mesh=self.mesh)
         logger.info(f"Transformer is sharded with {count} FSDP layers.")
+        self.transformer.to_empty(device=self.device)
+        logger.info("Transformer moved to GPU.")
 
         if self.conf.seed_checkpoint_dir is not None:
             model_sd, _ = get_state_dict(
@@ -244,7 +250,7 @@ class HsdpTrainer(Stateful):
                 f"Training Dataset has {len(dataset)} samples, separated into {len(dataset_lengths)} buckets."
             )
         else:
-            dataset_lengths = None
+            dataset_lengths = [len(dataset)]
             logger.info(f"Training Dataset has {len(dataset)} samples.")
         sampler = DistributedBucketSampler(
             lengths=dataset_lengths,
@@ -419,7 +425,7 @@ class HsdpTrainer(Stateful):
 
     def train_step(self, batch: Any):
         timesteps = self.conf.timestep_weighting.sample_timesteps(1)
-        timesteps = timesteps.to(device=self.model.device, dtype=self.model.dtype)
+        timesteps = timesteps.to(device=self.device, dtype=self.model.dtype)
         clean = batch["clean_latents"]
         noise = torch.randn_like(clean)
         batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
@@ -437,10 +443,11 @@ class HsdpTrainer(Stateful):
     def log_loss_lr(self, loss: float):
         lr = self.scheduler.get_last_lr()[0]
         losses = [None] * self.world_size
-        dist.all_gather_object(loss, losses)
+        dist.all_gather_object(losses, loss)
         avg_loss = sum(losses) / len(losses)  # type: ignore
-        self.tracker.track(avg_loss, name="train/loss", step=self.current_step)
-        self.tracker.track(lr, name="train/lr", step=self.current_step)
+        if self.is_main_process:
+            self.tracker.track(avg_loss, name="train/loss", step=self.current_step)
+            self.tracker.track(lr, name="train/lr", step=self.current_step)
         return avg_loss, lr
 
     def rotate_checkpoints_maybe(self):
@@ -464,6 +471,9 @@ class HsdpTrainer(Stateful):
 
     def save_dcp_checkpoint(self):
         checkpoint_dir = self.get_checkpoint_dir(self.current_step)
+        if self.is_main_process:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+        dist.barrier()
         state_dict = {"app": self}
         dcp.save(state_dict, checkpoint_id=checkpoint_dir)
         logger.info(
@@ -477,8 +487,8 @@ class HsdpTrainer(Stateful):
         logger.info("Cleaned up distributed resources.")
 
     def train(self):
-        set_seed(self.conf.seed)
         self.init_device_mesh()
+        set_seed(self.conf.seed + self.rank)
         self.init_tracker()
         self.load_transformer()
         self.make_optimizer_and_scheduler()
@@ -499,6 +509,8 @@ class HsdpTrainer(Stateful):
         for _ in range(starting_epoch, self.total_epochs):
             total_loss = 0.0
             progress.update(task, epoch=self.current_epoch + 1)
+            if hasattr(self.dataloader.sampler, "set_epoch"):
+                self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore
             for i, batch in enumerate(self.dataloader):
                 is_sync_step = (i + 1) % self.grad_acc_steps == 0
                 self.transformer.set_requires_gradient_sync(is_sync_step)
@@ -521,11 +533,11 @@ class HsdpTrainer(Stateful):
                 self.scheduler.step()
                 self.optimizer.zero_grad()
 
-                total_loss, lr = self.log_loss_lr(total_loss)
+                avg_loss, lr = self.log_loss_lr(total_loss)
+                total_loss = 0.0
                 self.current_step += 1
-                progress.update(
-                    task, completed=self.current_step, loss=total_loss, lr=lr
-                )
+                progress.update(task, loss=avg_loss, lr=lr)
+                progress.advance(task)
 
                 if (self.current_step % self.conf.checkpoint_steps == 0) or (
                     self.current_step == self.conf.train_steps

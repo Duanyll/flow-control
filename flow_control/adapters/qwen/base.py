@@ -10,6 +10,44 @@ from flow_control.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+_qwen_embed_rope_patched = False
+
+
+def patch_qwen_embed_rope():
+    global _qwen_embed_rope_patched
+    if _qwen_embed_rope_patched:
+        return
+    from diffusers.models.transformers.transformer_qwenimage import QwenEmbedRope
+
+    original_forward = QwenEmbedRope.forward
+
+    def patched_forward(self, video_fhw, txt_seq_lens, device):
+        if self.pos_freqs.device.type == "meta":
+            pos_index = torch.arange(4096)
+            neg_index = torch.arange(4096).flip(0) * -1 - 1
+            self.pos_freqs = torch.cat(
+                [
+                    self.rope_params(pos_index, self.axes_dim[0], self.theta),
+                    self.rope_params(pos_index, self.axes_dim[1], self.theta),
+                    self.rope_params(pos_index, self.axes_dim[2], self.theta),
+                ],
+                dim=1,
+            )
+            self.neg_freqs = torch.cat(
+                [
+                    self.rope_params(neg_index, self.axes_dim[0], self.theta),
+                    self.rope_params(neg_index, self.axes_dim[1], self.theta),
+                    self.rope_params(neg_index, self.axes_dim[2], self.theta),
+                ],
+                dim=1,
+            )
+        return original_forward(self, video_fhw, txt_seq_lens, device)
+
+    QwenEmbedRope.forward = patched_forward
+    logger.info("Patched QwenEmbedRope.forward to handle meta device.")
+    _qwen_embed_rope_patched = True
+
+
 class BaseQwenImageAdapter(BaseModelAdapter):
     @property
     def transformer(self) -> QwenImageTransformer2DModel:
@@ -26,6 +64,10 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
+
+    def load_transformer(self, use_meta_device=False):
+        patch_qwen_embed_rope()
+        return super().load_transformer(use_meta_device)
 
     class BatchType(BaseModelAdapter.BatchType):
         prompt_embeds: torch.Tensor

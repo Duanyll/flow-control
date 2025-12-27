@@ -38,8 +38,8 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter, PeftLoraAdapter):
     gaussian_init_lora: bool = False
     use_lora_bias: bool = False
 
-    def load_transformer(self):
-        super().load_transformer()
+    def load_transformer(self, use_meta_device: bool = False):
+        super().load_transformer(use_meta_device=use_meta_device)
 
         if self.pretrained_lora_id is not None:
             lora_state_dict = cast(

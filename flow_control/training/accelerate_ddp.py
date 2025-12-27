@@ -427,8 +427,12 @@ class AccelerateDdpFinetuner(BaseModel):
 
         self._make_ema()
         starting_step = self._try_resume_from_checkpoint()
-        starting_epoch = starting_step // len(dataloader)
-        total_epochs = self.train_steps // len(dataloader) + 1
+        starting_epoch = (
+            starting_step // len(dataloader) * self.gradient_accumulation_steps
+        )
+        total_epochs = (
+            self.train_steps // len(dataloader) * self.gradient_accumulation_steps + 1
+        )
         current_step = starting_step
 
         self._sample_and_log(sample_dataloader, current_step)
@@ -459,22 +463,22 @@ class AccelerateDdpFinetuner(BaseModel):
                     optimizer.step()
                     optimizer.zero_grad()
 
-                    if self.accelerator.sync_gradients and self.ema is not None:
-                        logs = {
-                            "loss": loss.item(),
-                            "lr": lr_scheduler.get_last_lr()[0],
-                        }
-                        self.accelerator.log(logs, step=current_step)
-                        progress.update(progress_task, advance=1, epoch=epoch, **logs)
-                        current_step += 1
-                        self.ema.update()
-                        lr_scheduler.step()
+                if self.accelerator.sync_gradients and self.ema is not None:
+                    logs = {
+                        "loss": loss.item(),
+                        "lr": lr_scheduler.get_last_lr()[0],
+                    }
+                    self.accelerator.log(logs, step=current_step)
+                    progress.update(progress_task, advance=1, epoch=epoch, **logs)
+                    current_step += 1
+                    self.ema.update()
+                    lr_scheduler.step()
 
-                if current_step % self.sample_steps == 0:
-                    self._sample_and_log(sample_dataloader, current_step)
+                    if current_step % self.sample_steps == 0:
+                        self._sample_and_log(sample_dataloader, current_step)
 
-                if current_step % self.checkpoint_steps == 0:
-                    self._save_checkpoint(current_step)
+                    if current_step % self.checkpoint_steps == 0:
+                        self._save_checkpoint(current_step)
 
                 if current_step > self.train_steps:
                     break
