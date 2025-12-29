@@ -1,7 +1,7 @@
 from typing import Any, Literal, NotRequired
 
 import torch
-from einops import rearrange, repeat
+from einops import rearrange
 from pydantic import PrivateAttr
 
 from flow_control.utils.loaders import HfModelLoader
@@ -162,17 +162,18 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         ] + latent_h * latent_w * (batch["num_layers"] + 2)
 
         return batch
-    
+
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
         base_image, layer_images = self.decode_latents_layered(
-            output_latent, batch["image_size"] # type: ignore
+            output_latent,
+            batch["image_size"],  # type: ignore
         )
         batch["layer_images"] = layer_images
         return base_image
-    
-    def initialize_latents(self, batch, generator = None, device=None):
+
+    def initialize_latents(self, batch, generator=None, device=None):
         if device is None:
             device = self.device
         if "image_size" in batch:
