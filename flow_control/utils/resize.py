@@ -94,7 +94,7 @@ def resize_to_closest_resolution(
 
 
 def resize_to_multiple_of(
-    image: torch.Tensor, multiple: int, crop: bool = True
+    image: torch.Tensor, multiple: int, crop: bool = True, pixels: int = 0
 ) -> torch.Tensor:
     """
     Resize an image so that its dimensions are multiples of a given number.
@@ -106,8 +106,15 @@ def resize_to_multiple_of(
 
     _, _, orig_height, orig_width = image.shape
 
-    target_width = (orig_width // multiple) * multiple
-    target_height = (orig_height // multiple) * multiple
+    if pixels > 0:
+        aspect_ratio = orig_width / orig_height
+        target_height = int((pixels / aspect_ratio) ** 0.5)
+        target_width = int(target_height * aspect_ratio)
+        target_height = (target_height // multiple) * multiple
+        target_width = (target_width // multiple) * multiple
+    else:
+        target_width = (orig_width // multiple) * multiple
+        target_height = (orig_height // multiple) * multiple
 
     if crop:
         left = (orig_width - target_width) // 2

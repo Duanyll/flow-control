@@ -7,6 +7,7 @@ from .flux1 import Flux1Processor
 from .kontext import KontextProcessor
 from .qwen import QwenImageProcessor
 from .qwen_edit import QwenImageEditProcessor
+from .qwen_layered import QwenImageLayeredProcessor
 
 PROCESSOR_REGISTRY = {
     "base": BaseProcessor,
@@ -14,6 +15,7 @@ PROCESSOR_REGISTRY = {
     "kontext": KontextProcessor,
     "qwen": QwenImageProcessor,
     "qwen_edit": QwenImageEditProcessor,
+    "qwen_layered": QwenImageLayeredProcessor,
 }
 
 

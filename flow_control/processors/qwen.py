@@ -69,14 +69,19 @@ class QwenImageProcessor(BaseProcessor):
         (1056, 1584),
     ]
     multiple_of: int = 32
+    pixels: int = 1328 * 1328
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         if self.resize_mode == "list":
             return resize_to_closest_resolution(
-                image, self.preferred_resolutions, crop=True
+                image,
+                self.preferred_resolutions,
+                crop=True,
             )
         else:
-            return resize_to_multiple_of(image, self.multiple_of, crop=True)
+            return resize_to_multiple_of(
+                image, self.multiple_of, crop=True, pixels=self.pixels
+            )
 
     @torch.no_grad()
     def encode_latents(self, image: torch.Tensor) -> torch.Tensor:
@@ -194,4 +199,5 @@ class QwenImageProcessor(BaseProcessor):
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
-        return self.decode_latents(output_latent, batch["image_size"])  # type: ignore
+        batch["clean_image"] = self.decode_latents(output_latent, batch["image_size"])  # type: ignore
+        return batch["clean_image"]

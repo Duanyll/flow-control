@@ -221,4 +221,5 @@ class Flux1Processor(BaseProcessor):
     def decode_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> torch.Tensor:
-        return self.decode_latents(output_latent, batch["image_size"])  # type: ignore
+        batch["clean_image"] = self.decode_latents(output_latent, batch["image_size"])  # type: ignore
+        return batch["clean_image"]

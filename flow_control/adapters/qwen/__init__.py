@@ -1,10 +1,12 @@
 from .base import BaseQwenImageAdapter
 from .edit import QwenImageEditAdapter
+from .layered import QwenImageLayeredAdapter
 from .peft_lora import QwenPeftLoraAdapter
 
 ADAPTER_REGISTRY = {
     "base": BaseQwenImageAdapter,
     "edit": QwenImageEditAdapter,
+    "layered": QwenImageLayeredAdapter,
     "peft_lora": QwenPeftLoraAdapter,
 }
 
