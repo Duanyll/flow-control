@@ -1,3 +1,4 @@
+import inspect
 from collections.abc import Iterator
 from typing import Any
 
@@ -71,12 +72,29 @@ class ProcessorStage(PipelineStage):
         self.processor.load_models(["encode"], device=self.device)
         self.logger.info("Processor models loaded.")
 
+        # Check if preprocess_batch is async
+        self._is_async = inspect.iscoroutinefunction(self.processor.preprocess_batch)
+        if self._is_async:
+            self.logger.info("Using async preprocess_batch")
+
     def process(self, batch: Any) -> Any:
         batch = deep_move_to_device(batch, self.device)
         batch = self.processor.preprocess_batch(batch)
         batch = deep_move_to_device(batch, torch.device("cpu"))
         self.logger.debug(f"Processed item by worker {self.worker_id}")
         return [batch]
+
+    async def _async_process(self, batch: Any) -> Any:
+        batch = deep_move_to_device(batch, self.device)
+        batch = await self.processor.preprocess_batch(batch)  # type: ignore[misc]
+        batch = deep_move_to_device(batch, torch.device("cpu"))
+        self.logger.debug(f"Processed item by worker {self.worker_id}")
+        return [batch]
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "process" and object.__getattribute__(self, "_is_async"):
+            return object.__getattribute__(self, "_async_process")
+        return object.__getattribute__(self, name)
 
 
 class PreprocessConfig(BaseModel):
@@ -87,6 +105,7 @@ class PreprocessConfig(BaseModel):
     num_loader_workers: int = 1
     num_sink_workers: int = 1
     processor_devices: list[int] = [0]
+    processor_concurrency: int = 1  # Max concurrent async calls per processor worker
     num_threads_per_worker: int = 8
     queue_size: int = 16
 
@@ -128,6 +147,7 @@ def main():
                 gpu_ids=config.processor_devices,
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
+                max_concurrency=config.processor_concurrency,
                 name="Processing",
                 init_kwargs={"processor_args": config.processor},
             ),

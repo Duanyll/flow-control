@@ -1,9 +1,10 @@
 """
 Demo script for the pipeline framework.
 
-Run with: uv run -m flow_control.utils.pipeline_demo
+Run with: uv run examples/pipeline.py [--fatal] [--async]
 """
 
+import asyncio
 import random
 import time
 from collections.abc import Iterator
@@ -124,6 +125,36 @@ class MockSink(DataSink):
         self.logger.info(f"Sink worker {self.worker_id} wrote {self.count} items")
 
 
+class MockLLMProcessor(PipelineStage):
+    """Simulate async LLM API calls with configurable concurrency."""
+
+    def __init__(
+        self,
+        worker_id: int,
+        device: int | None = None,
+        latency_range: tuple[float, float] = (0.5, 1.5),
+        **kwargs,
+    ):
+        self.worker_id = worker_id
+        self.latency_range = latency_range
+        self.logger = get_logger(f"MockLLM-{worker_id}")
+
+    async def process(self, item: dict) -> list[dict]:
+        """Async process method simulating LLM API call."""
+        latency = random.uniform(*self.latency_range)
+        self.logger.debug(f"LLM call for {item['path']} (latency={latency:.2f}s)")
+        await asyncio.sleep(latency)  # Simulate async API call
+
+        result = {
+            "path": item["path"],
+            "response": f"Generated response for {item['path']}",
+            "latency": latency,
+            "processed_by": self.worker_id,
+        }
+        self.logger.debug(f"LLM completed: {item['path']}")
+        return [result]
+
+
 class FaultyProcessor(PipelineStage):
     """Processor that throws a fatal error during setup."""
 
@@ -148,11 +179,13 @@ class FaultyProcessor(PipelineStage):
         return [item]
 
 
-def main(test_fatal_error: bool = False):
+def main(test_fatal_error: bool = False, test_async: bool = False):
     print("=" * 60)
     print("Pipeline Demo: Mock Data Processing")
     if test_fatal_error:
         print("(Testing fatal error handling)")
+    if test_async:
+        print("(Testing async concurrency)")
     print("=" * 60)
     print()
 
@@ -174,6 +207,28 @@ def main(test_fatal_error: bool = False):
                 queue_size=4,
                 name="FaultyProcessing",
                 init_kwargs={"fail_on_setup": False},
+            ),
+        ]
+    elif test_async:
+        # Use async LLM processor with concurrency
+        # 1 worker with 8 concurrent async calls = ~8x throughput for I/O-bound tasks
+        stages = [
+            StageConfig(
+                stage=MockLoader,
+                num_workers=2,
+                num_threads=2,
+                queue_size=16,
+                name="Loading",
+                init_kwargs={"filter_rate": 0.0},  # No filtering
+            ),
+            StageConfig(
+                stage=MockLLMProcessor,
+                num_workers=1,
+                num_threads=2,
+                queue_size=16,
+                max_concurrency=8,  # 8 concurrent async API calls
+                name="LLM Processing",
+                init_kwargs={"latency_range": (0.3, 0.8)},
             ),
         ]
     else:
@@ -201,7 +256,7 @@ def main(test_fatal_error: bool = False):
             source=MockDataSource,
             name="Scanning",
             queue_size=8,
-            init_kwargs={"num_items": 100},
+            init_kwargs={"num_items": 50 if test_async else 100},
         ),
         stages=stages,
         sink=SinkConfig(
@@ -232,4 +287,5 @@ if __name__ == "__main__":
     import sys
 
     test_fatal = "--fatal" in sys.argv
-    main(test_fatal_error=test_fatal)
+    test_async = "--async" in sys.argv
+    main(test_fatal_error=test_fatal, test_async=test_async)

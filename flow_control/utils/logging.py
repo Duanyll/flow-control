@@ -83,7 +83,7 @@ def setup_global_handler(handler):
 
 if process_type != "mp_spawn_child":
     setup_global_handler(rich_handler)
-    
+
 logging.captureWarnings(True)
 
 
