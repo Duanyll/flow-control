@@ -13,9 +13,8 @@
             "name": "Python Debugger: Finetune",
             "type": "debugpy",
             "request": "launch",
-            "module": "flow_control.scripts.finetune",
+            "module": "flow_control.scripts.launch",
             "args": [
-                "accelerate_ddp",
                 "data/civitai_1612085/train_qwen_ddp.toml"
             ]
         }

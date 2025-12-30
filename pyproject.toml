@@ -14,6 +14,7 @@ dependencies = [
     "ipykernel>=7.1.0",
     "ipython>=9.7.0",
     "ipywidgets>=8.1.8",
+    "json5>=0.12.1",
     "kornia>=0.8.2",
     "kornia-rs>=0.1.10",
     "lmdb>=1.7.5",

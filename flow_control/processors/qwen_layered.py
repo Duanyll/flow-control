@@ -4,11 +4,40 @@ import torch
 from einops import rearrange
 from pydantic import PrivateAttr
 
+from flow_control.utils.llm import LLMClient
 from flow_control.utils.loaders import HfModelLoader
 from flow_control.utils.resize import resize_to_resolution
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
+
+_DEFAULT_IMAGE_CAPTION_PROMPT_CN = """
+# 图像标注器
+你是一个专业的图像标注器。请基于输入图像，撰写图注:
+1. 使用自然、描述性的语言撰写图注，不要使用结构化形式或富文本形式。
+2. 通过加入以下内容，丰富图注细节：
+ - 对象的属性：如数量、颜色、形状、大小、位置、材质、状态、动作等
+ - 对象间的视觉关系：如空间关系、功能关系、动作关系、从属关系、比较关系、因果关系等
+ - 环境细节：例如天气、光照、颜色、纹理、气氛等
+ - 文字内容：识别图像中清晰可见的文字，不做翻译和解释，用引号在图注中强调
+3. 保持真实性与准确性：
+ - 不要使用笼统的描述
+ - 描述图像中所有可见的信息，但不要加入没有在图像中出现的内容
+"""
+
+_DEFAULT_IMAGE_CAPTION_PROMPT_EN = """
+# Image Annotator
+You are a professional image annotator. Please write an image caption based on the input image:
+1. Write the caption using natural, descriptive language without structured formats or rich text.
+2. Enrich caption details by including: 
+ - Object attributes, such as quantity, color, shape, size, material, state, position, actions, and so on
+ - Vision Relations between objects, such as spatial relations, functional relations, possessive relations, attachment relations, action relations, comparative relations, causal relations, and so on
+ - Environmental details, such as weather, lighting, colors, textures, atmosphere, and so on
+ - Identify the text clearly visible in the image, without translation or explanation, and highlight it in the caption with quotation marks
+3. Maintain authenticity and accuracy:
+ - Avoid generalizations
+ - Describe all visible information in the image, while do not add information not explicitly shown in the image
+"""
 
 
 class QwenImageLayeredProcessor(QwenImageProcessor):
@@ -33,6 +62,13 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         clean_latents: NotRequired[torch.Tensor]
         image_latents: NotRequired[torch.Tensor]
 
+    _loading_preset = {
+        "vae": ["encode", "decode"],
+        "text_encoder": ["encode"],
+        "tokenizer": ["always"],
+        "vl_processor": ["always"],
+    }
+
     vae: HfModelLoader = HfModelLoader(
         type="diffusers",
         class_name="AutoencoderKLQwenImage",
@@ -42,11 +78,60 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
     )
     _vae: Any = PrivateAttr()
 
+    vl_processor: HfModelLoader = HfModelLoader(
+        type="transformers",
+        class_name="Qwen2VLProcessor",
+        pretrained_model_id="Qwen/Qwen-Image-Layered",
+        subfolder="processor",
+    )
+    _vl_processor: Any = PrivateAttr()
+
     default_resolution: tuple[int, int] = (640, 640)
     resize_mode: Literal["multiple_of", "list"] = "multiple_of"
     multiple_of: int = 32
     pixels: int = 640 * 640
     default_num_layers: int = 4
+
+    llm: LLMClient | None = None
+    chat_template: str = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user{}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n<|im_start|>assistant\n"
+    image_caption_prompt: str = "cn"  # or "en", or custom string
+
+    async def generate_caption(self, image: torch.Tensor):
+        prompt = (
+            _DEFAULT_IMAGE_CAPTION_PROMPT_CN
+            if self.image_caption_prompt == "cn"
+            else _DEFAULT_IMAGE_CAPTION_PROMPT_EN
+            if self.image_caption_prompt == "en"
+            else self.image_caption_prompt
+        )
+
+        if self.llm:
+            content, _ = await self.llm.generate(user_prompt=prompt, images=[image])
+            return content.strip()
+        else:
+            text_input = self.chat_template.format(prompt)
+            with torch.no_grad():
+                model_inputs = self._vl_processor(
+                    text=text_input,
+                    images=[image],
+                    padding=True,
+                    return_tensors="pt",
+                ).to(self.device)
+                generated_ids = self._text_encoder.generate(
+                    **model_inputs, max_new_tokens=512
+                )
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids) :]
+                    for in_ids, out_ids in zip(
+                        model_inputs.input_ids, generated_ids, strict=True
+                    )
+                ]
+                output_text = self._vl_processor.batch_decode(
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )[0]
+            return output_text.strip()
 
     @torch.no_grad()
     def encode_latents_layered(
@@ -114,10 +199,10 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
             pw=self.patch_size,
         )
 
-    def preprocess_batch(self, batch: BatchType) -> BatchType:
+    async def preprocess_batch(self, batch: BatchType) -> BatchType:
         if "pooled_prompt_embeds" not in batch or "prompt_embeds" not in batch:
-            assert "prompt" in batch
-            # TODO: support empty prompt by generate caption
+            if "prompt" not in batch:
+                batch["prompt"] = await self.generate_caption(batch["clean_image"])
             prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["prompt_embeds"] = prompt_embeds
 
