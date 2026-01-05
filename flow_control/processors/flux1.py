@@ -24,11 +24,11 @@ class Flux1Processor(BaseProcessor):
         clean_latents: NotRequired[torch.Tensor]
 
     _loading_preset = {
-        "vae": ["encode", "decode"],
+        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
         "text_encoder": ["encode"],
         "text_encoder_2": ["encode"],
-        "tokenizer": ["always"],
-        "tokenizer_2": ["always"],
+        "tokenizer": ["encode"],
+        "tokenizer_2": ["encode"],
     }
 
     vae: HfModelLoader = HfModelLoader(

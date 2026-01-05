@@ -23,10 +23,10 @@ class QwenImageEditProcessor(QwenImageProcessor):
         """List of `[B, C, H', W']` Tensors representing VAE encoded reference images."""
 
     _loading_preset = {
-        "vae": ["encode", "decode"],
+        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
         "text_encoder": ["encode"],
-        "tokenizer": ["always"],
-        "vl_processor": ["always"],
+        "tokenizer": ["encode"],
+        "vl_processor": ["encode"],
     }
 
     vl_processor: HfModelLoader = HfModelLoader(

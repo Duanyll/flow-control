@@ -1,10 +1,14 @@
+import io
 from abc import ABC, abstractmethod
 from typing import Literal, NotRequired, TypedDict
 
+import requests
 import torch
 from einops import rearrange
+from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
+from flow_control.utils.common import tensor_to_pil
 from flow_control.utils.types import TorchDevice
 
 
@@ -21,7 +25,9 @@ class BaseProcessor(BaseModel, ABC):
         clean_latents: NotRequired[torch.Tensor]
         """Clean latents corresponding to the images in the batch, as training targets."""
 
-    _loading_preset: dict[str, list[Literal["encode", "decode", "always"]]] = {}
+    _loading_preset: dict[
+        str, list[Literal["encode", "decode", "preview", "allow_remote_preview"]]
+    ] = {}
     device: TorchDevice = torch.device("cuda")
 
     vae_scale_factor: int = 8
@@ -29,27 +35,28 @@ class BaseProcessor(BaseModel, ABC):
     latent_channels: int = 16
     default_resolution: tuple[int, int] = (1024, 1024)
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-        for field_name, preset in self._loading_preset.items():
-            if "always" in preset:
-                model = getattr(self, field_name).load_model()
-                setattr(self, f"_{field_name}", model)
-
     def load_models(
         self,
-        preset: list[Literal["encode", "decode"]],
+        preset: list[Literal["encode", "decode", "preview"]],
         device: torch.device | None = None,
     ) -> None:
         if device is None:
             device = self.device
         for field_name, field_preset in self._loading_preset.items():
             if any(p in field_preset for p in preset):
+                if (
+                    preset == ["preview"]
+                    and "allow_remote_preview" in field_preset
+                    and getattr(self, field_name).endpoint is not None
+                ):
+                    setattr(self, f"_{field_name}", None)
+                    continue
+
                 model = getattr(self, field_name).load_model()
-                model.to(device)
+                if hasattr(model, "to"):
+                    model.to(device)
                 setattr(self, f"_{field_name}", model)
-            elif "always" not in field_preset:
+            else:
                 setattr(self, f"_{field_name}", None)
 
     @abstractmethod
@@ -84,6 +91,23 @@ class BaseProcessor(BaseModel, ABC):
         save extra data into the batch if needed.
         """
         raise NotImplementedError()
+
+    @abstractmethod
+    def preview_output(
+        self, output_latent: torch.Tensor, batch: BatchType
+    ) -> Image.Image:
+        """
+        Decodes the output latents from the model into a preview image. It does not need
+        to be as high-quality as `decode_output`, but should be efficient to be called
+        frequently during training. It may call remote endpoints to save local VRAM if
+        configured to do so.
+
+        Should return a PIL Image object representing the preview.
+        """
+        if hasattr(self, "vae") and self.vae.endpoint is not None:  # type: ignore
+            return self._remote_decode_outputs(output_latent, batch)
+        else:
+            return tensor_to_pil(self.decode_output(output_latent, batch))
 
     def _pack_latents(self, latents):
         return rearrange(
@@ -127,3 +151,33 @@ class BaseProcessor(BaseModel, ABC):
         latents = torch.randn((1, c, h, w), generator=generator, device=device)
         batch["noisy_latents"] = self._pack_latents(latents)
         return batch["noisy_latents"]
+
+    def _remote_decode_outputs(
+        self, output_latent: torch.Tensor, batch: BatchType
+    ) -> Image.Image:
+        """
+        Decodes the output latents using a remote endpoint configured in the VAE.
+
+        Should return a PIL Image object representing the decoded image.
+        """
+        batch["noisy_latents"] = output_latent
+        buffer = io.BytesIO()
+        torch.save(batch, buffer)
+        buffer.seek(0)
+
+        response = requests.post(
+            self.vae.endpoint,  # type: ignore
+            files={"file": ("batch.pt", buffer, "application/octet-stream")},
+            verify=False,
+        )
+
+        if response.status_code != 200:
+            error_detail = response.text
+            raise RuntimeError(
+                f"Remote decoding failed with status {response.status_code}: {error_detail}"
+            )
+
+        image_data = io.BytesIO(response.content)
+        pil_image = Image.open(image_data)
+
+        return pil_image

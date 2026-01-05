@@ -23,9 +23,9 @@ class QwenImageProcessor(BaseProcessor):
         clean_latents: NotRequired[torch.Tensor]
 
     _loading_preset = {
-        "vae": ["encode", "decode"],
+        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
         "text_encoder": ["encode"],
-        "tokenizer": ["always"],
+        "tokenizer": ["encode"],
     }
 
     vae: HfModelLoader = HfModelLoader(

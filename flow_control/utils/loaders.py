@@ -6,7 +6,7 @@ import torch
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-from .logging import get_logger
+from .logging import get_logger, warn_once
 from .types import TorchDType
 
 logger = get_logger(__name__)
@@ -22,7 +22,15 @@ class HfModelLoader(BaseModel):
     subfolder: str | None = None
     dtype: TorchDType | Literal["auto"] = "auto"
 
+    endpoint: str | None = None
+
     def load_model(self, use_meta_device: bool = False) -> Any:
+        if self.endpoint is not None:
+            warn_once(
+                logger,
+                f"The remote endpoint is set for {self.class_name}, but the model is still loaded locally due to explicit call to load_model().",
+            )
+
         if self.type == "diffusers":
             import diffusers
 
