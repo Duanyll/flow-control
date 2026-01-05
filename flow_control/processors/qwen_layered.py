@@ -6,6 +6,7 @@ from pydantic import PrivateAttr
 
 from flow_control.utils.llm import LLMClient
 from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
 
 from .base import BaseProcessor
@@ -168,7 +169,9 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         )
 
     @torch.no_grad()
-    def decode_latents(self, latents: torch.Tensor, size: tuple[int, int]):
+    def decode_latents(
+        self, latents: torch.Tensor, size: tuple[int, int]
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         latents = self._unpack_latents_layered(latents, size)
         latents_mean = (
             torch.tensor(self._vae.config.latents_mean)
@@ -257,8 +260,9 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
             output_latent,
             batch["image_size"],  # type: ignore
         )
+        batch["clean_image"] = base_image
         batch["layer_images"] = layer_images
-        return base_image
+        return merge_images([base_image, *layer_images])
 
     def initialize_latents(self, batch, generator=None, device=None):
         if device is None:

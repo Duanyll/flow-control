@@ -1,0 +1,311 @@
+import random
+from typing import Any, overload
+
+import torch
+from PIL import Image, ImageDraw
+
+
+class BinPacker:
+    """
+    二维装箱算法 (保持不变)
+    """
+
+    def __init__(self):
+        self.root = {"x": 0, "y": 0, "w": 0, "h": 0, "used": False}
+
+    def fit(self, blocks):
+        len_blocks = len(blocks)
+        w = 0 if len_blocks == 0 else blocks[0]["w"]
+        h = 0 if len_blocks == 0 else blocks[0]["h"]
+        self.root = {"x": 0, "y": 0, "w": w, "h": h, "used": False}
+        for block in blocks:
+            node = self.find_node(self.root, block["w"], block["h"])
+            if node:
+                block["fit"] = self.split_node(node, block["w"], block["h"])
+            else:
+                block["fit"] = self.grow_node(block["w"], block["h"])
+
+    def find_node(self, root, w, h):
+        if root["used"]:
+            return self.find_node(root["right"], w, h) or self.find_node(
+                root["down"], w, h
+            )
+        elif w <= root["w"] and h <= root["h"]:
+            return root
+        else:
+            return None
+
+    def split_node(self, node, w, h):
+        node["used"] = True
+        node["down"] = {
+            "x": node["x"],
+            "y": node["y"] + h,
+            "w": node["w"],
+            "h": node["h"] - h,
+            "used": False,
+        }
+        node["right"] = {
+            "x": node["x"] + w,
+            "y": node["y"],
+            "w": node["w"] - w,
+            "h": h,
+            "used": False,
+        }
+        return node
+
+    def grow_node(self, w, h):
+        can_grow_down = w <= self.root["w"]
+        can_grow_right = h <= self.root["h"]
+        should_grow_right = can_grow_right and (self.root["h"] >= (self.root["w"] + w))
+        should_grow_down = can_grow_down and (self.root["w"] >= (self.root["h"] + h))
+
+        if should_grow_right:
+            return self.grow_right(w, h)
+        elif should_grow_down:
+            return self.grow_down(w, h)
+        elif can_grow_right:
+            return self.grow_right(w, h)
+        elif can_grow_down:
+            return self.grow_down(w, h)
+        else:
+            return (
+                self.grow_right(w, h)
+                if self.root["w"] < self.root["h"]
+                else self.grow_down(w, h)
+            )
+
+    def grow_right(self, w, h):
+        new_root = {
+            "x": 0,
+            "y": 0,
+            "w": self.root["w"] + w,
+            "h": self.root["h"],
+            "used": True,
+            "down": self.root,
+            "right": {
+                "x": self.root["w"],
+                "y": 0,
+                "w": w,
+                "h": self.root["h"],
+                "used": False,
+            },
+        }
+        self.root = new_root
+        node = self.find_node(self.root, w, h)
+        return self.split_node(node, w, h) if node else None
+
+    def grow_down(self, w, h):
+        new_root = {
+            "x": 0,
+            "y": 0,
+            "w": self.root["w"],
+            "h": self.root["h"] + h,
+            "used": True,
+            "down": {
+                "x": 0,
+                "y": self.root["h"],
+                "w": self.root["w"],
+                "h": h,
+                "used": False,
+            },
+            "right": self.root,
+        }
+        self.root = new_root
+        node = self.find_node(self.root, w, h)
+        return self.split_node(node, w, h) if node else None
+
+
+def _render_pil(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
+    """PIL 渲染逻辑"""
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), bg_color)
+    draw = ImageDraw.Draw(canvas) if border_w > 0 else None
+
+    for block in blocks:
+        if block.get("fit"):
+            x, y = block["fit"]["x"], block["fit"]["y"]
+            w, h = block["w"], block["h"]
+            canvas.paste(block["img"], (x, y))
+            if border_w > 0 and draw:
+                draw.rectangle(
+                    [x, y, x + w - 1, y + h - 1], outline=border_c, width=border_w
+                )
+    return canvas
+
+
+def _render_tensor(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
+    """PyTorch Tensor 渲染逻辑"""
+    # 获取第一个张量的元数据
+    ref_tensor = blocks[0]["img"]
+    dtype = ref_tensor.dtype
+    device = ref_tensor.device
+    channels = ref_tensor.shape[1]  # shape is (1, C, H, W)
+
+    # 1. 创建画布 Tensor (1, C, Total_H, Total_W)
+    # 如果 bg_color 是全0，直接用 zeros，否则用 fill_
+    canvas = torch.zeros((1, channels, canvas_h, canvas_w), dtype=dtype, device=device)
+
+    # 处理背景色 (简单的将 bg_color 视为填充值，这里为了简化，
+    # 假设如果用户传了 tensor，通常希望背景是 0 或特定值。
+    # 如果需要复杂的颜色映射需要对 border_c 进行转换，这里简化处理：
+    # 如果是 float tensor，背景保持 0；如果是 int tensor，也保持 0)
+
+    # 预处理边框颜色为 Tensor，以便广播赋值
+    if border_w > 0:
+        # border_c 传入的是 tuple (r,g,b,a) 或 (r,g,b)，我们需要根据 channels 截取或填充
+        # 并转换为对应的 dtype 和 device
+        bc_val = torch.tensor(border_c[:channels], dtype=dtype, device=device).view(
+            1, -1, 1, 1
+        )
+    else:
+        bc_val = 0
+
+    for block in blocks:
+        if block.get("fit"):
+            x, y = block["fit"]["x"], block["fit"]["y"]
+            w, h = block["w"], block["h"]
+            img = block["img"]  # shape (1, C, H, W)
+
+            # 2. 核心操作：切片赋值
+            # canvas[batch, channel, y:y+h, x:x+w]
+            canvas[:, :, y : y + h, x : x + w] = img
+
+            # 3. 绘制边框 (通过切片修改像素值)
+            if border_w > 0:
+                # 上边框
+                canvas[:, :, y : y + border_w, x : x + w] = bc_val
+                # 下边框
+                canvas[:, :, y + h - border_w : y + h, x : x + w] = bc_val
+                # 左边框
+                canvas[:, :, y : y + h, x : x + border_w] = bc_val
+                # 右边框
+                canvas[:, :, y : y + h, x + w - border_w : x + w] = bc_val
+
+    return canvas
+
+
+@overload
+def merge_images(
+    images: list[Image.Image],
+    background_color: tuple = (0, 0, 0, 0),
+    border_width: int = 0,
+    border_color: tuple = (255, 0, 0, 255),
+) -> Image.Image: ...
+
+
+@overload
+def merge_images(
+    images: list[torch.Tensor],
+    background_color: tuple = (0, 0, 0, 0),
+    border_width: int = 0,
+    border_color: tuple = (255, 0, 0, 255),
+) -> torch.Tensor: ...
+
+
+def merge_images(
+    images,
+    background_color=(0, 0, 0, 0),
+    border_width: int = 0,
+    border_color: tuple = (255, 0, 0, 255),
+):
+    """
+    接受 PIL Image 或 torch.Tensor 列表，将其拼接进一个矩形画布。
+    支持输入 Tensor 形状为 (1, C, H, W)。
+    """
+    if not images:
+        raise ValueError("Input image list is empty")
+
+    is_tensor = False
+    if isinstance(images[0], torch.Tensor):
+        is_tensor = True
+
+    # 1. 统一提取尺寸信息
+    blocks = []
+    for i, img in enumerate(images):
+        if isinstance(img, torch.Tensor):
+            # Tensor shape: (1, C, H, W) -> w=dim3, h=dim2
+            if img.dim() != 4:
+                raise ValueError(f"Expected tensor shape (1, C, H, W), got {img.shape}")
+            h, w = img.shape[2], img.shape[3]
+        else:
+            w, h = img.width, img.height
+
+        blocks.append({"w": w, "h": h, "img": img, "index": i})
+
+    # 2. 排序 (确定性)
+    blocks.sort(key=lambda x: (x["h"], x["w"], -x["index"]), reverse=True)
+
+    # 3. 运行装箱算法
+    packer = BinPacker()
+    packer.fit(blocks)
+
+    canvas_w = packer.root["w"]
+    canvas_h = packer.root["h"]
+
+    # 4. 根据类型分发渲染
+    if is_tensor:
+        return _render_tensor(
+            blocks, canvas_w, canvas_h, background_color, border_width, border_color
+        )
+    else:
+        return _render_pil(
+            blocks, canvas_w, canvas_h, background_color, border_width, border_color
+        )
+
+
+# --- 测试用例 ---
+if __name__ == "__main__":
+    # --- 测试 1: PIL 模式 ---
+    print("--- Test 1: PIL Images ---")
+    pil_images = []
+    for _ in range(5):
+        w, h = random.randint(50, 100), random.randint(50, 100)
+        img = Image.new(
+            "RGB",
+            (w, h),
+            (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
+        )
+        pil_images.append(img)
+
+    res_pil = merge_images(pil_images, border_width=2, border_color=(255, 255, 255))
+    print(f"PIL Result Size: {res_pil.size}")
+    # res_pil.show()
+
+    # --- 测试 2: PyTorch Tensor 模式 ---
+    print("\n--- Test 2: PyTorch Tensors ---")
+    tensor_images = []
+
+    # 创建一些随机 tensor: (1, 3, H, W) 模拟 RGB
+    # 注意：这里使用 float (0-1) 还是 uint8 (0-255) 取决于你的数据习惯
+    # 为了演示边框颜色，这里我们假设 tensor 是 uint8 格式 (0-255)
+    for _ in range(5):
+        h, w = random.randint(50, 100), random.randint(50, 100)
+        # 随机颜色 tensor
+        t = torch.randint(0, 255, (1, 3, h, w), dtype=torch.uint8)
+        tensor_images.append(t)
+
+    try:
+        # 拼接
+        # border_color 需要与 tensor 的数值范围匹配。如果是 uint8，用 (255,0,0)；如果是 float，用 (1.0, 0, 0)
+        res_tensor: Any = merge_images(
+            tensor_images,
+            border_width=2,
+            border_color=(0, 255, 0),  # 绿色边框
+        )
+
+        print(f"Input Tensor Shape: {tensor_images[0].shape}")
+        print(f"Output Tensor Shape: {res_tensor.shape}")
+        print(f"Output Device: {res_tensor.device}")
+        print(f"Output Dtype: {res_tensor.dtype}")
+
+        # 验证结果 (转换回 PIL 看看)
+        # Remove batch dim -> (C, H, W) -> permute to (H, W, C) -> numpy
+        disp_img = Image.fromarray(res_tensor.squeeze(0).permute(1, 2, 0).numpy())
+        # disp_img.show()
+        disp_img.save("tensor_packed_result.png")
+        print("Tensor result saved to 'tensor_packed_result.png'")
+
+    except Exception as e:
+        print(f"Tensor error: {e}")
+        import traceback
+
+        traceback.print_exc()
