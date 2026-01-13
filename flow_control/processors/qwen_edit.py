@@ -78,7 +78,7 @@ class QwenImageEditProcessor(QwenImageProcessor):
         return hidden_states[:, drop_idx:, :]
 
     def preprocess_batch(self, batch: BatchType) -> BatchType:
-        if "pooled_prompt_embeds" not in batch or "prompt_embeds" not in batch:
+        if "prompt_embeds" not in batch:
             prompt_embeds = self.encode_prompt_with_images(
                 batch["prompt"], batch["reference_images"]
             )

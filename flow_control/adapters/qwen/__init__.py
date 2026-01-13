@@ -1,5 +1,6 @@
 from .base import BaseQwenImageAdapter
 from .edit import QwenImageEditAdapter
+from .efficient_layered import EfficientLayeredQwenImageAdapter
 from .layered import QwenImageLayeredAdapter
 from .peft_lora import QwenPeftLoraAdapter
 
@@ -8,6 +9,7 @@ ADAPTER_REGISTRY = {
     "edit": QwenImageEditAdapter,
     "layered": QwenImageLayeredAdapter,
     "peft_lora": QwenPeftLoraAdapter,
+    "efficient_layered": EfficientLayeredQwenImageAdapter,
 }
 
 

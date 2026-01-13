@@ -3,6 +3,7 @@ from typing import Annotated
 from pydantic import PlainValidator
 
 from .base import BaseProcessor
+from .efficient_layered import EfficientLayeredQwenImageProcessor
 from .flux1 import Flux1Processor
 from .kontext import KontextProcessor
 from .qwen import QwenImageProcessor
@@ -16,6 +17,7 @@ PROCESSOR_REGISTRY = {
     "qwen": QwenImageProcessor,
     "qwen_edit": QwenImageEditProcessor,
     "qwen_layered": QwenImageLayeredProcessor,
+    "efficient_layered": EfficientLayeredQwenImageProcessor,
 }
 
 

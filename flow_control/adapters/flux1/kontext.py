@@ -78,6 +78,4 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
             return_dict=False,
         )[0]
 
-        model_pred = model_pred[:, :n, :]
-
-        return self._unpack_latents(model_pred, h, w)
+        return model_pred[:, :n, :]

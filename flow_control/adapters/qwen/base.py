@@ -1,4 +1,4 @@
-from typing import Any, NotRequired
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -124,8 +124,9 @@ class BaseQwenImageAdapter(BaseModelAdapter):
     class BatchType(BaseModelAdapter.BatchType):
         prompt_embeds: torch.Tensor
         """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
-        prompt_embeds_mask: NotRequired[torch.Tensor]
-        # TODO: What shape is this?
+        # prompt_embeds_mask: NotRequired[torch.Tensor]
+        # [B, N] Mask for the multimodal embeddings for sequence packing
+        # This is not used!
 
     def predict_velocity(
         self,
@@ -135,18 +136,18 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         b, n, d = batch["noisy_latents"].shape
         h, w = batch["image_size"]
 
-        if "prompt_embeds_mask" not in batch:
-            batch["prompt_embeds_mask"] = self._make_attention_mask(
-                batch["prompt_embeds"]
-            )
+        # if "prompt_embeds_mask" not in batch:
+        #     batch["prompt_embeds_mask"] = self._make_attention_mask(
+        #         batch["prompt_embeds"]
+        #     )
 
         img_shapes = [[(1, h // 16, w // 16)]] * b
-        txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
+        # txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
+        txt_seq_lens = [batch["prompt_embeds"].shape[1]] * b
 
         model_pred = self.transformer(
             hidden_states=batch["noisy_latents"],
             timestep=timestep / 1000,
-            encoder_hidden_states_mask=batch["prompt_embeds_mask"],
             encoder_hidden_states=batch["prompt_embeds"],
             img_shapes=img_shapes,
             txt_seq_lens=txt_seq_lens,

@@ -205,13 +205,13 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         )
 
     async def preprocess_batch(self, batch: BatchType) -> BatchType:
-        if "pooled_prompt_embeds" not in batch or "prompt_embeds" not in batch:
+        if "prompt_embeds" not in batch:
             if "prompt" not in batch:
                 batch["prompt"] = await self.generate_caption(batch["clean_image"])
             prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["prompt_embeds"] = prompt_embeds
 
-        if "reference_latents" not in batch:
+        if "image_latents" not in batch:
             # Add dummy alpha channel if needed
             if batch["clean_image"].shape[1] == 3:
                 batch["clean_image"] = torch.cat(

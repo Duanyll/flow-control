@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import json
@@ -7,7 +8,7 @@ from typing import Any, Literal, TypedDict
 import aiohttp
 import json5
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from .common import tensor_to_pil
 from .logging import get_logger
@@ -43,9 +44,11 @@ class LLMClient(BaseModel):
     timeout: int = 120
     model: str = "auto"
     max_tokens: int = 2048
-    temperature: float = 1.0  # Recent LLMs suggest 1.0 is a good default
+    temperature: float = 1.0  # Recent LLMs work well with temperature=1.0
+    max_concurrency: int = 0  # 0 means no limit
 
-    _session: aiohttp.ClientSession | None = None
+    _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
+    _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -56,6 +59,13 @@ class LLMClient(BaseModel):
             }
             self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
         return self._session
+
+    def _get_semaphore(self) -> asyncio.Semaphore | None:
+        if self.max_concurrency <= 0:
+            return None
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_concurrency)
+        return self._semaphore
 
     async def get_model_name(self) -> str:
         if self.model == "auto":
@@ -92,45 +102,56 @@ class LLMClient(BaseModel):
         system_prompt: str = "You are a helpful assistant.",
         context: list[Message] | None = None,
     ) -> tuple[str, list[Message]]:
-        session = self._get_session()
-        model_name = await self.get_model_name()
-        url = f"{self.base_url}/chat/completions"
+        semaphore = self._get_semaphore()
 
-        messages: list[Message] = []
-        if context:
-            messages.extend(context)
-        else:
-            messages.append({"role": "system", "content": system_prompt})
+        async def _generate_impl():
+            session = self._get_session()
+            model_name = await self.get_model_name()
+            url = f"{self.base_url}/chat/completions"
 
-        if images:
-            image_contents: list[ImageContent] = []
-            for img in images:
-                img_url = self._tensor_to_base64url(img)
-                image_contents.append(
-                    {"type": "image_url", "image_url": {"url": img_url}}
+            messages: list[Message] = []
+            if context:
+                messages.extend(context)
+            else:
+                messages.append({"role": "system", "content": system_prompt})
+
+            if images:
+                image_contents: list[ImageContent] = []
+                for img in images:
+                    img_url = self._tensor_to_base64url(img)
+                    image_contents.append(
+                        {"type": "image_url", "image_url": {"url": img_url}}
+                    )
+                text_contents: list[TextContent] = [{"type": "text", "text": ""}]
+                messages.append(
+                    {"role": "user", "content": image_contents + text_contents}
                 )
-            text_contents: list[TextContent] = [{"type": "text", "text": ""}]
-            messages.append({"role": "user", "content": image_contents + text_contents})
+            else:
+                messages.append({"role": "user", "content": user_prompt})
+
+            payload = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+            }
+
+            async with session.post(url, json=payload) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    raise ValueError("No choices returned from LLM API")
+                message = choices[0].get("message", {})
+                content = message.get("content", "")
+                messages.append({"role": "assistant", "content": content})
+                return content, messages
+
+        if semaphore is not None:
+            async with semaphore:
+                return await _generate_impl()
         else:
-            messages.append({"role": "user", "content": user_prompt})
-
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-        }
-
-        async with session.post(url, json=payload) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            choices = data.get("choices", [])
-            if not choices:
-                raise ValueError("No choices returned from LLM API")
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
-            messages.append({"role": "assistant", "content": content})
-            return content, messages
+            return await _generate_impl()
 
 
 def is_chinese_text(text: str) -> bool:

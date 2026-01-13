@@ -92,7 +92,6 @@ class BaseProcessor(BaseModel, ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
     def preview_output(
         self, output_latent: torch.Tensor, batch: BatchType
     ) -> Image.Image:
