@@ -12,6 +12,7 @@ from .directory import (
     RawDirectoryDataSink,
 )
 from .lmdb import LMDBDataset, LMDBDataSink
+from .prism_layers_pro import PrismLayersProDataset
 
 DatasetConfig = dict[str, Any]
 
@@ -21,6 +22,7 @@ DATASET_REGISTRY = {
     "pickle_directory": PickleDirectoryDataset,
     "raw_directory": RawDirectoryDataset,
     "bins_directory": BinsDirectoryDataset,
+    "prism_layers_pro": PrismLayersProDataset,
 }
 
 

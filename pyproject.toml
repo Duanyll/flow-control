@@ -72,6 +72,7 @@ torchaudio = [
 xformers = [
   { index = "pytorch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+diffusers = { git = "https://github.com/huggingface/diffusers.git" }
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"

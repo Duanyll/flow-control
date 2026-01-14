@@ -16,6 +16,15 @@ from flow_control.utils.pipeline import DataSink
 logger = get_logger(__name__)
 
 
+def _is_image_like_field(field_name: str) -> bool:
+    return (
+        field_name.endswith("image")
+        or field_name.endswith("images")
+        or ("image." in field_name)
+        or ("images." in field_name)
+    )
+
+
 def _serialize_with_field_names(obj: Any, base_path: str, field_path: str = "") -> Any:
     """
     Recursively serialize an object, saving special types to external files.
@@ -43,7 +52,7 @@ def _serialize_with_field_names(obj: Any, base_path: str, field_path: str = "") 
         file_name = clean_path if clean_path else "tensor"
 
         # Check if this tensor should be saved as an image
-        if clean_path.endswith("image") or clean_path.endswith("images"):
+        if _is_image_like_field(clean_path):
             # Convert tensor to PIL image
             pil_image = tensor_to_pil(obj)
             file_path = os.path.join(base_path, f"{file_name}.png")

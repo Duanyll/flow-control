@@ -87,3 +87,4 @@ class BinsDirectoryDataSink(DataSink):
         latent_length = data.get("latent_length")
         data_sink = self._get_data_sink(latent_length)
         data_sink.write(data)
+        return True

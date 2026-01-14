@@ -49,15 +49,29 @@ class LLMClient(BaseModel):
 
     _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
     _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
+    _model_lock: asyncio.Lock | None = PrivateAttr(default=None)
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
+            # 显式创建一个 Connector
+            # force_close=True: 每次请求后强制关闭连接，禁止复用
+            # limit=self.max_concurrency: 限制连接池大小，配合 semaphore 避免过载
+            connector = aiohttp.TCPConnector(
+                limit=self.max_concurrency if self.max_concurrency > 0 else 64,
+                force_close=True 
+            )
+            
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
-            self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
+            # 将 connector 传递给 session
+            self._session = aiohttp.ClientSession(
+                timeout=timeout, 
+                headers=headers, 
+                connector=connector
+            )
         return self._session
 
     def _get_semaphore(self) -> asyncio.Semaphore | None:
@@ -67,8 +81,23 @@ class LLMClient(BaseModel):
             self._semaphore = asyncio.Semaphore(self.max_concurrency)
         return self._semaphore
 
+    def _get_model_lock(self) -> asyncio.Lock:
+        if self._model_lock is None:
+            self._model_lock = asyncio.Lock()
+        return self._model_lock
+
     async def get_model_name(self) -> str:
-        if self.model == "auto":
+        # Fast path: if model is already set, return immediately
+        if self.model != "auto":
+            return self.model
+
+        # Slow path: need to fetch model from API with lock protection
+        lock = self._get_model_lock()
+        async with lock:
+            # Double-check: another coroutine might have fetched it while we waited
+            if self.model != "auto":
+                return self.model
+
             # Fetch first available model from the API
             session = self._get_session()
             async with session.get(f"{self.base_url}/models") as resp:
@@ -85,7 +114,6 @@ class LLMClient(BaseModel):
                     )
                 self.model = model_name
                 return model_name
-        return self.model
 
     def _tensor_to_base64url(self, tensor: torch.Tensor) -> str:
         pil_image = tensor_to_pil(tensor)
@@ -122,7 +150,9 @@ class LLMClient(BaseModel):
                     image_contents.append(
                         {"type": "image_url", "image_url": {"url": img_url}}
                     )
-                text_contents: list[TextContent] = [{"type": "text", "text": ""}]
+                text_contents: list[TextContent] = [
+                    {"type": "text", "text": user_prompt}
+                ]
                 messages.append(
                     {"role": "user", "content": image_contents + text_contents}
                 )
@@ -152,6 +182,10 @@ class LLMClient(BaseModel):
                 return await _generate_impl()
         else:
             return await _generate_impl()
+
+    def __del__(self):
+        if self._session is not None:
+            asyncio.create_task(self._session.close())
 
 
 def is_chinese_text(text: str) -> bool:

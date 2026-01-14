@@ -252,7 +252,7 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
             batch["prompt_embeds"].shape[1]
             + batch["image_size"][0] * batch["image_size"][1] // ratio
             + sum(
-                (top - bottom) * (right - left) // ratio
+                (bottom - top) * (right - left) // ratio
                 for (top, bottom, left, right) in batch["layer_boxes"]
             )
         )

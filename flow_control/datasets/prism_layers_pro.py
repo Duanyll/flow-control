@@ -14,10 +14,10 @@ class PrismLayersProDataset(Dataset):
     _last_loaded_file: str | None = None
     _last_table: pa.Table
 
-    def __init__(self, directory: str, ignore_caption: bool = False):
-        self.directory = directory
+    def __init__(self, path: str, ignore_caption: bool = False):
+        self.path = path
         self.ignore_caption = ignore_caption
-        index_file = os.path.join(directory, "index.pkl")
+        index_file = os.path.join(path, "index.pkl")
         if not os.path.exists(index_file):
             raise FileNotFoundError(
                 f"PrismLayersPro index file not found: {index_file}. "
@@ -36,7 +36,7 @@ class PrismLayersProDataset(Dataset):
         row = record["row"]
 
         if self._last_loaded_file != file:
-            filepath = os.path.join(self.directory, file)
+            filepath = os.path.join(self.path, file)
             self._last_table = pq.read_table(filepath)
             self._last_loaded_file = file
 
@@ -63,7 +63,9 @@ class PrismLayersProDataset(Dataset):
             prefix = f"layer_{i:02d}"
             output["layer_images"].append(row_data[f"{prefix}"])
             output["layer_captions"].append(row_data[f"{prefix}_caption"])
-            output["layer_boxes"].append(row_data[f"{prefix}_box"])
+            x_min, y_min, x_max, y_max = row_data[f"{prefix}_box"]
+            top, bottom, left, right = y_min, y_max, x_min, x_max
+            output["layer_boxes"].append((top, bottom, left, right))
 
         if self.ignore_caption:
             del output["whole_caption"]
@@ -93,4 +95,4 @@ if __name__ == "__main__":
     index_file = os.path.join(directory, "index.pkl")
     with open(index_file, "wb") as f:
         pickle.dump(index, f)
-    print(f"Index saved to {index_file}")
+    print(f"Index saved to {index_file}, total {len(index)} records.")

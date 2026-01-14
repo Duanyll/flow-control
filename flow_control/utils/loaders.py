@@ -22,6 +22,8 @@ class HfModelLoader(BaseModel):
     subfolder: str | None = None
     dtype: TorchDType | Literal["auto"] = "auto"
 
+    extra_from_pretrained_kwargs: dict[str, Any] = {}
+
     endpoint: str | None = None
 
     def load_model(self, use_meta_device: bool = False) -> Any:
@@ -48,6 +50,7 @@ class HfModelLoader(BaseModel):
                     self.pretrained_model_id,
                     revision=self.revision,
                     subfolder=self.subfolder,
+                    **self.extra_from_pretrained_kwargs,
                 )
                 model = model_cls.from_config(config)
                 if self.dtype != "auto":
@@ -62,6 +65,7 @@ class HfModelLoader(BaseModel):
                 revision=self.revision,
                 subfolder=self.subfolder,
                 torch_dtype=None if self.dtype == "auto" else self.dtype,
+                **self.extra_from_pretrained_kwargs,
             )
             logger.info(
                 f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
