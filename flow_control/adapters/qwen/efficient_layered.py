@@ -49,6 +49,8 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         vid_freqs_list = []
         max_vid_index = 0
 
+        _, all_height, all_width = fhws[0]
+
         for idx, spec in enumerate(fhws):
             if len(spec) == 3:
                 frame, height, width = spec
@@ -68,6 +70,11 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
                     max_vid_index = max(max_vid_index, height, width)
             else:
                 frame, top, bottom, left, right = spec
+                if self.scale_rope:
+                    top -= all_height // 2
+                    bottom -= all_height // 2
+                    left -= all_width // 2
+                    right -= all_width // 2
                 t_idx = torch.arange(frame, device=device) + idx
                 h_idx = torch.arange(top, bottom, device=device)
                 w_idx = torch.arange(left, right, device=device)

@@ -14,8 +14,9 @@ class PrismLayersProDataset(Dataset):
     _last_loaded_file: str | None = None
     _last_table: pa.Table
 
-    def __init__(self, directory: str):
+    def __init__(self, directory: str, ignore_caption: bool = False):
         self.directory = directory
+        self.ignore_caption = ignore_caption
         index_file = os.path.join(directory, "index.pkl")
         if not os.path.exists(index_file):
             raise FileNotFoundError(
@@ -63,6 +64,11 @@ class PrismLayersProDataset(Dataset):
             output["layer_images"].append(row_data[f"{prefix}"])
             output["layer_captions"].append(row_data[f"{prefix}_caption"])
             output["layer_boxes"].append(row_data[f"{prefix}_box"])
+
+        if self.ignore_caption:
+            del output["whole_caption"]
+            del output["base_caption"]
+            del output["layer_captions"]
 
         return output
 

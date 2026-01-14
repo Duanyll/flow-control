@@ -1,10 +1,10 @@
 from collections.abc import MutableMapping
-from typing import Any
+from typing import Any, Literal
 
 import kornia
 import numpy as np
 import torch
-from einops import rearrange
+from einops import rearrange, repeat
 from PIL import Image
 
 
@@ -149,3 +149,57 @@ def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
     array = (tensor.detach().float().cpu().numpy() * 255).astype(np.uint8)
     image = Image.fromarray(array)
     return image
+
+
+def ensure_alpha_channel(image: torch.Tensor) -> torch.Tensor:
+    """
+    Ensure that the input image tensor has an alpha channel.
+    If it has 3 channels (RGB), add an alpha channel with value 1.
+    Args:
+        image: Tensor of shape (B, 3, H, W) or (B, 4, H, W)
+    Returns:
+        Tensor of shape (B, 4, H, W)
+    """
+    if image.shape[1] == 3:
+        alpha_channel = torch.ones(
+            (image.shape[0], 1, image.shape[2], image.shape[3]),
+            dtype=image.dtype,
+            device=image.device,
+        )
+        image = torch.cat([image, alpha_channel], dim=1)
+    return image
+
+
+def remove_alpha_channel(
+    image: torch.Tensor,
+    background_color: tuple[float, float, float] | Literal["auto"] = "auto",
+) -> torch.Tensor:
+    """
+    Remove the alpha channel from the input image tensor by compositing it over a background color.
+    Args:
+        image: Tensor of shape (B, 4, H, W) or (B, 3, H, W)
+        background_color: Tuple of (R, G, B) values in [0, 1] or "auto" to use content-aware background
+    Returns:
+        Tensor of shape (B, 3, H, W)
+    """
+    if image.shape[1] < 4:
+        return image  # No alpha channel to remove
+    rgb = image[:, :3, :, :]
+    alpha = image[:, 3:4, :, :]
+    if background_color == "auto":
+        # Get average brightness of non-transparent pixels
+        mask = alpha > 0.01
+        if mask.sum() == 0:
+            background_color = (1.0, 1.0, 1.0)  # Default to white if fully transparent
+        else:
+            avg_brightness = (rgb * mask).sum(dim=(0, 2, 3)) / mask.sum()
+            # Use black or white based on brightness
+            background_color = (
+                (0.0, 0.0, 0.0) if avg_brightness.mean() > 0.5 else (1.0, 1.0, 1.0)
+            )
+    background = torch.tensor(background_color, device=image.device)
+    background = repeat(
+        background, "c -> b c h w", b=image.shape[0], h=image.shape[2], w=image.shape[3]
+    )
+    composited = rgb * alpha + background * (1 - alpha)
+    return composited

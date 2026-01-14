@@ -5,6 +5,8 @@ from typing import Any, Literal, NotRequired
 import torch
 from pydantic import PrivateAttr
 
+from flow_control.utils.common import ensure_alpha_channel, remove_alpha_channel
+from flow_control.utils.llm import LLMClient
 from flow_control.utils.loaders import HfModelLoader
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import (
@@ -15,6 +17,11 @@ from flow_control.utils.resize import (
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
+
+_DEFAULT_CAPTION_PROMPT_FG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的部分设计元素，你只用关注图片的前景部分。如果图片中包含文字，你必须在描述中用双引号完整地给出图片中的文字内容。直接输出最终结果，不要加额外的解释。"
+_DEFAULT_CAPTION_PROMPT_FG_EN = 'Task: Describe the image in exactly one sentence. Context: The image is a specific design element extracted from a larger graphic design work. Requirements: 1. Focus exclusively on the foreground. 2. If text is present, include the text content verbatim inside "double quotes". 3. Output ONLY the description string. Do not include introductory or concluding remarks.'
+_DEFAULT_CAPTION_PROMPT_BG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的背景部分，它可能是纯色背景，也可能有一些图案。直接输出最终结果，不要加额外的解释。"
+_DEFAULT_CAPTION_PROMPT_BG_EN = "Task: Describe the image in exactly one sentence. Context: The image is the background layer extracted from a graphic design work. Requirements: 1. Analyze the visual style, noting whether it is a solid color, a gradient, a texture, or contains specific patterns. 2. Output ONLY the description string. Do not include introductory or concluding remarks."
 
 
 class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
@@ -45,16 +52,40 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
     )
     _vae: Any = PrivateAttr()
 
+    llm: LLMClient
+
     default_resolution: tuple[int, int] = (1024, 1024)
     resize_mode: Literal["multiple_of", "list"] = "multiple_of"
     multiple_of: int = 32
     pixels: int = 1024 * 1024
+    fg_prompt: str = "en"
+    bg_prompt: str = "en"
 
     async def generate_background_caption(self, image: torch.Tensor) -> str:
-        raise NotImplementedError()
+        prompt = (
+            _DEFAULT_CAPTION_PROMPT_BG_EN
+            if self.bg_prompt == "en"
+            else _DEFAULT_CAPTION_PROMPT_BG_CN
+            if self.bg_prompt == "cn"
+            else self.bg_prompt
+        )
+        response, _ = await self.llm.generate(
+            prompt, images=[remove_alpha_channel(image)]
+        )
+        return response.strip()
 
     async def generate_layer_caption(self, image: torch.Tensor) -> str:
-        raise NotImplementedError()
+        prompt = (
+            _DEFAULT_CAPTION_PROMPT_FG_EN
+            if self.fg_prompt == "en"
+            else _DEFAULT_CAPTION_PROMPT_FG_CN
+            if self.fg_prompt == "cn"
+            else self.fg_prompt
+        )
+        response, _ = await self.llm.generate(
+            prompt, images=[remove_alpha_channel(image)]
+        )
+        return response.strip()
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         # Cropping is disabled to make resizing layer box calculation easier
@@ -78,22 +109,18 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
         return [
             (
                 int(math.floor(top * scale_h / align) * align),
-                int(math.ceil(bottom * scale_h / align) * align) + 1,
+                int(math.ceil(bottom * scale_h / align) * align),
                 int(math.floor(left * scale_w / align) * align),
-                int(math.ceil(right * scale_w / align) * align) + 1,
+                int(math.ceil(right * scale_w / align) * align),
             )
             for (top, bottom, left, right) in layer_boxes
         ]
 
     def _stack_all_images(self, whole_image, layer_boxes, layer_images):
         n_layers = len(layer_boxes)
-        b, c, h, w = whole_image.shape
-        if c == 3:
-            # Insert alpha channel
-            alpha_channel = torch.ones((b, 1, h, w), device=whole_image.device)
-            whole_image = torch.cat([whole_image, alpha_channel], dim=1)
+        h, w = whole_image.shape[-2:]
         stacked_images = torch.zeros((n_layers + 1, 4, h, w), device=whole_image.device)
-        stacked_images[0] = whole_image[0]  # Base image
+        stacked_images[0] = ensure_alpha_channel(whole_image)[0]
         for i in range(n_layers):
             top, bottom, left, right = layer_boxes[i]
             layer_img = layer_images[i]
@@ -132,32 +159,34 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
                 "Number of layer captions and layer boxes must be the same."
             )
 
-        # 1. Try generate `base_caption` with `base_image` if missing
+        # Start generating `base_caption` (Future)
+        base_caption_task = None
         if "base_image" in batch and "base_caption" not in batch:
-            batch["base_caption"] = await self.generate_background_caption(
-                batch["base_image"]
+            base_caption_task = asyncio.create_task(
+                self.generate_background_caption(batch["base_image"])
             )
 
-        # 2. Try generate `layer_captions` with `layer_images` if missing
+        # Start generating `layer_captions` (Future)
+        layer_captions_task = None
         if "layer_images" in batch and "layer_captions" not in batch:
-            batch["layer_captions"] = await asyncio.gather(
+            layer_captions_task = asyncio.gather(
                 *[self.generate_layer_caption(img) for img in batch["layer_images"]]
             )
 
-        # 3. Merge `base_image` into `layer_images`
+        # Merge `base_image` into `layer_images` (ONLY IMAGES & BOXES PART)
         orig_h, orig_w = batch["whole_image"].shape[-2:]
-        if "base_image" in batch and "base_caption" in batch:
+        has_base_image = "base_image" in batch
+
+        if has_base_image:
             if "layer_images" not in batch:
                 batch["layer_images"] = []
+            # 立即合并图片，供后续 resize/crop 使用
             batch["layer_images"].insert(0, batch["base_image"])
-            if "layer_captions" not in batch:
-                batch["layer_captions"] = []
-            batch["layer_captions"].insert(0, batch["base_caption"])
             batch["layer_boxes"].insert(0, (0, orig_h, 0, orig_w))
-            del batch["base_image"]
-            del batch["base_caption"]
 
-        # 4. Handle resizing and cropping of `whole_image`
+            del batch["base_image"]
+
+        # Handle resizing and cropping of `whole_image` (Heavy CPU/GPU)
         if "layer_images" in batch:
             stacked_images = self._stack_all_images(
                 batch["whole_image"],
@@ -166,20 +195,47 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
             )
         else:
             stacked_images = batch["whole_image"]
+
         stacked_images = self.resize_image(stacked_images)
         batch["whole_image"] = stacked_images[0:1]
         new_h, new_w = stacked_images.shape[-2:]
         batch["image_size"] = (new_h, new_w)
+
         batch["layer_boxes"] = self._scale_and_align_layer_boxes(
             batch["layer_boxes"], (orig_h, orig_w), (new_h, new_w)
         )
+
         if "layer_images" in batch:
             batch["layer_images"] = self._crop_stacked_images(
                 stacked_images, batch["layer_boxes"]
             )
         del stacked_images
 
-        # 5. Encode text prompts
+        # Encode image latents (Heavy GPU)
+        batch["image_latents"] = self.encode_latents(batch["whole_image"])
+        if "layer_images" in batch:
+            clean_latents_list = []
+            for layer_img in batch["layer_images"]:
+                latents = self.encode_latents(layer_img)
+                clean_latents_list.append(latents)
+            batch["clean_latents"] = torch.cat(clean_latents_list, dim=1)
+
+        # Resolve base_caption
+        if base_caption_task:
+            batch["base_caption"] = await base_caption_task
+
+        # Resolve layer_captions
+        if layer_captions_task:
+            batch["layer_captions"] = await layer_captions_task
+
+        # Merge `base_caption` into `layer_captions` (CAPTION PART)
+        if has_base_image and "base_caption" in batch:
+            if "layer_captions" not in batch:
+                batch["layer_captions"] = []
+            batch["layer_captions"].insert(0, batch["base_caption"])
+            del batch["base_caption"]
+
+        # Encode text prompts (Depends on Captions)
         prompt_embeds_list = []
         text_lengths = []
         if "layer_captions" in batch:
@@ -190,16 +246,7 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
         batch["prompt_embeds"] = torch.cat(prompt_embeds_list, dim=1)
         batch["text_lengths"] = text_lengths
 
-        # 6. Encode image latents
-        batch["image_latents"] = self.encode_latents(batch["whole_image"])
-        if "layer_images" in batch:
-            clean_latents_list = []
-            for layer_img in batch["layer_images"]:
-                latents = self.encode_latents(layer_img)
-                clean_latents_list.append(latents)
-            batch["clean_latents"] = torch.cat(clean_latents_list, dim=1)
-
-        # 7. Compute latent length
+        # Compute latent length
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         batch["latent_length"] = (
             batch["prompt_embeds"].shape[1]
