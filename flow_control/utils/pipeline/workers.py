@@ -256,13 +256,23 @@ async def _async_stage_loop(
     max_concurrency: int,
     worker_logger,
 ):
-    """Asynchronous processing loop for async stages with concurrency control."""
+    """Asynchronous processing loop for async stages with concurrency control.
+
+    IMPORTANT: To maintain proper backpressure, we must limit how many items
+    we pull from the input queue. The semaphore must guard queue access, not
+    just the process() call. Otherwise, items accumulate in pending_tasks
+    instead of staying in the queue, bypassing backpressure.
+    """
     semaphore = asyncio.Semaphore(max_concurrency)
     pending_tasks: set[asyncio.Task] = set()
+    # Track active slots to properly manage backpressure
+    active_slots = 0
+    active_slots_lock = asyncio.Lock()
 
     async def process_item(item):
-        """Process a single item with semaphore control."""
-        async with semaphore:
+        """Process a single item. Semaphore is already acquired before calling."""
+        nonlocal active_slots
+        try:
             if shutdown_event.is_set():
                 return
             try:
@@ -287,36 +297,64 @@ async def _async_stage_loop(
             except Exception as e:
                 worker_logger.error(f"Error processing item: {e}", exc_info=True)
                 _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
+        finally:
+            # Release the semaphore after processing is complete
+            semaphore.release()
+            async with active_slots_lock:
+                active_slots -= 1
 
     work_done = False
     while not shutdown_event.is_set():
-        # Try to get an item from the queue (non-blocking in async context)
+        # First, try to acquire a semaphore slot before pulling from queue
+        # This ensures we only pull items we can actually process
+        try:
+            # Use wait_for with a short timeout to allow checking shutdown
+            await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
+        except TimeoutError:
+            # Couldn't acquire semaphore, check conditions and retry
+            if shutdown_event.is_set():
+                worker_logger.info("Stage worker received shutdown signal")
+                break
+            # Check if we're done (no pending work and upstream finished)
+            async with active_slots_lock:
+                no_active = active_slots == 0
+            if upstream_done.is_set() and input_queue.empty() and no_active:
+                if not work_done:
+                    worker_logger.info("Work completed, waiting for pipeline shutdown")
+                    work_done = True
+                await asyncio.sleep(0.1)
+            continue
+
+        # We have a semaphore slot, now try to get an item
         success, item = _safe_get(
             input_queue, timeout=0.1, shutdown_event=shutdown_event
         )
 
         if success:
-            # Create a new task for this item
+            # Track active slot and create task
+            async with active_slots_lock:
+                active_slots += 1
             task = asyncio.create_task(process_item(item))
             pending_tasks.add(task)
             task.add_done_callback(pending_tasks.discard)
         else:
-            # No item available
+            # No item available, release the semaphore we acquired
+            semaphore.release()
+
             if shutdown_event.is_set():
                 worker_logger.info("Stage worker received shutdown signal")
                 break
-            if (
-                upstream_done.is_set()
-                and input_queue.empty()
-                and len(pending_tasks) == 0
-            ):
-                # All work is done
+
+            # Check if all work is done
+            async with active_slots_lock:
+                no_active = active_slots == 0
+            if upstream_done.is_set() and input_queue.empty() and no_active:
                 if not work_done:
                     worker_logger.info("Work completed, waiting for pipeline shutdown")
                     work_done = True
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
             else:
-                # Give pending tasks a chance to run
+                # Brief sleep to avoid busy loop when queue is temporarily empty
                 await asyncio.sleep(0.01)
 
     # Wait for all pending tasks to complete on shutdown
