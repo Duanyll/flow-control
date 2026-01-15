@@ -1,6 +1,6 @@
 import torch
 
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
 from .base import BaseQwenImageAdapter

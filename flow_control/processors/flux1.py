@@ -1,15 +1,15 @@
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from einops import repeat
-from pydantic import PrivateAttr
 
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     ResolutionList,
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
+from flow_control.utils.vae import Flux1VAE
 
 from .base import BaseProcessor
 
@@ -23,24 +23,16 @@ class Flux1Processor(BaseProcessor):
         clean_image: NotRequired[torch.Tensor]
         clean_latents: NotRequired[torch.Tensor]
 
-    _loading_preset = {
-        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
-        "text_encoder": ["encode"],
-        "text_encoder_2": ["encode"],
-        "tokenizer": ["encode"],
-        "tokenizer_2": ["encode"],
-    }
+    _encoding_components = [
+        "_vae",
+        "text_encoder",
+        "text_encoder_2",
+        "tokenizer",
+        "tokenizer_2",
+    ]
+    _decoding_components = ["_vae"]
 
-    vae: HfModelLoader = HfModelLoader(
-        type="diffusers",
-        class_name="AutoencoderKL",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
-        subfolder="vae",
-        dtype=torch.bfloat16,
-    )
-    _vae: Any = PrivateAttr()
-    # Declaring _vae as AutoencoderKL does not help mypy recognize its type properly,
-    # since huggingface libraries are badly typed.
+    vae: Flux1VAE = Flux1VAE()
 
     text_encoder: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -49,7 +41,6 @@ class Flux1Processor(BaseProcessor):
         subfolder="text_encoder",
         dtype=torch.bfloat16,
     )
-    _text_encoder: Any = PrivateAttr()
 
     text_encoder_2: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -58,7 +49,6 @@ class Flux1Processor(BaseProcessor):
         subfolder="text_encoder_2",
         dtype=torch.bfloat16,
     )
-    _text_encoder_2: Any = PrivateAttr()
 
     tokenizer: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -66,7 +56,6 @@ class Flux1Processor(BaseProcessor):
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="tokenizer",
     )
-    _tokenizer: Any = PrivateAttr()
 
     tokenizer_2: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -74,7 +63,6 @@ class Flux1Processor(BaseProcessor):
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="tokenizer_2",
     )
-    _tokenizer_2: Any = PrivateAttr()
 
     clip_max_length: int = 77
     t5_max_length: int = 512
@@ -121,15 +109,9 @@ class Flux1Processor(BaseProcessor):
 
         if image.ndim == 3:
             image = repeat(image, "b h w -> b c h w", c=3)
-
-        image = image * 2 - 1
-        image = image.to(torch.bfloat16)
-        latent = self._vae.encode(image).latent_dist.sample()
-        latent = (
-            latent - self._vae.config.shift_factor
-        ) * self._vae.config.scaling_factor
-        latent = self._pack_latents(latent)
-        return latent
+        latents = self.vae.encode(image)
+        latents = self._pack_latents(latents)
+        return latents
 
     @torch.no_grad()
     def decode_latents(
@@ -142,11 +124,7 @@ class Flux1Processor(BaseProcessor):
         :return: Reconstructed image [B, C, H, W]
         """
         latents = self._unpack_latents(latents, size)
-        latents = (
-            latents / self._vae.config.scaling_factor
-        ) + self._vae.config.shift_factor
-        image = self._vae.decode(latents).sample
-        image = (image + 1) / 2
+        image = self.vae.decode(latents)
         return image
 
     @torch.no_grad()
@@ -159,7 +137,7 @@ class Flux1Processor(BaseProcessor):
         """
 
         # CLIP Text Encoder -> pooled_prompt_embeds
-        clip_inputs = self._tokenizer(
+        clip_inputs = self.tokenizer.model(
             [prompt],
             padding="max_length",
             max_length=self.clip_max_length,
@@ -169,12 +147,12 @@ class Flux1Processor(BaseProcessor):
             return_tensors="pt",
         )
         clip_input_ids = clip_inputs.input_ids
-        pooled_prompt_embeds = self._text_encoder(
+        pooled_prompt_embeds = self.text_encoder.model(
             clip_input_ids.to(self.device), output_hidden_states=False
         ).pooler_output
 
         # T5 Text Encoder -> prompt_embeds
-        t5_inputs = self._tokenizer_2(
+        t5_inputs = self.tokenizer_2.model(
             [prompt],
             padding="max_length",
             truncation=True,
@@ -183,7 +161,7 @@ class Flux1Processor(BaseProcessor):
             return_tensors="pt",
         )
         t5_input_ids = t5_inputs.input_ids
-        prompt_embeds = self._text_encoder_2(
+        prompt_embeds = self.text_encoder_2.model(
             t5_input_ids.to(self.device), output_hidden_states=False
         )[0]
 

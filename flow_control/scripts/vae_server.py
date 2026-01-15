@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from flow_control.processors import Processor
 from flow_control.utils.common import tensor_to_pil
-from flow_control.utils.loaders import load_config_file
+from flow_control.utils.hf_model import load_config_file
 from flow_control.utils.logging import get_logger
 
 # 配置日志

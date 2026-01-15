@@ -48,5 +48,5 @@ class QwenPeftLoraAdapter(BaseQwenImageAdapter, PeftLoraAdapter):
             lora_state_dict = cast(
                 dict, QwenImagePipeline.lora_state_dict(self.pretrained_lora_id)
             )
-            self.load_model(lora_state_dict)
+            self.accelerate_load_model(lora_state_dict)
             cast_trainable_parameters(self.transformer, self.trainable_dtype)

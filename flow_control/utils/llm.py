@@ -182,8 +182,14 @@ class LLMClient(BaseModel):
             return await _generate_impl()
 
     def __del__(self):
-        if self._session is not None:
-            asyncio.create_task(self._session.close())
+        if self._session is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(
+                self._session.close()
+            )
+        except RuntimeError:
+            asyncio.run(self._session.close())
 
 
 def is_chinese_text(text: str) -> bool:

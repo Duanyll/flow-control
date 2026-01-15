@@ -170,7 +170,7 @@ class AccelerateDdpFinetuner(BaseModel):
         if not self.accelerator.is_main_process:
             return
 
-        layers_to_save = self.model.save_model()
+        layers_to_save = self.model.accelerate_save_model()
 
         if weights:
             # Remove the model from input list to avoid default saving behavior
@@ -193,7 +193,7 @@ class AccelerateDdpFinetuner(BaseModel):
 
     def _load_weights(self, input_dir):
         lora_state_dict = cast(dict, FluxControlPipeline.lora_state_dict(input_dir))
-        self.model.load_model(lora_state_dict)
+        self.model.accelerate_load_model(lora_state_dict)
         logger.info(f"Loaded model from {input_dir}")
 
     def _load_model_hook(self, models, input_dir):
@@ -215,7 +215,7 @@ class AccelerateDdpFinetuner(BaseModel):
         if self.gradient_checkpointing:
             self.transformer.enable_gradient_checkpointing()
         if self.sample_dataset is not None:
-            self.processor.load_models(["decode"], device=self.device)
+            self.processor.load_models("decode", device=self.device)
         self.accelerator.register_load_state_pre_hook(self._load_model_hook)
         self.accelerator.register_save_state_pre_hook(self._save_model_hook)
 

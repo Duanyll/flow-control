@@ -45,7 +45,7 @@ class Flux1PeftLoraAdapter(BaseFlux1Adapter, PeftLoraAdapter):
             lora_state_dict = cast(
                 dict, FluxControlPipeline.lora_state_dict(self.pretrained_lora_id)
             )
-            self.load_model(lora_state_dict)
+            self.accelerate_load_model(lora_state_dict)
             cast_trainable_parameters(self.transformer, self.trainable_dtype)
 
     def _install_modules(self):

@@ -1,19 +1,18 @@
 import asyncio
 import math
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
-from pydantic import PrivateAttr
 
 from flow_control.utils.common import ensure_alpha_channel, remove_alpha_channel
 from flow_control.utils.llm import LLMClient
-from flow_control.utils.loaders import HfModelLoader
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
     resize_to_resolution,
 )
+from flow_control.utils.vae import QwenImageVAE
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
@@ -43,14 +42,13 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
         text_lengths: NotRequired[list[int]]
         prompt_embeds: NotRequired[torch.Tensor]
 
-    vae: HfModelLoader = HfModelLoader(
+    vae: QwenImageVAE = QwenImageVAE(
         type="diffusers",
         class_name="AutoencoderKLQwenImage",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="vae",
         dtype=torch.bfloat16,
     )
-    _vae: Any = PrivateAttr()
 
     llm: LLMClient
 

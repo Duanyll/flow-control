@@ -52,7 +52,7 @@ class PeftLoraAdapter(BaseModelAdapter):
         model = model._orig_mod if hasattr(model, "_orig_mod") else model
         return model
 
-    def save_model(self) -> dict:
+    def accelerate_save_model(self) -> dict:
         transformer = self.unwrap_transformer()
 
         layers_to_save = get_peft_model_state_dict(transformer)
@@ -62,7 +62,7 @@ class PeftLoraAdapter(BaseModelAdapter):
 
         return layers_to_save
 
-    def load_model(self, state_dict: dict):
+    def accelerate_load_model(self, state_dict: dict):
         transformer = self.transformer
 
         lora_state_dict = {}

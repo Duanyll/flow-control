@@ -5,11 +5,13 @@ from copy import deepcopy
 from typing import Any
 
 import aim
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from accelerate.utils import set_seed
 from einops import reduce
+from PIL import Image
 from pydantic import BaseModel
 from rich.progress import (
     BarColumn,
@@ -33,7 +35,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
-from flow_control.utils.common import deep_move_to_device
+from flow_control.utils.common import deep_move_to_device, tensor_to_pil
 from flow_control.utils.data import DistributedBucketSampler
 from flow_control.utils.ema import apply_ema_maybe
 from flow_control.utils.logging import console, get_logger, warn_once
@@ -270,8 +272,7 @@ class HsdpTrainer(Stateful):
             logger.info("No sample dataset provided, skipping sample dataloader.")
             self.sample_dataloader = None
             return
-        self.processor.device = self.device
-        self.processor.load_models(["preview"])
+        self.processor.load_models("decode", device=self.device)
         dataset: Any = parse_dataset(self.conf.sample_dataset)
         dataset_length = len(dataset)
         logger.info(f"Sample Dataset has {dataset_length} samples.")
@@ -329,15 +330,16 @@ class HsdpTrainer(Stateful):
         return os.path.join(self.conf.checkpoint_dir, f"step_{step:07d}")
 
     def log_images(self, image, key):
+        image = np.array(image)
         if self.is_main_process:
-            images = [None] * self.world_size
+            images: list[Any] = [None] * self.world_size
             dist.gather_object(image, images, dst=0)
             keys = [None] * self.world_size
             dist.gather_object(key, keys, dst=0)
 
             unique_images = {}
             for k, img in zip(keys, images, strict=True):
-                unique_images[k] = img
+                unique_images[k] = Image.fromarray(img)
             for k, img in unique_images.items():
                 self.tracker.track(
                     aim.Image(img), name=f"samples/{k}", step=self.current_step
@@ -385,7 +387,9 @@ class HsdpTrainer(Stateful):
                 )
                 self.processor.initialize_latents(batch, generator=generator)
                 clean_latents = self.sampler.sample(self.model, batch)
-                image = self.processor.preview_output(clean_latents, batch)
+                image = tensor_to_pil(
+                    self.processor.decode_output(clean_latents, batch)
+                )
                 key = batch.get("__key__", "unknown")
                 self.log_images(image, key)
                 progress.advance(task)

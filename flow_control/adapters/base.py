@@ -5,7 +5,7 @@ import torch
 from einops import rearrange
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDType
 from flow_control.utils.upcasting import (
@@ -23,15 +23,13 @@ class BaseModelAdapter(BaseModel, ABC):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    _transformer: Any
-
     @property
     def transformer(self) -> Any:
-        return self._transformer
+        return self.hf_model.model
 
     @transformer.setter
     def transformer(self, value: Any):
-        self._transformer = value
+        self.hf_model.model = value
 
     @property
     def device(self) -> torch.device:
@@ -88,7 +86,7 @@ class BaseModelAdapter(BaseModel, ABC):
         """
         pass
 
-    def save_model(self) -> dict:
+    def accelerate_save_model(self) -> dict:
         """
         Decide which layers to save in the checkpoint. Will be wrapped and registered by
         `accelerator.register_save_state_pre_hook`.
@@ -101,7 +99,7 @@ class BaseModelAdapter(BaseModel, ABC):
         else:
             return {}
 
-    def load_model(self, state_dict: dict):
+    def accelerate_load_model(self, state_dict: dict):
         """
         Load the state_dict. Will be wrapped and registered by `accelerator.register_load_state_pre_hook`.
 

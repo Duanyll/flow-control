@@ -1,9 +1,8 @@
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
-from pydantic import PrivateAttr
 
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
@@ -22,12 +21,8 @@ class QwenImageEditProcessor(QwenImageProcessor):
         reference_latents: NotRequired[list[torch.Tensor]]
         """List of `[B, C, H', W']` Tensors representing VAE encoded reference images."""
 
-    _loading_preset = {
-        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
-        "text_encoder": ["encode"],
-        "tokenizer": ["encode"],
-        "vl_processor": ["encode"],
-    }
+    _encoding_components = ["vae"]
+    _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
 
     vl_processor: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -35,7 +30,6 @@ class QwenImageEditProcessor(QwenImageProcessor):
         pretrained_model_id="Qwen/Qwen-Image-Edit",
         subfolder="processor",
     )
-    _vl_processor: Any = PrivateAttr()
 
     reference_image_resize_mode: Literal["multiple_of", "list", "match_latent"] = (
         "match_latent"
@@ -60,13 +54,13 @@ class QwenImageEditProcessor(QwenImageProcessor):
                 + [prompt]
             )
         )
-        model_inputs = self._vl_processor(
+        model_inputs = self.vl_processor.model(
             text=txt,
             images=reference_images,
             padding=True,
             return_tensors="pt",
         ).to(self.device)
-        encoder_hidden_states = self._text_encoder(
+        encoder_hidden_states = self.text_encoder.model(
             input_ids=model_inputs.input_ids,
             attention_mask=model_inputs.attention_mask,
             pixel_values=model_inputs.pixel_values,

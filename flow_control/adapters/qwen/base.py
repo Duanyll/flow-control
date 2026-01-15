@@ -6,7 +6,7 @@ from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 
 from flow_control.adapters.base import BaseModelAdapter
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -97,11 +97,11 @@ class PatchedQwenEmbedRope(nn.Module):
 class BaseQwenImageAdapter(BaseModelAdapter):
     @property
     def transformer(self) -> QwenImageTransformer2DModel:
-        return self._transformer  # type: ignore
+        return self.hf_model.model  # type: ignore
 
     @transformer.setter
     def transformer(self, value: Any):
-        self._transformer = value
+        self.hf_model.model = value
 
     hf_model: HfModelLoader = HfModelLoader(
         type="diffusers",

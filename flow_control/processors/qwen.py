@@ -1,15 +1,15 @@
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
-from einops import rearrange, repeat
-from pydantic import PrivateAttr
+from einops import repeat
 
-from flow_control.utils.loaders import HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     ResolutionList,
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
+from flow_control.utils.vae import QwenImageVAE
 
 from .base import BaseProcessor
 
@@ -22,20 +22,10 @@ class QwenImageProcessor(BaseProcessor):
         clean_image: NotRequired[torch.Tensor]
         clean_latents: NotRequired[torch.Tensor]
 
-    _loading_preset = {
-        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
-        "text_encoder": ["encode"],
-        "tokenizer": ["encode"],
-    }
+    _encoding_components = ["vae"]
+    _decoding_components = ["vae", "text_encoder", "tokenizer"]
 
-    vae: HfModelLoader = HfModelLoader(
-        type="diffusers",
-        class_name="AutoencoderKLQwenImage",
-        pretrained_model_id="Qwen/Qwen-Image",
-        subfolder="vae",
-        dtype=torch.bfloat16,
-    )
-    _vae: Any = PrivateAttr()
+    vae: QwenImageVAE = QwenImageVAE()
 
     text_encoder: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -44,7 +34,6 @@ class QwenImageProcessor(BaseProcessor):
         subfolder="text_encoder",
         dtype=torch.bfloat16,
     )
-    _text_encoder: Any = PrivateAttr()
 
     tokenizer: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -52,7 +41,6 @@ class QwenImageProcessor(BaseProcessor):
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="tokenizer",
     )
-    _tokenizer: Any = PrivateAttr()
 
     max_sequence_length: int = 512
     default_negative_prompt: str = "low quality, worst quality, blurry, deformed"
@@ -94,21 +82,7 @@ class QwenImageProcessor(BaseProcessor):
 
         if image.ndim == 3:
             image = repeat(image, "b h w -> b c h w", c=3)
-
-        image = image * 2 - 1
-        image = image.to(torch.bfloat16)
-        image = rearrange(image, "b c h w -> b c 1 h w")
-        latents = self._vae.encode(image).latent_dist.sample()
-        latents_mean = (
-            torch.tensor(self._vae.config.latents_mean)
-            .view(1, self._vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
-            1, self._vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-        latents = (latents - latents_mean) * latents_std
-        latents = rearrange(latents, "b c 1 h w -> b c h w")
+        latents = self.vae.encode(image)
         latents = self._pack_latents(latents)
         return latents
 
@@ -123,19 +97,7 @@ class QwenImageProcessor(BaseProcessor):
         :return: Reconstructed image [B, C, H, W]
         """
         latents = self._unpack_latents(latents, size)
-        latents = rearrange(latents, "b c h w -> b c 1 h w")
-        latents_mean = (
-            torch.tensor(self._vae.config.latents_mean)
-            .view(1, self._vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
-            1, self._vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-        latents = latents / latents_std + latents_mean
-        image = self._vae.decode(latents).sample
-        image = rearrange(image, "b c 1 h w -> b c h w")
-        image = (image + 1) / 2
+        image = self.vae.decode(latents)
         return image
 
     tokenizer_max_length: int = 1024
@@ -154,14 +116,14 @@ class QwenImageProcessor(BaseProcessor):
         template = self.prompt_template_encode
         drop_idx = self.prompt_template_encode_start_idx
         txt = [template.format(prompt)]
-        txt_tokens = self._tokenizer(
+        txt_tokens = self.tokenizer.model(
             txt,
             max_length=self.tokenizer_max_length + drop_idx,
             padding=True,
             truncation=True,
             return_tensors="pt",
         ).to(self.device)
-        encoder_hidden_states = self._text_encoder(
+        encoder_hidden_states = self.text_encoder.model(
             input_ids=txt_tokens.input_ids,
             attention_mask=txt_tokens.attention_mask,
             output_hidden_states=True,

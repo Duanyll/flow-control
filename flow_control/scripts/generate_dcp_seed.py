@@ -1,7 +1,7 @@
 import argparse
 
 from flow_control.training.hsdp import HsdpTrainer
-from flow_control.utils.loaders import load_config_file
+from flow_control.utils.hf_model import load_config_file
 
 
 def main():

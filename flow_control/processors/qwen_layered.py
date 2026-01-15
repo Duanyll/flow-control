@@ -4,10 +4,12 @@ import torch
 from einops import rearrange
 from pydantic import PrivateAttr
 
+from flow_control.utils.common import ensure_alpha_channel
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.llm import LLMClient
-from flow_control.utils.loaders import HfModelLoader
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
+from flow_control.utils.vae import QwenImageVAE
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
@@ -63,21 +65,16 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         clean_latents: NotRequired[torch.Tensor]
         image_latents: NotRequired[torch.Tensor]
 
-    _loading_preset = {
-        "vae": ["encode", "decode", "preview", "allow_remote_preview"],
-        "text_encoder": ["encode"],
-        "tokenizer": ["encode"],
-        "vl_processor": ["encode"],
-    }
+    _encoding_components = ["vae"]
+    _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
 
-    vae: HfModelLoader = HfModelLoader(
+    vae: QwenImageVAE = QwenImageVAE(
         type="diffusers",
         class_name="AutoencoderKLQwenImage",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="vae",
         dtype=torch.bfloat16,
     )
-    _vae: Any = PrivateAttr()
 
     vl_processor: HfModelLoader = HfModelLoader(
         type="transformers",
@@ -118,7 +115,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
                     padding=True,
                     return_tensors="pt",
                 ).to(self.device)
-                generated_ids = self._text_encoder.generate(
+                generated_ids = self.text_encoder.model.generate(
                     **model_inputs, max_new_tokens=512
                 )
                 generated_ids_trimmed = [
@@ -139,25 +136,11 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         if not isinstance(images, list):
             images = [images]
 
-        layer_images = []
-        for image in images:
-            if image.shape[1] == 3:
-                # Add dummy alpha channel
-                image = torch.cat([image, torch.ones_like(image[:, :1, :, :])], dim=1)
-            layer_images.append(image)
-
-        all_images = torch.stack(layer_images, dim=2)  # b, c, f, h, w
-        latents = self._vae.encode(all_images).latent_dist.sample()
-        latents_mean = (
-            torch.tensor(self._vae.config.latents_mean)
-            .view(1, self._vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
+        all_images = torch.stack(
+            [ensure_alpha_channel(image) for image in images], dim=2
         )
-        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
-            1, self._vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-        latents = (latents - latents_mean) * latents_std
-        latents = self._pack_latents(latents)
+        latents = self.vae.encode(all_images)
+        latents = self._pack_latents_layered(latents)
         return latents
 
     def _pack_latents_layered(self, latents: torch.Tensor) -> torch.Tensor:
@@ -173,17 +156,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         self, latents: torch.Tensor, size: tuple[int, int]
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         latents = self._unpack_latents_layered(latents, size)
-        latents_mean = (
-            torch.tensor(self._vae.config.latents_mean)
-            .view(1, self._vae.config.z_dim, 1, 1, 1)
-            .to(latents.device, latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(
-            1, self._vae.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-        latents = latents / latents_std + latents_mean
-        images = self._vae.decode(latents).sample
-        images = (images + 1) / 2
+        images = self.vae.decode(latents)
         base_image = images[:, :, 0, :, :]
         layer_images = [images[:, :, i + 1, :, :] for i in range(images.shape[2] - 1)]
         return base_image, layer_images
@@ -212,16 +185,9 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
             batch["prompt_embeds"] = prompt_embeds
 
         if "image_latents" not in batch:
-            # Add dummy alpha channel if needed
-            if batch["clean_image"].shape[1] == 3:
-                batch["clean_image"] = torch.cat(
-                    [
-                        batch["clean_image"],
-                        torch.ones_like(batch["clean_image"][:, :1, :, :]),
-                    ],
-                    dim=1,
-                )  # b, 4, h, w
-            batch["clean_image"] = self.resize_image(batch["clean_image"])
+            batch["clean_image"] = self.resize_image(
+                ensure_alpha_channel(batch["clean_image"])
+            )
             batch["image_latents"] = self.encode_latents(batch["clean_image"])
 
         if "image_size" not in batch:
@@ -233,7 +199,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         if "layer_images" in batch and "clean_latents" not in batch:
             for i in range(len(batch["layer_images"])):
                 batch["layer_images"][i] = resize_to_resolution(
-                    batch["layer_images"][i], batch["image_size"]
+                    ensure_alpha_channel(batch["layer_images"][i]), batch["image_size"]
                 )
             batch["clean_latents"] = self.encode_latents(
                 [batch["clean_image"], *batch["layer_images"]]

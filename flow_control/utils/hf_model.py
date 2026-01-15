@@ -1,12 +1,9 @@
-import json
-import tomllib
 from typing import Any, Literal
 
 import torch
-import yaml
 from pydantic import BaseModel, ConfigDict
 
-from .logging import get_logger, warn_once
+from .logging import get_logger
 from .types import TorchDType
 
 logger = get_logger(__name__)
@@ -24,15 +21,18 @@ class HfModelLoader(BaseModel):
 
     extra_from_pretrained_kwargs: dict[str, Any] = {}
 
-    endpoint: str | None = None
+    _model: Any = None
+    @property
+    def model(self) -> Any:
+        if self._model is None:
+            raise ValueError("Model is not loaded yet. Call load_model() first.")
+        return self._model
+    
+    @model.setter
+    def model(self, value: Any):
+        self._model = value
 
     def load_model(self, use_meta_device: bool = False) -> Any:
-        if self.endpoint is not None:
-            warn_once(
-                logger,
-                f"The remote endpoint is set for {self.class_name}, but the model is still loaded locally due to explicit call to load_model().",
-            )
-
         if self.type == "diffusers":
             import diffusers
 
@@ -71,21 +71,5 @@ class HfModelLoader(BaseModel):
                 f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
                 f"with dtype {self.dtype}"
             )
+        self._model = model
         return model
-
-
-def load_config_file(path: str) -> dict:
-    """
-    Load JSON, YAML or TOML configuration file.
-    """
-    if path.endswith(".json"):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    elif path.endswith((".yaml", ".yml")):
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    elif path.endswith(".toml"):
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    else:
-        raise ValueError(f"Unsupported config file format: {path}")

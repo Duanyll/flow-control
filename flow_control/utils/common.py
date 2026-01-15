@@ -1,9 +1,12 @@
+import json
+import tomllib
 from collections.abc import MutableMapping
 from typing import Any, Literal
 
 import kornia
 import numpy as np
 import torch
+import yaml
 from einops import rearrange, repeat
 from PIL import Image
 
@@ -203,3 +206,20 @@ def remove_alpha_channel(
     )
     composited = rgb * alpha + background * (1 - alpha)
     return composited
+
+
+def load_config_file(path: str) -> dict:
+    """
+    Load JSON, YAML or TOML configuration file.
+    """
+    if path.endswith(".json"):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    elif path.endswith((".yaml", ".yml")):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    elif path.endswith(".toml"):
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    else:
+        raise ValueError(f"Unsupported config file format: {path}")

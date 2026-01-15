@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
 from flow_control.processors import parse_processor
 from flow_control.utils.common import deep_move_to_device
-from flow_control.utils.loaders import load_config_file
+from flow_control.utils.hf_model import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import (
     DataSource,
