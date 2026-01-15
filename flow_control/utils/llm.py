@@ -58,9 +58,9 @@ class LLMClient(BaseModel):
             # limit=self.max_concurrency: 限制连接池大小，配合 semaphore 避免过载
             connector = aiohttp.TCPConnector(
                 limit=self.max_concurrency if self.max_concurrency > 0 else 64,
-                force_close=True 
+                force_close=True,
             )
-            
+
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -68,9 +68,7 @@ class LLMClient(BaseModel):
             }
             # 将 connector 传递给 session
             self._session = aiohttp.ClientSession(
-                timeout=timeout, 
-                headers=headers, 
-                connector=connector
+                timeout=timeout, headers=headers, connector=connector
             )
         return self._session
 

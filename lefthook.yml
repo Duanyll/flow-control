@@ -2,11 +2,13 @@ pre-commit:
   parallel: false
   commands:
     ruff-format:
-      run: uv run ruff format .
+      glob: "*.py"
+      run: uv run ruff format {staged_files}
       stage_fixed: true
 
     ruff-check:
-      run: uv run ruff check --fix .
+      glob: "*.py"
+      run: uv run ruff check --fix {staged_files}
       stage_fixed: true
 
     # pyright:
