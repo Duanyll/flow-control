@@ -71,13 +71,13 @@ diffusers.utils.logging.disable_progress_bar()
 diffusers.utils.logging.set_verbosity_warning()
 
 
-def setup_global_handler(handler):
+def setup_global_handler(handler, include_name: bool = True):
     transformers.utils.logging.add_handler(handler)
     diffusers.utils.logging.add_handler(handler)
     logging.basicConfig(
         level=log_level,
         handlers=[handler],
-        format="%(name)s | %(message)s",
+        format="<%(name)s> %(message)s" if include_name else "%(message)s",
     )
 
 
@@ -85,6 +85,9 @@ if process_type != "mp_spawn_child":
     setup_global_handler(rich_handler)
 
 logging.captureWarnings(True)
+
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:

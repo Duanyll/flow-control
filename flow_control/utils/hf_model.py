@@ -25,8 +25,6 @@ class HfModelLoader(BaseModel):
 
     @property
     def model(self) -> Any:
-        if self._model is None:
-            raise ValueError("Model is not loaded yet. Call load_model() first.")
         return self._model
 
     @model.setter

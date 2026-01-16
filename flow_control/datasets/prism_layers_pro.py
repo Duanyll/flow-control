@@ -8,6 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from flow_control.utils.common import pil_to_tensor
+from flow_control.utils.logging import console
 
 
 class PrismLayersProDataset(Dataset):
@@ -78,14 +79,13 @@ class PrismLayersProDataset(Dataset):
 if __name__ == "__main__":
     import sys
 
-    from rich import print
     from rich.progress import track
 
     directory = sys.argv[1]
     files = os.listdir(directory)
     files = sorted(files)
     index = []
-    for file in track(files, description="Generating index"):
+    for file in track(files, description="Generating index", console=console):
         if file.endswith(".parquet"):
             filepath = os.path.join(directory, file)
             table = pq.read_table(filepath, columns=["id"])
@@ -95,4 +95,4 @@ if __name__ == "__main__":
     index_file = os.path.join(directory, "index.pkl")
     with open(index_file, "wb") as f:
         pickle.dump(index, f)
-    print(f"Index saved to {index_file}, total {len(index)} records.")
+    console.print(f"Index saved to {index_file}, total {len(index)} records.")

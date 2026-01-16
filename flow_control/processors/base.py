@@ -45,7 +45,7 @@ class BaseProcessor(BaseModel, ABC):
         for field_name in field_list:
             model_loader: HfModelLoader = getattr(self, field_name)
             model_loader.load_model()
-            if hasattr(model_loader.model, "to"):
+            if model_loader.model is not None and hasattr(model_loader.model, "to"):
                 model_loader.model.to(device)
 
     @abstractmethod
@@ -103,7 +103,11 @@ class BaseProcessor(BaseModel, ABC):
         )
 
     def initialize_latents(
-        self, batch: BatchType, generator: torch.Generator | None = None, device=None
+        self,
+        batch: BatchType,
+        generator: torch.Generator | None = None,
+        device=None,
+        dtype=torch.bfloat16,
     ) -> torch.Tensor:
         """
         Initializes noisy latents for the given batch based on its image size.
@@ -120,6 +124,8 @@ class BaseProcessor(BaseModel, ABC):
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
-        latents = torch.randn((1, c, h, w), generator=generator, device=device)
+        latents = torch.randn(
+            (1, c, h, w), generator=generator, device=device, dtype=dtype
+        )
         batch["noisy_latents"] = self._pack_latents(latents)
         return batch["noisy_latents"]

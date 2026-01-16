@@ -22,8 +22,8 @@ class QwenImageProcessor(BaseProcessor):
         clean_image: NotRequired[torch.Tensor]
         clean_latents: NotRequired[torch.Tensor]
 
-    _encoding_components = ["vae"]
-    _decoding_components = ["vae", "text_encoder", "tokenizer"]
+    _encoding_components = ["vae", "text_encoder", "tokenizer"]
+    _decoding_components = ["vae"]
 
     vae: VAE = QwenImageVAE()
 

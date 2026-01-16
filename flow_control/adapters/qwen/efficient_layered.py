@@ -37,10 +37,16 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
 
     def forward(
         self,
-        video_fhw: list[list[Any]],
-        txt_seq_lens: list[int],
+        video_fhw: Any,
+        txt_seq_lens: list[int] | None = None,
         device: torch.device | None = None,
+        max_txt_seq_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(video_fhw, tuple):
+            video_fhw, txt_seq_lens = video_fhw
+        if txt_seq_lens is None:
+            txt_seq_lens = [max_txt_seq_len] # type: ignore
+
         fhws = video_fhw[0]
 
         if device is None:
@@ -104,7 +110,7 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         txt_idx = torch.cat(
             [
                 torch.arange(max_vid_index, max_vid_index + length, device=device)
-                for length in txt_seq_lens
+                for length in txt_seq_lens # type: ignore
             ]
         )
         txt_freqs = torch.cat(
@@ -155,6 +161,12 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
     def load_transformer(self, use_meta_device=False):
         super().load_transformer(use_meta_device)
         self.transformer.set_attention_backend("flex")
+        orig_module = self.transformer.pos_embed
+        self.transformer.pos_embed = EfficientLayeredQwenEmbedRope(  # type: ignore
+            theta=orig_module.theta,
+            axes_dim=orig_module.axes_dim,
+            scale_rope=orig_module.scale_rope,
+        )
 
     def make_block_mask(
         self, base_len: int, layer_lens: list[int], txt_lens: list[int]
@@ -235,8 +247,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             hidden_states=input_latents,
             timestep=timestep / 1000,
             encoder_hidden_states=batch["prompt_embeds"],
-            img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
+            img_shapes=(img_shapes, txt_seq_lens),
             attention_kwargs={
                 "attention_mask": block_mask,
             },

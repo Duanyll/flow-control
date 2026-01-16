@@ -44,14 +44,12 @@ class QwenImageEditAdapter(BaseQwenImageAdapter):
                 ],
             ]
         ] * b
-        txt_seq_lens = [batch["prompt_embeds"].shape[1]] * b
 
         model_pred = self.transformer(
             hidden_states=input_latents,
             timestep=timestep / 1000,
             encoder_hidden_states=batch["prompt_embeds"],
             img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
             return_dict=False,
         )[0]
 

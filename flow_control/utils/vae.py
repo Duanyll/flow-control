@@ -179,10 +179,12 @@ class QwenImageVAE(BaseVAE):
             .view(1, self.model.config.z_dim, 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
-        latents_std = 1.0 / torch.tensor(self.model.config.latents_std).view(
-            1, self.model.config.z_dim, 1, 1, 1
-        ).to(latents.device, latents.dtype)
-        latents = (latents - latents_mean) * latents_std
+        latents_std = (
+            torch.tensor(self.model.config.latents_std)
+            .view(1, self.model.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents = (latents - latents_mean) / latents_std
         if not has_frame_dim:
             latents = rearrange(latents, "b c 1 h w -> b c h w")
         return latents
@@ -196,10 +198,11 @@ class QwenImageVAE(BaseVAE):
             .view(1, self.model.config.z_dim, 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
+        # In the original implementation, latents are scaled by 1/stddev during encoding
         latents_std = 1.0 / torch.tensor(self.model.config.latents_std).view(
             1, self.model.config.z_dim, 1, 1, 1
         ).to(latents.device, latents.dtype)
-        latents = latents * latents_std + latents_mean
+        latents = latents / latents_std + latents_mean
         images = self.model.decode(latents).sample
         images = (images + 1) / 2
         if not has_frame_dim:
@@ -209,7 +212,7 @@ class QwenImageVAE(BaseVAE):
 
 VAE_REGISTRY = {
     "flux1": Flux1VAE,
-    "qwen_image": QwenImageVAE,
+    "qwen": QwenImageVAE,
 }
 
 

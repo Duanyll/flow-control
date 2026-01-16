@@ -5,7 +5,7 @@ import sys
 
 import torch
 import uvicorn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -20,6 +20,8 @@ logger = get_logger(__name__)
 
 
 class VAEServerConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     host: str = "0.0.0.0"
     port: int = 8000
     device: TorchDevice = torch.device("cuda")

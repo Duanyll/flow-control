@@ -38,13 +38,17 @@ class PatchedQwenEmbedRope(nn.Module):
     def forward(
         self,
         video_fhw: list[list[tuple[int, int, int]]],
-        txt_seq_lens: list[int],
+        txt_seq_lens: list[int] | None = None,
         device: torch.device | None = None,
+        max_txt_seq_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         fhws = video_fhw[0]
 
         if device is None:
             device = self.inv_freq_t.device
+
+        if txt_seq_lens is None and max_txt_seq_len is None:
+            raise ValueError("Either txt_seq_lens or max_txt_seq_len must be provided.")
 
         vid_freqs_list = []
         max_vid_index = 0
@@ -80,7 +84,7 @@ class PatchedQwenEmbedRope(nn.Module):
 
         vid_freqs = torch.cat(vid_freqs_list, dim=0)
 
-        max_len = max(txt_seq_lens)
+        max_len = max_txt_seq_len if max_txt_seq_len is not None else max(txt_seq_lens) # type: ignore
         txt_idx = torch.arange(max_vid_index, max_vid_index + max_len, device=device)
         txt_freqs = torch.cat(
             [
@@ -142,15 +146,12 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         #     )
 
         img_shapes = [[(1, h // 16, w // 16)]] * b
-        # txt_seq_lens = batch["prompt_embeds_mask"].sum(dim=1).tolist()
-        txt_seq_lens = [batch["prompt_embeds"].shape[1]] * b
 
         model_pred = self.transformer(
             hidden_states=batch["noisy_latents"],
             timestep=timestep / 1000,
             encoder_hidden_states=batch["prompt_embeds"],
             img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
             return_dict=False,
         )[0]
 

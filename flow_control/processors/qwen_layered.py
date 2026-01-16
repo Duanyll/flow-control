@@ -64,8 +64,8 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         clean_latents: NotRequired[torch.Tensor]
         image_latents: NotRequired[torch.Tensor]
 
-    _encoding_components = ["vae"]
-    _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
+    _encoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
+    _decoding_components = ["vae"]
 
     vae: VAE = QwenImageVAE(
         library="diffusers",
@@ -228,7 +228,9 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         batch["layer_images"] = layer_images
         return merge_images([base_image, *layer_images])
 
-    def initialize_latents(self, batch, generator=None, device=None):
+    def initialize_latents(
+        self, batch, generator=None, device=None, dtype=torch.bfloat16
+    ):
         if device is None:
             device = self.device
         if "image_size" in batch:
@@ -239,6 +241,8 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
         f = batch.get("num_layers", 0) + 1
-        latents = torch.randn((1, c, f, h, w), generator=generator, device=device)
+        latents = torch.randn(
+            (1, c, f, h, w), generator=generator, device=device, dtype=dtype
+        )
         batch["noisy_latents"] = self._pack_latents_layered(latents)
         return batch["noisy_latents"]

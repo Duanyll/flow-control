@@ -24,13 +24,13 @@ class Flux1Processor(BaseProcessor):
         clean_latents: NotRequired[torch.Tensor]
 
     _encoding_components = [
-        "_vae",
+        "vae",
         "text_encoder",
         "text_encoder_2",
         "tokenizer",
         "tokenizer_2",
     ]
-    _decoding_components = ["_vae"]
+    _decoding_components = ["vae"]
 
     vae: VAE = Flux1VAE()
 

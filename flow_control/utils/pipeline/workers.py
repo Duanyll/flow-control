@@ -21,7 +21,7 @@ from .base import DataSink, DataSource, PipelineStage
 def _setup_worker_logging(name: str, log_queue: mp.Queue):
     """Set up logging for a worker process."""
     handler = QueueHandler(log_queue)
-    setup_global_handler(handler)
+    setup_global_handler(handler, include_name=False)
     return get_logger(name)
 
 

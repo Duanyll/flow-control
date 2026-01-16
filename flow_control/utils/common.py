@@ -124,6 +124,12 @@ def deep_move_to_shared_memory(data):
     return deep_apply_tensor_fn(data, lambda x: x.cpu().share_memory_())
 
 
+def deep_cast_float_dtype(data, dtype: torch.dtype):
+    return deep_apply_tensor_fn(
+        data, lambda x: x.to(dtype) if x.is_floating_point() else x
+    )
+
+
 def pil_to_tensor(image) -> torch.Tensor:
     """
     Convert a PIL Image to a normalized torch Tensor.

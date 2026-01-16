@@ -21,8 +21,8 @@ class QwenImageEditProcessor(QwenImageProcessor):
         reference_latents: NotRequired[list[torch.Tensor]]
         """List of `[B, C, H', W']` Tensors representing VAE encoded reference images."""
 
-    _encoding_components = ["vae"]
-    _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
+    _encoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
+    _decoding_components = ["vae"]
 
     vl_processor: HfModelLoader = HfModelLoader(
         library="transformers",

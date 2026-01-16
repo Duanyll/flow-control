@@ -35,7 +35,11 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
-from flow_control.utils.common import deep_move_to_device, tensor_to_pil
+from flow_control.utils.common import (
+    deep_cast_float_dtype,
+    deep_move_to_device,
+    tensor_to_pil,
+)
 from flow_control.utils.data import DistributedBucketSampler
 from flow_control.utils.ema import apply_ema_maybe
 from flow_control.utils.logging import console, get_logger, warn_once
@@ -45,7 +49,12 @@ from flow_control.utils.types import (
     parse_optimizer,
     parse_scheduler,
 )
-from flow_control.utils.weighting import LossWeighting, TimestepWeighting
+from flow_control.utils.weighting import (
+    LogitNormalTimestepWeighting,
+    LossWeighting,
+    TimestepWeighting,
+    UniformLossWeighting,
+)
 
 logger = get_logger(__name__)
 
@@ -56,10 +65,10 @@ class HsdpTrainerConfig(BaseModel):
     processor: Processor
     dataset: DatasetConfig
     sample_dataset: DatasetConfig | None = None
-    optimizer: OptimizerConfig
-    scheduler: SchedulerConfig
-    timestep_weighting: TimestepWeighting
-    loss_weighting: LossWeighting
+    optimizer: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
+    scheduler: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
+    timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
+    loss_weighting: LossWeighting = UniformLossWeighting()
 
     checkpoint_dir: str
     seed_checkpoint_dir: str | None = None
@@ -212,6 +221,9 @@ class HsdpTrainer(Stateful):
         logger.info("Transformer moved to GPU.")
 
         if self.conf.seed_checkpoint_dir is not None:
+            logger.info(
+                f"Loading seed checkpoint from {self.conf.seed_checkpoint_dir} into transformer..."
+            )
             model_sd, _ = get_state_dict(
                 self.transformer, [], options=StateDictOptions(strict=False)
             )
@@ -220,9 +232,7 @@ class HsdpTrainer(Stateful):
                 checkpoint_id=self.conf.seed_checkpoint_dir,
                 planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
             )
-            logger.info(
-                f"Loaded seed checkpoint from {self.conf.seed_checkpoint_dir} into transformer."
-            )
+            logger.info("Seed checkpoint loaded into transformer.")
         elif not self.model.all_trainable:
             warn_once(
                 logger,
@@ -282,7 +292,7 @@ class HsdpTrainer(Stateful):
             rank=self.rank,
             shuffle=True,
             seed=self.conf.seed,
-            grad_acc_steps=self.grad_acc_steps,
+            grad_acc_steps=1,
         )
         self.sample_dataloader = StatefulDataLoader(
             dataset,
@@ -381,11 +391,17 @@ class HsdpTrainer(Stateful):
         self.transformer.eval()
         with apply_ema_maybe(self.optimizer):
             for batch in self.sample_dataloader:
+                batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
                 generator = torch.Generator(device=self.device).manual_seed(
                     self.conf.seed
                 )
-                self.processor.initialize_latents(batch, generator=generator)
+                self.processor.initialize_latents(
+                    batch,
+                    generator=generator,
+                    device=self.device,
+                    dtype=self.model.dtype,
+                )
                 clean_latents = self.sampler.sample(self.model, batch)
                 image = tensor_to_pil(
                     self.processor.decode_output(clean_latents, batch)
@@ -500,6 +516,8 @@ class HsdpTrainer(Stateful):
 
         self.sample_and_log()
 
+        console.rule("[bold blue]Starting training[/bold blue]")
+
         progress, task = self.make_train_progress_bar()
         progress.start()
 
@@ -513,6 +531,7 @@ class HsdpTrainer(Stateful):
                 is_sync_step = (i + 1) % self.grad_acc_steps == 0
                 self.transformer.set_requires_gradient_sync(is_sync_step)
 
+                batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
                 loss = self.train_step(batch) / self.grad_acc_steps
                 loss.backward()
@@ -549,7 +568,7 @@ class HsdpTrainer(Stateful):
                     break
 
         progress.stop()
-        logger.info("Training completed.")
+        console.rule("[bold green]Training completed[/bold green]")
 
         self.cleanup()
 

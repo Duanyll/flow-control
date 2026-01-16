@@ -354,8 +354,8 @@ class AccelerateDdpFinetuner(BaseModel):
             generator = torch.Generator(device=self.device)
             generator.manual_seed(self.seed)
             batch["noisy_latents"] = self.processor.initialize_latents(
-                batch, generator=generator
-            ).to(self.model.dtype)
+                batch, generator=generator, dtype=self.model.dtype
+            )
             clean_latents = self.sampler.sample(self.model, batch)
 
             image = self.processor.decode_output(clean_latents, batch)  # type: ignore
