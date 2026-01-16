@@ -1,15 +1,14 @@
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from einops import rearrange
-from pydantic import PrivateAttr
 
 from flow_control.utils.common import ensure_alpha_channel
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.llm import LLMClient
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
-from flow_control.utils.vae import QwenImageVAE
+from flow_control.utils.vae import VAE, QwenImageVAE
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
@@ -68,8 +67,8 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
     _encoding_components = ["vae"]
     _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
 
-    vae: QwenImageVAE = QwenImageVAE(
-        type="diffusers",
+    vae: VAE = QwenImageVAE(
+        library="diffusers",
         class_name="AutoencoderKLQwenImage",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="vae",
@@ -77,12 +76,11 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
     )
 
     vl_processor: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="Qwen2VLProcessor",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="processor",
     )
-    _vl_processor: Any = PrivateAttr()
 
     default_resolution: tuple[int, int] = (640, 640)
     resize_mode: Literal["multiple_of", "list"] = "multiple_of"
@@ -109,7 +107,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         else:
             text_input = self.chat_template.format(prompt)
             with torch.no_grad():
-                model_inputs = self._vl_processor(
+                model_inputs = self.vl_processor.model(
                     text=text_input,
                     images=[image],
                     padding=True,
@@ -124,7 +122,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
                         model_inputs.input_ids, generated_ids, strict=True
                     )
                 ]
-                output_text = self._vl_processor.batch_decode(
+                output_text = self.vl_processor.model.batch_decode(
                     generated_ids_trimmed,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,

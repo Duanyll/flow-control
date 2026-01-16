@@ -15,13 +15,13 @@ class BaseFlux1Adapter(BaseModelAdapter):
     @property
     def transformer(self) -> FluxTransformer2DModel:
         return self.hf_model.model
-    
+
     @transformer.setter
     def transformer(self, value: Any):
         self.hf_model.model = value
 
     hf_model: HfModelLoader = HfModelLoader(
-        type="diffusers",
+        library="diffusers",
         class_name="FluxTransformer2DModel",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="transformer",

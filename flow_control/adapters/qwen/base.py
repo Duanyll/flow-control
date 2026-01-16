@@ -104,7 +104,7 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         self.hf_model.model = value
 
     hf_model: HfModelLoader = HfModelLoader(
-        type="diffusers",
+        library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="transformer",

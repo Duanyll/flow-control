@@ -9,7 +9,7 @@ from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
-from flow_control.utils.vae import QwenImageVAE
+from flow_control.utils.vae import VAE, QwenImageVAE
 
 from .base import BaseProcessor
 
@@ -25,10 +25,10 @@ class QwenImageProcessor(BaseProcessor):
     _encoding_components = ["vae"]
     _decoding_components = ["vae", "text_encoder", "tokenizer"]
 
-    vae: QwenImageVAE = QwenImageVAE()
+    vae: VAE = QwenImageVAE()
 
     text_encoder: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="Qwen2_5_VLForConditionalGeneration",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="text_encoder",
@@ -36,7 +36,7 @@ class QwenImageProcessor(BaseProcessor):
     )
 
     tokenizer: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="Qwen2Tokenizer",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="tokenizer",

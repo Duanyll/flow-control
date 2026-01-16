@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 
 class QwenImageEditAdapter(BaseQwenImageAdapter):
     hf_model: HfModelLoader = HfModelLoader(
-        type="diffusers",
+        library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image-Edit-2509",
         subfolder="transformer",

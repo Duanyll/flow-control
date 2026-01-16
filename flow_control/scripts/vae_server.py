@@ -1,118 +1,101 @@
 import asyncio
 import io
+import pickle
+import sys
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import Response
 from pydantic import BaseModel
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
-from flow_control.processors import Processor
-from flow_control.utils.common import tensor_to_pil
-from flow_control.utils.hf_model import load_config_file
+from flow_control.utils.common import load_config_file
 from flow_control.utils.logging import get_logger
+from flow_control.utils.types import TorchDevice
+from flow_control.utils.vae import VAE, BaseVAE
 
-# 配置日志
 logger = get_logger(__name__)
 
 
-class VaeServerConfig(BaseModel):
-    processor: Processor
+class VAEServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
+    device: TorchDevice = torch.device("cuda")
+
+    vae: VAE
 
 
-# 全局变量
-processor = None
-processing_lock = asyncio.Lock()  # 确保一次只处理一个batch
-
-app = FastAPI(title="VAE Decode Server")
-
-
-@app.get("/health")
-async def health_check():
-    """健康检查端点"""
-    if processor is None:
-        raise HTTPException(status_code=503, detail="Processor not loaded")
-    return {"status": "healthy"}
+def serialize_tensor(tensor: torch.Tensor) -> bytes:
+    """Serialize tensor to bytes, converting to bf16 first."""
+    tensor = tensor.to(torch.bfloat16).cpu()
+    buffer = io.BytesIO()
+    pickle.dump(tensor, buffer)
+    return buffer.getvalue()
 
 
-@app.post("/vae_decode")
-async def vae_decode(file: UploadFile):
-    """
-    VAE解码端点
-    接收一个包含batch字典的pickle文件
-    返回解码后的PNG图像
-    """
-    if processor is None:
-        raise HTTPException(status_code=503, detail="Processor not loaded")
-
-    # 使用锁确保一次只处理一个batch
-    async with processing_lock:
-        try:
-            logger.info(f"Receiving batch from {file.filename}")
-
-            # 读取上传的文件
-            content = await file.read()
-
-            # 使用torch.load反序列化batch
-            batch = torch.load(io.BytesIO(content), map_location="cpu")
-
-            # 验证batch包含必要的键
-            if "noisy_latents" not in batch:
-                raise HTTPException(
-                    status_code=400, detail="Batch must contain 'noisy_latents' key"
-                )
-
-            logger.info(
-                f"Processing batch with latents shape: {batch['noisy_latents'].shape}"
-            )
-
-            # 执行解码
-            image = processor.decode_output(batch["noisy_latents"], batch)
-            pil_image = tensor_to_pil(image)
-
-            # 将PIL图像转换为PNG字节流
-            img_byte_arr = io.BytesIO()
-            pil_image.save(img_byte_arr, format="PNG")
-            img_byte_arr.seek(0)
-
-            logger.info("Batch processed successfully")
-
-            # 返回PNG图像
-            return Response(content=img_byte_arr.read(), media_type="image/png")
-
-        except Exception as e:
-            logger.error(f"Error processing batch: {e}")
-            raise HTTPException(
-                status_code=500, detail=f"Error processing batch: {str(e)}"
-            ) from e
+def deserialize_tensor(data: bytes, device: torch.device) -> torch.Tensor:
+    """Deserialize tensor from bytes."""
+    buffer = io.BytesIO(data)
+    tensor = pickle.load(buffer)  # noqa: S301
+    return tensor.to(device=device)
 
 
-def start_server(config_path: str):
-    """启动服务器的入口函数"""
-    # 加载配置
-    config = VaeServerConfig(**load_config_file(config_path))
+def create_app(vae: BaseVAE, device: torch.device) -> Starlette:
+    vae.model.to(device)
+    # Lock to ensure only one GPU operation at a time
+    gpu_lock = asyncio.Lock()
 
-    # 更新全局processor
-    global processor
-    processor = config.processor
-    processor.load_models(["decode"])
+    async def encode(request: Request) -> Response:
+        body = await request.body()
+        images = deserialize_tensor(body, device)
+        logger.info(f"Encoding images with shape {images.shape}")
+        async with gpu_lock:
+            with torch.no_grad():
+                latents = vae._encode(images)
+            result = serialize_tensor(latents)
+        return Response(content=result, media_type="application/octet-stream")
 
-    # 启动服务器
-    logger.info(f"Starting VAE server on {config.host}:{config.port}")
-    uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+    async def decode(request: Request) -> Response:
+        body = await request.body()
+        latents = deserialize_tensor(body, device)
+        logger.info(f"Decoding latents with shape {latents.shape}")
+        async with gpu_lock:
+            with torch.no_grad():
+                images = vae._decode(latents)
+            result = serialize_tensor(images)
+        return Response(content=result, media_type="application/octet-stream")
+
+    async def health(request: Request) -> Response:
+        return JSONResponse(
+            {
+                "status": "ok",
+                "pretrained_model_id": vae.pretrained_model_id,
+                "revision": vae.revision,
+                "subfolder": vae.subfolder,
+            }
+        )
+
+    routes = [
+        Route("/encode", encode, methods=["POST"]),
+        Route("/decode", decode, methods=["POST"]),
+        Route("/health", health, methods=["GET"]),
+    ]
+
+    return Starlette(routes=routes)
 
 
 def main():
-    import sys
+    config_file = sys.argv[1]
+    config = VAEServerConfig(**load_config_file(config_file))
 
-    if len(sys.argv) < 2:
-        print("Usage: python vae_server.py <config_path>")
-        sys.exit(1)
+    logger.info(f"Loading VAE model: {config.vae.pretrained_model_id}")
+    config.vae.load_model()
 
-    config_path = sys.argv[1]
-    start_server(config_path)
+    logger.info(f"Starting VAE server on {config.host}:{config.port}")
+    app = create_app(config.vae, config.device)
+    uvicorn.run(app, host=config.host, port=config.port)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ class QwenImageEditProcessor(QwenImageProcessor):
     _decoding_components = ["vae", "text_encoder", "tokenizer", "vl_processor"]
 
     vl_processor: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="Qwen2VLProcessor",
         pretrained_model_id="Qwen/Qwen-Image-Edit",
         subfolder="processor",

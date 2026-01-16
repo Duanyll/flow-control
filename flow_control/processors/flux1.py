@@ -9,7 +9,7 @@ from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
-from flow_control.utils.vae import Flux1VAE
+from flow_control.utils.vae import VAE, Flux1VAE
 
 from .base import BaseProcessor
 
@@ -32,10 +32,10 @@ class Flux1Processor(BaseProcessor):
     ]
     _decoding_components = ["_vae"]
 
-    vae: Flux1VAE = Flux1VAE()
+    vae: VAE = Flux1VAE()
 
     text_encoder: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="CLIPTextModel",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="text_encoder",
@@ -43,7 +43,7 @@ class Flux1Processor(BaseProcessor):
     )
 
     text_encoder_2: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="T5EncoderModel",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="text_encoder_2",
@@ -51,14 +51,14 @@ class Flux1Processor(BaseProcessor):
     )
 
     tokenizer: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="CLIPTokenizer",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="tokenizer",
     )
 
     tokenizer_2: HfModelLoader = HfModelLoader(
-        type="transformers",
+        library="transformers",
         class_name="T5TokenizerFast",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
         subfolder="tokenizer_2",

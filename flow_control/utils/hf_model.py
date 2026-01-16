@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 class HfModelLoader(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    type: Literal["diffusers", "transformers"]
+    library: Literal["diffusers", "transformers"]
     class_name: str
     pretrained_model_id: str
     revision: str | None = None
@@ -22,27 +22,28 @@ class HfModelLoader(BaseModel):
     extra_from_pretrained_kwargs: dict[str, Any] = {}
 
     _model: Any = None
+
     @property
     def model(self) -> Any:
         if self._model is None:
             raise ValueError("Model is not loaded yet. Call load_model() first.")
         return self._model
-    
+
     @model.setter
     def model(self, value: Any):
         self._model = value
 
     def load_model(self, use_meta_device: bool = False) -> Any:
-        if self.type == "diffusers":
+        if self.library == "diffusers":
             import diffusers
 
             model_cls = getattr(diffusers, self.class_name)
-        elif self.type == "transformers":
+        elif self.library == "transformers":
             import transformers
 
             model_cls = getattr(transformers, self.class_name)
         else:
-            raise ValueError(f"Unknown model type: {self.type}")
+            raise ValueError(f"Unknown model library: {self.library}")
 
         if use_meta_device:
             with torch.device("meta"):

@@ -12,7 +12,7 @@ from flow_control.utils.resize import (
     resize_to_multiple_of,
     resize_to_resolution,
 )
-from flow_control.utils.vae import QwenImageVAE
+from flow_control.utils.vae import VAE, QwenImageVAE
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
@@ -42,8 +42,8 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
         text_lengths: NotRequired[list[int]]
         prompt_embeds: NotRequired[torch.Tensor]
 
-    vae: QwenImageVAE = QwenImageVAE(
-        type="diffusers",
+    vae: VAE = QwenImageVAE(
+        library="diffusers",
         class_name="AutoencoderKLQwenImage",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="vae",
