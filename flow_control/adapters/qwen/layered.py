@@ -38,7 +38,7 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
 
         model_pred = self.transformer(
             hidden_states=input_latents,
-            timestep=timestep / 1000,
+            timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],
             img_shapes=img_shapes,
             return_dict=False,
