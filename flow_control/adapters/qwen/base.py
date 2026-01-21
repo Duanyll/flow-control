@@ -84,7 +84,7 @@ class PatchedQwenEmbedRope(nn.Module):
 
         vid_freqs = torch.cat(vid_freqs_list, dim=0)
 
-        max_len = max_txt_seq_len if max_txt_seq_len is not None else max(txt_seq_lens) # type: ignore
+        max_len = max_txt_seq_len if max_txt_seq_len is not None else max(txt_seq_lens)  # type: ignore
         txt_idx = torch.arange(max_vid_index, max_vid_index + max_len, device=device)
         txt_freqs = torch.cat(
             [

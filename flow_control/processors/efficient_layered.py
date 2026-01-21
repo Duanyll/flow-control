@@ -283,7 +283,9 @@ class EfficientLayeredQwenImageProcessor(QwenImageProcessor):
         merged_image = merge_images(decoded_layers)
         return merged_image
 
-    def initialize_latents(self, batch: BatchType, generator=None, device=None, dtype=torch.bfloat16) -> torch.Tensor:
+    def initialize_latents(
+        self, batch: BatchType, generator=None, device=None, dtype=torch.bfloat16
+    ) -> torch.Tensor:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         latent_len_per_image = [
             (bottom - top) * (right - left) // ratio

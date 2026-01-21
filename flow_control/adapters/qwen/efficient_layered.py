@@ -45,7 +45,7 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         if isinstance(video_fhw, tuple):
             video_fhw, txt_seq_lens = video_fhw
         if txt_seq_lens is None:
-            txt_seq_lens = [max_txt_seq_len] # type: ignore
+            txt_seq_lens = [max_txt_seq_len]  # type: ignore
 
         fhws = video_fhw[0]
 
@@ -110,7 +110,7 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         txt_idx = torch.cat(
             [
                 torch.arange(max_vid_index, max_vid_index + length, device=device)
-                for length in txt_seq_lens # type: ignore
+                for length in txt_seq_lens  # type: ignore
             ]
         )
         txt_freqs = torch.cat(

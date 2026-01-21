@@ -1,18 +1,13 @@
 import math
 import os
 import shutil
-from copy import deepcopy
 from typing import Any
 
 import aim
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
-from accelerate.utils import set_seed
 from einops import reduce
-from PIL import Image
-from pydantic import BaseModel
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -28,13 +23,12 @@ from torch.distributed.checkpoint.state_dict import (
     set_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.fsdp import fully_shard
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
 from flow_control.processors import Processor
-from flow_control.samplers import Sampler
+from flow_control.samplers import Sampler, SimpleEulerSampler
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -42,7 +36,7 @@ from flow_control.utils.common import (
 )
 from flow_control.utils.data import DistributedBucketSampler
 from flow_control.utils.ema import apply_ema_maybe
-from flow_control.utils.logging import console, get_logger, warn_once
+from flow_control.utils.logging import console, get_logger
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -56,12 +50,14 @@ from flow_control.utils.weighting import (
     UniformLossWeighting,
 )
 
+from .hsdp_engine import HsdpEngine, HsdpEngineConfig
+
 logger = get_logger(__name__)
 
 
-class HsdpTrainerConfig(BaseModel):
+class HsdpTrainerConfig(HsdpEngineConfig):
     model: ModelAdapter
-    sampler: Sampler
+    sampler: Sampler = SimpleEulerSampler()
     processor: Processor
     dataset: DatasetConfig
     sample_dataset: DatasetConfig | None = None
@@ -70,34 +66,33 @@ class HsdpTrainerConfig(BaseModel):
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     loss_weighting: LossWeighting = UniformLossWeighting()
 
-    checkpoint_dir: str
+    checkpoint_root: str
     seed_checkpoint_dir: str | None = None
     logging_dir: str = "."
     experiment_name: str
-    resume_from_step: int | None = None
+    resume_from_dir: str | None = None
     checkpoint_steps: int = 500
     checkpoint_limit: int = 5
     sample_steps: int = 1000
 
-    gradient_checkpointing: bool = True
     num_dataloader_workers: int = 4
 
-    seed: int = 42
     global_batch_size: int = 16
     train_steps: int = 10000
     ema_decay: float = 0.999
     clip_grad_norm: float = 1.0
 
-    hsdp_shard_dim: int = 1
 
-
-class HsdpTrainer(Stateful):
-    raw_conf: dict[str, Any]
+class HsdpSftTrainer(HsdpEngine, Stateful):
     conf: HsdpTrainerConfig
 
     @property
     def model(self):
         return self.conf.model
+
+    @property
+    def transformer(self):
+        return self.conf.model.transformer
 
     @property
     def sampler(self):
@@ -107,10 +102,6 @@ class HsdpTrainer(Stateful):
     def processor(self):
         return self.conf.processor
 
-    @property
-    def transformer(self):
-        return self.conf.model.transformer
-
     dataloader: StatefulDataLoader
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler._LRScheduler
@@ -118,23 +109,6 @@ class HsdpTrainer(Stateful):
     tracker: aim.Run
 
     current_step: int = 0
-
-    world_size: int
-    rank: int
-    local_rank: int
-    mesh: dist.device_mesh.DeviceMesh | None = None
-
-    @property
-    def is_main_process(self):
-        return self.rank == 0
-
-    @property
-    def is_local_main_process(self):
-        return self.local_rank == 0
-
-    @property
-    def device(self):
-        return torch.device(f"cuda:{self.local_rank}")
 
     @property
     def grad_acc_steps(self):
@@ -153,30 +127,8 @@ class HsdpTrainer(Stateful):
         return self.current_step // len(self.dataloader) * self.grad_acc_steps
 
     def __init__(self, **kwargs):
-        self.raw_conf = deepcopy(kwargs)
-        self.conf = HsdpTrainerConfig(**kwargs)
-
-    def init_device_mesh(self):
-        if not dist.is_torchelastic_launched():
-            raise RuntimeError("HSDPTrainer requires torchelastic launch.")
-        self.world_size = int(os.environ["WORLD_SIZE"])
-        self.rank = int(os.environ["RANK"])
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(self.local_rank)
-        self.mesh = dist.device_mesh.init_device_mesh(
-            "cuda",
-            mesh_shape=(
-                self.world_size // self.conf.hsdp_shard_dim,
-                self.conf.hsdp_shard_dim,
-            ),
-            mesh_dim_names=("replicate", "shard"),
-        )
-        logger.info(
-            f"Initialized device mesh: "
-            f"world_size={self.world_size}, "
-            f"replicate_dim={self.world_size // self.conf.hsdp_shard_dim}, "
-            f"shard_dim={self.conf.hsdp_shard_dim}"
-        )
+        self.conf = HsdpTrainerConfig(**kwargs)  # type: ignore
+        super().__init__(**kwargs)
 
     def init_tracker(self):
         if not self.is_main_process:
@@ -188,57 +140,6 @@ class HsdpTrainer(Stateful):
         logger.info(
             f"Initialized Aim tracker at {self.conf.logging_dir}, experiment={self.conf.experiment_name}."
         )
-
-    def load_transformer(self):
-        with torch.device("meta"):
-            self.model.load_transformer(use_meta_device=True)
-            if self.conf.gradient_checkpointing:
-                if (
-                    hasattr(self.transformer, "_supports_gradient_checkpointing")
-                    and self.transformer._supports_gradient_checkpointing
-                ):
-                    self.transformer.enable_gradient_checkpointing()
-                else:
-                    warn_once(
-                        logger,
-                        "Gradient checkpointing is enabled in the config, "
-                        "but the transformer model does not support it.",
-                    )
-        if not hasattr(self.transformer, "_no_split_modules"):
-            raise ValueError(
-                "The transformer model must define _no_split_modules for HSDP."
-            )
-        fsdp_layers: list[str] = self.transformer._no_split_modules
-        count = 0
-        for _, module in self.transformer.named_modules():
-            module_type = type(module).__name__
-            if module_type in fsdp_layers:
-                fully_shard(module, mesh=self.mesh)
-                count += 1
-        fully_shard(self.transformer, mesh=self.mesh)
-        logger.info(f"Transformer is sharded with {count} FSDP layers.")
-        self.transformer.to_empty(device=self.device)
-        logger.info("Transformer moved to GPU.")
-
-        if self.conf.seed_checkpoint_dir is not None:
-            logger.info(
-                f"Loading seed checkpoint from {self.conf.seed_checkpoint_dir} into transformer..."
-            )
-            model_sd, _ = get_state_dict(
-                self.transformer, [], options=StateDictOptions(strict=False)
-            )
-            dcp.load(
-                model_sd,
-                checkpoint_id=self.conf.seed_checkpoint_dir,
-                planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
-            )
-            logger.info("Seed checkpoint loaded into transformer.")
-        elif not self.model.all_trainable:
-            warn_once(
-                logger,
-                "Model is not fully trainable and no seed checkpoint is provided. "
-                "This may lead to uninitialized parameters.",
-            )
 
     def make_optimizer_and_scheduler(self):
         params = [p for p in self.transformer.parameters() if p.requires_grad]
@@ -253,16 +154,8 @@ class HsdpTrainer(Stateful):
 
     def make_train_dataloader(self):
         dataset: Any = parse_dataset(self.conf.dataset)
-        if hasattr(dataset, "lengths"):
-            dataset_lengths = dataset.lengths
-            logger.info(
-                f"Training Dataset has {len(dataset)} samples, separated into {len(dataset_lengths)} buckets."
-            )
-        else:
-            dataset_lengths = [len(dataset)]
-            logger.info(f"Training Dataset has {len(dataset)} samples.")
         sampler = DistributedBucketSampler(
-            lengths=dataset_lengths,
+            dataset=dataset,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True,
@@ -284,13 +177,11 @@ class HsdpTrainer(Stateful):
             return
         self.processor.load_models("decode", device=self.device)
         dataset: Any = parse_dataset(self.conf.sample_dataset)
-        dataset_length = len(dataset)
-        logger.info(f"Sample Dataset has {dataset_length} samples.")
         sampler = DistributedBucketSampler(
-            lengths=[dataset_length],
+            dataset=dataset,
             num_replicas=self.world_size,
             rank=self.rank,
-            shuffle=True,
+            shuffle=False,
             seed=self.conf.seed,
             grad_acc_steps=1,
         )
@@ -327,17 +218,8 @@ class HsdpTrainer(Stateful):
         self.scheduler.load_state_dict(state_dict["scheduler"])
         self.current_step = state_dict["current_step"]
 
-    def load_dcp_checkpoint(self, checkpoint_dir: str):
-        state_dict = {"app": self}
-        dcp.load(
-            state_dict,
-            checkpoint_id=checkpoint_dir,
-            planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
-        )
-        logger.info(f"Resumed DCP checkpoint from {checkpoint_dir}.")
-
     def get_checkpoint_dir(self, step: int) -> str:
-        return os.path.join(self.conf.checkpoint_dir, f"step_{step:07d}")
+        return os.path.join(self.conf.checkpoint_root, f"step_{step:07d}")
 
     def log_images(self, image, key):
         image = np.array(image)
@@ -347,10 +229,9 @@ class HsdpTrainer(Stateful):
             keys = [None] * self.world_size
             dist.gather_object(key, keys, dst=0)
 
-            unique_images = {}
             for k, img in zip(keys, images, strict=True):
-                unique_images[k] = Image.fromarray(img)
-            for k, img in unique_images.items():
+                if k == "__padding__":
+                    continue
                 self.tracker.track(
                     aim.Image(img), name=f"samples/{k}", step=self.current_step
                 )
@@ -471,7 +352,7 @@ class HsdpTrainer(Stateful):
         if self.conf.checkpoint_limit <= 0:
             return
         checkpoint_dirs = []
-        for name in os.listdir(self.conf.checkpoint_dir):
+        for name in os.listdir(self.conf.checkpoint_root):
             if name.startswith("step_"):
                 checkpoint_dirs.append(name)
         if len(checkpoint_dirs) <= self.conf.checkpoint_limit:
@@ -479,40 +360,21 @@ class HsdpTrainer(Stateful):
         checkpoint_dirs.sort()
         num_to_remove = len(checkpoint_dirs) - self.conf.checkpoint_limit
         for i in range(num_to_remove):
-            dir_to_remove = os.path.join(self.conf.checkpoint_dir, checkpoint_dirs[i])
+            dir_to_remove = os.path.join(self.conf.checkpoint_root, checkpoint_dirs[i])
             shutil.rmtree(dir_to_remove)
             logger.info(f"Removed old checkpoint: {dir_to_remove}")
 
-    def save_dcp_checkpoint(self):
-        checkpoint_dir = self.get_checkpoint_dir(self.current_step)
-        if self.is_main_process:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-        dist.barrier()
-        state_dict = {"app": self}
-        dcp.save(state_dict, checkpoint_id=checkpoint_dir)
-        logger.info(
-            f"Saved DCP checkpoint at step {self.current_step} to {checkpoint_dir}."
-        )
-        self.rotate_checkpoints_maybe()
-
-    def cleanup(self):
-        dist.barrier()
-        dist.destroy_process_group()
-        logger.info("Cleaned up distributed resources.")
-
     def train(self):
         self.init_device_mesh()
-        set_seed(self.conf.seed + self.rank)
+        self.set_seed()
         self.init_tracker()
-        self.load_transformer()
+        self.load_transformer_from_seed(self.model, self.conf.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
         self.make_sample_dataloader_maybe()
 
-        if self.conf.resume_from_step is not None:
-            self.load_dcp_checkpoint(
-                self.get_checkpoint_dir(self.conf.resume_from_step)
-            )
+        if self.conf.resume_from_dir is not None:
+            self.load_dcp_checkpoint(self.conf.resume_from_dir)
 
         self.sample_and_log()
 
@@ -559,7 +421,8 @@ class HsdpTrainer(Stateful):
                 if (self.current_step % self.conf.checkpoint_steps == 0) or (
                     self.current_step == self.conf.train_steps
                 ):
-                    self.save_dcp_checkpoint()
+                    self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
+                    self.rotate_checkpoints_maybe()
 
                 if self.current_step % self.conf.sample_steps == 0:
                     self.sample_and_log()
@@ -568,6 +431,12 @@ class HsdpTrainer(Stateful):
                     break
 
         progress.stop()
+
+        with apply_ema_maybe(self.optimizer):
+            self.save_dcp_checkpoint(
+                self.get_checkpoint_dir(self.current_step) + "_final"
+            )
+
         console.rule("[bold green]Training completed[/bold green]")
 
         self.cleanup()
@@ -580,8 +449,4 @@ class HsdpTrainer(Stateful):
         self.model.load_transformer()
         logger.info("Writing DCP seed checkpoint...")
 
-        model_sd, _ = get_state_dict(
-            self.transformer, [], options=StateDictOptions(strict=False)
-        )
-        dcp.save(model_sd, checkpoint_id=self.conf.seed_checkpoint_dir)
-        logger.info(f"Saved DCP seed checkpoint to {self.conf.seed_checkpoint_dir}.")
+        self.save_transformer_to_seed(self.model, self.conf.seed_checkpoint_dir)

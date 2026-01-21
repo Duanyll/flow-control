@@ -3,6 +3,8 @@ from typing import Any
 from datasets import load_dataset
 from torch.utils.data import ConcatDataset, Dataset
 
+from flow_control.utils.pipeline import DataSink
+
 from .bins_directory import BinsDirectoryDataset, BinsDirectoryDataSink
 from .civitai import CivitaiDataset
 from .directory import (
@@ -27,8 +29,6 @@ DATASET_REGISTRY = {
 
 
 def parse_dataset(dataset_config: DatasetConfig) -> Dataset:
-    if not isinstance(dataset_config, dict):
-        raise ValueError("dataset_config must be a dictionary.")
     if "type" not in dataset_config:
         raise ValueError("dataset_config must contain a 'type' key.")
     dataset_type = dataset_config.pop("type")
@@ -53,12 +53,26 @@ def parse_dataset(dataset_config: DatasetConfig) -> Dataset:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
+DatasinkConfig = dict[str, Any]
+
 DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,
     "pickle_directory": PickleDirectoryDataSink,
     "raw_directory": RawDirectoryDataSink,
     "bins_directory": BinsDirectoryDataSink,
 }
+
+
+def parse_datasink(datasink_config: DatasinkConfig) -> DataSink:
+    if "type" not in datasink_config:
+        raise ValueError("datasink_config must contain a 'type' key.")
+    datasink_type = datasink_config.pop("type")
+
+    if datasink_type in DATASINK_REGISTRY:
+        datasink_class = DATASINK_REGISTRY[datasink_type]
+        return datasink_class(**datasink_config)
+    else:
+        raise ValueError(f"Unknown datasink type: {datasink_type}")
 
 
 # This library is designed to work with batch size 1 datasets.

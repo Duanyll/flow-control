@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 
 class LaunchConfig(BaseModel):
-    mode: Literal["torchrun", "accelerate"]
+    type: Literal["sft", "inference", "accelerate"]
     accelerate_config: str | None = None
     num_processes: int
     omp_num_threads: int | None = None
@@ -21,9 +21,8 @@ def main():
         "config_path", type=str, help="Path to the training configuration file."
     )
     parser.add_argument(
-        "--mode",
+        "--type",
         type=str,
-        choices=["torchrun", "accelerate"],
         default=None,
         help="Do not manually set this argument.",
     )
@@ -35,23 +34,31 @@ def main():
         raise ValueError("Launch configuration section is missing in the config file.")
     launch_config = LaunchConfig(**config_data["launch"])
 
-    if args.mode:
+    if args.type:
         # This is child process
-        if launch_config.mode == "torchrun":
-            from flow_control.training.hsdp import HsdpTrainer
+        if launch_config.type == "sft":
+            from flow_control.training.sft import HsdpSftTrainer
 
             del config_data["launch"]
-            trainer = HsdpTrainer(**config_data)
+            trainer = HsdpSftTrainer(**config_data)
             trainer.train()
-        else:
+        elif launch_config.type == "inference":
+            from flow_control.training.inference import HsdpInference
+
+            del config_data["launch"]
+            trainer = HsdpInference(**config_data)
+            trainer.inference()
+        elif launch_config.type == "accelerate":
             from flow_control.training.accelerate_ddp import AccelerateDdpFinetuner
 
             del config_data["launch"]
             trainer = AccelerateDdpFinetuner(**config_data)
             trainer.train()
+        else:
+            raise ValueError(f"Unknown launch type: {launch_config.type}")
     else:
         # This is parent process
-        if launch_config.mode == "torchrun":
+        if launch_config.type in ["sft", "inference"]:
             cmd = [
                 "torchrun",
                 "--nproc_per_node",
@@ -59,8 +66,8 @@ def main():
                 "-m",
                 "flow_control.scripts.launch",
                 args.config_path,
-                "--mode",
-                "torchrun",
+                "--type",
+                launch_config.type,
             ]
         else:
             cmd = [
@@ -75,7 +82,7 @@ def main():
                 "-m",
                 "flow_control.scripts.launch",
                 args.config_path,
-                "--mode",
+                "--type",
                 "accelerate",
             ]
         if launch_config.omp_num_threads is None:

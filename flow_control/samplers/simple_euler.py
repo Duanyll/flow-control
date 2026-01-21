@@ -7,7 +7,6 @@ from .base import BaseSampler, make_sample_progress
 
 class SimpleEulerSampler(BaseSampler):
     steps: int = 50
-    seed: int = 42
 
     def sample(
         self,

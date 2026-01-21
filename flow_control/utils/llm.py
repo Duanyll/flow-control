@@ -185,9 +185,7 @@ class LLMClient(BaseModel):
         if self._session is None:
             return
         try:
-            asyncio.get_running_loop().create_task(
-                self._session.close()
-            )
+            asyncio.get_running_loop().create_task(self._session.close())
         except RuntimeError:
             asyncio.run(self._session.close())
 

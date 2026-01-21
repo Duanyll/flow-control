@@ -3,13 +3,60 @@ import math
 import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import Sampler
+from torch.utils.data import Dataset, Sampler
+
+from .logging import get_logger
+
+logger = get_logger(__name__)
+
+
+def _patch_dataset_getitem(dataset: Dataset):
+    """
+    Dynamically change the dataset's class to handle (index, is_padding) tuples.
+    """
+    # 1. 防止重复 Patch
+    if getattr(dataset, "_is_patched_for_padding", False):
+        return
+
+    # 2. 获取原始类
+    OriginalClass = dataset.__class__
+
+    # 3. 定义一个新的子类
+    class PatchedDataset(OriginalClass):
+        def __getitem__(self, item):
+            # 默认情况：假设是正常调用
+            real_index = item
+            is_padding = False
+
+            # 检查是否是我们 Sampler 传来的特殊 Tuple
+            if isinstance(item, tuple):
+                real_index, is_padding = item
+
+            # 4. 调用父类（原始 Dataset）的逻辑获取数据
+            # 使用 super() 确保原本的文件读取/处理逻辑正常执行
+            data = super().__getitem__(real_index)
+
+            # 5. 如果是 Padding 数据（重复数据）
+            if is_padding:
+                data = data.copy()
+                data["__key__"] = "__padding__"
+                # 还可以加个 flag 方便后面过滤
+                data["_is_padding_sample"] = True
+
+            return data
+
+    # 6. "偷天换日"：修改实例的类
+    dataset.__class__ = PatchedDataset
+    # 标记已处理
+    dataset._is_patched_for_padding = True  # type: ignore[attr-defined]
+
+    logger.info(f"Patched dataset {type(dataset).__name__} to handle padding indices.")
 
 
 class DistributedBucketSampler(Sampler, Stateful):
     def __init__(
         self,
-        lengths,
+        dataset: Dataset,
         num_replicas=None,
         rank=None,
         shuffle=True,
@@ -22,7 +69,15 @@ class DistributedBucketSampler(Sampler, Stateful):
         if rank is None:
             rank = dist.get_rank()
 
-        self.lengths = lengths  # 每个 bucket 的长度列表
+        if hasattr(dataset, "lengths"):
+            self.lengths = dataset.lengths  # type: ignore[attr-defined]
+        else:
+            self.lengths = [len(dataset)]  # type: ignore
+        _patch_dataset_getitem(dataset)
+        logger.info(
+            f"Initialized DistributedBucketSampler with {len(self.lengths)} buckets and {sum(self.lengths)} samples."
+        )
+
         self.num_replicas = num_replicas
         self.rank = rank
         self.shuffle = shuffle
@@ -41,52 +96,85 @@ class DistributedBucketSampler(Sampler, Stateful):
         )
 
     def __iter__(self):
-        # 为了保证不同 epoch 的补齐和打乱逻辑不同，使用 epoch 相关的随机种子
+        # 保持随机种子逻辑不变
         g_cpu = torch.Generator(device="cpu")
         g_cpu.manual_seed(self.seed + self.epoch)
 
-        # 1. 为每个长度创建索引列表，并补齐到 num_replicas 的整数倍
-        blocks = []
+        blocks = []  # 存放的是 [(idx, is_padding), (idx, is_padding), ...] 的列表
+
+        # -----------------------------------------------------------
+        # 1. 桶内补齐 (Padding for World Size)
+        # -----------------------------------------------------------
         cumulative_size = 0
         for length in self.lengths:
-            # 计算需要补齐多少个样本
             total_size = math.ceil(length / self.num_replicas) * self.num_replicas
-            # 创建索引列表
-            if self.shuffle:
-                indices = torch.randperm(length, generator=g_cpu)
-            else:
-                indices = torch.arange(length)
-            # 补齐索引，取前 total_size - length 个样本，考虑 length < total_size - length 的情况
-            while len(indices) < total_size:
-                indices = torch.cat(
-                    (indices, indices[: min(total_size - len(indices), len(indices))])
-                )
-            indices += cumulative_size
-            cumulative_size += length
-            # 2. 将索引列表分割成 num_replicas 个块
-            indices = indices.view(-1, self.num_replicas).tolist()
-            blocks.extend(indices)
 
-        # 3. 打乱 Blocks 并补齐到梯度累积步数的整数倍
+            # 生成原始索引，并标记为 False (真实数据)
+            if self.shuffle:
+                raw_indices = torch.randperm(length, generator=g_cpu).tolist()
+            else:
+                raw_indices = list(range(length))
+
+            # 加上 offset
+            current_indices = [(idx + cumulative_size, False) for idx in raw_indices]
+
+            # 计算需要补齐的数量
+            num_padding = total_size - length
+
+            # 补齐逻辑：从头复制，但标记为 True (重复数据/Padding)
+            if num_padding > 0:
+                padding_indices = []
+                while len(padding_indices) < num_padding:
+                    source = current_indices[
+                        : min(num_padding - len(padding_indices), len(current_indices))
+                    ]
+                    padding_indices.extend([(x[0], True) for x in source])
+
+                current_indices.extend(padding_indices)
+
+            cumulative_size += length
+
+            # 分割成 Block，每个 Block 大小为 num_replicas
+            # current_indices 结构: [(idx, bool), (idx, bool)...]
+            for i in range(0, len(current_indices), self.num_replicas):
+                blocks.append(current_indices[i : i + self.num_replicas])
+
+        # -----------------------------------------------------------
+        # 2. 梯度累积补齐 (Padding for Grad Accumulation)
+        # -----------------------------------------------------------
         total_blocks = (
             math.ceil(len(blocks) / self.grad_acc_steps) * self.grad_acc_steps
         )
+
         if self.shuffle:
-            # 使用同步的随机顺序
             shuffled_idx = torch.randperm(len(blocks), generator=g_cpu).tolist()
             blocks = [blocks[i] for i in shuffled_idx]
-        while len(blocks) < total_blocks:
-            blocks.extend(blocks[: min(total_blocks - len(blocks), len(blocks))])
 
-        # 4. 每个进程取属于自己的索引
+        while len(blocks) < total_blocks:
+            # 取出需要复制的 block
+            needed = total_blocks - len(blocks)
+            source_blocks = blocks[: min(needed, len(blocks))]
+
+            padding_blocks = []
+            for blk in source_blocks:
+                # blk 结构: [(idx, bool), (idx, bool)...]
+                # 创建新副本，全部设为 False
+                padding_blocks.append([(x[0], True) for x in blk])
+
+            blocks.extend(padding_blocks)
+
+        # -----------------------------------------------------------
+        # 3. 分发给当前进程
+        # -----------------------------------------------------------
+        # 每个 block 长度为 num_replicas，取出属于当前 rank 的那个元组
         subsample = [b[self.rank] for b in blocks]
 
-        # 5. 断点恢复逻辑
         if self.counter > 0:
             subsample = subsample[self.counter :]
 
-        for index in subsample:
-            yield index
+        for item in subsample:
+            # item 是 (index, is_padding)
+            yield item
             self.counter += 1
 
         self.counter = 0

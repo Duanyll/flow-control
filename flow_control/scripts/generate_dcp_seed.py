@@ -1,6 +1,6 @@
 import argparse
 
-from flow_control.training.hsdp import HsdpTrainer
+from flow_control.training.sft import HsdpSftTrainer
 from flow_control.utils.common import load_config_file
 
 
@@ -14,7 +14,7 @@ def main():
     args = parser.parse_args()
     config_path = args.config_path
     config = load_config_file(config_path)
-    finetuner = HsdpTrainer(**config)
+    finetuner = HsdpSftTrainer(**config)
     finetuner.generate_seed_checkpoint()
 
 
