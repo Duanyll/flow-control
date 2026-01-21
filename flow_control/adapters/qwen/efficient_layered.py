@@ -126,10 +126,13 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
 
 
 class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
-    attn_mask_mode: Literal["full", "per-layer", "per-layer-strict"] = "per-layer"
+    attn_mask_mode: Literal["full", "text-only", "per-layer", "per-layer-strict"] = (
+        "per-layer"
+    )
     """
     Attention mask mode for the adapter. Options are:
     - "full": No attention masking, full attention.
+    - "text-only": Only restrict each layer to attend to the text prompts.
     - "per-layer": Each layer attends only to themselves, their corresponding text prompt,
       and the base image. They do not attend to other layers.
     - "per-layer-strict": Similar to "per-layer", but the base image does not attend to
@@ -177,7 +180,8 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             total_len = base_len + sum(layer_lens) + sum(txt_lens)
             layer_ids = torch.zeros(total_len, dtype=torch.long, device=self.device)
             current_loc_layer = base_len
-            current_loc_txt = base_len + sum(layer_lens)
+            txt_begin = base_len + sum(layer_lens)
+            current_loc_txt = txt_begin
             for i, (layer_size, txt_size) in enumerate(
                 zip(layer_lens, txt_lens, strict=True)
             ):
@@ -185,6 +189,11 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
                 current_loc_layer += layer_size
                 layer_ids[current_loc_txt : current_loc_txt + txt_size] = i + 1
                 current_loc_txt += txt_size
+
+            def text_only_mask_fn(b, h, q_idx, kv_idx):
+                return (layer_ids[q_idx] == layer_ids[kv_idx]) | (
+                    (q_idx < txt_begin) & (kv_idx < txt_begin)
+                )
 
             def per_layer_mask_fn(b, h, q_idx, kv_idx):
                 return (
@@ -198,11 +207,13 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
                     layer_ids[kv_idx] == 0
                 )
 
-            mask_fn = (
-                per_layer_mask_fn
-                if self.attn_mask_mode == "per-layer"
-                else per_layer_strict_mask_fn
-            )
+            mask_fn_dict = {
+                "text-only": text_only_mask_fn,
+                "per-layer": per_layer_mask_fn,
+                "per-layer-strict": per_layer_strict_mask_fn,
+            }
+
+            mask_fn = mask_fn_dict[self.attn_mask_mode]
 
             block_mask = self._get_compiled_create_block_mask()(
                 mask_fn,

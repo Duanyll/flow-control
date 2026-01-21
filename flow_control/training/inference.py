@@ -136,7 +136,7 @@ class HsdpInference(HsdpEngine):
         return progress, task
 
     @torch.no_grad()
-    def inference(self):
+    def run(self):
         self.init_device_mesh()
         self.set_seed()
         self.load_transformer_from_seed(self.model, self.conf.seed_checkpoint_dir)

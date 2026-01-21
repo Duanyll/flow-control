@@ -156,3 +156,34 @@ class BaseQwenImageAdapter(BaseModelAdapter):
             dtype=torch.long,
             device=prompt_embeds.device,
         )
+
+    def latent_length_test(self):
+        def mock_batch(image_size: tuple[int, int], text_length: int):
+            img_len = (image_size[0] // 16) * (image_size[1] // 16)
+            total_len = img_len + text_length
+            return {
+                "image_size": image_size,
+                "clean_latents": torch.randn(
+                    1,
+                    img_len,
+                    self.transformer.config.in_channels,  # type: ignore
+                    device=self.device,
+                    dtype=self.dtype,
+                ),
+                "prompt_embeds": torch.randn(
+                    1,
+                    text_length,
+                    self.transformer.config.joint_attention_dim,  # type: ignore
+                    device=self.device,
+                    dtype=self.dtype,
+                ),
+                "latent_length": total_len,
+            }
+
+        yield mock_batch((512, 512), 64)
+        yield mock_batch((768, 768), 64)
+        yield mock_batch((1024, 1024), 64)
+        yield mock_batch((1328, 1328), 64)
+
+        for text_length in range(512, 32768, 512):
+            yield mock_batch((1328, 1328), text_length)

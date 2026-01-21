@@ -408,7 +408,7 @@ class AccelerateDdpFinetuner(BaseModel):
         )
         return progress, task
 
-    def train(self):
+    def run(self):
         set_seed(self.seed)
         self._load_models_for_training()
 

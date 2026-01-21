@@ -41,19 +41,19 @@ def main():
 
             del config_data["launch"]
             trainer = HsdpSftTrainer(**config_data)
-            trainer.train()
+            trainer.run()
         elif launch_config.type == "inference":
             from flow_control.training.inference import HsdpInference
 
             del config_data["launch"]
             trainer = HsdpInference(**config_data)
-            trainer.inference()
+            trainer.run()
         elif launch_config.type == "accelerate":
             from flow_control.training.accelerate_ddp import AccelerateDdpFinetuner
 
             del config_data["launch"]
             trainer = AccelerateDdpFinetuner(**config_data)
-            trainer.train()
+            trainer.run()
         else:
             raise ValueError(f"Unknown launch type: {launch_config.type}")
     else:

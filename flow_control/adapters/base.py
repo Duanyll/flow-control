@@ -163,3 +163,6 @@ class BaseModelAdapter(BaseModel, ABC):
             ph=self.patch_size,
             pw=self.patch_size,
         )
+
+    def latent_length_test(self):
+        raise NotImplementedError()

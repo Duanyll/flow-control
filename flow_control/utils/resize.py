@@ -61,7 +61,7 @@ def resize_to_resolution(
 
 
 def resize_to_closest_resolution(
-    image: torch.Tensor, target_resolutions: list[tuple[int, int]], crop: bool = True
+    image: torch.Tensor, target_resolutions: ResolutionList, crop: bool = True
 ) -> torch.Tensor:
     """
     Resize an image to the closest aspect ratio from a list of target resolutions.

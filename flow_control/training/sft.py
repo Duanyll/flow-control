@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import time
 from typing import Any
 
 import aim
@@ -8,6 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from einops import reduce
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -81,6 +83,8 @@ class HsdpTrainerConfig(HsdpEngineConfig):
     train_steps: int = 10000
     ema_decay: float = 0.999
     clip_grad_norm: float = 1.0
+
+    latent_length_test_mode: bool = False
 
 
 class HsdpSftTrainer(HsdpEngine, Stateful):
@@ -364,7 +368,11 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             shutil.rmtree(dir_to_remove)
             logger.info(f"Removed old checkpoint: {dir_to_remove}")
 
-    def train(self):
+    def run(self):
+        if self.conf.latent_length_test_mode:
+            self.run_latent_length_test()
+            return
+
         self.init_device_mesh()
         self.set_seed()
         self.init_tracker()
@@ -450,3 +458,45 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         logger.info("Writing DCP seed checkpoint...")
 
         self.save_transformer_to_seed(self.model, self.conf.seed_checkpoint_dir)
+
+    def run_latent_length_test(self):
+        logger.warning(
+            "Running in latent length test mode since enabled in config. This will not perform training, but will test "
+            "increasing latent lengths until OOM. This is useful for finding the maximum latent length that fits in memory."
+        )
+
+        self.init_device_mesh()
+        self.set_seed()
+        self.load_transformer_from_seed(self.model)
+        self.make_optimizer_and_scheduler()
+
+        console.rule("[bold blue]Starting latent length test[/bold blue]")
+
+        current_len = 0
+        best_len = 0
+        try:
+            for batch in self.model.latent_length_test():
+                current_len = batch["latent_length"]
+                start_time = time.time()
+                logger.info(f"Testing latent length: {current_len}")
+                batch = deep_cast_float_dtype(batch, self.model.dtype)
+                batch = deep_move_to_device(batch, self.device)
+                loss = self.train_step(batch)
+                loss.backward()
+                self.optimizer.step()
+                elapsed_time = time.time() - start_time
+                logger.info(
+                    f"Successfully trained with latent length {current_len} in {elapsed_time:.2f} seconds."
+                )
+                best_len = current_len
+            logger.info(
+                f"Latent length test completed successfully up to length {current_len}."
+            )
+        except torch.cuda.OutOfMemoryError:
+            logger.error(
+                f"Out of memory error encountered at latent length {current_len}."
+            )
+        finally:
+            console.rule("[bold red]Latent length test completed[/bold red]")
+            console.print(Panel.fit(f"Maximum latent length: [bold]{best_len}[/bold]"))
+            self.cleanup()
