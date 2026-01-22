@@ -13,6 +13,11 @@ logger = get_logger(__name__)
 
 
 class PatchedQwenEmbedRope(nn.Module):
+    """
+    Reimplementation of QwenEmbedRope from diffusers to correctly utilize nn.Module' buffer system.
+    The original implementation is not compatible with meta device loading.
+    """
+
     inv_freq_t: torch.Tensor
     inv_freq_h: torch.Tensor
     inv_freq_w: torch.Tensor
@@ -42,7 +47,7 @@ class PatchedQwenEmbedRope(nn.Module):
         device: torch.device | None = None,
         max_txt_seq_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        fhws = video_fhw[0]
+        fhws = video_fhw[0]  # Only support batch size 1
 
         if device is None:
             device = self.inv_freq_t.device
@@ -150,6 +155,9 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         return model_pred
 
     def _make_attention_mask(self, prompt_embeds):
+        """
+        Depreacted: QwenImageTransformer2DModel will generate it internally.
+        """
         b, n, d = prompt_embeds.shape
         return torch.ones(
             (b, n),

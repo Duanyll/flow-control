@@ -4,6 +4,7 @@ import tomllib
 from typing import Literal
 
 from pydantic import BaseModel
+from rich import print
 
 
 class LaunchConfig(BaseModel):
@@ -11,6 +12,7 @@ class LaunchConfig(BaseModel):
     accelerate_config: str | None = None
     num_processes: int
     omp_num_threads: int | None = None
+    nccl_p2p_level: str | None = None
 
 
 def main():
@@ -85,14 +87,24 @@ def main():
                 "--type",
                 "accelerate",
             ]
+
         if launch_config.omp_num_threads is None:
             launch_config.omp_num_threads = (
                 os.cpu_count() or 0
             ) // launch_config.num_processes
         if launch_config.omp_num_threads > 0:
-            print(f"Setting OMP_NUM_THREADS to {launch_config.omp_num_threads}")
+            print(
+                f"[green]Setting OMP_NUM_THREADS: [/green]{launch_config.omp_num_threads}"
+            )
             os.environ["OMP_NUM_THREADS"] = str(launch_config.omp_num_threads)
-        print(f"Executing command: {' '.join(cmd)}")
+
+        if launch_config.nccl_p2p_level:
+            print(
+                f"[green]Setting NCCL_P2P_LEVEL: [/green]{launch_config.nccl_p2p_level}"
+            )
+            os.environ["NCCL_P2P_LEVEL"] = launch_config.nccl_p2p_level
+
+        print(f"[blue]Executing command:[/blue] {' '.join(cmd)}")
         os.execvp(cmd[0], cmd)
 
 

@@ -4,6 +4,9 @@ import torch
 from pydantic import BeforeValidator, PlainSerializer
 
 from .ema import make_ema_optimizer
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def validate_torch_dtype(v: Any) -> torch.dtype:
@@ -64,6 +67,7 @@ def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
     else:
         ctor = getattr(torch.optim, class_name)
     if ema_decay != 1.0:
+        logger.info(f"Patching optimizer {class_name} with EMA decay {ema_decay}")
         ctor = make_ema_optimizer(ctor)
         return ctor(parameters, ema_decay=ema_decay, **conf)
     else:

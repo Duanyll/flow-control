@@ -14,7 +14,7 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
 
     class BatchType(Flux1PeftLoraAdapter.BatchType):
         control_latents: torch.Tensor
-        """`[B, C, H, W]` The VAE encoded control condition image."""
+        """`[B, N, D]` The VAE encoded control condition image."""
 
     def predict_velocity(
         self,

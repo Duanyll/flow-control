@@ -21,6 +21,7 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
         num_layers: int
         """Number of layers in the layered image generation."""
         image_latents: torch.Tensor
+        """`[B, N, D]` Tensor representing input image latents."""
 
     def predict_velocity(
         self,

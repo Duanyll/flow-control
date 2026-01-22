@@ -484,6 +484,7 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                 loss = self.train_step(batch)
                 loss.backward()
                 self.optimizer.step()
+                self.optimizer.zero_grad()
                 elapsed_time = time.time() - start_time
                 logger.info(
                     f"Successfully trained with latent length {current_len} in {elapsed_time:.2f} seconds."

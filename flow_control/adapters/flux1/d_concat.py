@@ -23,7 +23,7 @@ class Flux1DConcatAdapter(BaseFlux1Adapter):
 
     class BatchType(BaseFlux1Adapter.BatchType):
         control_latents: torch.Tensor
-        """`[B, C, H, W]` The VAE encoded control condition image."""
+        """`[B, N, D]` The VAE encoded control condition image."""
 
     def _install_modules(self):
         transformer = self.transformer

@@ -1,3 +1,4 @@
+import functools
 import json
 import tomllib
 from collections.abc import MutableMapping
@@ -9,6 +10,10 @@ import torch
 import yaml
 from einops import rearrange, repeat
 from PIL import Image
+
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def flatten_dict(dictionary, parent_key="", separator="_"):
@@ -229,3 +234,29 @@ def load_config_file(path: str) -> dict:
             return tomllib.load(f)
     else:
         raise ValueError(f"Unsupported config file format: {path}")
+
+
+_flex_attention_compiled = False
+
+
+def ensure_compiled_flex_attention():
+    global _flex_attention_compiled
+    if not _flex_attention_compiled:
+        import torch.nn.attention.flex_attention as flex_attention
+
+        flex_attention.flex_attention = torch.compile(
+            functools.partial(
+                flex_attention.flex_attention,
+                # These options are required for poor consumer grade GPUs like RTX 3090 and 4090
+                kernel_options={
+                    "BLOCK_M": 64,
+                    "BLOCK_N": 64,
+                    "BLOCK_M1": 32,
+                    "BLOCK_N1": 64,
+                    "BLOCK_M2": 64,
+                    "BLOCK_N2": 32,
+                },
+            )
+        )
+        logger.info("Flex attention function has been compiled.")
+        _flex_attention_compiled = True

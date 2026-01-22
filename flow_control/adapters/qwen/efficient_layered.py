@@ -5,6 +5,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from flow_control.utils.common import ensure_compiled_flex_attention
 from flow_control.utils.logging import get_logger
 
 from .base import BaseQwenImageAdapter
@@ -42,6 +43,24 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         device: torch.device | None = None,
         max_txt_seq_len: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        :param self: Description
+        :param video_fhw: Originally list[list[tuple[int, int, int]]]. QwenTransformer2DModel directly passes its
+            `img_shapes` argument here, so we utilize it to carry additional `txt_seq_lens` information. In `video_fhw`,
+            a three element tuple `(frame, height, width)` indicates the full frame, while a five element tuple
+            `(frame, top, bottom, left, right)` indicates a cropped frame. Since the first image is always the base image,
+            we can infer `all_height` and `all_width` from it to center the cropped frames if `scale_rope` is True.
+        :type video_fhw: Any
+        :param txt_seq_lens: Unfortunately, this parameter is marked as deprecated in newer QwenTransformer2DModel,
+            and thus will always be None. We have to squeeze this information from `video_fhw` instead.
+        :type txt_seq_lens: list[int] | None
+        :param device: Not quite useful for the EfficientLayered patch, kept for API compatibility.
+        :type device: torch.device | None
+        :param max_txt_seq_len: Not quite useful for the EfficientLayered patch, kept for API compatibility.
+        :type max_txt_seq_len: int | None
+        :return: Description
+        :rtype: tuple[Tensor, Tensor]
+        """
         if isinstance(video_fhw, tuple):
             video_fhw, txt_seq_lens = video_fhw
         if txt_seq_lens is None:
@@ -127,12 +146,13 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
 
 class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
     attn_mask_mode: Literal["full", "text-only", "per-layer", "per-layer-strict"] = (
-        "per-layer"
+        "text-only"
     )
     """
     Attention mask mode for the adapter. Options are:
     - "full": No attention masking, full attention.
-    - "text-only": Only restrict each layer to attend to the text prompts.
+    - "text-only": All layers can attend to each other, and the base image, but text prompts
+      can only attend to their corresponding layers.
     - "per-layer": Each layer attends only to themselves, their corresponding text prompt,
       and the base image. They do not attend to other layers.
     - "per-layer-strict": Similar to "per-layer", but the base image does not attend to
@@ -142,6 +162,9 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
 
     class BatchType(BaseQwenImageAdapter.BatchType):
         image_latents: torch.Tensor
+        """
+        `[B, N, D]` Tensor representing input image latents.
+        """
         layer_boxes: list[tuple[int, int, int, int]]
         """
         `(top, bottom, left, right)` in pixels for each layer in the image. Should be aligned with
@@ -150,6 +173,15 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         text_lengths: list[int]
         """
         Lengths of prompts corresponding to each layer in the image.
+        """
+        prompt_embeds: torch.Tensor
+        """
+        `[B, N, D]` Multimodal embeddings per layer from Qwen2.5-VL-7B, already concatenated
+        along the sequence dimension.
+        """
+        noisy_latents: torch.Tensor
+        """
+        `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
         """
 
     def _get_compiled_create_block_mask(self):
@@ -163,6 +195,8 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
 
     def load_transformer(self, use_meta_device=False):
         super().load_transformer(use_meta_device)
+        # Must use flex attention backend for block masks
+        ensure_compiled_flex_attention()
         self.transformer.set_attention_backend("flex")
         orig_module = self.transformer.pos_embed
         self.transformer.pos_embed = EfficientLayeredQwenEmbedRope(  # type: ignore
@@ -176,7 +210,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
     ) -> BlockMask | None:
         if self.attn_mask_mode == "full":
             return None
-        elif self.attn_mask_mode in ["per-layer", "per-layer-strict"]:
+        elif self.attn_mask_mode in ["text-only", "per-layer", "per-layer-strict"]:
             total_len = base_len + sum(layer_lens) + sum(txt_lens)
             layer_ids = torch.zeros(total_len, dtype=torch.long, device=self.device)
             current_loc_layer = base_len
@@ -191,8 +225,11 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
                 current_loc_txt += txt_size
 
             def text_only_mask_fn(b, h, q_idx, kv_idx):
-                return (layer_ids[q_idx] == layer_ids[kv_idx]) | (
-                    (q_idx < txt_begin) & (kv_idx < txt_begin)
+                return (
+                    (layer_ids[q_idx] == layer_ids[kv_idx])
+                    | ((q_idx < txt_begin) & (kv_idx < txt_begin))
+                    # Shall we allow text to attend to base image?
+                    | (layer_ids[kv_idx] == 0)
                 )
 
             def per_layer_mask_fn(b, h, q_idx, kv_idx):
@@ -237,13 +274,12 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         )
 
         img_shapes = [
-            [1, h // 16, w // 16]
+            [(1, h // 16, w // 16)]
             + [
                 (1, top // 16, bottom // 16, left // 16, right // 16)
                 for (top, bottom, left, right) in batch["layer_boxes"]
             ]
         ] * b
-        txt_seq_lens = batch["text_lengths"]
 
         block_mask = self.make_block_mask(
             base_len=batch["image_latents"].shape[1],
@@ -258,7 +294,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             hidden_states=input_latents,
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],
-            img_shapes=(img_shapes, txt_seq_lens),
+            img_shapes=(img_shapes, batch["text_lengths"]),
             attention_kwargs={
                 "attention_mask": block_mask,
             },

@@ -56,9 +56,9 @@ class BaseModelAdapter(BaseModel, ABC):
         image_size: tuple[int, int]
         """`(H, W)` The size of the image to generate."""
         clean_latents: torch.Tensor
-        """`[B, C, H, W]` The clean latents. Only available during training."""
+        """`[B, N, D]` The clean latents. Only available during training."""
         noisy_latents: torch.Tensor
-        """`[B, C, H, W]` The noisy latents to denoise."""
+        """`[B, N, D]` The noisy latents to denoise."""
 
     def load_transformer(self, use_meta_device: bool = False):
         self.transformer = self.hf_model.load_model(use_meta_device=use_meta_device)  # type: ignore
