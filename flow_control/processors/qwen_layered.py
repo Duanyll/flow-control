@@ -134,9 +134,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         if not isinstance(images, list):
             images = [images]
 
-        all_images = torch.stack(
-            [ensure_alpha_channel(image) for image in images], dim=2
-        )
+        all_images = torch.cat([ensure_alpha_channel(image) for image in images], dim=0)
         latents = self.vae.encode(all_images)
         latents = self._pack_latents_layered(latents)
         return latents
@@ -144,7 +142,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
     def _pack_latents_layered(self, latents: torch.Tensor) -> torch.Tensor:
         return rearrange(
             latents,
-            "b c f (h ph) (w pw) -> b (f h w) (c ph pw)",
+            "f c (h ph) (w pw) -> 1 (f h w) (c ph pw)",
             ph=self.patch_size,
             pw=self.patch_size,
         )
@@ -155,8 +153,8 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         latents = self._unpack_latents_layered(latents, size)
         images = self.vae.decode(latents)
-        base_image = images[:, :, 0, :, :]
-        layer_images = [images[:, :, i + 1, :, :] for i in range(images.shape[2] - 1)]
+        base_image = images[0:1]
+        layer_images = [images[i + 1 : i + 2] for i in range(images.shape[0] - 1)]
         return base_image, layer_images
 
     def _unpack_latents_layered(
@@ -167,8 +165,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         w = w // self.vae_scale_factor
         return rearrange(
             latents,
-            "b (f h w) (c ph pw) -> b c f (h ph) (w pw)",
-            f=self.default_num_layers + 1,
+            "1 (f h w) (c ph pw) -> f c (h ph) (w pw)",
             h=h // self.patch_size,
             w=w // self.patch_size,
             ph=self.patch_size,
@@ -179,6 +176,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         if "prompt_embeds" not in batch:
             if "prompt" not in batch:
                 batch["prompt"] = await self.generate_caption(batch["clean_image"])
+            # The layered model does not pass input image to the text encoder
             prompt_embeds = self.encode_prompt(batch["prompt"])
             batch["prompt_embeds"] = prompt_embeds
 
@@ -242,7 +240,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
         w = w // self.vae_scale_factor
         f = batch.get("num_layers", 0) + 1
         latents = torch.randn(
-            (1, c, f, h, w), generator=generator, device=device, dtype=dtype
+            (f, c, h, w), generator=generator, device=device, dtype=dtype
         )
         batch["noisy_latents"] = self._pack_latents_layered(latents)
         return batch["noisy_latents"]

@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 class PatchedQwenEmbedRope(nn.Module):
     """
-    Reimplementation of QwenEmbedRope from diffusers to correctly utilize nn.Module' buffer system.
+    Reimplementation of QwenEmbedRope from diffusers to correctly utilize nn.Module's buffer system.
     The original implementation is not compatible with meta device loading.
     """
 

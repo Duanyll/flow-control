@@ -62,7 +62,12 @@ def _serialize_with_field_names(obj: Any, base_path: str, field_path: str = "") 
             # Save as tensor
             file_path = os.path.join(base_path, f"{file_name}.pt")
             torch.save(obj, file_path)
-            return {"__type__": "tensor", "file": f"{file_name}.pt"}
+            return {
+                "__type__": "tensor",
+                "file": f"{file_name}.pt",
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype),
+            }
 
     # Handle PIL.Image
     if isinstance(obj, Image.Image):
@@ -78,7 +83,12 @@ def _serialize_with_field_names(obj: Any, base_path: str, field_path: str = "") 
         file_name = clean_path if clean_path else "array"
         file_path = os.path.join(base_path, f"{file_name}.npy")
         np.save(file_path, obj)
-        return {"__type__": "ndarray", "file": f"{file_name}.npy"}
+        return {
+            "__type__": "ndarray",
+            "file": f"{file_name}.npy",
+            "shape": list(obj.shape),
+            "dtype": str(obj.dtype),
+        }
 
     # Handle dict
     if isinstance(obj, dict):

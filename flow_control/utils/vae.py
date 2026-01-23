@@ -173,7 +173,7 @@ class QwenImageVAE(BaseVAE):
             images = rearrange(images, "b c h w -> b c 1 h w")
         images = images * 2 - 1
         images = images.to(torch.bfloat16)
-        latents = self.model.encode(images).latent_dist.sample()
+        latents = self.model.encode(images).latent_dist.mode()
         latents_mean = (
             torch.tensor(self.model.config.latents_mean)
             .view(1, self.model.config.z_dim, 1, 1, 1)

@@ -325,9 +325,10 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
     def train_step(self, batch: Any):
         timesteps = self.conf.timestep_weighting.sample_timesteps(1)
         timesteps = timesteps.to(device=self.device, dtype=self.model.dtype)
-        clean = batch["clean_latents"]
+        clean = batch["clean_latents"].float()
         noise = torch.randn_like(clean)
         batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
+        batch = deep_cast_float_dtype(batch, self.model.dtype)
 
         model_pred = self.model.predict_velocity(batch, timesteps).float()
         target = noise.float() - clean.float()
@@ -401,7 +402,6 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                 is_sync_step = (i + 1) % self.grad_acc_steps == 0
                 self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
                 loss = self.train_step(batch) / self.grad_acc_steps
                 loss.backward()
@@ -448,16 +448,6 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         console.rule("[bold green]Training completed[/bold green]")
 
         self.cleanup()
-
-    def generate_seed_checkpoint(self):
-        if self.conf.seed_checkpoint_dir is None:
-            raise ValueError("seed_checkpoint_dir must be specified to generate seed.")
-
-        logger.info("Reading HuggingFace model weights to generate seed checkpoint...")
-        self.model.load_transformer()
-        logger.info("Writing DCP seed checkpoint...")
-
-        self.save_transformer_to_seed(self.model, self.conf.seed_checkpoint_dir)
 
     def run_latent_length_test(self):
         logger.warning(

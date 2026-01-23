@@ -138,6 +138,7 @@ class HsdpEngine(Stateful):
         return model
 
     def save_transformer_to_seed(self, model: ModelAdapter, seed_checkpoint_dir: str):
+        logger.info(f"Saving DCP seed checkpoint to {seed_checkpoint_dir}...")
         model_sd, _ = get_state_dict(
             model.transformer, [], options=StateDictOptions(strict=False)
         )

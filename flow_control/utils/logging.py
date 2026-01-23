@@ -10,8 +10,9 @@ Logging behavior:
   - Set up global logging handlers for transformers and diffusers.
 - Child processes spawned by multiprocessing:
   - Should call setup_global_handler with a QueueHandler to route logs to the main process.
-  - Import and call setup_global_handler as early as possible in the child process.
-- Child processes launched by accelerate:
+  - Import and call setup_global_handler with include_name=False as early as possible in the child process. 
+    Pass a QueueHandler connected to the main process's listener.
+- Child processes launched by accelerate or torchrun:
   - Due to limitations, just silence all logs to avoid clutter.
 """
 

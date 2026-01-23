@@ -40,7 +40,7 @@ class Message(TypedDict):
 
 class LLMClient(BaseModel):
     base_url: str = "https://api.openai.com/v1"
-    api_key: str
+    api_key: str = ""
     timeout: int = 120
     model: str = "auto"
     max_tokens: int = 2048

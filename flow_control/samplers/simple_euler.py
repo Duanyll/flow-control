@@ -29,8 +29,8 @@ class SimpleEulerSampler(BaseSampler):
         device = model.device
         dtype = model.dtype
 
-        sigmas = sigmas.to(device=device)
-        latents = batch["noisy_latents"]
+        sigmas = sigmas.to(device=device, dtype=torch.float32)
+        latents = batch["noisy_latents"].float()
 
         with make_sample_progress() as progress:
             task = progress.add_task("Sampling", total=self.steps)

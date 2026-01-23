@@ -17,6 +17,21 @@
             "args": [
                 "data/civitai_1612085/train_qwen_ddp.toml"
             ]
+        },
+        {
+            "name": "Python Debugger: Inference",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "args": [
+                "--nproc_per_node", 
+                "1",
+                "-m",
+                "flow_control.scripts.launch",
+                "data/qwen_layered_test/inference.toml",
+                "--type",
+                "inference"
+            ]
         }
     ]
 }

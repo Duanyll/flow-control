@@ -6,7 +6,6 @@ from torch.utils.data import ConcatDataset, Dataset
 from flow_control.utils.pipeline import DataSink
 
 from .bins_directory import BinsDirectoryDataset, BinsDirectoryDataSink
-from .civitai import CivitaiDataset
 from .directory import (
     PickleDirectoryDataset,
     PickleDirectoryDataSink,
@@ -14,13 +13,14 @@ from .directory import (
     RawDirectoryDataSink,
 )
 from .lmdb import LMDBDataset, LMDBDataSink
+from .plain import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
 
 DatasetConfig = dict[str, Any]
 
 DATASET_REGISTRY = {
     "lmdb": LMDBDataset,
-    "civitai": CivitaiDataset,
+    "plain_directory": PlainDirectoryDataset,
     "pickle_directory": PickleDirectoryDataset,
     "raw_directory": RawDirectoryDataset,
     "bins_directory": BinsDirectoryDataset,
