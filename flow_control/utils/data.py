@@ -20,6 +20,10 @@ def _patch_dataset_getitem(dataset: Dataset):
 
     # 2. 获取原始类
     OriginalClass = dataset.__class__
+    original_class_name = OriginalClass.__name__
+    if original_class_name == "PatchedDataset":
+        # 已经被 Patch 过了
+        return
 
     # 3. 定义一个新的子类
     class PatchedDataset(OriginalClass):
@@ -50,7 +54,7 @@ def _patch_dataset_getitem(dataset: Dataset):
     # 标记已处理
     dataset._is_patched_for_padding = True  # type: ignore[attr-defined]
 
-    logger.info(f"Patched dataset {type(dataset).__name__} to handle padding indices.")
+    logger.info(f"Patched dataset {original_class_name} to handle padding indices.")
 
 
 class DistributedBucketSampler(Sampler, Stateful):

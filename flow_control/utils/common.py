@@ -258,5 +258,10 @@ def ensure_compiled_flex_attention():
                 },
             )
         )
+
+        flex_attention.create_block_mask = torch.compile(
+            flex_attention.create_block_mask
+        )
+
         logger.info("Flex attention function has been compiled.")
         _flex_attention_compiled = True

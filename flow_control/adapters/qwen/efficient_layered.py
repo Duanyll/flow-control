@@ -2,8 +2,8 @@ from typing import Any, Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.attention.flex_attention as flex_attention
 from einops import rearrange, repeat
-from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from flow_control.utils.common import ensure_compiled_flex_attention
 from flow_control.utils.logging import get_logger
@@ -18,11 +18,18 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
     inv_freq_h: torch.Tensor
     inv_freq_w: torch.Tensor
 
-    def __init__(self, theta: int, axes_dim: list[int], scale_rope: bool = False):
+    def __init__(
+        self,
+        theta: int,
+        axes_dim: list[int],
+        scale_rope: bool = False,
+        base_image_index: int = 0,
+    ):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
         self.scale_rope = scale_rope
+        self.base_image_index = base_image_index
 
         inv_freqs = []
         for dim in axes_dim:
@@ -79,7 +86,9 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         for idx, spec in enumerate(fhws):
             if len(spec) == 3:
                 frame, height, width = spec
-                t_idx = torch.arange(frame, device=device) + idx
+                t_idx = torch.full(
+                    (frame,), float(self.base_image_index), device=device
+                )
 
                 if self.scale_rope:
                     h_idx = torch.arange(
@@ -159,6 +168,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
       any layers, ensuring the decoupling of layers from the base image.
     """
     attn_block_size: int = 128
+    base_image_index: Literal[0, -1] = 0
 
     class BatchType(BaseQwenImageAdapter.BatchType):
         image_latents: torch.Tensor
@@ -184,15 +194,6 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
         """
 
-    def _get_compiled_create_block_mask(self):
-        if hasattr(self, "_compiled_create_block_mask"):
-            return self._compiled_create_block_mask
-        else:
-            logger.info("Compiling create_block_mask function for the first time...")
-            compiled_fn = torch.compile(create_block_mask)
-            self._compiled_create_block_mask = compiled_fn
-            return compiled_fn
-
     def load_transformer(self, use_meta_device=False):
         super().load_transformer(use_meta_device)
         # Must use flex attention backend for block masks
@@ -207,29 +208,52 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
 
     def make_block_mask(
         self, base_len: int, layer_lens: list[int], txt_lens: list[int]
-    ) -> BlockMask | None:
+    ) -> flex_attention.BlockMask | None:
         if self.attn_mask_mode == "full":
             return None
         elif self.attn_mask_mode in ["text-only", "per-layer", "per-layer-strict"]:
-            total_len = base_len + sum(layer_lens) + sum(txt_lens)
+            # 1. 计算总长度
+            txt_total_len = sum(txt_lens)
+            total_len = txt_total_len + base_len + sum(layer_lens)
+
+            # 2. 初始化 ID Tensor
             layer_ids = torch.zeros(total_len, dtype=torch.long, device=self.device)
-            current_loc_layer = base_len
-            txt_begin = base_len + sum(layer_lens)
-            current_loc_txt = txt_begin
+
+            # 3. 定义各部分的起始位置
+            # 现在的顺序是: Text -> Base Image -> Layer Images
+            # Base Image 在 Text 之后
+            base_img_begin = txt_total_len
+            # Layer Images 在 Base Image 之后
+            layer_img_begin = base_img_begin + base_len
+
+            # 4. 填充 layer_ids
+            # 指针初始化
+            current_loc_txt = 0  # Text 从 0 开始
+            current_loc_layer = layer_img_begin  # Layer 从 Base 之后开始
+
+            # Base Image 部分默认为 0，不需要显式填充，保持为 0 即可
+
             for i, (layer_size, txt_size) in enumerate(
                 zip(layer_lens, txt_lens, strict=True)
             ):
-                layer_ids[current_loc_layer : current_loc_layer + layer_size] = i + 1
-                current_loc_layer += layer_size
+                # 填充 Text ID (i+1)
                 layer_ids[current_loc_txt : current_loc_txt + txt_size] = i + 1
                 current_loc_txt += txt_size
+
+                # 填充 Layer Image ID (i+1)
+                layer_ids[current_loc_layer : current_loc_layer + layer_size] = i + 1
+                current_loc_layer += layer_size
+
+            # 定义 Mask 函数
+            # 注意：现在的 Image 部分是从 base_img_begin 开始直到结束
 
             def text_only_mask_fn(b, h, q_idx, kv_idx):
                 return (
                     (layer_ids[q_idx] == layer_ids[kv_idx])
-                    | ((q_idx < txt_begin) & (kv_idx < txt_begin))
-                    # Shall we allow text to attend to base image?
-                    | (layer_ids[kv_idx] == 0)
+                    # 原逻辑是 "Both in Image"，现在 Image 是指 index >= base_img_begin
+                    | ((q_idx >= base_img_begin) & (kv_idx >= base_img_begin))
+                    # Allow attention to base image (id 0)
+                    # | (layer_ids[kv_idx] == 0)
                 )
 
             def per_layer_mask_fn(b, h, q_idx, kv_idx):
@@ -252,7 +276,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
 
             mask_fn = mask_fn_dict[self.attn_mask_mode]
 
-            block_mask = self._get_compiled_create_block_mask()(
+            block_mask = flex_attention.create_block_mask(
                 mask_fn,
                 1,
                 1,
@@ -290,6 +314,8 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             txt_lens=batch["text_lengths"],
         )
 
+        is_rgb = torch.tensor([0] * b).to(device=self.device, dtype=torch.long)
+
         model_pred = self.transformer(
             hidden_states=input_latents,
             timestep=timestep,
@@ -299,6 +325,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
                 "attention_mask": block_mask,
             },
             return_dict=False,
+            additional_t_cond=is_rgb,
         )[0]
 
         return model_pred[:, batch["image_latents"].shape[1] :, :]
