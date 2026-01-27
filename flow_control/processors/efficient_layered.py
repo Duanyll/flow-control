@@ -17,8 +17,8 @@ from flow_control.utils.vae import VAE, QwenImageVAE
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor
 
-_DEFAULT_CAPTION_PROMPT_FG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的部分设计元素，你只用关注图片的前景部分。如果图片中包含文字，你必须在描述中用双引号完整地给出图片中的文字内容。直接输出最终结果，不要加额外的解释。"
-_DEFAULT_CAPTION_PROMPT_FG_EN = 'Task: Describe the image in exactly one sentence. Context: The image is a specific design element extracted from a larger graphic design work. Requirements: 1. Focus exclusively on the foreground. 2. If text is present, include the text content verbatim inside "double quotes". 3. Output ONLY the description string. Do not include introductory or concluding remarks.'
+_DEFAULT_CAPTION_PROMPT_FG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的部分设计元素，你只用关注图片的前景部分。如果图片中包含文字，你必须先描述文字的样式，再用双引号完整地给出图片中的文字内容。直接输出最终结果，不要加额外的解释。"
+_DEFAULT_CAPTION_PROMPT_FG_EN = 'Task: Describe the image in exactly one sentence. Context: The image is a specific design element extracted from a larger graphic design work. Requirements: 1. Focus exclusively on the foreground. 2. If text is present, first describe the style of the text, then include the text content verbatim inside "double quotes". 3. Output ONLY the description string. Do not include introductory or concluding remarks.'
 _DEFAULT_CAPTION_PROMPT_BG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的背景部分，它可能是纯色背景，也可能有一些图案。直接输出最终结果，不要加额外的解释。"
 _DEFAULT_CAPTION_PROMPT_BG_EN = "Task: Describe the image in exactly one sentence. Context: The image is the background layer extracted from a graphic design work. Requirements: 1. Analyze the visual style, noting whether it is a solid color, a gradient, a texture, or contains specific patterns. 2. Output ONLY the description string. Do not include introductory or concluding remarks."
 

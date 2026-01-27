@@ -1,5 +1,8 @@
 import os
 import random
+import signal
+import sys
+from contextlib import ContextDecorator
 from copy import deepcopy
 from typing import Any
 
@@ -16,7 +19,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.fsdp import fully_shard
 
 from flow_control.adapters import ModelAdapter
-from flow_control.utils.logging import get_logger, warn_once
+from flow_control.utils.logging import console, get_logger, warn_once
 
 logger = get_logger(__name__)
 
@@ -157,6 +160,7 @@ class HsdpEngine(Stateful):
 
     def load_dcp_checkpoint(self, checkpoint_dir: str):
         state_dict = {"app": self}
+        # will call self.state_dict() and self.load_state_dict() internally
         dcp.load(
             state_dict,
             checkpoint_id=checkpoint_dir,
@@ -169,6 +173,7 @@ class HsdpEngine(Stateful):
             os.makedirs(checkpoint_dir, exist_ok=True)
         dist.barrier()
         state_dict = {"app": self}
+        # will call self.state_dict() internally
         dcp.save(state_dict, checkpoint_id=checkpoint_dir)
         logger.info(f"Saved DCP checkpoint to {checkpoint_dir}.")
 
@@ -176,3 +181,54 @@ class HsdpEngine(Stateful):
         dist.barrier()
         dist.destroy_process_group()
         logger.info("Cleaned up distributed resources.")
+
+
+def distributed_main(func):
+    def wrapper(self: HsdpEngine, *args, **kwargs):
+        try:
+            self.init_device_mesh()
+            return func(self, *args, **kwargs)
+        finally:
+            self.cleanup()
+
+    return wrapper
+
+
+class DistributedExitSignal(ContextDecorator):
+    def __init__(self, hsdp_engine: HsdpEngine):
+        super().__init__()
+
+        self.sigint_received = False
+        self.original_handler = None
+        self.hsdp_engine = hsdp_engine
+
+    def __enter__(self):
+        self.original_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self.handle_sigint)
+        logger.info("Registered SIGINT handler for distributed exit signal.")
+        return self
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGINT, self.original_handler)
+        logger.info("Restored original SIGINT handler.")
+        return False
+
+    def handle_sigint(self, signum, frame):
+        if self.sigint_received:
+            logger.error("Second SIGINT received. Exiting immediately.")
+            # Do not catch further SIGINTs
+            signal.signal(signal.SIGINT, self.original_handler)
+            sys.exit(1)
+        else:
+            self.sigint_received = True
+            console.rule("[red]SIGINT[/red]")
+            logger.warning(
+                "SIGINT received. Waiting to save state after current step... Press Ctrl+C again to force exit."
+            )
+
+    def __bool__(self):
+        exit_flag_tensor = torch.tensor(
+            int(self.sigint_received), device=self.hsdp_engine.device
+        )
+        dist.all_reduce(exit_flag_tensor, op=dist.ReduceOp.MAX)
+        return bool(exit_flag_tensor.item())

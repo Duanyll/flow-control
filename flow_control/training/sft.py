@@ -36,7 +36,7 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.data import DistributedBucketSampler
+from flow_control.utils.data import DistributedBucketSampler, PaddingAwareDatasetWrapper
 from flow_control.utils.ema import apply_ema_maybe
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.types import (
@@ -52,7 +52,12 @@ from flow_control.utils.weighting import (
     UniformLossWeighting,
 )
 
-from .hsdp_engine import HsdpEngine, HsdpEngineConfig
+from .hsdp_engine import (
+    DistributedExitSignal,
+    HsdpEngine,
+    HsdpEngineConfig,
+    distributed_main,
+)
 
 logger = get_logger(__name__)
 
@@ -123,12 +128,12 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         # For consistency, we always count optimizer steps towards epochs
         # Multiple grad acc steps are counted as one optimizer step
         return math.ceil(
-            self.conf.train_steps / len(self.dataloader) * self.grad_acc_steps
+            self.conf.train_steps / (len(self.dataloader) // self.grad_acc_steps)
         )
 
     @property
     def current_epoch(self):
-        return self.current_step // len(self.dataloader) * self.grad_acc_steps
+        return self.current_step // (len(self.dataloader) // self.grad_acc_steps)
 
     def __init__(self, **kwargs):
         self.conf = HsdpTrainerConfig(**kwargs)  # type: ignore
@@ -157,7 +162,7 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         self.scheduler = parse_scheduler(self.conf.scheduler, self.optimizer)
 
     def make_train_dataloader(self):
-        dataset: Any = parse_dataset(self.conf.dataset)
+        dataset: Any = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -180,7 +185,9 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             self.sample_dataloader = None
             return
         self.processor.load_models("decode", device=self.device)
-        dataset: Any = parse_dataset(self.conf.sample_dataset)
+        dataset: Any = PaddingAwareDatasetWrapper(
+            parse_dataset(self.conf.sample_dataset)
+        )
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -272,9 +279,8 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
 
         logger.info(f"Sampling at step {self.current_step}...")
         progress, task = self.make_sample_progress_bar()
-        progress.start()
         self.transformer.eval()
-        with apply_ema_maybe(self.optimizer):
+        with apply_ema_maybe(self.optimizer), progress:
             for batch in self.sample_dataloader:
                 batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
@@ -295,7 +301,6 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                 self.log_images(image, key)
                 progress.advance(task)
         self.transformer.train()
-        progress.stop()
         logger.info(f"Completed sampling at step {self.current_step}.")
 
     def make_train_progress_bar(self):
@@ -324,13 +329,15 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
 
     def train_step(self, batch: Any):
         timesteps = self.conf.timestep_weighting.sample_timesteps(1)
-        timesteps = timesteps.to(device=self.device, dtype=self.model.dtype)
+        timesteps = timesteps.to(device=self.device, dtype=torch.float32)
         clean = batch["clean_latents"].float()
-        noise = torch.randn_like(clean)
+        noise = torch.randn_like(clean, dtype=torch.float32)
         batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
         batch = deep_cast_float_dtype(batch, self.model.dtype)
 
-        model_pred = self.model.predict_velocity(batch, timesteps).float()
+        model_pred = self.model.predict_velocity(
+            batch, timesteps.to(dtype=self.model.dtype)
+        ).float()
         target = noise.float() - clean.float()
         loss = (model_pred - target) ** 2
         loss = reduce(loss, "b n d -> 1", reduction="mean")
@@ -369,12 +376,12 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             shutil.rmtree(dir_to_remove)
             logger.info(f"Removed old checkpoint: {dir_to_remove}")
 
+    @distributed_main
     def run(self):
         if self.conf.latent_length_test_mode:
             self.run_latent_length_test()
             return
 
-        self.init_device_mesh()
         self.set_seed()
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.conf.seed_checkpoint_dir)
@@ -390,55 +397,64 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         console.rule("[bold blue]Starting training[/bold blue]")
 
         progress, task = self.make_train_progress_bar()
-        progress.start()
 
-        starting_epoch = self.current_epoch
-        for _ in range(starting_epoch, self.total_epochs):
-            total_loss = 0.0
-            progress.update(task, epoch=self.current_epoch + 1)
-            if hasattr(self.dataloader.sampler, "set_epoch"):
-                self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore
-            for i, batch in enumerate(self.dataloader):
-                is_sync_step = (i + 1) % self.grad_acc_steps == 0
-                self.transformer.set_requires_gradient_sync(is_sync_step)
-
-                batch = deep_move_to_device(batch, self.device)
-                loss = self.train_step(batch) / self.grad_acc_steps
-                loss.backward()
-
-                total_loss += loss.item()
-
-                if not is_sync_step:
-                    continue
-
-                if self.conf.clip_grad_norm > 0.0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.transformer.parameters(), self.conf.clip_grad_norm
-                    )
-
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-
-                avg_loss, lr = self.log_loss_lr(total_loss)
+        with progress, DistributedExitSignal(self) as exit_signal:
+            starting_epoch = self.current_epoch
+            for _ in range(starting_epoch, self.total_epochs):
                 total_loss = 0.0
-                self.current_step += 1
-                progress.update(task, loss=avg_loss, lr=lr)
-                progress.advance(task)
+                progress.update(task, epoch=self.current_epoch + 1)
+                if hasattr(self.dataloader.sampler, "set_epoch"):
+                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore
+                for i, batch in enumerate(self.dataloader):
+                    is_sync_step = (i + 1) % self.grad_acc_steps == 0
+                    self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                if (self.current_step % self.conf.checkpoint_steps == 0) or (
-                    self.current_step == self.conf.train_steps
-                ):
-                    self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
-                    self.rotate_checkpoints_maybe()
+                    batch = deep_move_to_device(batch, self.device)
+                    loss = self.train_step(batch) / self.grad_acc_steps
+                    loss.backward()
 
-                if self.current_step % self.conf.sample_steps == 0:
-                    self.sample_and_log()
+                    total_loss += loss.item()
 
-                if self.current_step >= self.conf.train_steps:
-                    break
+                    if not is_sync_step:
+                        continue
 
-        progress.stop()
+                    if self.conf.clip_grad_norm > 0.0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.transformer.parameters(), self.conf.clip_grad_norm
+                        )
+
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+
+                    avg_loss, lr = self.log_loss_lr(total_loss)
+                    total_loss = 0.0
+                    self.current_step += 1
+                    progress.update(task, loss=avg_loss, lr=lr)
+                    progress.advance(task)
+
+                    if exit_signal:
+                        logger.info(
+                            "Exit signal received. Saving checkpoint and exiting training loop..."
+                        )
+                        self.save_dcp_checkpoint(
+                            self.get_checkpoint_dir(self.current_step)
+                        )
+                        return
+
+                    if (self.current_step % self.conf.checkpoint_steps == 0) or (
+                        self.current_step == self.conf.train_steps
+                    ):
+                        self.save_dcp_checkpoint(
+                            self.get_checkpoint_dir(self.current_step)
+                        )
+                        self.rotate_checkpoints_maybe()
+
+                    if self.current_step % self.conf.sample_steps == 0:
+                        self.sample_and_log()
+
+                    if self.current_step >= self.conf.train_steps:
+                        break
 
         with apply_ema_maybe(self.optimizer):
             self.save_dcp_checkpoint(
@@ -447,15 +463,12 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
 
         console.rule("[bold green]Training completed[/bold green]")
 
-        self.cleanup()
-
     def run_latent_length_test(self):
         logger.warning(
             "Running in latent length test mode since enabled in config. This will not perform training, but will test "
             "increasing latent lengths until OOM. This is useful for finding the maximum latent length that fits in memory."
         )
 
-        self.init_device_mesh()
         self.set_seed()
         self.load_transformer_from_seed(self.model)
         self.make_optimizer_and_scheduler()
@@ -490,4 +503,3 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         finally:
             console.rule("[bold red]Latent length test completed[/bold red]")
             console.print(Panel.fit(f"Maximum latent length: [bold]{best_len}[/bold]"))
-            self.cleanup()

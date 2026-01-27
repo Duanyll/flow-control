@@ -10,74 +10,57 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
-def _patch_dataset_getitem(dataset: Dataset):
-    """
-    Dynamically change the dataset's class to handle (index, is_padding) tuples.
-    """
-    # 1. 防止重复 Patch
-    if getattr(dataset, "_is_patched_for_padding", False):
-        return
+class PaddingAwareDatasetWrapper(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+        if hasattr(dataset, "lengths"):
+            self.lengths = dataset.lengths
 
-    # 2. 获取原始类
-    OriginalClass = dataset.__class__
-    original_class_name = OriginalClass.__name__
-    if original_class_name == "PatchedDataset":
-        # 已经被 Patch 过了
-        return
+    def __len__(self):
+        return len(self.dataset)
 
-    # 3. 定义一个新的子类
-    class PatchedDataset(OriginalClass):
-        def __getitem__(self, item):
-            # 默认情况：假设是正常调用
-            real_index = item
-            is_padding = False
+    def __getitem__(self, item):
+        real_index = item
+        is_padding = False
+        if isinstance(item, tuple):
+            real_index, is_padding = item
 
-            # 检查是否是我们 Sampler 传来的特殊 Tuple
-            if isinstance(item, tuple):
-                real_index, is_padding = item
-
-            # 4. 调用父类（原始 Dataset）的逻辑获取数据
-            # 使用 super() 确保原本的文件读取/处理逻辑正常执行
-            data = super().__getitem__(real_index)
-
-            # 5. 如果是 Padding 数据（重复数据）
-            if is_padding:
-                data = data.copy()
-                data["__key__"] = "__padding__"
-                # 还可以加个 flag 方便后面过滤
-                data["_is_padding_sample"] = True
-
-            return data
-
-    # 6. "偷天换日"：修改实例的类
-    dataset.__class__ = PatchedDataset
-    # 标记已处理
-    dataset._is_patched_for_padding = True  # type: ignore[attr-defined]
-
-    logger.info(f"Patched dataset {original_class_name} to handle padding indices.")
+        data = self.dataset[real_index]
+        if is_padding and isinstance(data, dict):
+            data = data.copy()
+            data["__key__"] = "__padding__"
+            data["_is_padding_sample"] = True
+        return data
 
 
 class DistributedBucketSampler(Sampler, Stateful):
     def __init__(
         self,
-        dataset: Dataset,
+        dataset: PaddingAwareDatasetWrapper,
         num_replicas=None,
         rank=None,
         shuffle=True,
         seed=0,
         grad_acc_steps=1,
     ):
-        super().__init__(None)
+        super().__init__(None)  # type: ignore[arg-type]
         if num_replicas is None:
             num_replicas = dist.get_world_size()
         if rank is None:
             rank = dist.get_rank()
 
+        self.mark_padding = isinstance(dataset, PaddingAwareDatasetWrapper)
+        if not self.mark_padding:
+            logger.warning(
+                f"DistributedBucketSampler is used with a {dataset.__class__.__name__} that does not mark padding samples. "
+                "To distinguish padding samples from real samples, please wrap your dataset with PaddingAwareDatasetWrapper."
+            )
+
         if hasattr(dataset, "lengths"):
             self.lengths = dataset.lengths  # type: ignore[attr-defined]
         else:
             self.lengths = [len(dataset)]  # type: ignore
-        _patch_dataset_getitem(dataset)
+
         logger.info(
             f"Initialized DistributedBucketSampler with {len(self.lengths)} buckets and {sum(self.lengths)} samples."
         )
@@ -86,7 +69,7 @@ class DistributedBucketSampler(Sampler, Stateful):
         self.rank = rank
         self.shuffle = shuffle
         self.seed = seed
-        self.grad_acc_steps = grad_acc_steps  # 梯度累积步数
+        self.grad_acc_steps = grad_acc_steps
 
         self.epoch = 0
         self.counter = 0
@@ -178,7 +161,10 @@ class DistributedBucketSampler(Sampler, Stateful):
 
         for item in subsample:
             # item 是 (index, is_padding)
-            yield item
+            if self.mark_padding:
+                yield item
+            else:
+                yield item[0]
             self.counter += 1
 
         self.counter = 0
