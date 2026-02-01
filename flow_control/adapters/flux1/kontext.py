@@ -21,7 +21,11 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
         b, n, d = batch["noisy_latents"].shape
         h, w = batch["image_size"]
         device = batch["noisy_latents"].device
-        guidance = torch.full((b,), self.guidance, device=device)
+        guidance = (
+            torch.full((b,), self.guidance, device=device)
+            if self.guidance is not None
+            else None
+        )
 
         model_input_list = [batch["noisy_latents"]] + batch["reference_latents"]
         concatenated_model_input = torch.cat(model_input_list, dim=1)

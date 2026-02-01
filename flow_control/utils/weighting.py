@@ -6,6 +6,8 @@ from pydantic import BaseModel, PlainValidator
 
 
 class BaseTimestepWeighting(BaseModel):
+    type: str
+
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         raise NotImplementedError
 
@@ -42,7 +44,7 @@ TIMESTEP_WEIGHTING_REGISTRY = {
 
 
 def parse_timestep_weighting(conf: dict) -> BaseTimestepWeighting:
-    weighting_type = conf.pop("type")
+    weighting_type = conf["type"]
     weighting_class = TIMESTEP_WEIGHTING_REGISTRY.get(weighting_type)
     if weighting_class is None:
         raise ValueError(f"Unknown timestep weighting type: {weighting_type}")
@@ -84,7 +86,7 @@ LOSS_WEIGHTING_REGISTRY = {
 
 
 def parse_loss_weighting(conf: dict) -> BaseLossWeighting:
-    weighting_type = conf.pop("type")
+    weighting_type = conf["type"]
     weighting_class = LOSS_WEIGHTING_REGISTRY.get(weighting_type)
     if weighting_class is None:
         raise ValueError(f"Unknown loss weighting type: {weighting_type}")

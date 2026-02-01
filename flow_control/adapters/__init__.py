@@ -13,7 +13,7 @@ MODEL_ADAPTER_PARSERS = {
 
 
 def parse_model_adapter(conf: dict) -> BaseModelAdapter:
-    model_type = conf.pop("arch")
+    model_type = conf["arch"]
     parser = MODEL_ADAPTER_PARSERS.get(model_type)
     if parser is None:
         raise ValueError(f"Unknown model adapter type: {model_type}")

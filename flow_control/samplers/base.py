@@ -33,6 +33,7 @@ def make_sample_progress() -> Progress:
 
 
 class BaseSampler(BaseModel, ABC):
+    type: str
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     cfg_scale: float = 7.5

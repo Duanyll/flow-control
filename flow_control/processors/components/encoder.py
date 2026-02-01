@@ -12,6 +12,8 @@ logger = get_logger(__name__)
 
 
 class BaseEncoder(HfModelLoader):
+    type: str
+
     chat_template: str = "{user}"
     image_template: str = ""
 
@@ -27,7 +29,12 @@ class BaseEncoder(HfModelLoader):
         )
         return formatted_prompt
 
-    def encode(self, prompt, images=None, system_prompt: str | None = None):
+    def encode(
+        self,
+        prompt: str,
+        images: list[torch.Tensor] | None = None,
+        system_prompt: str | None = None,
+    ) -> torch.Tensor:
         raise NotImplementedError("Encode method must be implemented by subclasses.")
 
 
@@ -145,6 +152,7 @@ class Qwen25VLEncoder(BaseEncoder):
         ("'", "'"),
     ]
     drop_suffix_tokens: bool = False
+    generate_max_new_tokens: int = 512
 
     def _split_quotation(self, prompt: str):
         patterns = []
@@ -243,15 +251,45 @@ class Qwen25VLEncoder(BaseEncoder):
         else:
             return hidden_states[:, prefix_len:, :]
 
+    def generate(
+        self, prompt, images=None, system_prompt: str = "You are a helpful assistant."
+    ) -> str:
+        vl_processor = self.vl_processor.model
+        model = self.model
+
+        text_input = self._format_prompt(prompt, images, system_prompt)
+        model_inputs = vl_processor(
+            text=text_input,
+            images=images,
+            padding=True,
+            return_tensors="pt",
+        ).to(model.device)
+        generated_ids = model.generate(
+            **model_inputs, max_new_tokens=self.generate_max_new_tokens
+        )
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :]
+            for in_ids, out_ids in zip(
+                model_inputs.input_ids, generated_ids, strict=True
+            )
+        ]
+        output_text = vl_processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        return output_text.strip()
+
 
 ENCODER_REGISTRY = {
     "t5": T5TextEncoder,
     "clip": ClipTextEncoder,
+    "qwen25vl": Qwen25VLEncoder,
 }
 
 
 def parse_encoder(config: dict[str, Any]) -> BaseEncoder:
-    encoder_type = config.pop("type")
+    encoder_type = config["type"]
     encoder_class = ENCODER_REGISTRY.get(encoder_type)
     if encoder_class is None:
         raise ValueError(f"Unsupported encoder type: {encoder_type}")

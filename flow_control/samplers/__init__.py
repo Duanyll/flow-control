@@ -16,7 +16,7 @@ SAMPLER_REGISTRY = {
 
 
 def parse_sampler(conf: dict) -> BaseSampler:
-    sampler_type = conf.pop("type")
+    sampler_type = conf["type"]
     sampler_class = SAMPLER_REGISTRY.get(sampler_type)
     if sampler_class is None:
         raise ValueError(f"Unknown sampler type: {sampler_type}")

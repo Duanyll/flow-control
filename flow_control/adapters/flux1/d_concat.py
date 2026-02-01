@@ -51,7 +51,11 @@ class Flux1DConcatAdapter(BaseFlux1Adapter):
     def predict_velocity(self, batch: dict, timestep: torch.Tensor) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
-        guidance = torch.full((b,), self.guidance, device=device)
+        guidance = (
+            torch.full((b,), self.guidance, device=device)
+            if self.guidance is not None
+            else None
+        )
 
         noisy_model_input = torch.cat(
             (batch["noisy_latents"], batch["control_latents"]), dim=2

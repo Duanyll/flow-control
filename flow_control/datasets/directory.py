@@ -22,6 +22,10 @@ def _is_image_like_field(field_name: str) -> bool:
         or field_name.endswith("images")
         or ("image." in field_name)
         or ("images." in field_name)
+        or field_name.endswith("mask")
+        or field_name.endswith("masks")
+        or ("mask." in field_name)
+        or ("masks." in field_name)
     )
 
 

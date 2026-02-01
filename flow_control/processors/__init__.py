@@ -4,8 +4,8 @@ from pydantic import PlainValidator
 
 from .base import BaseProcessor
 from .efficient_layered import EfficientLayeredQwenImageProcessor
-from .flux1 import Flux1Processor
 from .kontext import KontextProcessor
+from .presets import Flux1Processor
 from .qwen import QwenImageProcessor
 from .qwen_edit import QwenImageEditProcessor
 from .qwen_layered import QwenImageLayeredProcessor

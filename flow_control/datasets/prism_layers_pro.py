@@ -49,29 +49,27 @@ class PrismLayersProDataset(Dataset):
                     Image.open(io.BytesIO(v["bytes"])).convert("RGBA")
                 )
 
+        h, w = row_data["whole_image"].shape[1:3]
         output = {
             "__key__": record["id"],
-            "whole_caption": row_data["whole_caption"],
-            "whole_image": row_data["whole_image"],
+            "prompt": row_data["whole_caption"],
+            "clean_image": row_data["whole_image"],
             "style_category": row_data["style_category"],
-            "base_caption": row_data["base_caption"],
-            "base_image": row_data["base_image"],
-            "layer_images": [],
-            "layer_captions": [],
-            "layer_boxes": [],
+            "layer_images": [row_data["base_image"]],
+            "layer_prompts": [row_data["base_caption"]],
+            "layer_boxes": [(0, h, 0, w)],
         }
         for i in range(row_data["layer_count"]):
             prefix = f"layer_{i:02d}"
             output["layer_images"].append(row_data[f"{prefix}"])
-            output["layer_captions"].append(row_data[f"{prefix}_caption"])
+            output["layer_prompts"].append(row_data[f"{prefix}_caption"])
             x_min, y_min, x_max, y_max = row_data[f"{prefix}_box"]
             top, bottom, left, right = y_min, y_max, x_min, x_max
             output["layer_boxes"].append((top, bottom, left, right))
 
         if self.ignore_caption:
-            del output["whole_caption"]
-            del output["base_caption"]
-            del output["layer_captions"]
+            del output["prompt"]
+            del output["layer_prompts"]
 
         return output
 

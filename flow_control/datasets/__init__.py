@@ -31,6 +31,7 @@ DATASET_REGISTRY = {
 def parse_dataset(dataset_config: DatasetConfig) -> Dataset:
     if "type" not in dataset_config:
         raise ValueError("dataset_config must contain a 'type' key.")
+    dataset_config = dataset_config.copy()
     dataset_type = dataset_config.pop("type")
 
     if dataset_type == "huggingface":
@@ -66,6 +67,7 @@ DATASINK_REGISTRY = {
 def parse_datasink(datasink_config: DatasinkConfig) -> DataSink:
     if "type" not in datasink_config:
         raise ValueError("datasink_config must contain a 'type' key.")
+    datasink_config = datasink_config.copy()
     datasink_type = datasink_config.pop("type")
 
     if datasink_type in DATASINK_REGISTRY:

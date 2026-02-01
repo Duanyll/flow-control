@@ -39,6 +39,8 @@ class HsdpEngine(Stateful):
     local_rank: int
     mesh: dist.device_mesh.DeviceMesh | None = None
 
+    _checkpoint_future: Any = None
+
     @property
     def is_main_process(self):
         return self.rank == 0
@@ -169,17 +171,23 @@ class HsdpEngine(Stateful):
         logger.info(f"Resumed DCP checkpoint from {checkpoint_dir}.")
 
     def save_dcp_checkpoint(self, checkpoint_dir: str):
-        if self.is_main_process:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-        dist.barrier()
+        if self._checkpoint_future is not None:
+            logger.warning("Still waiting for previous checkpoint to finish.")
+            self._checkpoint_future.result()
         state_dict = {"app": self}
         # will call self.state_dict() internally
-        dcp.save(state_dict, checkpoint_id=checkpoint_dir)
-        logger.info(f"Saved DCP checkpoint to {checkpoint_dir}.")
+        self._checkpoint_future = dcp.async_save(
+            state_dict, checkpoint_id=checkpoint_dir
+        )
+        logger.info(f"Started async DCP checkpoint to {checkpoint_dir}.")
 
     def cleanup(self):
-        dist.barrier()
-        dist.destroy_process_group()
+        if self._checkpoint_future is not None:
+            logger.info("Waiting for checkpoint to finish before cleanup...")
+            self._checkpoint_future.result()
+        if self.mesh is not None:
+            dist.barrier()
+            dist.destroy_process_group()
         logger.info("Cleaned up distributed resources.")
 
 

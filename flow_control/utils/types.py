@@ -55,6 +55,7 @@ OptimizerConfig = dict[str, Any]
 
 
 def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
+    conf = conf.copy()
     class_name = conf.pop("class_name")
     if class_name == "Prodigy":
         from prodigyopt import Prodigy
@@ -78,6 +79,7 @@ SchedulerConfig = dict[str, Any]
 
 
 def parse_scheduler(conf: SchedulerConfig, optimizer: torch.optim.Optimizer):
+    conf = conf.copy()
     class_name = conf.pop("class_name")
     ctor = getattr(torch.optim.lr_scheduler, class_name)
     return ctor(optimizer, **conf)

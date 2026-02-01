@@ -14,7 +14,7 @@ ADAPTER_REGISTRY = {
 
 
 def parse_adapter(conf: dict) -> BaseFlux1Adapter:
-    adapter_type = conf.pop("type")
+    adapter_type = conf["type"]
     if isinstance(adapter_type, list):
         # Construct mixin adapter
         adapter_class = type(
