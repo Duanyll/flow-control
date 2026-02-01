@@ -60,8 +60,8 @@ class BaseModelAdapter(BaseModel, ABC):
         noisy_latents: torch.Tensor
         """`[B, N, D]` The noisy latents to denoise."""
 
-    def load_transformer(self, use_meta_device: bool = False):
-        self.transformer = self.hf_model.load_model(use_meta_device=use_meta_device)  # type: ignore
+    def load_transformer(self, device: torch.device) -> None:
+        self.transformer = self.hf_model.load_model(device=device)  # type: ignore
         self.transformer.requires_grad_(self.all_trainable)
         self._install_modules()
         cast_trainable_parameters(self.transformer, self.trainable_dtype)

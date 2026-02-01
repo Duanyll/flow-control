@@ -120,8 +120,8 @@ class BaseQwenImageAdapter(BaseModelAdapter):
         dtype=torch.bfloat16,
     )
 
-    def load_transformer(self, use_meta_device=False):
-        super().load_transformer(use_meta_device)
+    def load_transformer(self, device: torch.device) -> None:
+        super().load_transformer(device=device)
         # Replace self.transformer.pos_embed with the above impl
         orig_module = self.transformer.pos_embed
         self.transformer.pos_embed = PatchedQwenEmbedRope(  # type: ignore

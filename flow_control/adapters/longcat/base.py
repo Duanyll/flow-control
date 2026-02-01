@@ -1,7 +1,7 @@
 from typing import Any, NotRequired
 
 import torch
-from diffusers import FluxTransformer2DModel
+from diffusers import LongCatImageTransformer2DModel
 from einops import rearrange
 
 from flow_control.adapters.base import BaseModelAdapter
@@ -11,9 +11,13 @@ from flow_control.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-class BaseFlux1Adapter(BaseModelAdapter):
+class BaseLongCatAdapter(BaseModelAdapter):
+    """
+    Meituan LongCat-Image is a smaller Flux.1-like MMDiT model with Qwen2.5-VL as the text encoder.
+    """
+
     @property
-    def transformer(self) -> FluxTransformer2DModel:
+    def transformer(self) -> LongCatImageTransformer2DModel:
         return self.hf_model.model
 
     @transformer.setter
@@ -22,24 +26,18 @@ class BaseFlux1Adapter(BaseModelAdapter):
 
     hf_model: HfModelLoader = HfModelLoader(
         library="diffusers",
-        class_name="FluxTransformer2DModel",
-        pretrained_model_id="black-forest-labs/FLUX.1-dev",
+        class_name="LongCatImageTransformer2DModel",
+        pretrained_model_id="meituan-longcat/LongCat-Image",
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
 
-    guidance: float | None = 3.5
-    """
-    Guidance scale for DISTILLED classifier-free guidance as timestep embeddings.
-    """
     patch_size: int = 2
     vae_scale_factor: int = 8
 
     class BatchType(BaseModelAdapter.BatchType):
-        pooled_prompt_embeds: torch.Tensor
-        """`[B, D]` Pooled text embeddings from the CLIP text encoder."""
         prompt_embeds: torch.Tensor
-        """`[B, N, D]` Text embeddings from T5XXL text encoder."""
+        """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
         txt_ids: NotRequired[torch.Tensor]
         """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
            Usually all zeros. Will be calculated if not present."""
@@ -52,14 +50,6 @@ class BaseFlux1Adapter(BaseModelAdapter):
         batch: BatchType,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        b, n, d = batch["noisy_latents"].shape
-        device = batch["noisy_latents"].device
-        guidance = (
-            torch.full((b,), self.guidance, device=device)
-            if self.guidance is not None
-            else None
-        )
-
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
@@ -68,8 +58,6 @@ class BaseFlux1Adapter(BaseModelAdapter):
         model_pred = self.transformer(
             hidden_states=batch["noisy_latents"],
             timestep=timestep,
-            guidance=guidance,
-            pooled_projections=batch["pooled_prompt_embeds"],
             encoder_hidden_states=batch["prompt_embeds"],
             txt_ids=batch["txt_ids"],
             img_ids=batch["img_ids"],
@@ -78,11 +66,23 @@ class BaseFlux1Adapter(BaseModelAdapter):
 
         return model_pred
 
-    def _make_txt_ids(self, prompt_embeds):
+    def _make_txt_ids(
+        self, prompt_embeds: torch.Tensor, index=0, h_offset=0, w_offset=0
+    ):
         b, n, d = prompt_embeds.shape
-        return torch.zeros(
-            (n, 3), dtype=prompt_embeds.dtype, device=prompt_embeds.device
+        txt_ids = torch.zeros((n, 3), dtype=self.dtype, device=prompt_embeds.device)
+        txt_ids[:, 0] = index
+        txt_ids[:, 1] = (
+            txt_ids[:, 1]
+            + torch.arange(n, dtype=txt_ids.dtype, device=txt_ids.device)
+            + h_offset // self.patch_size
         )
+        txt_ids[:, 2] = (
+            txt_ids[:, 2]
+            + torch.arange(n, dtype=txt_ids.dtype, device=txt_ids.device)
+            + w_offset // self.patch_size
+        )
+        return txt_ids
 
     def _make_img_ids(
         self, image_size: tuple[int, int], index=0, h_offset=0, w_offset=0

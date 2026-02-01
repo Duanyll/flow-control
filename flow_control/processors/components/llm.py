@@ -10,8 +10,8 @@ import json5
 import torch
 from pydantic import BaseModel, PrivateAttr
 
-from .common import tensor_to_pil
-from .logging import get_logger
+from flow_control.utils.common import tensor_to_pil
+from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -7,9 +7,9 @@ import torch
 from einops import rearrange
 from pydantic import PlainValidator
 
-from .hf_model import HfModelLoader
-from .logging import get_logger
-from .types import TorchDType
+from flow_control.utils.hf_model import HfModelLoader
+from flow_control.utils.logging import get_logger
+from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
 
@@ -37,17 +37,17 @@ def _deserialize_tensor(
 class BaseVAE(HfModelLoader):
     endpoint: str | None = None
 
-    def _load_model(self, use_meta_device: bool = False):
-        return super().load_model(use_meta_device)
+    def _load_model(self, device: torch.device) -> None:
+        return super().load_model(device)
 
-    def load_model(self, use_meta_device=False):
+    def load_model(self, device: torch.device):
         if self.endpoint is not None:
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")
             self._verify_remote_vae()
             self._model = None
             return None
         else:
-            return super().load_model(use_meta_device)
+            return super().load_model(device)
 
     def _verify_remote_vae(self):
         """Verify that the remote VAE server is available and serves the correct model."""

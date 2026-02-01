@@ -3,12 +3,12 @@ from typing import Literal, NotRequired
 import torch
 from einops import rearrange
 
+from flow_control.processors.components.llm import LLMClient
+from flow_control.processors.components.vae import VAE, QwenImageVAE
 from flow_control.utils.common import ensure_alpha_channel
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.llm import LLMClient
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
-from flow_control.utils.vae import VAE, QwenImageVAE
 
 from .base import BaseProcessor
 from .qwen import QwenImageProcessor

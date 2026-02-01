@@ -31,7 +31,7 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
             # Precompute the inverse frequencies
             inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
             inv_freqs.append(inv_freq)
-        
+
         self.register_buffer("inv_freq_t", inv_freqs[0])
         self.register_buffer("inv_freq_h", inv_freqs[1])
         self.register_buffer("inv_freq_w", inv_freqs[2])
@@ -46,7 +46,6 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
         max_txt_seq_len: int | torch.Tensor,
         device: torch.device | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        
         # video_fhw structure: [Batch_List[Layer_Tuple(f, h, w), ...]]
         # We process the first item in the batch (assuming batch consistency or BS=1)
         fhws = video_fhw[0]
@@ -64,7 +63,7 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
                 # Standard layer: time grows from idx
                 t_idx = torch.arange(frame, device=device) + idx
             else:
-                # Condition layer (Last item): 
+                # Condition layer (Last item):
                 # Original logic uses neg_freqs[-1], which corresponds to index -1.
                 # Even if frame > 1, the condition image shares the same time index -1 across all its frames.
                 t_idx = torch.full((frame,), -1.0, device=device)
@@ -105,10 +104,10 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
         # 5. Compute Text Frequencies
         # Ensure max_vid_index is at least layer_num (from original logic)
         max_vid_index = max(max_vid_index, layer_num)
-        
+
         max_len = int(max_txt_seq_len)
         txt_idx = torch.arange(max_vid_index, max_vid_index + max_len, device=device)
-        
+
         txt_freqs = torch.cat(
             [
                 self._cal_freqs(txt_idx, self.inv_freq_t),
@@ -130,8 +129,8 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
         dtype=torch.bfloat16,
     )
 
-    def load_transformer(self, use_meta_device=False):
-        super().load_transformer(use_meta_device)
+    def load_transformer(self, device: torch.device) -> None:
+        super().load_transformer(device=device)
         # Replace self.transformer.pos_embed with the above impl
         orig_module = self.transformer.pos_embed
         self.transformer.pos_embed = PatchedQwenEmbedLayer3DRope(  # type: ignore
@@ -160,7 +159,7 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
 
         img_shapes = [[(1, h // 16, w // 16)] * (batch["num_layers"] + 2)] * b
 
-        is_rgb =  torch.tensor([0] * b).to(device=self.device, dtype=torch.long)
+        is_rgb = torch.tensor([0] * b).to(device=self.device, dtype=torch.long)
 
         model_pred = self.transformer(
             hidden_states=input_latents,

@@ -44,9 +44,7 @@ class BaseProcessor(BaseModel, ABC):
         )
         for field_name in field_list:
             model_loader: HfModelLoader = getattr(self, field_name)
-            model_loader.load_model()
-            if model_loader.model is not None and hasattr(model_loader.model, "to"):
-                model_loader.model.to(device)
+            model_loader.load_model(device=device)
 
     @abstractmethod
     def preprocess_batch(self, batch: BatchType) -> BatchType:

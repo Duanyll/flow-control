@@ -8,8 +8,7 @@ from rich import print
 
 
 class LaunchConfig(BaseModel):
-    type: Literal["sft", "inference", "accelerate"]
-    accelerate_config: str | None = None
+    type: Literal["sft", "inference"]
     num_processes: int
     omp_num_threads: int | None = None
     nccl_p2p_level: str | None = None
@@ -50,43 +49,20 @@ def main():
             del config_data["launch"]
             trainer = HsdpInference(**config_data)
             trainer.run()
-        elif launch_config.type == "accelerate":
-            from flow_control.training.accelerate_ddp import AccelerateDdpFinetuner
-
-            del config_data["launch"]
-            trainer = AccelerateDdpFinetuner(**config_data)
-            trainer.run()
         else:
             raise ValueError(f"Unknown launch type: {launch_config.type}")
     else:
         # This is parent process
-        if launch_config.type in ["sft", "inference"]:
-            cmd = [
-                "torchrun",
-                "--nproc_per_node",
-                str(launch_config.num_processes),
-                "-m",
-                "flow_control.scripts.launch",
-                args.config_path,
-                "--type",
-                launch_config.type,
-            ]
-        else:
-            cmd = [
-                "accelerate",
-                "launch",
-            ]
-            if launch_config.accelerate_config:
-                cmd += ["--config_file", launch_config.accelerate_config]
-            cmd += [
-                "--num_processes",
-                str(launch_config.num_processes),
-                "-m",
-                "flow_control.scripts.launch",
-                args.config_path,
-                "--type",
-                "accelerate",
-            ]
+        cmd = [
+            "torchrun",
+            "--nproc_per_node",
+            str(launch_config.num_processes),
+            "-m",
+            "flow_control.scripts.launch",
+            args.config_path,
+            "--type",
+            launch_config.type,
+        ]
 
         if launch_config.omp_num_threads is None:
             launch_config.omp_num_threads = (

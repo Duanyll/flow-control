@@ -90,7 +90,7 @@ class HsdpEngine(Stateful):
         self, model: ModelAdapter, seed_checkpoint_dir: str | None = None
     ) -> ModelAdapter:
         with torch.device("meta"):
-            model.load_transformer(use_meta_device=True)
+            model.load_transformer(device=torch.device("meta"))
             if self.conf.gradient_checkpointing:
                 if (
                     hasattr(model.transformer, "_supports_gradient_checkpointing")
@@ -117,7 +117,7 @@ class HsdpEngine(Stateful):
         fully_shard(model.transformer, mesh=self.mesh)
         logger.info(f"Transformer is sharded with {count} FSDP layers.")
         model.transformer.to_empty(device=self.device)
-        logger.info("Transformer moved to GPU.")
+        logger.info("Transformer is materialized on to GPU.")
 
         if seed_checkpoint_dir is not None:
             logger.info(

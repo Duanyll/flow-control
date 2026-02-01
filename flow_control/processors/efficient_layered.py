@@ -4,17 +4,17 @@ from typing import Literal, NotRequired
 
 import torch
 
+from flow_control.processors.components.llm import LLMClient
 from flow_control.utils.common import ensure_alpha_channel, remove_alpha_channel
-from flow_control.utils.llm import LLMClient
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
     resize_to_resolution,
 )
-from flow_control.utils.vae import VAE, QwenImageVAE
 
 from .base import BaseProcessor
+from .components.vae import VAE, QwenImageVAE
 from .qwen import QwenImageProcessor
 
 _DEFAULT_CAPTION_PROMPT_FG_CN = "请你给我给出的图片生成一句话的描述。你要描述的图片是从平面设计作品中提取出的部分设计元素，你只用关注图片的前景部分。如果图片中包含文字，你必须先描述文字的样式，再用双引号完整地给出图片中的文字内容。直接输出最终结果，不要加额外的解释。"

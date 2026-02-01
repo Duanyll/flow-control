@@ -31,7 +31,7 @@ class HfModelLoader(BaseModel):
     def model(self, value: Any):
         self._model = value
 
-    def load_model(self, use_meta_device: bool = False) -> Any:
+    def load_model(self, device: torch.device) -> Any:
         if self.library == "diffusers":
             import diffusers
 
@@ -43,7 +43,7 @@ class HfModelLoader(BaseModel):
         else:
             raise ValueError(f"Unknown model library: {self.library}")
 
-        if use_meta_device:
+        if device.type == "meta":
             with torch.device("meta"):
                 config = model_cls.load_config(
                     self.pretrained_model_id,
@@ -72,7 +72,11 @@ class HfModelLoader(BaseModel):
             )
             logger.info(
                 f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
-                f"with dtype {self.dtype}"
+                f"with dtype {self.dtype} to device {device}"
             )
+            if hasattr(model, "to"):
+                model.to(device)
+                logger.info(f"Moved model {self.class_name} to device {device}")
+
         self._model = model
         return model

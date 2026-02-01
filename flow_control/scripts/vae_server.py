@@ -11,10 +11,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from flow_control.processors.components.vae import VAE, BaseVAE
 from flow_control.utils.common import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDevice
-from flow_control.utils.vae import VAE, BaseVAE
 
 logger = get_logger(__name__)
 

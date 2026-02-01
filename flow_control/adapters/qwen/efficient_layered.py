@@ -194,8 +194,8 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
         """
 
-    def load_transformer(self, use_meta_device=False):
-        super().load_transformer(use_meta_device)
+    def load_transformer(self, device: torch.device) -> None:
+        super().load_transformer(device=device)
         # Must use flex attention backend for block masks
         ensure_compiled_flex_attention()
         self.transformer.set_attention_backend("flex")

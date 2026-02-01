@@ -9,9 +9,9 @@ from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
-from flow_control.utils.vae import VAE, Flux1VAE
 
 from .base import BaseProcessor
+from .components.vae import VAE, Flux1VAE
 
 
 class Flux1Processor(BaseProcessor):
