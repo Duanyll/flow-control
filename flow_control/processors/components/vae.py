@@ -35,7 +35,7 @@ def _deserialize_tensor(
 
 
 class BaseVAE(HfModelLoader):
-    type: str | None = None
+    type: str
     endpoint: str | None = None
 
     def _load_model(self, device: torch.device) -> None:
@@ -137,6 +137,8 @@ class BaseVAE(HfModelLoader):
 
 
 class Flux1VAE(BaseVAE):
+    type: str = "flux1"
+
     library: Literal["diffusers", "transformers"] = "diffusers"
     class_name: str = "AutoencoderKL"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
@@ -162,6 +164,8 @@ class Flux1VAE(BaseVAE):
 
 
 class QwenImageVAE(BaseVAE):
+    type: str = "qwen"
+
     library: Literal["diffusers", "transformers"] = "diffusers"
     class_name: str = "AutoencoderKLQwenImage"
     pretrained_model_id: str = "Qwen/Qwen-Image"

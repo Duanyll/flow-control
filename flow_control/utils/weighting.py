@@ -6,18 +6,21 @@ from pydantic import BaseModel, PlainValidator
 
 
 class BaseTimestepWeighting(BaseModel):
-    type: str | None = None
+    type: str
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         raise NotImplementedError
 
 
 class UniformTimestepWeighting(BaseTimestepWeighting):
+    type: str = "uniform"
+
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         return torch.rand(batch_size)
 
 
 class LogitNormalTimestepWeighting(BaseTimestepWeighting):
+    type: str = "logit_normal"
     mean: float = 0.0
     std: float = 1.0
 
@@ -28,6 +31,7 @@ class LogitNormalTimestepWeighting(BaseTimestepWeighting):
 
 
 class ModeTimestepWeighting(BaseTimestepWeighting):
+    type: str = "mode"
     scale: float = 1.29
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
@@ -57,23 +61,29 @@ TimestepWeighting = Annotated[
 
 
 class BaseLossWeighting(BaseModel):
-    type: str | None = None
+    type: str
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
 
 class UniformLossWeighting(BaseLossWeighting):
+    type: str = "uniform"
+
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(timesteps)
 
 
 class SigmaSquaredLossWeighting(BaseLossWeighting):
+    type: str = "sigma_squared"
+
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         return timesteps ** (-2.0)
 
 
 class CosmapLossWeighting(BaseLossWeighting):
+    type: str = "cosmap"
+
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         bot = 1 - 2 * timesteps + 2 * (timesteps**2)
         weights = 2 / (math.pi * bot)

@@ -40,8 +40,8 @@ class ProcessedBatch(TypedDict):
 
 
 class BaseProcessor(BaseModel, ABC):
-    task: str | None = None
-    preset: str | None = None
+    task: str
+    preset: str
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # ---------------------------------- Loading --------------------------------- #

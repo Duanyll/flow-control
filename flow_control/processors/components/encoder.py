@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 
 class BaseEncoder(HfModelLoader):
-    type: str | None = None
+    type: str
 
     chat_template: str = "{user}"
     image_template: str = ""
@@ -39,6 +39,8 @@ class BaseEncoder(HfModelLoader):
 
 
 class T5TextEncoder(BaseEncoder):
+    type: str = "t5"
+
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "T5EncoderModel"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
@@ -79,6 +81,8 @@ class T5TextEncoder(BaseEncoder):
 
 
 class ClipTextEncoder(BaseEncoder):
+    type: str = "clip"
+
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "CLIPTextModel"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
@@ -122,6 +126,7 @@ class ClipTextEncoder(BaseEncoder):
 
 
 class Qwen25VLEncoder(BaseEncoder):
+    type: str = "qwen_2_5_vl"
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "Qwen2_5_VLForConditionalGeneration"
     pretrained_model_id: str = "Qwen/Qwen-Image"
