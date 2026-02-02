@@ -21,8 +21,8 @@ class BaseModelAdapter(BaseModel, ABC):
     Base class for all control adapters.
     """
 
-    arch: str
-    type: str | list[str]
+    arch: str | None = None
+    type: str | list[str] | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

@@ -3,7 +3,6 @@ import random
 import signal
 import sys
 from contextlib import ContextDecorator
-from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -31,7 +30,6 @@ class HsdpEngineConfig(BaseModel):
 
 
 class HsdpEngine(Stateful):
-    raw_conf: dict[str, Any]
     conf: HsdpEngineConfig
 
     world_size: int
@@ -52,9 +50,6 @@ class HsdpEngine(Stateful):
     @property
     def device(self):
         return torch.device(f"cuda:{self.local_rank}")
-
-    def __init__(self, **kwargs):
-        self.raw_conf = deepcopy(kwargs)
 
     def init_device_mesh(self):
         if not dist.is_torchelastic_launched():

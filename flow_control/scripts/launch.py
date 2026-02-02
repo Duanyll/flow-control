@@ -40,13 +40,11 @@ def main():
         if launch_config.type == "sft":
             from flow_control.training.sft import HsdpSftTrainer
 
-            del config_data["launch"]
             trainer = HsdpSftTrainer(**config_data)
             trainer.run()
         elif launch_config.type == "inference":
             from flow_control.training.inference import HsdpInference
 
-            del config_data["launch"]
             trainer = HsdpInference(**config_data)
             trainer.run()
         else:

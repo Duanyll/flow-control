@@ -1,6 +1,5 @@
-import inspect
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel
@@ -61,6 +60,8 @@ class ProcessorStage(PipelineStage):
         self,
         worker_id: int,
         device: int | None = None,
+        save_intermediate: bool = False,
+        processing_mode: Literal["inference", "training"] = "training",
         processor_args: dict | None = None,
     ):
         if processor_args is None:
@@ -72,34 +73,27 @@ class ProcessorStage(PipelineStage):
         self.logger.info(f"Using device: {self.device}")
         processor_args["device"] = self.device
         self.processor = parse_processor(processor_args)
-        self.logger.info(f"Initialized processor: {self.processor.__class__.__name__}")
-
+        self.save_intermediate = save_intermediate
+        self.processing_mode = processing_mode
+        self.logger.info(
+            f"Initialized processor for {self.processing_mode}: {self.processor.__class__.__name__}"
+        )
         self.processor.load_models("encode", device=self.device)
         self.logger.info("Processor models loaded.")
 
-        # Check if preprocess_batch is async
-        self._is_async = inspect.iscoroutinefunction(self.processor.preprocess_batch)
-        if self._is_async:
-            self.logger.info("Using async preprocess_batch")
-
-    def process(self, batch: Any) -> Any:
+    @torch.no_grad()
+    async def process(self, batch: Any) -> Any:
         batch = deep_move_to_device(batch, self.device)
-        batch = self.processor.preprocess_batch(batch)
-        batch = deep_move_to_device(batch, torch.device("cpu"))
+        if self.processing_mode == "inference":
+            output = await self.processor.prepare_inference_batch(batch)
+        else:
+            output = await self.processor.prepare_training_batch(batch)
+        if self.save_intermediate:
+            batch.update(output)
+            output = batch
+        output = deep_move_to_device(output, torch.device("cpu"))
         self.logger.debug(f"Processed item by worker {self.worker_id}")
-        return [batch]
-
-    async def _async_process(self, batch: Any) -> Any:
-        batch = deep_move_to_device(batch, self.device)
-        batch = await self.processor.preprocess_batch(batch)  # type: ignore[misc]
-        batch = deep_move_to_device(batch, torch.device("cpu"))
-        self.logger.debug(f"Processed item by worker {self.worker_id}")
-        return [batch]
-
-    def __getattribute__(self, name: str) -> Any:
-        if name == "process" and object.__getattribute__(self, "_is_async"):
-            return object.__getattribute__(self, "_async_process")
-        return object.__getattribute__(self, name)
+        return [output]
 
 
 class PreprocessConfig(BaseModel):
@@ -114,6 +108,9 @@ class PreprocessConfig(BaseModel):
     num_threads_per_worker: int = 8
     queue_size: int = 16
     processing_limit: int | None = None  # Limit number of items to process
+
+    processing_mode: Literal["inference", "training"] = "training"
+    save_intermediate: bool = False
 
 
 def main():
@@ -158,7 +155,11 @@ def main():
                 queue_size=config.queue_size,
                 max_concurrency=config.processor_concurrency,
                 name="Processing",
-                init_kwargs={"processor_args": config.processor},
+                init_kwargs={
+                    "processor_args": config.processor,
+                    "processing_mode": config.processing_mode,
+                    "save_intermediate": config.save_intermediate,
+                },
             ),
         ],
         sink=SinkConfig(

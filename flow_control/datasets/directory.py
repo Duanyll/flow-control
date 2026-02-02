@@ -365,6 +365,6 @@ class RawDirectoryDataSink(DataSink):
         serialized_data = _serialize_with_field_names(data_to_write, sample_dir_path)
         index_json_path = os.path.join(sample_dir_path, "index.json")
         with open(index_json_path, "w", encoding="utf-8") as f:
-            json.dump(serialized_data, f, indent=2)
+            json.dump(serialized_data, f, indent=2, ensure_ascii=False)
 
         return True

@@ -38,7 +38,7 @@ from flow_control.utils.common import (
 )
 from flow_control.utils.data import DistributedBucketSampler, PaddingAwareDatasetWrapper
 from flow_control.utils.ema import apply_ema_maybe
-from flow_control.utils.logging import console, get_logger
+from flow_control.utils.logging import console, get_logger, get_version, warn_once
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -88,6 +88,7 @@ class HsdpTrainerConfig(HsdpEngineConfig):
     train_steps: int = 10000
     ema_decay: float = 0.999
     clip_grad_norm: float = 1.0
+    cfg_drop_prob: float = 0.0
 
     latent_length_test_mode: bool = False
 
@@ -145,7 +146,9 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         self.tracker = aim.Run(
             repo=self.conf.logging_dir, experiment=self.conf.experiment_name
         )
-        self.tracker["hparams"] = self.raw_conf
+        conf_dump = self.conf.model_dump(mode="json", warnings="none")
+        conf_dump["__version__"] = get_version()
+        self.tracker["hparams"] = conf_dump
         logger.info(
             f"Initialized Aim tracker at {self.conf.logging_dir}, experiment={self.conf.experiment_name}."
         )
@@ -284,6 +287,11 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             for batch in self.sample_dataloader:
                 batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
+                negative_batch: Any = (
+                    self.processor.get_negative_batch(batch)
+                    if self.sampler.cfg_scale > 1.0
+                    else None
+                )
                 generator = torch.Generator(device=self.device).manual_seed(
                     self.conf.seed
                 )
@@ -293,7 +301,9 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                     device=self.device,
                     dtype=self.model.dtype,
                 )
-                clean_latents = self.sampler.sample(self.model, batch)
+                clean_latents = self.sampler.sample(
+                    self.model, batch, negative_batch=negative_batch
+                )
                 image = tensor_to_pil(
                     self.processor.decode_output(clean_latents, batch)
                 )
@@ -328,6 +338,19 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         return progress, task
 
     def train_step(self, batch: Any):
+        if (
+            self.conf.cfg_drop_prob > 0.0
+            and torch.rand(1).item() < self.conf.cfg_drop_prob
+        ):
+            negative_batch = self.processor.get_negative_batch(batch)
+            if negative_batch is not None:
+                batch = negative_batch
+            else:
+                warn_once(
+                    logger,
+                    f"CFG drop prob is set to {self.conf.cfg_drop_prob}, but no negative (unconditional) batch available.",
+                )
+
         timesteps = self.conf.timestep_weighting.sample_timesteps(1)
         timesteps = timesteps.to(device=self.device, dtype=torch.float32)
         clean = batch["clean_latents"].float()

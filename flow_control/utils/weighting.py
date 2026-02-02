@@ -6,7 +6,7 @@ from pydantic import BaseModel, PlainValidator
 
 
 class BaseTimestepWeighting(BaseModel):
-    type: str
+    type: str | None = None
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         raise NotImplementedError
@@ -57,6 +57,8 @@ TimestepWeighting = Annotated[
 
 
 class BaseLossWeighting(BaseModel):
+    type: str | None = None
+
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 

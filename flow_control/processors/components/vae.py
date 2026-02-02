@@ -35,6 +35,7 @@ def _deserialize_tensor(
 
 
 class BaseVAE(HfModelLoader):
+    type: str | None = None
     endpoint: str | None = None
 
     def _load_model(self, device: torch.device) -> None:

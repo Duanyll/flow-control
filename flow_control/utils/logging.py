@@ -10,15 +10,18 @@ Logging behavior:
   - Set up global logging handlers for transformers and diffusers.
 - Child processes spawned by multiprocessing:
   - Should call setup_global_handler with a QueueHandler to route logs to the main process.
-  - Import and call setup_global_handler with include_name=False as early as possible in the child process. 
+  - Import and call setup_global_handler with include_name=False as early as possible in the child process.
     Pass a QueueHandler connected to the main process's listener.
 - Child processes launched by accelerate or torchrun:
   - Due to limitations, just silence all logs to avoid clutter.
 """
 
+import contextlib
 import logging
 import os
+import subprocess
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 
 import diffusers
 import torch.multiprocessing as mp
@@ -26,6 +29,7 @@ import transformers
 from accelerate.state import PartialState
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.panel import Panel
 
 
 def get_process_type():
@@ -58,8 +62,9 @@ def get_process_type():
 
 
 process_type = get_process_type()
+enable_console = process_type == "main"
 
-console = Console(quiet=process_type != "main")
+console = Console(quiet=not enable_console)
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 rich_handler = RichHandler(console=console, rich_tracebacks=True)
 
@@ -114,6 +119,63 @@ def warn_once(logger: logging.Logger, message: str):
         message (str): The warning message to log.
     """
     logger.warning(message)
+
+
+_version_cache: str | None = None
+
+
+def get_version() -> str:
+    """Get the current version of the flow_control package.
+
+    Returns:
+        str: The version string.
+    """
+    global _version_cache
+    if _version_cache is not None:
+        return _version_cache
+
+    result = "unknown"
+    with contextlib.suppress(PackageNotFoundError):
+        result = version("flow_control")
+    with contextlib.suppress(Exception):
+        git_commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            )
+            .decode("ascii")
+            .strip()
+        )
+        result += f"+git.{git_commit}"
+
+        has_changes = (
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
+            ).strip()
+            != b""
+        )
+        if has_changes:
+            result += ".wip"
+    _version_cache = result
+    return result
+
+
+BANNER = r"""
+  _____ _                  ____            _             _ 
+ |  ___| | _____      __  / ___|___  _ __ | |_ _ __ ___ | |
+ | |_  | |/ _ \ \ /\ / / | |   / _ \| '_ \| __| '__/ _ \| |
+ |  _| | | (_) \ V  V /  | |__| (_) | | | | |_| | | (_) | |
+ |_|   |_|\___/ \_/\_/    \____\___/|_| |_|\__|_|  \___/|_|
+"""
+
+
+def print_banner():
+    console.print(
+        Panel.fit(BANNER, subtitle=f"[bold green]{get_version()}[/bold green]")
+    )
+
+
+if enable_console:
+    print_banner()
 
 
 __all__ = ["get_logger", "setup_global_handler", "console", "rich_handler"]

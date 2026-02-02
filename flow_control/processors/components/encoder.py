@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 
 class BaseEncoder(HfModelLoader):
-    type: str
+    type: str | None = None
 
     chat_template: str = "{user}"
     image_template: str = ""

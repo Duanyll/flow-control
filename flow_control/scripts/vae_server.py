@@ -45,7 +45,6 @@ def deserialize_tensor(data: bytes, device: torch.device) -> torch.Tensor:
 
 
 def create_app(vae: BaseVAE, device: torch.device) -> Starlette:
-    vae.model.to(device)
     # Lock to ensure only one GPU operation at a time
     gpu_lock = asyncio.Lock()
 
@@ -93,7 +92,7 @@ def main():
     config = VAEServerConfig(**load_config_file(config_file))
 
     logger.info(f"Loading VAE model: {config.vae.pretrained_model_id}")
-    config.vae.load_model()
+    config.vae.load_model(config.device)
 
     logger.info(f"Starting VAE server on {config.host}:{config.port}")
     app = create_app(config.vae, config.device)

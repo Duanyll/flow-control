@@ -161,6 +161,11 @@ class HsdpInference(HsdpEngine):
             for batch in self.dataloader:
                 batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
+                negative_batch: Any = (
+                    self.processor.get_negative_batch(batch)
+                    if self.sampler.cfg_scale > 1.0
+                    else None
+                )
                 generator = torch.Generator(device=self.device).manual_seed(
                     self.conf.seed
                 )
@@ -170,7 +175,9 @@ class HsdpInference(HsdpEngine):
                     device=self.device,
                     dtype=self.model.dtype,
                 )
-                clean_latents = self.sampler.sample(self.model, batch)
+                clean_latents = self.sampler.sample(
+                    self.model, batch, negative_batch=negative_batch
+                )
                 image = tensor_to_pil(
                     self.processor.decode_output(clean_latents, batch)
                 )

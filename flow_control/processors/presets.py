@@ -10,7 +10,7 @@ from .components.vae import VAE, Flux1VAE, QwenImageVAE
 # ---------------------------------- Flux.1 ---------------------------------- #
 
 
-class Flux1Processor(BaseProcessor):
+class Flux1Preset(BaseProcessor):
     vae: VAE = Flux1VAE()
     encoder: Encoder = T5TextEncoder()
     pooled_encoder: Encoder | None = ClipTextEncoder()
@@ -46,7 +46,7 @@ class Flux1Processor(BaseProcessor):
 # -------------------------------- Qwen-Image -------------------------------- #
 
 
-class QwenImageProcessor(Flux1Processor):
+class QwenImagePreset(BaseProcessor):
     vae: VAE = QwenImageVAE()
     encoder: Encoder = Qwen25VLEncoder()
 
@@ -68,11 +68,11 @@ class QwenImageProcessor(Flux1Processor):
     save_negative: bool = True
 
 
-class QwenImageEditProcessor(QwenImageProcessor):
+class QwenImageEditPreset(QwenImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@qwen_image_edit_encoder")
 
 
-class QwenImageLayeredProcessor(QwenImageProcessor):
+class QwenImageLayeredPreset(QwenImagePreset):
     vae: VAE = QwenImageVAE(
         pretrained_model_id="Qwen/Qwen-Image-Layered",
         subfolder="vae",
@@ -88,7 +88,7 @@ class QwenImageLayeredProcessor(QwenImageProcessor):
 # ------------------------------- Longcat Image ------------------------------ #
 
 
-class LongcatImageProcessor(BaseProcessor):
+class LongcatImagePreset(BaseProcessor):
     vae: VAE = Flux1VAE()
     encoder: Encoder = Qwen25VLEncoder(
         image_template="<|vision_start|><|image_pad|><|vision_end|>",
@@ -124,5 +124,5 @@ class LongcatImageProcessor(BaseProcessor):
     save_negative: bool = True
 
 
-class LongcatImageEditProcessor(LongcatImageProcessor):
+class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
