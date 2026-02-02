@@ -28,7 +28,6 @@ from flow_control.datasets import (
 )
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
-from flow_control.samplers.simple_euler import SimpleEulerSampler
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -44,7 +43,7 @@ logger = get_logger(__name__)
 
 class HsdpInferenceConfig(HsdpEngineConfig):
     model: ModelAdapter
-    sampler: Sampler = SimpleEulerSampler()
+    sampler: Sampler
     processor: Processor
     dataset: DatasetConfig
     datasink: DatasinkConfig | None = None

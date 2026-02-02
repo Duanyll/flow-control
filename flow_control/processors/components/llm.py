@@ -44,8 +44,9 @@ class LLMClient(BaseModel):
     timeout: int = 120
     model: str = "auto"
     max_tokens: int = 2048
-    temperature: float = 1.0  # Recent LLMs work well with temperature=1.0
+    temperature: float = 0.7
     max_concurrency: int = 0  # 0 means no limit
+    extra_generate_kwargs: dict[str, Any] = {}
 
     _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
     _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
@@ -162,6 +163,7 @@ class LLMClient(BaseModel):
                 "messages": messages,
                 "max_tokens": self.max_tokens,
                 "temperature": self.temperature,
+                **self.extra_generate_kwargs,
             }
 
             async with session.post(url, json=payload) as resp:

@@ -30,7 +30,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
 from flow_control.processors import Processor
-from flow_control.samplers import Sampler, SimpleEulerSampler
+from flow_control.samplers import Sampler
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -64,7 +64,7 @@ logger = get_logger(__name__)
 
 class HsdpTrainerConfig(HsdpEngineConfig):
     model: ModelAdapter
-    sampler: Sampler = SimpleEulerSampler()
+    sampler: Sampler
     processor: Processor
     dataset: DatasetConfig
     sample_dataset: DatasetConfig | None = None

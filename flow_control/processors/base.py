@@ -46,20 +46,17 @@ class BaseProcessor(BaseModel, ABC):
 
     # ---------------------------------- Loading --------------------------------- #
 
-    _encoding_components = [
-        "vae",
-        "text_encoder",
-        "tokenizer",
-    ]
-    _decoding_components = ["vae"]
-
     vae: VAE
     encoder: Encoder
     pooled_encoder: Encoder | None = None
     llm: LLMClient | None = None
 
-    _encoding_components: list[str] = []
-    _decoding_components: list[str] = []
+    _encoding_components: list[str] = [
+        "vae",
+        "encoder",
+        "pooled_encoder",
+    ]
+    _decoding_components: list[str] = ["vae"]
     device: TorchDevice = torch.device("cuda")
 
     def load_models(

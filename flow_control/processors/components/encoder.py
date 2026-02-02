@@ -222,28 +222,32 @@ class Qwen25VLEncoder(BaseEncoder):
         ).to(model.device)
         suffix_inputs = vl_processor(text=suffix, return_tensors="pt").to(model.device)
 
-        prefix_len = prefix_inputs.input_ids.shape[0]
-        suffix_len = suffix_inputs.input_ids.shape[0]
+        # When is_split_into_words=True is passed, returned inputs_ids and attention_mask
+        # will not have batch dimension. However, pixel_values and image_grid_thw will
+        # always have batch dimension.
+
+        prefix_len = prefix_inputs.input_ids.shape[1]
+        suffix_len = suffix_inputs.input_ids.shape[1]
 
         input_ids = torch.cat(
             [
                 prefix_inputs.input_ids,
-                prompt_inputs.input_ids,
+                prompt_inputs.input_ids.unsqueeze(0),
                 suffix_inputs.input_ids,
             ],
-            dim=0,
-        ).unsqueeze(0)
+            dim=1,
+        )
         attention_mask = torch.cat(
             [
                 prefix_inputs.attention_mask,
-                prompt_inputs.attention_mask,
+                prompt_inputs.attention_mask.unsqueeze(0),
                 suffix_inputs.attention_mask,
             ],
-            dim=0,
-        ).unsqueeze(0)
+            dim=1,
+        )
         pixel_values = prompt_inputs.pixel_values if images else None
         image_grid_thw = prompt_inputs.image_grid_thw if images else None
-        encoder_hidden_states = model.model.encoder(
+        encoder_hidden_states = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,

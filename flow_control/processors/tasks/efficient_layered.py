@@ -1,6 +1,6 @@
 import asyncio
 import math
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from einops import repeat
@@ -15,6 +15,7 @@ from flow_control.utils.resize import (
 )
 
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..components.llm import parse_llm_json_output
 from ..components.prompts import PromptStr, parse_prompt
 
 logger = get_logger(__name__)
@@ -46,6 +47,9 @@ class EfficientLayeredProcessor(BaseProcessor):
     bg_caption_prompt: PromptStr = parse_prompt("@efficient_layered_caption_bg_en")
     default_negative_prompt: str = " "
     save_negative: bool = False
+
+    detection_prompt: PromptStr = parse_prompt("@efficient_layered_detection_en")
+    detection_coord_type: Literal["qwen25vl", "qwen3vl"] = "qwen3vl"
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         # Cropping is disabled to make resizing layer box calculation easier
@@ -109,10 +113,34 @@ class EfficientLayeredProcessor(BaseProcessor):
         return cropped_layers
 
     async def genearte_layer_boxes_prompts(
-        self, layer_image: torch.Tensor
+        self, image: torch.Tensor
     ) -> tuple[list[tuple[int, int, int, int]], list[str]]:
-        # Generate layer boxes and prompts using LLM (Future)
-        raise NotImplementedError("Layer box and prompt generation not implemented.")
+        h, w = image.shape[2], image.shape[3]
+        result_text = await self.chat_completion(
+            self.detection_prompt, [remove_alpha_channel(image)]
+        )
+        try:
+            result_json = parse_llm_json_output(result_text)
+            layer_boxes: list[tuple[int, int, int, int]] = [(0, h, 0, w)]
+            layer_prompts: list[str] = [result_json["background"]]
+            for item in result_json["foreground"]:
+                xmin, ymin, xmax, ymax = item["bbox_2d"]
+                if self.detection_coord_type == "qwen3vl":
+                    # Qwen3-VL use normized coordinates [0, 1000]
+                    xmin = int(xmin / 1000 * w)
+                    xmax = int(xmax / 1000 * w)
+                    ymin = int(ymin / 1000 * h)
+                    ymax = int(ymax / 1000 * h)
+                layer_boxes.append((ymin, ymax, xmin, xmax))
+                layer_prompts.append(item["label"])
+            return layer_boxes, layer_prompts
+        except Exception:
+            logger.error(
+                "Failed to parse detection output, this is likely due to LLM returning invalid JSON."
+            )
+            logger.debug("Dumping raw LLM response:")
+            logger.debug(result_text)
+            raise
 
     def generate_negative(self, num_layers: int):
         negative_prompt_embeds = self.encoder.encode(
@@ -132,7 +160,9 @@ class EfficientLayeredProcessor(BaseProcessor):
         self, batch: EfficientLayeredInputBatch
     ) -> EfficientLayeredProcessedBatch:
         orig_size = batch["clean_image"].shape[2], batch["clean_image"].shape[3]
-        batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
+        batch["clean_image"] = clean_image = self.resize_image(
+            ensure_alpha_channel(batch["clean_image"])
+        )
         image_size = clean_image.shape[2], clean_image.shape[3]
         image_latents = self.encode_latents(clean_image)
 
@@ -148,9 +178,14 @@ class EfficientLayeredProcessor(BaseProcessor):
                 layer_boxes,
                 layer_prompts,
             ) = await self.genearte_layer_boxes_prompts(clean_image)
-        batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
-            layer_boxes, orig_size, image_size
-        )
+            # No need to scale layer boxes as image is already resized
+            batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
+                layer_boxes, image_size, image_size
+            )
+        else:
+            batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
+                layer_boxes, orig_size, image_size
+            )
         prompt_embeds_list = [
             self.encoder.encode(prompt, system_prompt=self.encoder_prompt)
             for prompt in layer_prompts

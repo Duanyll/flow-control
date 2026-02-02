@@ -81,17 +81,17 @@ class ProcessorStage(PipelineStage):
         self.processor.load_models("encode", device=self.device)
         self.logger.info("Processor models loaded.")
 
-    @torch.no_grad()
     async def process(self, batch: Any) -> Any:
-        batch = deep_move_to_device(batch, self.device)
-        if self.processing_mode == "inference":
-            output = await self.processor.prepare_inference_batch(batch)
-        else:
-            output = await self.processor.prepare_training_batch(batch)
-        if self.save_intermediate:
-            batch.update(output)
-            output = batch
-        output = deep_move_to_device(output, torch.device("cpu"))
+        with torch.no_grad():
+            batch = deep_move_to_device(batch, self.device)
+            if self.processing_mode == "inference":
+                output = await self.processor.prepare_inference_batch(batch)
+            else:
+                output = await self.processor.prepare_training_batch(batch)
+            if self.save_intermediate:
+                batch.update(output)
+                output = batch
+            output = deep_move_to_device(output, torch.device("cpu"))
         self.logger.debug(f"Processed item by worker {self.worker_id}")
         return [output]
 
@@ -109,7 +109,7 @@ class PreprocessConfig(BaseModel):
     queue_size: int = 16
     processing_limit: int | None = None  # Limit number of items to process
 
-    processing_mode: Literal["inference", "training"] = "training"
+    processing_mode: Literal["inference", "training"]
     save_intermediate: bool = False
 
 

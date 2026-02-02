@@ -59,16 +59,19 @@ class HfModelLoader(BaseModel):
                 f"on meta device with dtype {self.dtype}"
             )
         else:
+            kwargs = {
+                "revision": self.revision,
+                "subfolder": self.subfolder,
+                **self.extra_from_pretrained_kwargs,
+            }
             if self.dtype != "auto":
                 if self.library == "diffusers":
-                    self.extra_from_pretrained_kwargs["torch_dtype"] = self.dtype
+                    kwargs["torch_dtype"] = self.dtype
                 elif self.library == "transformers":
-                    self.extra_from_pretrained_kwargs["dtype"] = self.dtype
+                    kwargs["dtype"] = self.dtype
             model = model_cls.from_pretrained(
                 self.pretrained_model_id,
-                revision=self.revision,
-                subfolder=self.subfolder,
-                **self.extra_from_pretrained_kwargs,
+                **kwargs,
             )
             logger.info(
                 f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
