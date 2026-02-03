@@ -31,24 +31,22 @@ You are a professional image annotator. Please write an image caption based on t
 """
 
 EFFICIENT_LAYERED_DETECTION_CN = r"""
-请分析提供的图片，识别并定位所有前景中的可见对象及设计元素，并将结果输出为指定的 JSON 格式。识别每一个显著的前景元素，并为每个元素提供以下信息：
+请分析提供的图片，首先输出一段文本，描述图片中的场景，然后再识别并定位所有前景中的可见对象及设计元素，并将结果输出为指定的 JSON 格式。确保你识别出的元素没有重复，没有遗漏，如果某元素是另一个元素的一部份，你只需要识别整体而不需要识别单独的部分。比如，如果有一个人，则整个人是一个对象，无需再把人的头和手作为单独的对象；如果有一群人，则每个人都是独立的对象。
+
+为每个元素提供以下信息：
+
 - 2D边界框（bbox_2d）：该对象的二维边界框坐标。
 - 标签（label）：一句描述该对象外观特征（颜色、形状、材质等）的句子。如果对象中包含可识别的文字，必须先描述文字的视觉样式（字体、颜色、特效），然后在一个双引号内完整写出文字内容
+
 最后，用一句话描述排除了前景对象后的背景环境或底色。
 
-输出格式示例：
+请先输出对场景的描述，再把 JSON 放在代码块里。JSON 输出格式示例：
 
 ```
 {
     "foreground": [
-        { 
-            "bbox_2d": [0, 54, 473, 999], 
-            "label": "一个绿色的礼物盒，顶部系着红色的蝴蝶结丝带。" 
-        },
-        { 
-            "bbox_2d": [218, 53, 478, 567], 
-            "label": "带有黑色轮廓和细微阴影效果的白色粗体文字，用现代无衬线字体展示了短语 \"Time For The\"。" 
-        }
+        { "bbox_2d": [0, 54, 473, 999], "label": "一个绿色的礼物盒，顶部系着红色的蝴蝶结丝带。" },
+        { "bbox_2d": [218, 53, 478, 567], "label": "带有黑色轮廓和细微阴影效果的白色粗体文字，用现代无衬线字体展示了短语 \"Time For The\"。" }
     ],
     "background": "纯深蓝色背景，带有微妙的渐变效果，从边缘的深蓝向中心略微变浅。"
 }
@@ -56,26 +54,24 @@ EFFICIENT_LAYERED_DETECTION_CN = r"""
 """
 
 EFFICIENT_LAYERED_DETECTION_EN = r"""
-Please analyze the provided image to identify and locate all visible objects and design elements in the foreground, outputting the results in the specified JSON format. For each prominent foreground element, provide the following information:
-- 2D Bounding Box (bbox_2d): The 2D bounding box coordinates of the object.
-- Label (label): A sentence describing the object's visual characteristics (color, shape, material, etc.). If the object contains recognizable text, first describe the visual style of the text (font, color, effects), then write the text content verbatim within "double quotes".
-Finally, provide a one-sentence description of the background environment or base color, excluding the foreground objects.
+Please analyze the provided image, first output a paragraph of text describing the scene in the image, then identify and locate all visible objects and design elements in the foreground, and output the results in the specified JSON format. Ensure that the elements you identify are not duplicated or omitted. If an element is part of another element, you only need to identify the whole without identifying the individual parts. For example, if there is a person, the whole person is one object, and there is no need to identify the person's head and hands as separate objects; if there is a group of people, each person is an independent object.
 
-Output format example:
+For each element, provide the following information:
+
+- 2D Bounding Box (bbox_2d): The 2D bounding box coordinates of the object.
+- Label (label): A sentence describing the visual features (color, shape, material, etc.) of the object. If the object contains recognizable text, you must first describe the visual style of the text (font, color, special effects), and then write the text content in full within double quotes.
+
+Finally, provide a one-sentence description of the background environment or base color after excluding the foreground objects.
+
+Please first output the description of the scene, then put the JSON in a code block. Example of JSON output format:
 
 ```
 {
     "foreground": [
-        { 
-            "bbox_2d": [0, 54, 473, 999], 
-            "label": "A green gift box with a red ribbon tied in a bow on top." 
-        },
-        { 
-            "bbox_2d": [218, 53, 478, 567], 
-            "label": "bold, white text with a black outline and a subtle shadow effect, displaying the phrase \"Time For The\" in a modern sans-serif font." 
-        }
+        { "bbox_2d": [0, 54, 473, 999], "label": "A green gift box with a red bow ribbon on top." },
+        { "bbox_2d": [218, 53, 478, 567], "label": "White bold text with black outline and subtle shadow effect, displaying the phrase \"Time For The\" in a modern sans-serif font." }
     ],
-    "background": "a solid dark blue background with a subtle gradient effect, transitioning slightly from a deeper blue at the edges to a slightly lighter blue towards the center."
+    "background": "Solid deep blue background with a subtle gradient effect, slightly lighter towards the center from the edges."
 }
 ```
 """

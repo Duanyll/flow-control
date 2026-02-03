@@ -262,6 +262,10 @@ def parse_llm_json_output(llm_output: str) -> Any:
     :param llm_output: LLM 返回的可能包含 JSON 的字符串。
     :return: 解析后的 Python 字典或列表，如果失败则返回 None。
     """
+    # 0. Strip <think> </think> tags if present
+    if "</think>" in llm_output:
+        llm_output = llm_output.split("</think>")[-1]
+
     # 1. 优先从 markdown 块提取
     potential_json_str = _extract_last_json_block(llm_output)
 
