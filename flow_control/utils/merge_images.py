@@ -4,6 +4,9 @@ from typing import Any, overload
 import torch
 from PIL import Image, ImageDraw
 
+from .common import pil_to_tensor, tensor_to_pil
+from .draw import generate_color, load_font
+
 
 class BinPacker:
     """
@@ -115,10 +118,20 @@ class BinPacker:
         return self.split_node(node, w, h) if node else None
 
 
-def _render_pil(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
+def _render_pil(
+    blocks, canvas_w, canvas_h, bg_color, border_w, draw_labels=False, label_size=20
+):
     """PIL 渲染逻辑"""
     canvas = Image.new("RGBA", (canvas_w, canvas_h), bg_color)
-    draw = ImageDraw.Draw(canvas) if border_w > 0 else None
+    draw = ImageDraw.Draw(canvas) if (border_w > 0 or draw_labels) else None
+
+    # Load font for labels if needed
+    font = None
+    if draw_labels and draw:
+        try:
+            font = load_font(label_size)
+        except Exception:
+            font = None  # Fall back to default font
 
     for block in blocks:
         if block.get("fit"):
@@ -126,13 +139,45 @@ def _render_pil(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
             w, h = block["w"], block["h"]
             canvas.paste(block["img"], (x, y))
             if border_w > 0 and draw:
+                # Generate unique color for each block's border
+                border_color = generate_color(block["index"])
                 draw.rectangle(
-                    [x, y, x + w - 1, y + h - 1], outline=border_c, width=border_w
+                    [x, y, x + w - 1, y + h - 1], outline=border_color, width=border_w
                 )
+            # Draw label with index
+            if draw_labels and draw:
+                label_text = str(block["index"])
+                # Generate the same color used for border
+                label_bg_color = generate_color(block["index"])
+                # Add a semi-transparent background for better readability
+                padding = 2
+                if font:
+                    bbox = draw.textbbox((0, 0), label_text, font=font)
+                    text_w = bbox[2] - bbox[0]
+                    text_h = bbox[3] - bbox[1]
+                else:
+                    # Rough estimate for default font
+                    text_w = len(label_text) * 8
+                    text_h = 12
+
+                # Draw background rectangle with border color
+                bg_rect = [
+                    x + padding,
+                    y + padding,
+                    x + padding + text_w + padding * 2,
+                    y + padding + text_h + padding * 2,
+                ]
+                draw.rectangle(bg_rect, fill=(*label_bg_color, 220))
+
+                # Draw text
+                text_pos = (x + padding * 2, y + padding * 2)
+                draw.text(text_pos, label_text, fill=(255, 255, 255, 255), font=font)
     return canvas
 
 
-def _render_tensor(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
+def _render_tensor(
+    blocks, canvas_w, canvas_h, bg_color, border_w, draw_labels=False, label_size=20
+):
     """PyTorch Tensor 渲染逻辑"""
     # 获取第一个张量的元数据
     ref_tensor = blocks[0]["img"]
@@ -149,16 +194,6 @@ def _render_tensor(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
     # 如果需要复杂的颜色映射需要对 border_c 进行转换，这里简化处理：
     # 如果是 float tensor，背景保持 0；如果是 int tensor，也保持 0)
 
-    # 预处理边框颜色为 Tensor，以便广播赋值
-    if border_w > 0:
-        # border_c 传入的是 tuple (r,g,b,a) 或 (r,g,b)，我们需要根据 channels 截取或填充
-        # 并转换为对应的 dtype 和 device
-        bc_val = torch.tensor(border_c[:channels], dtype=dtype, device=device).view(
-            1, -1, 1, 1
-        )
-    else:
-        bc_val = 0
-
     for block in blocks:
         if block.get("fit"):
             x, y = block["fit"]["x"], block["fit"]["y"]
@@ -171,6 +206,31 @@ def _render_tensor(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
 
             # 3. 绘制边框 (通过切片修改像素值)
             if border_w > 0:
+                # Generate unique color for each block's border
+                border_color = generate_color(block["index"])  # Returns (R, G, B)
+                # Extend to RGBA if needed
+                if channels == 4:
+                    border_color = (
+                        *border_color,
+                        255,
+                    )  # Add full opacity for alpha channel
+                elif channels > 4:
+                    # For channels > 4, pad with appropriate values
+                    border_color = border_color + (255,) * (channels - 3)
+
+                # Convert border color to tensor format based on dtype
+                if dtype.is_floating_point:
+                    # For float tensors (0-1 range), normalize color values
+                    bc_val = torch.tensor(
+                        [c / 255.0 for c in border_color[:channels]],
+                        dtype=dtype,
+                        device=device,
+                    ).view(1, -1, 1, 1)
+                else:
+                    # For integer tensors, use color values directly
+                    bc_val = torch.tensor(
+                        border_color[:channels], dtype=dtype, device=device
+                    ).view(1, -1, 1, 1)
                 # 上边框
                 canvas[:, :, y : y + border_w, x : x + w] = bc_val
                 # 下边框
@@ -180,6 +240,51 @@ def _render_tensor(blocks, canvas_w, canvas_h, bg_color, border_w, border_c):
                 # 右边框
                 canvas[:, :, y : y + h, x + w - border_w : x + w] = bc_val
 
+    # 4. 绘制标签 (需要转换到 PIL)
+    if draw_labels:
+        # Convert tensor to PIL, draw labels, convert back
+        pil_canvas = tensor_to_pil(canvas)
+
+        # Draw labels on PIL image
+        draw = ImageDraw.Draw(pil_canvas)
+        try:
+            font = load_font(label_size)
+        except Exception:
+            font = None
+
+        for block in blocks:
+            if block.get("fit"):
+                x, y = block["fit"]["x"], block["fit"]["y"]
+                label_text = str(block["index"])
+                # Generate the same color used for border
+                label_bg_color = generate_color(block["index"])
+                padding = 2
+
+                if font:
+                    bbox = draw.textbbox((0, 0), label_text, font=font)
+                    text_w = bbox[2] - bbox[0]
+                    text_h = bbox[3] - bbox[1]
+                else:
+                    text_w = len(label_text) * 8
+                    text_h = 12
+
+                # Draw background rectangle with border color
+                bg_rect = [
+                    x + padding,
+                    y + padding,
+                    x + padding + text_w + padding * 2,
+                    y + padding + text_h + padding * 2,
+                ]
+                draw.rectangle(bg_rect, fill=(*label_bg_color, 220))
+
+                # Draw text
+                text_pos = (x + padding * 2, y + padding * 2)
+                draw.text(text_pos, label_text, fill=(255, 255, 255, 255), font=font)
+
+        # Convert back to tensor
+        canvas_labeled = pil_to_tensor(pil_canvas)
+        canvas = canvas_labeled.to(device=device, dtype=dtype)
+
     return canvas
 
 
@@ -188,7 +293,8 @@ def merge_images(
     images: list[Image.Image],
     background_color: tuple = (0, 0, 0, 0),
     border_width: int = 0,
-    border_color: tuple = (255, 0, 0, 255),
+    draw_labels: bool = False,
+    label_size=20,
 ) -> Image.Image: ...
 
 
@@ -197,7 +303,8 @@ def merge_images(
     images: list[torch.Tensor],
     background_color: tuple = (0, 0, 0, 0),
     border_width: int = 0,
-    border_color: tuple = (255, 0, 0, 255),
+    draw_labels: bool = False,
+    label_size=20,
 ) -> torch.Tensor: ...
 
 
@@ -205,11 +312,19 @@ def merge_images(
     images,
     background_color=(0, 0, 0, 0),
     border_width: int = 0,
-    border_color: tuple = (255, 0, 0, 255),
+    draw_labels: bool = False,
+    label_size: int = 20,
 ):
     """
     接受 PIL Image 或 torch.Tensor 列表，将其拼接进一个矩形画布。
     支持输入 Tensor 形状为 (1, C, H, W)。
+
+    Args:
+        images: PIL Image 或 torch.Tensor 列表
+        background_color: 背景颜色
+        border_width: 边框宽度（每个图像的边框颜色将自动根据索引生成）
+        draw_labels: 是否在每个图像左上角绘制索引标签
+        label_size: 标签字体大小
     """
     if not images:
         raise ValueError("Input image list is empty")
@@ -244,11 +359,23 @@ def merge_images(
     # 4. 根据类型分发渲染
     if is_tensor:
         return _render_tensor(
-            blocks, canvas_w, canvas_h, background_color, border_width, border_color
+            blocks,
+            canvas_w,
+            canvas_h,
+            background_color,
+            border_width,
+            draw_labels,
+            label_size,
         )
     else:
         return _render_pil(
-            blocks, canvas_w, canvas_h, background_color, border_width, border_color
+            blocks,
+            canvas_w,
+            canvas_h,
+            background_color,
+            border_width,
+            draw_labels,
+            label_size,
         )
 
 
@@ -266,30 +393,31 @@ if __name__ == "__main__":
         )
         pil_images.append(img)
 
-    res_pil = merge_images(pil_images, border_width=2, border_color=(255, 255, 255))
+    res_pil = merge_images(pil_images, border_width=2, draw_labels=True, label_size=24)
     print(f"PIL Result Size: {res_pil.size}")
+    res_pil.save("pil_packed_result.png")
+    print("PIL result saved to 'pil_packed_result.png'")
     # res_pil.show()
 
     # --- 测试 2: PyTorch Tensor 模式 ---
     print("\n--- Test 2: PyTorch Tensors ---")
     tensor_images = []
 
-    # 创建一些随机 tensor: (1, 3, H, W) 模拟 RGB
-    # 注意：这里使用 float (0-1) 还是 uint8 (0-255) 取决于你的数据习惯
-    # 为了演示边框颜色，这里我们假设 tensor 是 uint8 格式 (0-255)
+    # 创建一些随机 tensor: (1, 4, H, W) 模拟 RGBA
+    # 注意：这里使用 float (0-1)
     for _ in range(5):
         h, w = random.randint(50, 100), random.randint(50, 100)
         # 随机颜色 tensor
-        t = torch.randint(0, 255, (1, 3, h, w), dtype=torch.uint8)
+        t = torch.rand((1, 3, h, w), dtype=torch.float32)
+        t = torch.cat([t, torch.ones((1, 1, h, w), dtype=torch.float32)], dim=1)
         tensor_images.append(t)
 
     try:
-        # 拼接
-        # border_color 需要与 tensor 的数值范围匹配。如果是 uint8，用 (255,0,0)；如果是 float，用 (1.0, 0, 0)
         res_tensor: Any = merge_images(
             tensor_images,
             border_width=2,
-            border_color=(0, 255, 0),  # 绿色边框
+            draw_labels=True,
+            label_size=24,
         )
 
         print(f"Input Tensor Shape: {tensor_images[0].shape}")
@@ -298,8 +426,12 @@ if __name__ == "__main__":
         print(f"Output Dtype: {res_tensor.dtype}")
 
         # 验证结果 (转换回 PIL 看看)
-        # Remove batch dim -> (C, H, W) -> permute to (H, W, C) -> numpy
-        disp_img = Image.fromarray(res_tensor.squeeze(0).permute(1, 2, 0).numpy())
+        # For float tensors in 0-1 range, convert to uint8 for PIL
+        if res_tensor.dtype.is_floating_point:
+            tensor_uint8 = (res_tensor.squeeze(0) * 255).clamp(0, 255).byte()
+            disp_img = Image.fromarray(tensor_uint8.permute(1, 2, 0).numpy())
+        else:
+            disp_img = Image.fromarray(res_tensor.squeeze(0).permute(1, 2, 0).numpy())
         # disp_img.show()
         disp_img.save("tensor_packed_result.png")
         print("Tensor result saved to 'tensor_packed_result.png'")

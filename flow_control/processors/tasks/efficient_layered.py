@@ -6,6 +6,7 @@ import torch
 from einops import repeat
 
 from flow_control.utils.common import ensure_alpha_channel, remove_alpha_channel
+from flow_control.utils.draw import draw_bbox_on_image
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import (
@@ -25,6 +26,8 @@ class EfficientLayeredInputBatch(InputBatch):
     clean_image: torch.Tensor
     layer_boxes: NotRequired[list[tuple[int, int, int, int]] | None]
     layer_prompts: NotRequired[list[str] | None]
+
+    annotated_image: NotRequired[torch.Tensor]
 
 
 class EfficientLayeredTrainInputBatch(TrainInputBatch):
@@ -50,6 +53,8 @@ class EfficientLayeredProcessor(BaseProcessor):
 
     detection_prompt: PromptStr = parse_prompt("@efficient_layered_detection_en")
     detection_coord_type: Literal["qwen25vl", "qwen3vl"] = "qwen3vl"
+    save_annotated_image: bool = False
+    annotate_preview_image: bool = False
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         # Cropping is disabled to make resizing layer box calculation easier
@@ -186,6 +191,13 @@ class EfficientLayeredProcessor(BaseProcessor):
             batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
                 layer_boxes, orig_size, image_size
             )
+        if self.save_annotated_image:
+            batch["annotated_image"] = draw_bbox_on_image(
+                clean_image,
+                layer_boxes[1:],
+                [str(i) for i in range(1, len(layer_boxes))],
+            )
+
         prompt_embeds_list = [
             self.encoder.encode(prompt, system_prompt=self.encoder_prompt)
             for prompt in layer_prompts
@@ -296,7 +308,12 @@ class EfficientLayeredProcessor(BaseProcessor):
             )
             decoded_layers.append(decoded_layer)
         batch["layer_images"] = decoded_layers  # type: ignore
-        merged_image = merge_images(decoded_layers)
+        if self.annotate_preview_image:
+            merged_image = merge_images(
+                decoded_layers, border_width=4, draw_labels=True
+            )
+        else:
+            merged_image = merge_images(decoded_layers)
         return merged_image
 
     def initialize_latents(

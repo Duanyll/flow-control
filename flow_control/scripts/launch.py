@@ -9,7 +9,7 @@ from rich import print
 
 class LaunchConfig(BaseModel):
     type: Literal["sft", "inference"]
-    num_processes: int
+    devices: int | list[int]
     omp_num_threads: int | None = None
     nccl_p2p_level: str | None = None
 
@@ -50,11 +50,16 @@ def main():
         else:
             raise ValueError(f"Unknown launch type: {launch_config.type}")
     else:
+        num_processes = (
+            launch_config.devices
+            if isinstance(launch_config.devices, int)
+            else len(launch_config.devices)
+        )
         # This is parent process
         cmd = [
             "torchrun",
             "--nproc_per_node",
-            str(launch_config.num_processes),
+            str(num_processes),
             "-m",
             "flow_control.scripts.launch",
             args.config_path,
@@ -62,10 +67,12 @@ def main():
             launch_config.type,
         ]
 
+        if isinstance(launch_config.devices, list):
+            visible_devices = ",".join(str(d) for d in launch_config.devices)
+            print(f"[green]Setting CUDA_VISIBLE_DEVICES: [/green]{visible_devices}")
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
         if launch_config.omp_num_threads is None:
-            launch_config.omp_num_threads = (
-                os.cpu_count() or 0
-            ) // launch_config.num_processes
+            launch_config.omp_num_threads = (os.cpu_count() or 0) // num_processes
         if launch_config.omp_num_threads > 0:
             print(
                 f"[green]Setting OMP_NUM_THREADS: [/green]{launch_config.omp_num_threads}"
