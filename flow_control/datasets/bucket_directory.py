@@ -5,15 +5,11 @@ from torch.utils.data import Dataset
 
 from flow_control.utils.pipeline import DataSink
 
-from .directory import (
-    PickleDirectoryDataset,
-    PickleDirectoryDataSink,
-    RawDirectoryDataset,
-    RawDirectoryDataSink,
-)
+from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
+from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 
 
-class BinsDirectoryDataset(Dataset):
+class BucketDirectoryDataset(Dataset):
     bin_lengths: list[int]
 
     def __init__(self, path: str, base_type: Literal["raw", "pickle"], **kwargs):
@@ -46,7 +42,7 @@ class BinsDirectoryDataset(Dataset):
         raise IndexError("Index out of range")
 
 
-class BinsDirectoryDataSink(DataSink):
+class BucketDirectoryDatasink(DataSink):
     def __init__(
         self,
         worker_id,

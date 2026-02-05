@@ -5,16 +5,13 @@ from torch.utils.data import ConcatDataset, Dataset
 
 from flow_control.utils.pipeline import DataSink
 
-from .bins_directory import BinsDirectoryDataset, BinsDirectoryDataSink
-from .directory import (
-    PickleDirectoryDataset,
-    PickleDirectoryDataSink,
-    RawDirectoryDataset,
-    RawDirectoryDataSink,
-)
+from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
+from .csv import CsvDataset
 from .lmdb import LMDBDataset, LMDBDataSink
-from .plain import PlainDirectoryDataset
+from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
+from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
+from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 
 DatasetConfig = dict[str, Any]
 
@@ -23,8 +20,9 @@ DATASET_REGISTRY = {
     "plain_directory": PlainDirectoryDataset,
     "pickle_directory": PickleDirectoryDataset,
     "raw_directory": RawDirectoryDataset,
-    "bins_directory": BinsDirectoryDataset,
+    "bucket_directory": BucketDirectoryDataset,
     "prism_layers_pro": PrismLayersProDataset,
+    "csv": CsvDataset,
 }
 
 
@@ -60,7 +58,7 @@ DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,
     "pickle_directory": PickleDirectoryDataSink,
     "raw_directory": RawDirectoryDataSink,
-    "bins_directory": BinsDirectoryDataSink,
+    "bucket_directory": BucketDirectoryDatasink,
 }
 
 
