@@ -34,6 +34,7 @@ class BaseLongCatAdapter(BaseModelAdapter):
 
     patch_size: int = 2
     vae_scale_factor: int = 8
+    image_offset: int = 512
 
     class BatchType(BaseModelAdapter.BatchType):
         prompt_embeds: torch.Tensor
@@ -51,9 +52,19 @@ class BaseLongCatAdapter(BaseModelAdapter):
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         if "txt_ids" not in batch:
-            batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
+            batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"].shape[1])
         if "img_ids" not in batch:
-            batch["img_ids"] = self._make_img_ids(batch["image_size"])
+            scale = self.patch_size * self.vae_scale_factor
+            latent_size = (
+                batch["image_size"][0] // scale,
+                batch["image_size"][1] // scale,
+            )
+            batch["img_ids"] = self._make_img_ids(
+                latent_size,
+                index=1,
+                h_offset=self.image_offset,
+                w_offset=self.image_offset,
+            )
 
         model_pred = self.transformer(
             hidden_states=batch["noisy_latents"],
@@ -66,45 +77,24 @@ class BaseLongCatAdapter(BaseModelAdapter):
 
         return model_pred
 
-    def _make_txt_ids(
-        self, prompt_embeds: torch.Tensor, index=0, h_offset=0, w_offset=0
-    ):
-        b, n, d = prompt_embeds.shape
-        txt_ids = torch.zeros((n, 3), dtype=self.dtype, device=prompt_embeds.device)
+    def _make_txt_ids(self, length: int, index=0, h_offset=0, w_offset=0):
+        txt_ids = torch.zeros((length, 3))
         txt_ids[:, 0] = index
-        txt_ids[:, 1] = (
-            txt_ids[:, 1]
-            + torch.arange(n, dtype=txt_ids.dtype, device=txt_ids.device)
-            + h_offset // self.patch_size
-        )
-        txt_ids[:, 2] = (
-            txt_ids[:, 2]
-            + torch.arange(n, dtype=txt_ids.dtype, device=txt_ids.device)
-            + w_offset // self.patch_size
-        )
-        return txt_ids
+        txt_ids[:, 1] = txt_ids[:, 1] + torch.arange(length) + h_offset
+        txt_ids[:, 2] = txt_ids[:, 1] + torch.arange(length) + w_offset
+        return txt_ids.to(device=self.device)
 
     def _make_img_ids(
-        self, image_size: tuple[int, int], index=0, h_offset=0, w_offset=0
+        self, latent_size: tuple[int, int], index=0, h_offset=0, w_offset=0
     ):
-        h, w = image_size
-        h_len = h // (self.patch_size * self.vae_scale_factor)
-        w_len = w // (self.patch_size * self.vae_scale_factor)
-        img_ids = torch.zeros((h_len, w_len, 3), dtype=self.dtype, device=self.device)
+        h_len, w_len = latent_size
+        img_ids = torch.zeros((h_len, w_len, 3))
         img_ids[:, :, 0] = index
         img_ids[:, :, 1] = (
-            img_ids[:, :, 1]
-            + torch.arange(h_len, dtype=img_ids.dtype, device=img_ids.device).reshape(
-                h_len, 1
-            )
-            + h_offset // self.patch_size
+            img_ids[:, :, 1] + torch.arange(h_len).reshape(h_len, 1) + h_offset
         )
         img_ids[:, :, 2] = (
-            img_ids[:, :, 2]
-            + torch.arange(w_len, dtype=img_ids.dtype, device=img_ids.device).reshape(
-                1, w_len
-            )
-            + w_offset // self.patch_size
+            img_ids[:, :, 2] + torch.arange(w_len).reshape(1, w_len) + w_offset
         )
         img_ids = rearrange(img_ids, "h w c -> (h w) c")
-        return img_ids
+        return img_ids.to(device=self.device)

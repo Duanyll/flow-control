@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired
 
 import torch
 import torch.nn as nn
@@ -193,6 +193,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         """
         `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
         """
+        block_mask: NotRequired[flex_attention.BlockMask | None]
 
     def load_transformer(self, device: torch.device) -> None:
         super().load_transformer(device=device)
@@ -305,14 +306,15 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             ]
         ] * b
 
-        block_mask = self.make_block_mask(
-            base_len=batch["image_latents"].shape[1],
-            layer_lens=[
-                (bottom - top) * (right - left) // 256
-                for (top, bottom, left, right) in batch["layer_boxes"]
-            ],
-            txt_lens=batch["text_lengths"],
-        )
+        if "block_mask" not in batch:
+            batch["block_mask"] = self.make_block_mask(
+                base_len=batch["image_latents"].shape[1],
+                layer_lens=[
+                    (bottom - top) * (right - left) // 256
+                    for (top, bottom, left, right) in batch["layer_boxes"]
+                ],
+                txt_lens=batch["text_lengths"],
+            )
 
         is_rgb = torch.tensor([0] * b).to(device=self.device, dtype=torch.long)
 
@@ -322,7 +324,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
             encoder_hidden_states=batch["prompt_embeds"],
             img_shapes=(img_shapes, batch["text_lengths"]),
             attention_kwargs={
-                "attention_mask": block_mask,
+                "attention_mask": batch["block_mask"],
             },
             return_dict=False,
             additional_t_cond=is_rgb,

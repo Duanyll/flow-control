@@ -20,18 +20,18 @@ CsvColumnType = Literal["int", "float", "str", "json", "attachment", "attachment
 class CsvDataset(Dataset):
     def __init__(
         self,
-        csv_file: str,
+        path: str,
         column_types: dict[str, CsvColumnType],
         attachments_dir: str | None = None,
     ):
-        self.csv_file = csv_file
+        self.path = path
         self.column_types = column_types
         if not attachments_dir:
-            attachments_dir = os.path.dirname(csv_file)
+            attachments_dir = os.path.dirname(path)
         self.attachments_dir = attachments_dir
 
         self.data = []
-        with open(csv_file) as f:
+        with open(path) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 self.data.append(row)

@@ -32,20 +32,25 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            img_ids_list = [self._make_img_ids(batch["image_size"])]
+            scale = self.patch_size * self.vae_scale_factor
+            latent_size = (
+                batch["image_size"][0] // scale,
+                batch["image_size"][1] // scale,
+            )
+            img_ids_list = [self._make_img_ids(latent_size)]
             cur_h = 0
             cur_w = 0
             cur_index = 0
             for size in batch["reference_sizes"]:
-                h_ref, w_ref = size
+                h_ref, w_ref = lsize = (size[0] // scale, size[1] // scale)
+                cur_index += self.pe_index_scale
                 if self.pe_mode == "3d":
-                    cur_index += self.pe_index_scale
-                    img_ids_list.append(self._make_img_ids(size, index=cur_index))
+                    img_ids_list.append(self._make_img_ids(lsize, index=cur_index))
                 elif self.pe_mode == "diagonal":
                     img_ids_list.append(
                         self._make_img_ids(
-                            size,
-                            index=0,
+                            lsize,
+                            index=cur_index,
                             h_offset=h + cur_h,
                             w_offset=w + cur_w,
                         )
@@ -63,8 +68,8 @@ class Flux1KontextAdapter(BaseFlux1Adapter):
                     cur_w = max(cur_w, w_ref + w_offset)
                     img_ids_list.append(
                         self._make_img_ids(
-                            size,
-                            index=0,
+                            lsize,
+                            index=cur_index,
                             h_offset=h_offset,
                             w_offset=w_offset,
                         )

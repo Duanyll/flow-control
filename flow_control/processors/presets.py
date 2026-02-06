@@ -91,9 +91,13 @@ class QwenImageLayeredPreset(QwenImagePreset):
 class LongcatImagePreset(BaseProcessor):
     vae: VAE = Flux1VAE()
     encoder: Encoder = Qwen25VLEncoder(
+        pretrained_model_id="meituan-longcat/LongCat-Image",
+        subfolder="text_encoder",
         image_template="<|vision_start|><|image_pad|><|vision_end|>",
         split_quotation=True,
         drop_suffix_tokens=True,
+        tokenizer_max_length=512,
+        tokenizer_enforce_pad_token=True,
     )
 
     default_resolution: tuple[int, int] = (1024, 1024)
@@ -121,6 +125,7 @@ class LongcatImagePreset(BaseProcessor):
     total_pixels: int = 1024 * 1024
 
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_encoder")
+    default_negative_prompt: PromptStr = ""
     save_negative: bool = True
 
 

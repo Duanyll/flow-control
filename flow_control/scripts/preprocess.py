@@ -91,6 +91,8 @@ class ProcessorStage(PipelineStage):
             if self.save_intermediate:
                 batch.update(output)
                 output = batch
+            if "__key__" not in output:
+                output["__key__"] = batch.get("__key__", None)  # type: ignore
             output = deep_move_to_device(output, torch.device("cpu"))
         self.logger.debug(f"Processed item by worker {self.worker_id}")
         return [output]

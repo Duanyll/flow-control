@@ -37,9 +37,13 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            batch["img_ids"] = repeat(
-                self._make_img_ids(batch["image_size"]), "n d -> (r n) d", r=2
+            scale = self.patch_size * self.vae_scale_factor
+            latent_size = (
+                batch["image_size"][0] // scale,
+                batch["image_size"][1] // scale,
             )
+            img_ids = self._make_img_ids(latent_size)
+            batch["img_ids"] = repeat(img_ids, "n d -> (r n) d", r=2)
 
         model_pred = self.transformer(
             hidden_states=concatenated_model_input,

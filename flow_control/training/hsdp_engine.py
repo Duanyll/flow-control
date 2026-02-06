@@ -100,11 +100,14 @@ class HsdpEngine(Stateful):
                         "Gradient checkpointing is enabled in the config, "
                         "but the transformer model does not support it.",
                     )
-        if not hasattr(model.transformer, "_no_split_modules"):
+
+        fsdp_layers: list[str] = (
+            model.transformer._no_split_modules or model.transformer._repeated_blocks
+        )
+        if not fsdp_layers:
             raise ValueError(
-                "The transformer model must define _no_split_modules for HSDP."
+                "Model transformer must specify _no_split_modules or _repeated_blocks for FSDP sharding."
             )
-        fsdp_layers: list[str] = model.transformer._no_split_modules
         count = 0
         for _, module in model.transformer.named_modules():
             module_type = type(module).__name__

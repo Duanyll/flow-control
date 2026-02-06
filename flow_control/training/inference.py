@@ -152,6 +152,7 @@ class HsdpInference(HsdpEngine):
 
         if self.conf.save_preview_dir is not None:
             os.makedirs(self.conf.save_preview_dir, exist_ok=True)
+            logger.info(f"Saving preview images to {self.conf.save_preview_dir}")
 
         self.transformer.eval()
         console.rule("[bold green]Starting Inference[/bold green]")
@@ -188,4 +189,5 @@ class HsdpInference(HsdpEngine):
                 if self.conf.save_preview_dir is not None:
                     image.save(os.path.join(self.conf.save_preview_dir, f"{key}.png"))
                 progress.advance(task)
-            console.rule("[bold green]Inference Completed[/bold green]")
+
+        console.rule("[bold green]Inference Completed[/bold green]")

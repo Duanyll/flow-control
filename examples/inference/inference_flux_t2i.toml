@@ -1,0 +1,25 @@
+seed_checkpoint_dir = "./demo/seed/flux"
+save_preview_dir = "./demo/inference_flux_t2i_preview"
+
+hsdp_shard_dim = 1
+
+[model]
+arch = "flux1"
+type = "base"
+
+[dataset]
+type = "pickle_directory"
+path = "./demo/preprocess_flux_t2i"
+
+[sampler]
+type = "shifted_euler"
+steps = 20
+cfg_scale = 1.0
+
+[processor]
+task = "t2i"
+preset = "flux1"
+
+[launch]
+type = "inference"
+devices = 4

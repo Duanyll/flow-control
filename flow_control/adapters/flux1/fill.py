@@ -34,7 +34,12 @@ class Flux1FillAdapter(BaseFlux1Adapter):
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
         if "img_ids" not in batch:
-            batch["img_ids"] = self._make_img_ids(batch["image_size"])
+            scale = self.patch_size * self.vae_scale_factor
+            latent_size = (
+                batch["image_size"][0] // scale,
+                batch["image_size"][1] // scale,
+            )
+            batch["img_ids"] = self._make_img_ids(latent_size)
 
         mask = self._pack_mask(batch["inpaint_mask"])
         inputs = pack(

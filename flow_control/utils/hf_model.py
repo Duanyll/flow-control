@@ -75,7 +75,7 @@ class HfModelLoader(BaseModel):
             )
             logger.info(
                 f"Loaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
-                f"with dtype {self.dtype} to device {device}"
+                f"with dtype {self.dtype}"
             )
             if hasattr(model, "to"):
                 model.to(device)

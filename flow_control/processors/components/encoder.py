@@ -157,6 +157,8 @@ class Qwen25VLEncoder(BaseEncoder):
         ("'", "'"),
     ]
     drop_suffix_tokens: bool = False
+    tokenizer_max_length: int = 1024
+    tokenizer_enforce_pad_token: bool = False
     generate_max_new_tokens: int = 512
 
     def _split_quotation(self, prompt: str):
@@ -204,9 +206,10 @@ class Qwen25VLEncoder(BaseEncoder):
         if self.split_quotation:
             for part, is_quoted in self._split_quotation(prompt):
                 if is_quoted:
-                    pretokenized_inputs.append(part)
-                else:
+                    # Each character in the quoted part is treated as a separate token
                     pretokenized_inputs.extend(part)
+                else:
+                    pretokenized_inputs.append(part)
         else:
             pretokenized_inputs.append(prompt)
 
@@ -216,8 +219,9 @@ class Qwen25VLEncoder(BaseEncoder):
         prompt_inputs = vl_processor(
             images=images,
             text=pretokenized_inputs,
-            padding=False,
+            padding="max_length" if self.tokenizer_enforce_pad_token else False,
             is_split_into_words=True,
+            max_length=self.tokenizer_max_length,
             return_tensors="pt",
         ).to(model.device)
         suffix_inputs = vl_processor(text=suffix, return_tensors="pt").to(model.device)

@@ -1,6 +1,14 @@
 {
     "configurations": [
         {
+            "name": "Python Debugger: Longcat Inference",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "./draft/longcat_inference.py",
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        },
+        {
             "name": "Python Debugger: Preprocess",
             "type": "debugpy",
             "request": "launch",
@@ -24,7 +32,7 @@
             "request": "launch",
             "module": "torch.distributed.run",
             "args": [
-                "--nproc_per_node", 
+                "--nproc_per_node",
                 "1",
                 "-m",
                 "flow_control.scripts.launch",
@@ -32,6 +40,6 @@
                 "--type",
                 "inference"
             ]
-        }
+        },
     ]
 }

@@ -38,7 +38,9 @@ class BaseSampler(BaseModel, ABC):
 
     cfg_scale: float = 7.5
     seed: int = 42
-    keep_cfg_norm: bool = False
+    enable_cfg_renorm: bool = False
+    cfg_renorm_eps: float = 1e-8
+    cfg_renorm_min: float = 0.0
 
     @abstractmethod
     def sample(
@@ -61,28 +63,26 @@ class BaseSampler(BaseModel, ABC):
     ) -> torch.Tensor:
         dtype = batch["noisy_latents"].dtype
         batch["noisy_latents"] = latents.to(dtype)
-        velocity = model.predict_velocity(cast(Any, batch), timestep).float()
+        cond = model.predict_velocity(cast(Any, batch), timestep).float()
         if self.cfg_scale > 1.0:
             if negative_batch is not None:
                 negative_batch["noisy_latents"] = latents.to(dtype)
-                negative_velocity = model.predict_velocity(
+                uncond = model.predict_velocity(
                     cast(Any, negative_batch), timestep
                 ).float()
-                combined_velocity = (
-                    negative_velocity + (velocity - negative_velocity) * self.cfg_scale
-                )
-                if self.keep_cfg_norm:
-                    velocity_norm = torch.norm(velocity, dim=2, keepdim=True)
-                    combined_norm = torch.norm(combined_velocity, dim=2, keepdim=True)
+                combined_velocity = uncond + (cond - uncond) * self.cfg_scale
+                if self.enable_cfg_renorm:
+                    cond_norm = torch.norm(cond, dim=2, keepdim=True)
+                    noise_norm = torch.norm(combined_velocity, dim=2, keepdim=True)
                     combined_velocity = combined_velocity * (
-                        velocity_norm / combined_norm
-                    )
+                        cond_norm / (noise_norm + self.cfg_renorm_eps)
+                    ).clamp(min=self.cfg_renorm_min, max=1.0)
                 return combined_velocity
             else:
                 warn_once(
                     logger,
                     "CFG scale > 1.0 but no negative batch provided. Running without CFG.",
                 )
-                return velocity
+                return cond
         else:
-            return velocity
+            return cond
