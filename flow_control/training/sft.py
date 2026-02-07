@@ -28,7 +28,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import DatasetConfig, collate_fn, parse_dataset
+from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
 from flow_control.utils.common import (
@@ -36,7 +36,6 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.data import DistributedBucketSampler, PaddingAwareDatasetWrapper
 from flow_control.utils.ema import apply_ema_maybe
 from flow_control.utils.logging import console, get_logger, get_version, warn_once
 from flow_control.utils.types import (
@@ -45,18 +44,19 @@ from flow_control.utils.types import (
     parse_optimizer,
     parse_scheduler,
 )
-from flow_control.utils.weighting import (
-    LogitNormalTimestepWeighting,
-    LossWeighting,
-    TimestepWeighting,
-    UniformLossWeighting,
-)
 
+from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp_engine import (
     DistributedExitSignal,
     HsdpEngine,
     HsdpEngineConfig,
     distributed_main,
+)
+from .weighting import (
+    LogitNormalTimestepWeighting,
+    LossWeighting,
+    TimestepWeighting,
+    UniformLossWeighting,
 )
 
 logger = get_logger(__name__)

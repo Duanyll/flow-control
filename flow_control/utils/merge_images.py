@@ -381,6 +381,8 @@ def merge_images(
 
 # --- 测试用例 ---
 if __name__ == "__main__":
+    from rich import print
+
     # --- 测试 1: PIL 模式 ---
     print("--- Test 1: PIL Images ---")
     pil_images = []

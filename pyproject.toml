@@ -102,12 +102,19 @@ select = [
     "B",
     # flake8-simplify
     "SIM",
+    # flake8-print
+    "T20",
     # isort
     "I",
 ]
 ignore = [
     "E501",  # line too long
     "B027",  # empty function in abstract class
+]
+exclude = [
+    "examples/**",
+    "flow_control/third_party/**",
+    "notebooks/**",
 ]
 
 [tool.pyright]

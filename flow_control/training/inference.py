@@ -22,7 +22,6 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import (
     DatasetConfig,
     DatasinkConfig,
-    collate_fn,
     parse_dataset,
     parse_datasink,
 )
@@ -33,9 +32,9 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.data import DistributedBucketSampler, PaddingAwareDatasetWrapper
 from flow_control.utils.logging import console, get_logger
 
+from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp_engine import HsdpEngine, HsdpEngineConfig, distributed_main
 
 logger = get_logger(__name__)

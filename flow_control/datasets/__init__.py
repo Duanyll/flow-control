@@ -73,15 +73,3 @@ def parse_datasink(datasink_config: DatasinkConfig) -> DataSink:
         return datasink_class(**datasink_config)
     else:
         raise ValueError(f"Unknown datasink type: {datasink_type}")
-
-
-# This library is designed to work with batch size 1 datasets.
-# For larger batch sizes, use gradient accumulation.
-# Dataset should return tensors with batch dimension 1.
-def collate_fn(batch: list[dict]) -> dict:
-    if len(batch) != 1:
-        raise ValueError(
-            "Batch size greater than 1 is not supported. Use gradient accumulation instead."
-        )
-    item = batch[0]
-    return item

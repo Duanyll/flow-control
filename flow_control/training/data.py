@@ -5,7 +5,7 @@ import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import Dataset, Sampler
 
-from .logging import get_logger
+from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -186,3 +186,15 @@ class DistributedBucketSampler(Sampler, Stateful):
     def load_state_dict(self, state_dict):
         self.epoch = state_dict["epoch"]
         self.counter = state_dict["counter"]
+
+
+# This library is designed to work with batch size 1 datasets.
+# For larger batch sizes, use gradient accumulation.
+# Dataset should return tensors with batch dimension 1.
+def collate_fn(batch: list[dict]) -> dict:
+    if len(batch) != 1:
+        raise ValueError(
+            "Batch size greater than 1 is not supported. Use gradient accumulation instead."
+        )
+    item = batch[0]
+    return item

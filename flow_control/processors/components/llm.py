@@ -288,16 +288,12 @@ def parse_llm_json_output(llm_output: str) -> Any:
     try:
         # 使用 json5.loads，它可以处理注释、末尾逗号等
         return json5.loads(json_str)  # type: ignore
-    except Exception as e:
-        print(f"Failed to parse JSON with json5. Error: {e}")
+    except Exception:
         # 可以选择在这里增加一个使用标准库 json 的回退尝试
         try:
             # 去掉常见的注释（一个简单的实现）
             no_comments = re.sub(r"//.*", "", json_str)
             no_comments = re.sub(r"/\*[\s\S]*?\*/", "", no_comments, flags=re.MULTILINE)
             return json.loads(no_comments)
-        except json.JSONDecodeError as final_e:
-            print(
-                f"Failed to parse with standard json library after cleaning. Error: {final_e}"
-            )
+        except json.JSONDecodeError:
             return None
