@@ -32,7 +32,7 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.logging import console, get_logger
+from flow_control.utils.logging import console, dump_if_failed, get_logger
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp_engine import HsdpEngine, HsdpEngineConfig, distributed_main
@@ -158,35 +158,38 @@ class HsdpInference(HsdpEngine):
         progress, task = self.make_progress_bar()
         with progress:
             for batch in self.dataloader:
-                batch = deep_cast_float_dtype(batch, self.model.dtype)
-                batch = deep_move_to_device(batch, self.device)
-                negative_batch: Any = (
-                    self.processor.get_negative_batch(batch)
-                    if self.sampler.cfg_scale > 1.0
-                    else None
-                )
-                generator = torch.Generator(device=self.device).manual_seed(
-                    self.conf.seed
-                )
-                self.processor.initialize_latents(
-                    batch,
-                    generator=generator,
-                    device=self.device,
-                    dtype=self.model.dtype,
-                )
-                clean_latents = self.sampler.sample(
-                    self.model, batch, negative_batch=negative_batch
-                )
-                image = tensor_to_pil(
-                    self.processor.decode_output(clean_latents, batch)
-                )
-                key = batch.get("__key__", None)
-                if key == "__padding__":
-                    continue
-                if datasink is not None:
-                    datasink.write(batch)
-                if self.conf.save_preview_dir is not None:
-                    image.save(os.path.join(self.conf.save_preview_dir, f"{key}.png"))
+                with dump_if_failed(logger, batch):
+                    batch = deep_cast_float_dtype(batch, self.model.dtype)
+                    batch = deep_move_to_device(batch, self.device)
+                    negative_batch: Any = (
+                        self.processor.get_negative_batch(batch)
+                        if self.sampler.cfg_scale > 1.0
+                        else None
+                    )
+                    generator = torch.Generator(device=self.device).manual_seed(
+                        self.conf.seed
+                    )
+                    self.processor.initialize_latents(
+                        batch,
+                        generator=generator,
+                        device=self.device,
+                        dtype=self.model.dtype,
+                    )
+                    clean_latents = self.sampler.sample(
+                        self.model, batch, negative_batch=negative_batch
+                    )
+                    image = tensor_to_pil(
+                        self.processor.decode_output(clean_latents, batch)
+                    )
+                    key = batch.get("__key__", None)
+                    if key == "__padding__":
+                        continue
+                    if datasink is not None:
+                        datasink.write(batch)
+                    if self.conf.save_preview_dir is not None:
+                        image.save(
+                            os.path.join(self.conf.save_preview_dir, f"{key}.png")
+                        )
                 progress.advance(task)
 
         console.rule("[bold green]Inference Completed[/bold green]")

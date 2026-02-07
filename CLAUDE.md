@@ -29,6 +29,8 @@ Rules to follow:
 
 1. The main code for the `flow_control` module is located in the `flow_control` directory.
 2. Entrypoints: The entrypoint scripts facing users are located in the `flow_control/scripts` directory. All modules in this directory export a `main()` function as the main entrypoint, defined in `[project.scripts]` in `pyproject.toml`.
+   - Almost every option for these scripts should be loaded from a TOML file, avoid CLI arguments and environment variables as much as possible.
+   - The only exception is the `LOG_LEVEL` environment variable, which can be used to override logging level for debugging purposes. Default is `INFO`.
 3. Testing and examples: Due to the nature of machine learning code, we do not maintain traditional unit tests. Any code outside `flow_control/scripts` may contain a simple `if __name__ == "__main__":` block for quick testing and debugging. More complicated examples and usage demonstrations (e.g., requires multiple mock classes or multiprocessing) of individual modules should be placed in the `examples` directory at the root of the repository.
 
 ## Coding conventions

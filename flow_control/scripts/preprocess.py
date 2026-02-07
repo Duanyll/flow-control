@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
 from flow_control.processors import parse_processor
 from flow_control.utils.common import deep_move_to_device, load_config_file
-from flow_control.utils.logging import get_logger
+from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
     DataSource,
     Pipeline,
@@ -51,7 +51,6 @@ class TorchDatasetLoaderStage(PipelineStage):
 
     def process(self, item: Any) -> Any:
         data = self.dataset[item]  # type: ignore
-        self.logger.debug(f"Loaded item {item} by worker {self.worker_id}")
         return [data]
 
 
@@ -82,7 +81,7 @@ class ProcessorStage(PipelineStage):
         self.logger.info("Processor models loaded.")
 
     async def process(self, batch: Any) -> Any:
-        with torch.no_grad():
+        with torch.no_grad(), dump_if_failed(self.logger, batch):
             batch = deep_move_to_device(batch, self.device)
             if self.processing_mode == "inference":
                 output = await self.processor.prepare_inference_batch(batch)
@@ -94,7 +93,6 @@ class ProcessorStage(PipelineStage):
             if "__key__" not in output:
                 output["__key__"] = batch.get("__key__", None)  # type: ignore
             output = deep_move_to_device(output, torch.device("cpu"))
-        self.logger.debug(f"Processed item by worker {self.worker_id}")
         return [output]
 
 

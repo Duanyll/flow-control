@@ -37,7 +37,13 @@ from flow_control.utils.common import (
     tensor_to_pil,
 )
 from flow_control.utils.ema import apply_ema_maybe
-from flow_control.utils.logging import console, get_logger, get_version, warn_once
+from flow_control.utils.logging import (
+    console,
+    dump_if_failed,
+    get_logger,
+    get_version,
+    warn_once,
+)
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -285,31 +291,32 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         self.transformer.eval()
         with apply_ema_maybe(self.optimizer), progress:
             for batch in self.sample_dataloader:
-                batch = deep_cast_float_dtype(batch, self.model.dtype)
-                batch = deep_move_to_device(batch, self.device)
-                negative_batch: Any = (
-                    self.processor.get_negative_batch(batch)
-                    if self.sampler.cfg_scale > 1.0
-                    else None
-                )
-                generator = torch.Generator(device=self.device).manual_seed(
-                    self.conf.seed
-                )
-                self.processor.initialize_latents(
-                    batch,
-                    generator=generator,
-                    device=self.device,
-                    dtype=self.model.dtype,
-                )
-                clean_latents = self.sampler.sample(
-                    self.model, batch, negative_batch=negative_batch
-                )
-                image = tensor_to_pil(
-                    self.processor.decode_output(clean_latents, batch)
-                )
-                key = batch.get("__key__", "unknown")
-                self.log_images(image, key)
-                progress.advance(task)
+                with dump_if_failed(logger, batch):
+                    batch = deep_cast_float_dtype(batch, self.model.dtype)
+                    batch = deep_move_to_device(batch, self.device)
+                    negative_batch: Any = (
+                        self.processor.get_negative_batch(batch)
+                        if self.sampler.cfg_scale > 1.0
+                        else None
+                    )
+                    generator = torch.Generator(device=self.device).manual_seed(
+                        self.conf.seed
+                    )
+                    self.processor.initialize_latents(
+                        batch,
+                        generator=generator,
+                        device=self.device,
+                        dtype=self.model.dtype,
+                    )
+                    clean_latents = self.sampler.sample(
+                        self.model, batch, negative_batch=negative_batch
+                    )
+                    image = tensor_to_pil(
+                        self.processor.decode_output(clean_latents, batch)
+                    )
+                    key = batch.get("__key__", "unknown")
+                    self.log_images(image, key)
+                    progress.advance(task)
         self.transformer.train()
         logger.info(f"Completed sampling at step {self.current_step}.")
 
@@ -436,6 +443,13 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
 
         return self.current_step >= self.conf.train_steps
 
+    def check_loss(self, loss: torch.Tensor):
+        if not torch.isfinite(loss):
+            logger.error(
+                f"Non-finite loss detected (loss={loss.item()}). Stopping training."
+            )
+            raise RuntimeError("Non-finite loss detected.")
+
     @distributed_main
     def run(self):
         if self.conf.latent_length_test_mode:
@@ -466,14 +480,16 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                 if hasattr(self.dataloader.sampler, "set_epoch"):
                     self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore
                 for i, batch in enumerate(self.dataloader):
-                    is_sync_step = (i + 1) % self.grad_acc_steps == 0
-                    self.transformer.set_requires_gradient_sync(is_sync_step)
+                    with dump_if_failed(logger, batch):
+                        is_sync_step = (i + 1) % self.grad_acc_steps == 0
+                        self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                    batch = deep_move_to_device(batch, self.device)
-                    loss = self.train_step(batch) / self.grad_acc_steps
-                    loss.backward()
+                        batch = deep_move_to_device(batch, self.device)
+                        loss = self.train_step(batch) / self.grad_acc_steps
+                        self.check_loss(loss)
+                        loss.backward()
 
-                    total_loss += loss.item()
+                        total_loss += loss.item()
 
                     if not is_sync_step:
                         continue

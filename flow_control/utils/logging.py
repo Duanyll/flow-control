@@ -22,14 +22,18 @@ import os
 import subprocess
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
 import diffusers
+import torch
 import torch.multiprocessing as mp
 import transformers
 from accelerate.state import PartialState
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
+
+from .describe import describe
 
 
 def get_process_type():
@@ -61,39 +65,16 @@ def get_process_type():
     return "mp_spawn_child"
 
 
-process_type = get_process_type()
-enable_console = process_type == "main"
-
-console = Console(quiet=not enable_console)
-log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
-rich_handler = RichHandler(console=console, rich_tracebacks=True)
-
-transformers.utils.logging.disable_default_handler()
-transformers.utils.logging.disable_progress_bar()
-transformers.utils.logging.set_verbosity_warning()
-
-diffusers.utils.logging.disable_default_handler()
-diffusers.utils.logging.disable_progress_bar()
-diffusers.utils.logging.set_verbosity_warning()
-
-
 def setup_global_handler(handler, include_name: bool = True):
     transformers.utils.logging.add_handler(handler)
     diffusers.utils.logging.add_handler(handler)
     logging.basicConfig(
-        level=log_level,
+        level=global_log_level,
         handlers=[handler],
         format="<%(name)s> %(message)s" if include_name else "%(message)s",
     )
-
-
-if process_type != "mp_spawn_child":
-    setup_global_handler(rich_handler)
-
-logging.captureWarnings(True)
-
-httpx_logger = logging.getLogger("httpx")
-httpx_logger.setLevel(logging.WARNING)
+    package_logger = logging.getLogger("flow_control")
+    package_logger.setLevel(log_level)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -111,6 +92,12 @@ def get_logger(name: str) -> logging.Logger:
 
 
 @lru_cache(None)
+def _warn_once(logger: logging.Logger, message: str):
+    # lru_cache prevents pyright from checking input types strictly, so we add explicit
+    # type hints by wrapping this function.
+    logger.warning(message)
+
+
 def warn_once(logger: logging.Logger, message: str):
     """Log a warning message only once per unique message.
 
@@ -118,7 +105,7 @@ def warn_once(logger: logging.Logger, message: str):
         logger (logging.Logger): The logger to use.
         message (str): The warning message to log.
     """
-    logger.warning(message)
+    _warn_once(logger, message)
 
 
 _version_cache: str | None = None
@@ -168,14 +155,65 @@ BANNER = r"""
 """
 
 
-def print_banner():
+def _print_banner():
     console.print(
         Panel.fit(BANNER, subtitle=f"[bold green]{get_version()}[/bold green]")
     )
 
 
+@contextlib.contextmanager
+def dump_if_failed(logger: logging.Logger, obj: Any, save: bool = False):
+    try:
+        yield
+    except Exception as e:
+        logger.debug(
+            f"Dumping the {type(obj).__name__} that caused {type(e).__name__}..."
+        )
+        logger.debug(describe(obj, console=False), {"markup": True})
+        if save:
+            rank = os.getenv("RANK", "0")
+            path = f"dump/debug_dump_{rank}.pt"
+            torch.save(obj, path)
+            logger.info(
+                f"Saved the {type(obj).__name__} that caused {type(e).__name__} to {path}"
+            )
+        raise
+
+
+process_type = get_process_type()
+enable_console = process_type == "main"
+
+console = Console(quiet=not enable_console)
+log_level: int = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+global_log_level: int = getattr(
+    logging, os.getenv("GLOBAL_LOG_LEVEL", "WARNING").upper(), logging.WARNING
+)
+rich_handler = RichHandler(console=console, rich_tracebacks=True)
+
+transformers.utils.logging.disable_default_handler()
+transformers.utils.logging.disable_progress_bar()
+transformers.utils.logging.set_verbosity(global_log_level)
+
+diffusers.utils.logging.disable_default_handler()
+diffusers.utils.logging.disable_progress_bar()
+diffusers.utils.logging.set_verbosity(global_log_level)
+
+if process_type != "mp_spawn_child":
+    setup_global_handler(rich_handler)
+
+logging.captureWarnings(True)
+
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(global_log_level)
+
 if enable_console:
-    print_banner()
+    _print_banner()
 
 
-__all__ = ["get_logger", "setup_global_handler", "console", "rich_handler"]
+__all__ = [
+    "get_logger",
+    "setup_global_handler",
+    "console",
+    "rich_handler",
+    "get_version",
+]
