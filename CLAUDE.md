@@ -37,7 +37,7 @@ Rules to follow:
 
 Rules to follow:
 
-AVOID excessive code nesting (e.g., nested loops, nested conditionals, etc.) and long functions (e.g., > 100 lines). If you find yourself writing code that is deeply nested or has long functions, try to refactor the code by extracting smaller functions or using early returns to reduce nesting. This will make the code easier to read and maintain.
+1. AVOID excessive code nesting (e.g., nested loops, nested conditionals, etc.) and long functions (e.g., > 100 lines). A McCabe complexity check with a threshold of 10 is in place, please listen to it. 
 
 ### Pydantic patterns
 

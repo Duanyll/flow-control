@@ -399,6 +399,43 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             shutil.rmtree(dir_to_remove)
             logger.info(f"Removed old checkpoint: {dir_to_remove}")
 
+    def _after_sync_step(self, total_loss: float, progress, task, exit_signal) -> bool:
+        """Handle optimizer step, logging, checkpointing after a gradient sync.
+
+        Returns True if training should stop early.
+        """
+        if self.conf.clip_grad_norm > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                self.transformer.parameters(), self.conf.clip_grad_norm
+            )
+
+        self.optimizer.step()
+        self.scheduler.step()
+        self.optimizer.zero_grad()
+
+        avg_loss, lr = self.log_loss_lr(total_loss)
+        self.current_step += 1
+        progress.update(task, loss=avg_loss, lr=lr)
+        progress.advance(task)
+
+        if exit_signal:
+            logger.info(
+                "Exit signal received. Saving checkpoint and exiting training loop..."
+            )
+            self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
+            return True
+
+        if (self.current_step % self.conf.checkpoint_steps == 0) or (
+            self.current_step == self.conf.train_steps
+        ):
+            self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
+            self.rotate_checkpoints_maybe()
+
+        if self.current_step % self.conf.sample_steps == 0:
+            self.sample_and_log()
+
+        return self.current_step >= self.conf.train_steps
+
     @distributed_main
     def run(self):
         if self.conf.latent_length_test_mode:
@@ -441,42 +478,14 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                     if not is_sync_step:
                         continue
 
-                    if self.conf.clip_grad_norm > 0.0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.transformer.parameters(), self.conf.clip_grad_norm
-                        )
-
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
-
-                    avg_loss, lr = self.log_loss_lr(total_loss)
+                    should_stop = self._after_sync_step(
+                        total_loss, progress, task, exit_signal
+                    )
                     total_loss = 0.0
-                    self.current_step += 1
-                    progress.update(task, loss=avg_loss, lr=lr)
-                    progress.advance(task)
 
-                    if exit_signal:
-                        logger.info(
-                            "Exit signal received. Saving checkpoint and exiting training loop..."
-                        )
-                        self.save_dcp_checkpoint(
-                            self.get_checkpoint_dir(self.current_step)
-                        )
-                        return
-
-                    if (self.current_step % self.conf.checkpoint_steps == 0) or (
-                        self.current_step == self.conf.train_steps
-                    ):
-                        self.save_dcp_checkpoint(
-                            self.get_checkpoint_dir(self.current_step)
-                        )
-                        self.rotate_checkpoints_maybe()
-
-                    if self.current_step % self.conf.sample_steps == 0:
-                        self.sample_and_log()
-
-                    if self.current_step >= self.conf.train_steps:
+                    if should_stop:
+                        if exit_signal:
+                            return
                         break
 
         with apply_ema_maybe(self.optimizer):

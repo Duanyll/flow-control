@@ -1,6 +1,7 @@
 import datetime
-from collections.abc import Callable
-from typing import Any
+import functools
+from collections.abc import Callable, Iterable
+from typing import Any, Literal, overload
 
 import numpy as np
 import pandas as pd
@@ -349,6 +350,30 @@ def _describe_pydantic_model(
         return f"[{STYLE_PYDANTIC}]Pydantic Model[/] [{STYLE_ERROR}](Error describing: {e})[/]"
 
 
+def _format_list_key(k: int) -> str:
+    return f"[{STYLE_KEY}]\\[{k}][/]"
+
+
+def _format_tuple_key(k: int) -> str:
+    return f"[{STYLE_KEY}]({k})[/]"
+
+
+def _format_dict_key(k: Any, str_limit: int) -> str:
+    return f"[{STYLE_KEY}]{pretty_str(k, limit=str_limit // 2)}[/]"
+
+
+def _format_set_key(_: int) -> str:
+    return f"[{STYLE_INFO}]-[/]"
+
+
+_COLLECTION_KEY_FORMATTERS: dict[type, Callable] = {
+    list: _format_list_key,
+    tuple: _format_tuple_key,
+    set: _format_set_key,
+    frozenset: _format_set_key,
+}
+
+
 def _describe_collection(
     value: list | tuple | dict | set | frozenset,
     max_items: int,
@@ -364,33 +389,16 @@ def _describe_collection(
     collection_type_name = type(value).__name__
     collection_len = len(value)
 
-    def _format_list_key(k: int) -> str:
-        return f"[{STYLE_KEY}]\\[{k}][/]"
-
-    def _format_tuple_key(k: int) -> str:
-        return f"[{STYLE_KEY}]({k})[/]"
-
-    def _format_dict_key(k: Any) -> str:
-        return f"[{STYLE_KEY}]{pretty_str(k, limit=str_limit // 2)}[/]"
-
-    def _format_set_key(_: int) -> str:
-        return f"[{STYLE_INFO}]-[/]"
-
     # Determine iterator and key formatter based on type
-    if isinstance(value, (list, tuple)):
-        items_iterator = enumerate(value)
-        is_mapping = False
-        key_formatter = (
-            _format_list_key if isinstance(value, list) else _format_tuple_key
+    # All iterators yield (key, value) pairs
+    if isinstance(value, dict):
+        items_iterator: Iterable[tuple[Any, Any]] = value.items()
+        key_formatter: Callable = functools.partial(
+            _format_dict_key, str_limit=str_limit
         )
-    elif isinstance(value, dict):
-        items_iterator = value.items()
-        is_mapping = True
-        key_formatter = _format_dict_key
-    else:  # set, frozenset
+    else:
         items_iterator = enumerate(value)
-        is_mapping = False
-        key_formatter = _format_set_key
+        key_formatter = _COLLECTION_KEY_FORMATTERS[type(value)]
 
     title = f"[{STYLE_TYPE}]{collection_type_name}[/] [{STYLE_INFO}]with {collection_len} items[/]"
     lines = [title]
@@ -399,17 +407,12 @@ def _describe_collection(
     seen_ids.add(value_id)
     item_count = 0
     try:
-        for item_or_pair in items_iterator:
+        for k, v in items_iterator:
             if item_count >= max_items:
                 lines.append(
                     f"{item_indent_str}[{STYLE_INFO}]... ({collection_len - max_items} more items)[/]"
                 )
                 break
-
-            if is_mapping:
-                k, v = item_or_pair
-            else:
-                k, v = item_or_pair
 
             key_str = key_formatter(k)
             value_desc = recurse_fn(
@@ -513,6 +516,29 @@ def _is_pydantic_model(value: Any) -> bool:
         return False
 
 
+def _describe_leaf_type(value: Any, str_limit: int) -> str | None:
+    """Try to describe value as a simple leaf type. Returns None if not a leaf."""
+    if value is None:
+        return _describe_none()
+    if isinstance(value, bool):
+        return _describe_bool(value)
+    if isinstance(value, (int, float, complex)):
+        return _describe_number(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.timedelta)):
+        return _describe_datetime(value)
+    if isinstance(value, str):
+        return _describe_string(value, str_limit)
+    if isinstance(value, bytes):
+        return _describe_bytes(value, str_limit)
+    if isinstance(value, torch.Tensor):
+        return _describe_tensor(value)
+    if isinstance(value, np.ndarray):
+        return _describe_ndarray(value)
+    if isinstance(value, Image.Image):
+        return _describe_pil_image(value)
+    return None
+
+
 def _describe_recursive(
     value: Any,
     max_items: int,
@@ -530,83 +556,13 @@ def _describe_recursive(
     if current_depth > max_depth:
         return f"[{STYLE_INFO}]... (Max Depth Reached)[/]"
 
-    # --- Basic Types ---
-    if value is None:
-        return _describe_none()
-    if value is True or value is False:
-        return _describe_bool(value)
-    if isinstance(value, (int, float, complex)):
-        return _describe_number(value)
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.timedelta)):
-        return _describe_datetime(value)
-    if isinstance(value, str):
-        return _describe_string(value, str_limit)
-    if isinstance(value, bytes):
-        return _describe_bytes(value, str_limit)
+    # --- Leaf Types (no recursion needed) ---
+    leaf = _describe_leaf_type(value, str_limit)
+    if leaf is not None:
+        return leaf
 
-    # --- Tensor/Array Types ---
-    if isinstance(value, torch.Tensor):
-        return _describe_tensor(value)
-    if isinstance(value, np.ndarray):
-        return _describe_ndarray(value)
-
-    # --- Pandas Types ---
-    if isinstance(value, pd.DataFrame):
-        return _describe_dataframe(
-            value,
-            max_items,
-            max_depth,
-            current_depth,
-            str_limit,
-            seen_ids,
-            inspect_objects,
-            _describe_recursive,
-        )
-    if isinstance(value, pd.Series):
-        return _describe_series(
-            value,
-            max_items,
-            max_depth,
-            current_depth,
-            str_limit,
-            seen_ids,
-            inspect_objects,
-            _describe_recursive,
-        )
-
-    # --- PIL Image ---
-    if isinstance(value, Image.Image):
-        return _describe_pil_image(value)
-
-    # --- Pydantic Model (check before generic object) ---
-    if _is_pydantic_model(value):
-        return _describe_pydantic_model(
-            value,
-            max_items,
-            max_depth,
-            current_depth,
-            str_limit,
-            seen_ids,
-            inspect_objects,
-            _describe_recursive,
-        )
-
-    # --- Collections ---
-    if isinstance(value, (list, tuple, dict, set, frozenset)):
-        return _describe_collection(
-            value,
-            max_items,
-            max_depth,
-            current_depth,
-            str_limit,
-            seen_ids,
-            inspect_objects,
-            _describe_recursive,
-        )
-
-    # --- Generic Objects ---
-    return _describe_generic_object(
-        value,
+    # --- Recursive Types ---
+    recurse_args = (
         max_items,
         max_depth,
         current_depth,
@@ -616,17 +572,50 @@ def _describe_recursive(
         _describe_recursive,
     )
 
+    if isinstance(value, pd.DataFrame):
+        return _describe_dataframe(value, *recurse_args)
+    if isinstance(value, pd.Series):
+        return _describe_series(value, *recurse_args)
+    if _is_pydantic_model(value):
+        return _describe_pydantic_model(value, *recurse_args)
+    if isinstance(value, (list, tuple, dict, set, frozenset)):
+        return _describe_collection(value, *recurse_args)
+
+    return _describe_generic_object(value, *recurse_args)
+
 
 # --- Public API ---
 
 
+@overload
 def describe(
     value: Any,
+    console: Console | None,
     max_items: int = DEFAULT_MAX_ITEMS,
     max_depth: int = DEFAULT_MAX_DEPTH,
     str_limit: int = DEFAULT_STR_LIMIT,
     inspect_objects: bool = False,
-    console: Console | None = None,
+) -> None: ...
+
+
+@overload
+def describe(
+    value: Any,
+    console: Literal[False],
+    max_items: int = DEFAULT_MAX_ITEMS,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    str_limit: int = DEFAULT_STR_LIMIT,
+    inspect_objects: bool = False,
+) -> str: ...
+
+
+def describe(
+    value: Any,
+    console: Console | None | Literal[False] = None,
+    max_items: int = DEFAULT_MAX_ITEMS,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    str_limit: int = DEFAULT_STR_LIMIT,
+    inspect_objects: bool = False,
 ):
     """
     Prints a rich, detailed description of a Python variable.
@@ -652,4 +641,7 @@ def describe(
         seen_ids=seen_ids,
         inspect_objects=inspect_objects,
     )
-    console.print(description)
+    if console is not False:
+        console.print(description)
+    else:
+        return description

@@ -106,6 +106,8 @@ select = [
     "T20",
     # isort
     "I",
+    # mccabe
+    "C90",
 ]
 ignore = [
     "E501",  # line too long
@@ -116,6 +118,9 @@ exclude = [
     "flow_control/third_party/**",
     "notebooks/**",
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.pyright]
 typeCheckingMode = "standard"

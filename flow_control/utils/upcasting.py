@@ -33,7 +33,8 @@ logger = get_logger(__name__)
 
 # Copied from torch.nn.Module._apply
 # Modified to distinguish between parameters and their gradients
-def _module_apply_advanced(module, fn, recurse=True):
+# C901 is ignored because it is copied from torch.
+def _module_apply_advanced(module, fn, recurse=True):  # noqa: C901
     if recurse:
         for m in module.children():
             _module_apply_advanced(m, fn)

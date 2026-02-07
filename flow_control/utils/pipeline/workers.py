@@ -245,6 +245,95 @@ def _sync_stage_loop(
             _safe_put(progress_queue, ("stage", stage_index, "produced", output_count))
 
 
+def _report_stage_output(
+    results: list,
+    stage_index: int,
+    output_queue: Any,
+    progress_queue: Any,
+    shutdown_event: EventType,
+    worker_logger,
+) -> None:
+    """Put stage results into output queue and report progress."""
+    for result in results:
+        if not _safe_put(
+            output_queue,
+            result,
+            logger=worker_logger,
+            shutdown_event=shutdown_event,
+        ):
+            break
+
+    if len(results) == 0:
+        _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
+    else:
+        _safe_put(progress_queue, ("stage", stage_index, "produced", len(results)))
+
+
+async def _async_process_item(
+    item: Any,
+    stage: PipelineStage,
+    stage_index: int,
+    output_queue: Any,
+    progress_queue: Any,
+    shutdown_event: EventType,
+    semaphore: asyncio.Semaphore,
+    active_slots_lock: asyncio.Lock,
+    active_slots_ref: list[int],
+    worker_logger,
+) -> None:
+    """Process a single item in an async stage. Semaphore is already acquired."""
+    try:
+        if shutdown_event.is_set():
+            return
+        try:
+            results = await stage.process(item)  # type: ignore[misc]
+            _report_stage_output(
+                results,
+                stage_index,
+                output_queue,
+                progress_queue,
+                shutdown_event,
+                worker_logger,
+            )
+        except Exception as e:
+            worker_logger.error(f"Error processing item: {e}", exc_info=True)
+            _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
+    finally:
+        semaphore.release()
+        async with active_slots_lock:
+            active_slots_ref[0] -= 1
+
+
+async def _async_check_all_done(
+    upstream_done: EventType,
+    input_queue: Any,
+    active_slots_lock: asyncio.Lock,
+    active_slots_ref: list[int],
+) -> bool:
+    """Check if upstream is done, queue is empty, and no active slots."""
+    async with active_slots_lock:
+        no_active = active_slots_ref[0] == 0
+    return upstream_done.is_set() and input_queue.empty() and no_active
+
+
+async def _async_wait_if_idle(
+    upstream_done: EventType,
+    input_queue: Any,
+    active_slots_lock: asyncio.Lock,
+    active_slots_ref: list[int],
+    work_done_ref: list[bool],
+    worker_logger,
+) -> None:
+    """If upstream is done and no active work, log once and sleep briefly."""
+    if await _async_check_all_done(
+        upstream_done, input_queue, active_slots_lock, active_slots_ref
+    ):
+        if not work_done_ref[0]:
+            worker_logger.info("Work completed, waiting for pipeline shutdown")
+            work_done_ref[0] = True
+        await asyncio.sleep(0.1)
+
+
 async def _async_stage_loop(
     stage: PipelineStage,
     stage_index: int,
@@ -265,64 +354,26 @@ async def _async_stage_loop(
     """
     semaphore = asyncio.Semaphore(max_concurrency)
     pending_tasks: set[asyncio.Task] = set()
-    # Track active slots to properly manage backpressure
-    active_slots = 0
+    active_slots_ref = [0]  # mutable ref for sharing with async tasks
     active_slots_lock = asyncio.Lock()
+    work_done_ref = [False]
 
-    async def process_item(item):
-        """Process a single item. Semaphore is already acquired before calling."""
-        nonlocal active_slots
-        try:
-            if shutdown_event.is_set():
-                return
-            try:
-                results = await stage.process(item)  # type: ignore[misc]
-                output_count = len(results)
+    idle_args = (
+        upstream_done,
+        input_queue,
+        active_slots_lock,
+        active_slots_ref,
+        work_done_ref,
+        worker_logger,
+    )
 
-                for result in results:
-                    if not _safe_put(
-                        output_queue,
-                        result,
-                        logger=worker_logger,
-                        shutdown_event=shutdown_event,
-                    ):
-                        break
-
-                if output_count == 0:
-                    _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
-                else:
-                    _safe_put(
-                        progress_queue, ("stage", stage_index, "produced", output_count)
-                    )
-            except Exception as e:
-                worker_logger.error(f"Error processing item: {e}", exc_info=True)
-                _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
-        finally:
-            # Release the semaphore after processing is complete
-            semaphore.release()
-            async with active_slots_lock:
-                active_slots -= 1
-
-    work_done = False
     while not shutdown_event.is_set():
-        # First, try to acquire a semaphore slot before pulling from queue
-        # This ensures we only pull items we can actually process
+        # Try to acquire a semaphore slot before pulling from queue
         try:
-            # Use wait_for with a short timeout to allow checking shutdown
             await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
         except TimeoutError:
-            # Couldn't acquire semaphore, check conditions and retry
-            if shutdown_event.is_set():
-                worker_logger.info("Stage worker received shutdown signal")
-                break
-            # Check if we're done (no pending work and upstream finished)
-            async with active_slots_lock:
-                no_active = active_slots == 0
-            if upstream_done.is_set() and input_queue.empty() and no_active:
-                if not work_done:
-                    worker_logger.info("Work completed, waiting for pipeline shutdown")
-                    work_done = True
-                await asyncio.sleep(0.1)
+            if not shutdown_event.is_set():
+                await _async_wait_if_idle(*idle_args)
             continue
 
         # We have a semaphore slot, now try to get an item
@@ -331,30 +382,30 @@ async def _async_stage_loop(
         )
 
         if success:
-            # Track active slot and create task
             async with active_slots_lock:
-                active_slots += 1
-            task = asyncio.create_task(process_item(item))
+                active_slots_ref[0] += 1
+            task = asyncio.create_task(
+                _async_process_item(
+                    item,
+                    stage,
+                    stage_index,
+                    output_queue,
+                    progress_queue,
+                    shutdown_event,
+                    semaphore,
+                    active_slots_lock,
+                    active_slots_ref,
+                    worker_logger,
+                )
+            )
             pending_tasks.add(task)
             task.add_done_callback(pending_tasks.discard)
         else:
-            # No item available, release the semaphore we acquired
             semaphore.release()
-
             if shutdown_event.is_set():
-                worker_logger.info("Stage worker received shutdown signal")
                 break
-
-            # Check if all work is done
-            async with active_slots_lock:
-                no_active = active_slots == 0
-            if upstream_done.is_set() and input_queue.empty() and no_active:
-                if not work_done:
-                    worker_logger.info("Work completed, waiting for pipeline shutdown")
-                    work_done = True
-                await asyncio.sleep(0.1)
-            else:
-                # Brief sleep to avoid busy loop when queue is temporarily empty
+            await _async_wait_if_idle(*idle_args)
+            if not work_done_ref[0]:
                 await asyncio.sleep(0.01)
 
     # Wait for all pending tasks to complete on shutdown

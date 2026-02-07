@@ -175,115 +175,109 @@ def _render_pil(
     return canvas
 
 
+def _make_border_color_tensor(
+    border_color: tuple[int, ...],
+    channels: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Convert an RGB border color tuple to a (1, C, 1, 1) tensor."""
+    if channels == 4:
+        border_color = (*border_color, 255)
+    elif channels > 4:
+        border_color = border_color + (255,) * (channels - 3)
+
+    values = list(border_color[:channels])
+    if dtype.is_floating_point:
+        values = [c / 255.0 for c in values]
+    return torch.tensor(values, dtype=dtype, device=device).view(1, -1, 1, 1)
+
+
+def _draw_tensor_border(
+    canvas: torch.Tensor,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    border_w: int,
+    bc_val: torch.Tensor,
+) -> None:
+    """Draw a border on the tensor canvas via slice assignment."""
+    canvas[:, :, y : y + border_w, x : x + w] = bc_val
+    canvas[:, :, y + h - border_w : y + h, x : x + w] = bc_val
+    canvas[:, :, y : y + h, x : x + border_w] = bc_val
+    canvas[:, :, y : y + h, x + w - border_w : x + w] = bc_val
+
+
+def _draw_labels_on_tensor(
+    blocks,
+    canvas: torch.Tensor,
+    label_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Draw index labels on a tensor canvas by round-tripping through PIL."""
+    pil_canvas = tensor_to_pil(canvas)
+    draw = ImageDraw.Draw(pil_canvas)
+    try:
+        font = load_font(label_size)
+    except Exception:
+        font = None
+
+    for block in blocks:
+        if not block.get("fit"):
+            continue
+        x, y = block["fit"]["x"], block["fit"]["y"]
+        label_text = str(block["index"])
+        label_bg_color = generate_color(block["index"])
+        padding = 2
+
+        if font:
+            bbox = draw.textbbox((0, 0), label_text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+        else:
+            text_w = len(label_text) * 8
+            text_h = 12
+
+        bg_rect = [
+            x + padding,
+            y + padding,
+            x + padding + text_w + padding * 2,
+            y + padding + text_h + padding * 2,
+        ]
+        draw.rectangle(bg_rect, fill=(*label_bg_color, 220))
+        text_pos = (x + padding * 2, y + padding * 2)
+        draw.text(text_pos, label_text, fill=(255, 255, 255, 255), font=font)
+
+    return pil_to_tensor(pil_canvas).to(device=device, dtype=dtype)
+
+
 def _render_tensor(
     blocks, canvas_w, canvas_h, bg_color, border_w, draw_labels=False, label_size=20
 ):
     """PyTorch Tensor 渲染逻辑"""
-    # 获取第一个张量的元数据
     ref_tensor = blocks[0]["img"]
     dtype = ref_tensor.dtype
     device = ref_tensor.device
     channels = ref_tensor.shape[1]  # shape is (1, C, H, W)
 
-    # 1. 创建画布 Tensor (1, C, Total_H, Total_W)
-    # 如果 bg_color 是全0，直接用 zeros，否则用 fill_
     canvas = torch.zeros((1, channels, canvas_h, canvas_w), dtype=dtype, device=device)
 
-    # 处理背景色 (简单的将 bg_color 视为填充值，这里为了简化，
-    # 假设如果用户传了 tensor，通常希望背景是 0 或特定值。
-    # 如果需要复杂的颜色映射需要对 border_c 进行转换，这里简化处理：
-    # 如果是 float tensor，背景保持 0；如果是 int tensor，也保持 0)
-
     for block in blocks:
-        if block.get("fit"):
-            x, y = block["fit"]["x"], block["fit"]["y"]
-            w, h = block["w"], block["h"]
-            img = block["img"]  # shape (1, C, H, W)
+        if not block.get("fit"):
+            continue
+        x, y = block["fit"]["x"], block["fit"]["y"]
+        w, h = block["w"], block["h"]
+        canvas[:, :, y : y + h, x : x + w] = block["img"]
 
-            # 2. 核心操作：切片赋值
-            # canvas[batch, channel, y:y+h, x:x+w]
-            canvas[:, :, y : y + h, x : x + w] = img
+        if border_w > 0:
+            border_color = generate_color(block["index"])
+            bc_val = _make_border_color_tensor(border_color, channels, dtype, device)
+            _draw_tensor_border(canvas, x, y, w, h, border_w, bc_val)
 
-            # 3. 绘制边框 (通过切片修改像素值)
-            if border_w > 0:
-                # Generate unique color for each block's border
-                border_color = generate_color(block["index"])  # Returns (R, G, B)
-                # Extend to RGBA if needed
-                if channels == 4:
-                    border_color = (
-                        *border_color,
-                        255,
-                    )  # Add full opacity for alpha channel
-                elif channels > 4:
-                    # For channels > 4, pad with appropriate values
-                    border_color = border_color + (255,) * (channels - 3)
-
-                # Convert border color to tensor format based on dtype
-                if dtype.is_floating_point:
-                    # For float tensors (0-1 range), normalize color values
-                    bc_val = torch.tensor(
-                        [c / 255.0 for c in border_color[:channels]],
-                        dtype=dtype,
-                        device=device,
-                    ).view(1, -1, 1, 1)
-                else:
-                    # For integer tensors, use color values directly
-                    bc_val = torch.tensor(
-                        border_color[:channels], dtype=dtype, device=device
-                    ).view(1, -1, 1, 1)
-                # 上边框
-                canvas[:, :, y : y + border_w, x : x + w] = bc_val
-                # 下边框
-                canvas[:, :, y + h - border_w : y + h, x : x + w] = bc_val
-                # 左边框
-                canvas[:, :, y : y + h, x : x + border_w] = bc_val
-                # 右边框
-                canvas[:, :, y : y + h, x + w - border_w : x + w] = bc_val
-
-    # 4. 绘制标签 (需要转换到 PIL)
     if draw_labels:
-        # Convert tensor to PIL, draw labels, convert back
-        pil_canvas = tensor_to_pil(canvas)
-
-        # Draw labels on PIL image
-        draw = ImageDraw.Draw(pil_canvas)
-        try:
-            font = load_font(label_size)
-        except Exception:
-            font = None
-
-        for block in blocks:
-            if block.get("fit"):
-                x, y = block["fit"]["x"], block["fit"]["y"]
-                label_text = str(block["index"])
-                # Generate the same color used for border
-                label_bg_color = generate_color(block["index"])
-                padding = 2
-
-                if font:
-                    bbox = draw.textbbox((0, 0), label_text, font=font)
-                    text_w = bbox[2] - bbox[0]
-                    text_h = bbox[3] - bbox[1]
-                else:
-                    text_w = len(label_text) * 8
-                    text_h = 12
-
-                # Draw background rectangle with border color
-                bg_rect = [
-                    x + padding,
-                    y + padding,
-                    x + padding + text_w + padding * 2,
-                    y + padding + text_h + padding * 2,
-                ]
-                draw.rectangle(bg_rect, fill=(*label_bg_color, 220))
-
-                # Draw text
-                text_pos = (x + padding * 2, y + padding * 2)
-                draw.text(text_pos, label_text, fill=(255, 255, 255, 255), font=font)
-
-        # Convert back to tensor
-        canvas_labeled = pil_to_tensor(pil_canvas)
-        canvas = canvas_labeled.to(device=device, dtype=dtype)
+        canvas = _draw_labels_on_tensor(blocks, canvas, label_size, device, dtype)
 
     return canvas
 

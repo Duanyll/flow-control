@@ -4,6 +4,7 @@ Main Pipeline class for multi-stage data processing.
 
 import queue
 import time
+from dataclasses import dataclass, field
 from logging.handlers import QueueListener
 from multiprocessing.synchronize import Event as EventType
 from typing import Any
@@ -30,6 +31,163 @@ from .config import (
 from .workers import _sink_worker, _source_worker, _stage_worker
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _MonitorState:
+    """Mutable state for the progress monitor loop."""
+
+    source_total: int | None = None
+    source_count: int = 0
+    stage_stats: list[StageStats] = field(default_factory=list)
+    sink_stats: StageStats = field(default_factory=StageStats)
+    pending: list[int] = field(default_factory=list)
+    aborted: bool = False
+    error_message: str | None = None
+    all_done: bool = False
+
+    def __init__(self, num_stages: int):
+        self.source_total = None
+        self.source_count = 0
+        self.stage_stats = [StageStats() for _ in range(num_stages)]
+        self.sink_stats = StageStats()
+        self.pending = [0] * (num_stages + 1)
+        self.aborted = False
+        self.error_message = None
+        self.all_done = False
+
+
+@dataclass
+class _ProgressTasks:
+    """Rich progress task IDs."""
+
+    source: TaskID
+    stages: list[TaskID]
+    sink: TaskID
+
+
+def _check_idle_done(
+    shutdown_event: EventType,
+    source_done: EventType,
+    stage_done_events: list[EventType],
+    state: _MonitorState,
+) -> bool:
+    """Check if the pipeline is done when the queue is empty."""
+    if shutdown_event.is_set():
+        state.aborted = True
+        return True
+    return (
+        source_done.is_set()
+        and all(e.is_set() for e in stage_done_events)
+        and all(p == 0 for p in state.pending)
+    )
+
+
+def _handle_source_msg(
+    state: _MonitorState,
+    event_type: str,
+    count: int,
+    progress: Progress,
+    tasks: _ProgressTasks,
+    has_stages: bool,
+) -> None:
+    """Handle a progress message from the source worker."""
+    if event_type == "total":
+        state.source_total = count
+        progress.update(tasks.source, total=count)
+        if has_stages:
+            progress.update(tasks.stages[0], total=count)
+    elif event_type == "produced":
+        state.source_count += count
+        state.pending[0] += count
+        progress.update(tasks.source, completed=state.source_count)
+
+
+def _handle_stage_msg(
+    state: _MonitorState,
+    stage_idx: int,
+    event_type: str,
+    count: int,
+    progress: Progress,
+    tasks: _ProgressTasks,
+    source_done: EventType,
+    stage_done_events: list[EventType],
+) -> None:
+    """Handle a progress message from a stage worker."""
+    stats = state.stage_stats[stage_idx]
+    state.pending[stage_idx] -= 1
+
+    if event_type == "produced":
+        stats.completed += 1
+        stats.total_output += count
+        state.pending[stage_idx + 1] += count
+    elif event_type == "filtered":
+        stats.completed += 1
+        stats.filtered += 1
+
+    extra = f"⊘{stats.filtered}" if stats.filtered > 0 else ""
+    progress.update(tasks.stages[stage_idx], completed=stats.completed, extra=extra)
+
+    # Check if this stage is done
+    upstream_done = (
+        source_done.is_set()
+        if stage_idx == 0
+        else stage_done_events[stage_idx - 1].is_set()
+    )
+    if upstream_done and state.pending[stage_idx] == 0:
+        stage_done_events[stage_idx].set()
+
+    # Update downstream totals
+    _update_downstream_totals(state, progress, tasks)
+
+
+def _update_downstream_totals(
+    state: _MonitorState,
+    progress: Progress,
+    tasks: _ProgressTasks,
+) -> None:
+    """Recalculate and update the total for each downstream task."""
+    delta = 0
+    num_stages = len(state.stage_stats)
+    for i in range(num_stages):
+        delta += state.stage_stats[i].total_output - state.stage_stats[i].completed
+        display_total = (
+            state.source_total + delta
+            if state.source_total is not None
+            else state.stage_stats[i].total_output
+        )
+        target_task = tasks.stages[i + 1] if i + 1 < num_stages else tasks.sink
+        progress.update(target_task, total=display_total)
+
+
+def _handle_sink_msg(
+    state: _MonitorState,
+    event_type: str,
+    progress: Progress,
+    tasks: _ProgressTasks,
+    source_done: EventType,
+    stage_done_events: list[EventType],
+    sink_done: EventType,
+    shutdown_event: EventType,
+    has_stages: bool,
+) -> None:
+    """Handle a progress message from a sink worker."""
+    state.pending[-1] -= 1
+
+    if event_type == "produced":
+        state.sink_stats.completed += 1
+    elif event_type == "filtered":
+        state.sink_stats.completed += 1
+        state.sink_stats.filtered += 1
+
+    extra = f"⊘{state.sink_stats.filtered}" if state.sink_stats.filtered > 0 else ""
+    progress.update(tasks.sink, completed=state.sink_stats.completed, extra=extra)
+
+    last_done = stage_done_events[-1].is_set() if has_stages else source_done.is_set()
+    if last_done and state.pending[-1] == 0:
+        sink_done.set()
+        shutdown_event.set()
+        state.all_done = True
 
 
 class Pipeline:
@@ -62,6 +220,116 @@ class Pipeline:
         self.stages = stages
         self.sink = sink
 
+    def _spawn_workers(
+        self,
+        ctx,
+        stage_queues,
+        progress_queue,
+        log_queue,
+        source_done,
+        stage_done_events,
+        shutdown_event,
+    ):
+        """Spawn source, stage, and sink worker processes."""
+        processes = []
+
+        # Source worker
+        source_proc = ctx.Process(
+            target=_source_worker,
+            args=(
+                self.source.source,
+                self.source.init_kwargs,
+                stage_queues[0],
+                progress_queue,
+                log_queue,
+                source_done,
+                shutdown_event,
+            ),
+        )
+        source_proc.start()
+        processes.append(source_proc)
+        logger.info("Started source worker")
+
+        # Stage workers
+        for stage_idx, stage_cfg in enumerate(self.stages):
+            upstream_done = (
+                source_done if stage_idx == 0 else stage_done_events[stage_idx - 1]
+            )
+            for worker_id in range(stage_cfg.num_workers):
+                device = None
+                if stage_cfg.gpu_ids:
+                    device = stage_cfg.gpu_ids[worker_id % len(stage_cfg.gpu_ids)]
+                proc = ctx.Process(
+                    target=_stage_worker,
+                    args=(
+                        stage_idx,
+                        worker_id,
+                        stage_cfg.stage,
+                        stage_queues[stage_idx],
+                        stage_queues[stage_idx + 1],
+                        progress_queue,
+                        log_queue,
+                        upstream_done,
+                        shutdown_event,
+                        stage_cfg.num_threads,
+                        device,
+                        stage_cfg.init_kwargs,
+                        stage_cfg.max_concurrency,
+                    ),
+                )
+                proc.start()
+                processes.append(proc)
+            logger.info(
+                f"Started {stage_cfg.num_workers} workers for stage '{stage_cfg.name}'"
+            )
+
+        # Sink workers
+        last_stage_done = stage_done_events[-1] if self.stages else source_done
+        for worker_id in range(self.sink.num_workers):
+            proc = ctx.Process(
+                target=_sink_worker,
+                args=(
+                    worker_id,
+                    self.sink.sink,
+                    stage_queues[-1],
+                    progress_queue,
+                    log_queue,
+                    last_stage_done,
+                    shutdown_event,
+                    self.sink.num_threads,
+                    self.sink.init_kwargs,
+                ),
+            )
+            proc.start()
+            processes.append(proc)
+        logger.info(f"Started {self.sink.num_workers} sink workers")
+
+        return processes
+
+    def _print_summary(self, result: PipelineResult) -> None:
+        """Print pipeline execution summary."""
+        elapsed = result.elapsed_time
+        if result.aborted:
+            console.print(
+                f"\n[bold red]Pipeline aborted after {elapsed:.1f}s[/bold red]"
+            )
+            if result.error_message:
+                console.print(f"  Error: {result.error_message}")
+        else:
+            console.print(
+                f"\n[bold green]Pipeline completed in {elapsed:.1f}s[/bold green]"
+            )
+
+        for i, stats in enumerate(result.stage_stats):
+            name = self.stages[i].name if i < len(self.stages) else self.sink.name
+            console.print(
+                f"  {name}: completed={stats['completed']}, filtered={stats['filtered']}"
+            )
+        if result.stage_stats:
+            console.print(
+                f"  Sink: success={result.sink_success}, skipped={result.sink_skipped}"
+            )
+
     def run(self) -> PipelineResult:
         """
         Run the pipeline.
@@ -77,18 +345,14 @@ class Pipeline:
         log_queue = ctx.Queue()
         progress_queue = ctx.Queue()
 
-        # Source -> Stage[0]
         stage_queues = [ctx.Queue(maxsize=self.source.queue_size)]
-        # Stage[i] -> Stage[i+1] or Sink
         for stage_cfg in self.stages:
             stage_queues.append(ctx.Queue(maxsize=stage_cfg.queue_size))
 
-        # Done events for each stage
+        # Done events
         source_done = ctx.Event()
         stage_done_events = [ctx.Event() for _ in self.stages]
         sink_done = ctx.Event()
-
-        # Shutdown event for graceful termination
         shutdown_event = ctx.Event()
 
         # Start log listener
@@ -97,90 +361,19 @@ class Pipeline:
         )
         log_listener.start()
 
-        processes = []
+        processes: list = []
 
         try:
-            # Start source worker
-            source_proc = ctx.Process(
-                target=_source_worker,
-                args=(
-                    self.source.source,
-                    self.source.init_kwargs,
-                    stage_queues[0],
-                    progress_queue,
-                    log_queue,
-                    source_done,
-                    shutdown_event,
-                ),
+            processes = self._spawn_workers(
+                ctx,
+                stage_queues,
+                progress_queue,
+                log_queue,
+                source_done,
+                stage_done_events,
+                shutdown_event,
             )
-            source_proc.start()
-            processes.append(source_proc)
-            logger.info("Started source worker")
 
-            # Start stage workers
-            for stage_idx, stage_cfg in enumerate(self.stages):
-                upstream_done = (
-                    source_done if stage_idx == 0 else stage_done_events[stage_idx - 1]
-                )
-                input_queue = stage_queues[stage_idx]
-                output_queue = stage_queues[stage_idx + 1]
-
-                for worker_id in range(stage_cfg.num_workers):
-                    # Determine device
-                    device = None
-                    if stage_cfg.gpu_ids:
-                        device = stage_cfg.gpu_ids[worker_id % len(stage_cfg.gpu_ids)]
-
-                    proc = ctx.Process(
-                        target=_stage_worker,
-                        args=(
-                            stage_idx,
-                            worker_id,
-                            stage_cfg.stage,
-                            input_queue,
-                            output_queue,
-                            progress_queue,
-                            log_queue,
-                            upstream_done,
-                            shutdown_event,
-                            stage_cfg.num_threads,
-                            device,
-                            stage_cfg.init_kwargs,
-                            stage_cfg.max_concurrency,
-                        ),
-                    )
-                    proc.start()
-                    processes.append(proc)
-
-                logger.info(
-                    f"Started {stage_cfg.num_workers} workers for stage '{stage_cfg.name}'"
-                )
-
-            # Start sink workers
-            last_stage_done = stage_done_events[-1] if self.stages else source_done
-            sink_queue = stage_queues[-1]
-
-            for worker_id in range(self.sink.num_workers):
-                proc = ctx.Process(
-                    target=_sink_worker,
-                    args=(
-                        worker_id,
-                        self.sink.sink,
-                        sink_queue,
-                        progress_queue,
-                        log_queue,
-                        last_stage_done,
-                        shutdown_event,
-                        self.sink.num_threads,
-                        self.sink.init_kwargs,
-                    ),
-                )
-                proc.start()
-                processes.append(proc)
-
-            logger.info(f"Started {self.sink.num_workers} sink workers")
-
-            # Monitor progress
             result = self._monitor_progress(
                 progress_queue,
                 source_done,
@@ -203,41 +396,16 @@ class Pipeline:
             )
 
         finally:
-            # Wait for all processes to finish
             for proc in processes:
                 proc.join(timeout=10)
                 if proc.is_alive():
                     logger.warning(f"Process {proc.pid} did not terminate, killing")
                     proc.terminate()
                     proc.join(timeout=5)
-
             log_listener.stop()
 
-        elapsed = time.time() - start_time
-        result.elapsed_time = elapsed
-
-        # Print summary
-        if result.aborted:
-            console.print(
-                f"\n[bold red]Pipeline aborted after {elapsed:.1f}s[/bold red]"
-            )
-            if result.error_message:
-                console.print(f"  Error: {result.error_message}")
-        else:
-            console.print(
-                f"\n[bold green]Pipeline completed in {elapsed:.1f}s[/bold green]"
-            )
-
-        for i, stats in enumerate(result.stage_stats):
-            name = self.stages[i].name if i < len(self.stages) else self.sink.name
-            console.print(
-                f"  {name}: completed={stats['completed']}, filtered={stats['filtered']}"
-            )
-        if result.stage_stats:
-            console.print(
-                f"  Sink: success={result.sink_success}, skipped={result.sink_skipped}"
-            )
-
+        result.elapsed_time = time.time() - start_time
+        self._print_summary(result)
         return result
 
     def _monitor_progress(
@@ -249,20 +417,7 @@ class Pipeline:
         shutdown_event: EventType,
     ) -> PipelineResult:
         """Monitor progress and update progress bars."""
-        source_total = None
-        source_count = 0
-
-        # Initialize stats
-        stage_stats = [StageStats() for _ in self.stages]
-        sink_stats = StageStats()
-
-        # Track pending counts
-        # pending[i] = items sent to stage[i] but not yet processed
-        pending = [0] * (len(self.stages) + 1)  # +1 for sink
-
-        # Track abort state
-        aborted = False
-        error_message = None
+        state = _MonitorState(len(self.stages))
 
         with Progress(
             SpinnerColumn(),
@@ -275,169 +430,84 @@ class Pipeline:
             TextColumn("{task.fields[extra]}"),
             console=console,
         ) as progress:
-            # Create tasks
             source_task = progress.add_task(
-                f"[cyan]{self.source.name}",
-                total=source_total,
-                extra="",
+                f"[cyan]{self.source.name}", total=None, extra=""
             )
-
-            stage_tasks: list[TaskID] = []
-            for stage_cfg in self.stages:
-                task = progress.add_task(
-                    f"[green]{stage_cfg.name}",
-                    total=source_total,
-                    extra="",
-                )
-                stage_tasks.append(task)
-
+            stage_tasks = [
+                progress.add_task(f"[green]{cfg.name}", total=None, extra="")
+                for cfg in self.stages
+            ]
             sink_task = progress.add_task(
-                f"[yellow]{self.sink.name}",
-                total=source_total,
-                extra="",
+                f"[yellow]{self.sink.name}", total=None, extra=""
             )
 
-            all_done = False
+            tasks = _ProgressTasks(source_task, stage_tasks, sink_task)
+
             try:
-                while not all_done:
+                while not state.all_done:
                     try:
                         msg = progress_queue.get(timeout=0.5)
                     except queue.Empty:
-                        # Check if shutdown was requested
-                        if shutdown_event.is_set():
-                            all_done = True
-                            aborted = True
-                            continue
-                        # Check if everything is done
-                        if (
-                            source_done.is_set()
-                            and all(e.is_set() for e in stage_done_events)
-                            and all(p == 0 for p in pending)
-                        ):
-                            all_done = True
+                        state.all_done = _check_idle_done(
+                            shutdown_event, source_done, stage_done_events, state
+                        )
                         continue
 
                     stage_type, stage_idx, event_type, count = msg
 
-                    # Handle fatal errors from workers
                     if stage_type == "fatal":
-                        error_message = str(count)  # count contains error message
-                        logger.error(f"Fatal error from worker: {error_message}")
+                        state.error_message = str(count)
+                        logger.error(f"Fatal error from worker: {state.error_message}")
                         shutdown_event.set()
-                        aborted = True
-                        all_done = True
-                        continue
-
-                    if stage_type == "source":
-                        if event_type == "total":
-                            source_total = count
-                            progress.update(source_task, total=source_total)
-                            if self.stages:
-                                progress.update(stage_tasks[0], total=source_total)
-                        elif event_type == "produced":
-                            source_count += count
-                            pending[0] += count
-                            progress.update(source_task, completed=source_count)
-
+                        state.aborted = True
+                        state.all_done = True
+                    elif stage_type == "source":
+                        _handle_source_msg(
+                            state, event_type, count, progress, tasks, bool(self.stages)
+                        )
                     elif stage_type == "stage":
-                        stats = stage_stats[stage_idx]
-                        pending[stage_idx] -= 1
-
-                        if event_type == "produced":
-                            stats.completed += 1
-                            stats.total_output += count
-                            pending[stage_idx + 1] += count
-                        elif event_type == "filtered":
-                            stats.completed += 1
-                            stats.filtered += 1
-
-                        # Update progress bar
-                        extra = f"⊘{stats.filtered}" if stats.filtered > 0 else ""
-                        progress.update(
-                            stage_tasks[stage_idx],
-                            completed=stats.completed,
-                            extra=extra,
+                        _handle_stage_msg(
+                            state,
+                            stage_idx,
+                            event_type,
+                            count,
+                            progress,
+                            tasks,
+                            source_done,
+                            stage_done_events,
                         )
-
-                        # Check if this stage is done
-                        upstream_done_flag = (
-                            source_done.is_set()
-                            if stage_idx == 0
-                            else stage_done_events[stage_idx - 1].is_set()
-                        )
-                        if upstream_done_flag and pending[stage_idx] == 0:
-                            stage_done_events[stage_idx].set()
-
-                        delta = 0
-                        for i in range(len(self.stages)):
-                            delta += (
-                                stage_stats[i].total_output - stage_stats[i].completed
-                            )
-                            display_total = (
-                                source_total + delta
-                                if source_total is not None
-                                else stage_stats[i].total_output
-                            )
-                            if i + 1 < len(self.stages):
-                                progress.update(
-                                    stage_tasks[i + 1],
-                                    total=display_total,
-                                )
-                            else:
-                                progress.update(
-                                    sink_task,
-                                    total=display_total,
-                                )
-
                     elif stage_type == "sink":
-                        pending[-1] -= 1
-
-                        if event_type == "produced":
-                            sink_stats.completed += 1
-                        elif event_type == "filtered":
-                            sink_stats.completed += 1
-                            sink_stats.filtered += 1
-
-                        extra = (
-                            f"⊘{sink_stats.filtered}" if sink_stats.filtered > 0 else ""
+                        _handle_sink_msg(
+                            state,
+                            event_type,
+                            progress,
+                            tasks,
+                            source_done,
+                            stage_done_events,
+                            sink_done,
+                            shutdown_event,
+                            bool(self.stages),
                         )
-                        progress.update(
-                            sink_task,
-                            completed=sink_stats.completed,
-                            extra=extra,
-                        )
-
-                        # Check if sink is done
-                        last_stage_done = (
-                            stage_done_events[-1].is_set()
-                            if self.stages
-                            else source_done.is_set()
-                        )
-                        if last_stage_done and pending[-1] == 0:
-                            sink_done.set()
-                            # Signal all workers to shutdown now that work is complete
-                            shutdown_event.set()
-                            all_done = True
 
             except KeyboardInterrupt:
                 logger.warning("Keyboard interrupt in monitor, shutting down...")
                 shutdown_event.set()
-                aborted = True
-                error_message = "Interrupted by user"
+                state.aborted = True
+                state.error_message = "Interrupted by user"
 
         return PipelineResult(
-            source_total=source_count,
+            source_total=state.source_count,
             stage_stats=[
                 {
                     "completed": s.completed,
                     "filtered": s.filtered,
                     "total_output": s.total_output,
                 }
-                for s in stage_stats
+                for s in state.stage_stats
             ],
-            sink_success=sink_stats.completed - sink_stats.filtered,
-            sink_skipped=sink_stats.filtered,
+            sink_success=state.sink_stats.completed - state.sink_stats.filtered,
+            sink_skipped=state.sink_stats.filtered,
             elapsed_time=0,
-            aborted=aborted,
-            error_message=error_message,
+            aborted=state.aborted,
+            error_message=state.error_message,
         )
