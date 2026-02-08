@@ -1,6 +1,6 @@
 # Instructions for agents working on the `flow_control` module
 
-This is the `flow_control` module, which provides training utilities for flow-matching based Diffusion Transformers (DiTs).
+This is the `flow_control` module, which provides training utilities for flow-matching Diffusion Transformers (DiTs).
 
 ## Package management
 
@@ -28,9 +28,11 @@ Rules to follow:
 ## Code structure
 
 1. The main code for the `flow_control` module is located in the `flow_control` directory.
-2. Entrypoints: The entrypoint scripts facing users are located in the `flow_control/scripts` directory. All modules in this directory export a `main()` function as the main entrypoint, defined in `[project.scripts]` in `pyproject.toml`.
-   - Almost every option for these scripts should be loaded from a TOML file, avoid CLI arguments and environment variables as much as possible.
-   - The only exception is the `LOG_LEVEL` environment variable, which can be used to override logging level for debugging purposes. Default is `INFO`.
+2. Entrypoints: The entrypoint scripts facing users are located in the `flow_control/scripts` directory.
+   - The unified CLI is `flow-control`, defined in `flow_control/scripts/cli.py`. It dispatches to subcommands, each subcommand takes a single `config_path` positional argument.
+   - Each script module exposes a `run(config_path: str)` function with the core logic, and a `main()` function as a thin argparse wrapper (kept for standalone/internal use, e.g., `launch.py` is invoked by torchrun).
+   - `describe` remains a separate entry point (will be split into another package later).
+   - Almost every option for these scripts should be loaded from a TOML file, avoid CLI arguments and environment variables as much as possible. The only exception is the `LOG_LEVEL` environment variable, which can be used to override logging level for debugging purposes. Default is `INFO`.
 3. Testing and examples: Due to the nature of machine learning code, we do not maintain traditional unit tests. Any code outside `flow_control/scripts` may contain a simple `if __name__ == "__main__":` block for quick testing and debugging. More complicated examples and usage demonstrations (e.g., requires multiple mock classes or multiprocessing) of individual modules should be placed in the `examples` directory at the root of the repository.
 
 ## Coding conventions

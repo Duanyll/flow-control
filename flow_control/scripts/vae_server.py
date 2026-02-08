@@ -1,7 +1,6 @@
 import asyncio
 import io
 import pickle
-import sys
 
 import torch
 import uvicorn
@@ -87,9 +86,9 @@ def create_app(vae: BaseVAE, device: torch.device) -> Starlette:
     return Starlette(routes=routes)
 
 
-def main():
-    config_file = sys.argv[1]
-    config = VAEServerConfig(**load_config_file(config_file))
+def run(config_path: str) -> None:
+    """Start the VAE server with the given config file."""
+    config = VAEServerConfig(**load_config_file(config_path))
 
     logger.info(f"Loading VAE model: {config.vae.pretrained_model_id}")
     config.vae.load_model(config.device)
@@ -97,6 +96,15 @@ def main():
     logger.info(f"Starting VAE server on {config.host}:{config.port}")
     app = create_app(config.vae, config.device)
     uvicorn.run(app, host=config.host, port=config.port)
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Start VAE encoding/decoding server.")
+    parser.add_argument("config_path", type=str, help="Path to the configuration file.")
+    args = parser.parse_args()
+    run(args.config_path)
 
 
 if __name__ == "__main__":

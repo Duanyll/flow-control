@@ -113,18 +113,8 @@ class PreprocessConfig(BaseModel):
     save_intermediate: bool = False
 
 
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Preprocess dataset using a pipeline.")
-    parser.add_argument(
-        "config_path",
-        type=str,
-        help="Path to the preprocessing configuration file (YAML or JSON).",
-    )
-    args = parser.parse_args()
-    config_path = args.config_path
-
+def run(config_path: str) -> None:
+    """Run preprocessing pipeline with the given config file."""
     config = PreprocessConfig(**load_config_file(config_path))
     datasink_type = config.output.pop("type")
 
@@ -172,6 +162,19 @@ def main():
     )
 
     pipeline.run()
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Preprocess dataset using a pipeline.")
+    parser.add_argument(
+        "config_path",
+        type=str,
+        help="Path to the preprocessing configuration file.",
+    )
+    args = parser.parse_args()
+    run(args.config_path)
 
 
 if __name__ == "__main__":

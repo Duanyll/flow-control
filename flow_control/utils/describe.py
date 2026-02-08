@@ -590,7 +590,7 @@ def _describe_recursive(
 @overload
 def describe(
     value: Any,
-    console: Console | None,
+    console: Console | None = None,
     max_items: int = DEFAULT_MAX_ITEMS,
     max_depth: int = DEFAULT_MAX_DEPTH,
     str_limit: int = DEFAULT_STR_LIMIT,
