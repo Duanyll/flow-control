@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Any, Literal, NotRequired, TypedDict
+from collections.abc import Mapping
+from typing import Any, Literal, NotRequired, TypedDict, TypeVar
 
 import torch
 from einops import rearrange, repeat
@@ -13,7 +14,7 @@ from flow_control.utils.resize import (
 )
 from flow_control.utils.types import TorchDevice
 
-from .components.encoder import Encoder
+from .components.encoder import Encoder, GenerativeEncoder
 from .components.llm import LLMClient
 from .components.vae import VAE
 
@@ -36,10 +37,24 @@ class ProcessedBatch(TypedDict):
     clean_latents: NotRequired[torch.Tensor]
     """Clean latents corresponding to the images in the batch, as training targets."""
 
-    negative: NotRequired[Any]
+    negative: NotRequired[Mapping[str, Any]]
 
 
-class BaseProcessor(BaseModel, ABC):
+class DecodedBatch(TypedDict):
+    clean_image: torch.Tensor
+    """Primary clean image decoded from the latents."""
+
+
+TInput = TypeVar("TInput", bound=InputBatch)
+TTrainInput = TypeVar("TTrainInput", bound=TrainInputBatch)
+TProcessed = TypeVar("TProcessed", bound=ProcessedBatch)
+
+
+class BaseProcessor[
+    TInput: InputBatch,
+    TTrainInput: TrainInputBatch,
+    TProcessed: ProcessedBatch,
+](BaseModel, ABC):
     task: str
     preset: str
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -78,14 +93,14 @@ class BaseProcessor(BaseModel, ABC):
     # --------------------------- Processing Interfaces -------------------------- #
 
     @abstractmethod
-    async def prepare_inference_batch(self, batch: InputBatch) -> ProcessedBatch:
+    async def prepare_inference_batch(self, batch: TInput) -> ProcessedBatch:
         """
         Prepares the input batch for inference.
         Should return a ProcessedBatch with all necessary fields.
         """
         raise NotImplementedError()
 
-    def get_negative_batch(self, batch: ProcessedBatch) -> ProcessedBatch | None:
+    def get_negative_batch(self, batch: TProcessed) -> ProcessedBatch | None:
         """
         Retrieves the negative batch from the processed batch if it exists.
 
@@ -102,7 +117,7 @@ class BaseProcessor(BaseModel, ABC):
             return None
 
     @abstractmethod
-    async def prepare_training_batch(self, batch: TrainInputBatch) -> ProcessedBatch:
+    async def prepare_training_batch(self, batch: TTrainInput) -> ProcessedBatch:
         """
         Prepares the input batch for training.
         Should return a ProcessedBatch with all necessary fields.
@@ -110,17 +125,19 @@ class BaseProcessor(BaseModel, ABC):
         raise NotImplementedError()
 
     def decode_output(
-        self, output_latent: torch.Tensor, batch: ProcessedBatch
-    ) -> torch.Tensor:
+        self, output_latent: torch.Tensor, batch: TProcessed
+    ) -> DecodedBatch:
         """
         Decodes the output latents from the model into images.
 
         Should return a primary image tensor of shape (B, C, H, W), and optionally
         save extra data into the batch if needed.
         """
-        return self.decode_latents(output_latent, batch["image_size"])
+        return {
+            "clean_image": self.decode_latents(output_latent, size=batch["image_size"])
+        }
 
-    def get_latent_length(self, batch: ProcessedBatch) -> int:
+    def get_latent_length(self, batch: TProcessed) -> int:
         """
         Computes the latent length for the given batch based on its image size. The
         result has not to be the actual length of the transfomer's input, but should be
@@ -140,7 +157,7 @@ class BaseProcessor(BaseModel, ABC):
     patch_size: int = 2
     latent_channels: int = 16
 
-    def _pack_latents(self, latents):
+    def _pack_latents(self, latents) -> torch.Tensor:
         return rearrange(
             latents,
             "b c (h ph) (w pw) -> b (h w) (c ph pw)",
@@ -148,7 +165,7 @@ class BaseProcessor(BaseModel, ABC):
             pw=self.patch_size,
         )
 
-    def _unpack_latents(self, latents, size: tuple[int, int]):
+    def _unpack_latents(self, latents, size: tuple[int, int]) -> torch.Tensor:
         h, w = size
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
@@ -163,7 +180,7 @@ class BaseProcessor(BaseModel, ABC):
 
     def initialize_latents(
         self,
-        batch: ProcessedBatch,
+        batch: TProcessed,
         generator: torch.Generator | None = None,
         device=None,
         dtype=torch.bfloat16,
@@ -176,15 +193,15 @@ class BaseProcessor(BaseModel, ABC):
         """
         if device is None:
             device = self.device
-        h, w = batch["image_size"]  # type: ignore
+        h, w = batch["image_size"]
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
         latents = torch.randn(
             (1, c, h, w), generator=generator, device=device, dtype=dtype
         )
-        batch["noisy_latents"] = self._pack_latents(latents)
-        return batch["noisy_latents"]
+        noisy_latents = batch["noisy_latents"] = self._pack_latents(latents)
+        return noisy_latents
 
     @torch.no_grad()
     def encode_latents(self, image: torch.Tensor) -> torch.Tensor:
@@ -230,8 +247,8 @@ class BaseProcessor(BaseModel, ABC):
         if self.llm is not None:
             msg, _ = await self.llm.generate(prompt, images, system_prompt)
             return msg
-        elif hasattr(self.encoder, "generate"):
-            return self.encoder.generate(prompt, images, system_prompt)  # type: ignore
+        elif isinstance(self.encoder, GenerativeEncoder):
+            return self.encoder.generate(prompt, images, system_prompt)
         else:
             raise NotImplementedError("Cannot generate chat completion. Use a ")
 

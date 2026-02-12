@@ -2,21 +2,22 @@ from typing import Literal
 
 import torch
 
-from .base import BaseFlux1Adapter
+from .base import Flux1Adapter, Flux1Batch
 
 
-class Flux1KontextAdapter(BaseFlux1Adapter):
+class Flux1KontextBatch(Flux1Batch):
+    reference_latents: list[torch.Tensor]
+    """List of `[B, N, D]` Tensors representing VAE encoded reference images."""
+    reference_sizes: list[tuple[int, int]]
+    """List of `(H, W)` tuples representing the sizes of the reference images."""
+
+
+class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
     pe_mode: Literal["3d", "diagonal", "stacked"] = "3d"
     pe_index_scale: int = 1
 
-    class BatchType(BaseFlux1Adapter.BatchType):
-        reference_latents: list[torch.Tensor]
-        """List of `[B, N, D]` Tensors representing VAE encoded reference images."""
-        reference_sizes: list[tuple[int, int]]
-        """List of `(H, W)` tuples representing the sizes of the reference images."""
-
     def predict_velocity(
-        self, batch: BatchType, timestep: torch.Tensor
+        self, batch: Flux1KontextBatch, timestep: torch.Tensor
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         h, w = batch["image_size"]

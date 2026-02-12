@@ -9,9 +9,11 @@ from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 
 
-class BucketDirectoryDataset(Dataset):
-    bin_lengths: list[int]
+class BucketDataset(Dataset):
+    bucket_lengths: list[int]
 
+
+class BucketDirectoryDataset(BucketDataset):
     def __init__(self, path: str, base_type: Literal["raw", "pickle"], **kwargs):
         bin_dirs = []
         with os.scandir(path) as it:
@@ -25,19 +27,19 @@ class BucketDirectoryDataset(Dataset):
             else PickleDirectoryDataset(d, **kwargs)
             for d in bin_dirs
         ]
-        self.bin_lengths = [len(ds) for ds in self.datasets]
+        self.bucket_lengths = [len(ds) for ds in self.datasets]
         self.cum_lengths = []
         cum_length = 0
-        for length in self.bin_lengths:
+        for length in self.bucket_lengths:
             self.cum_lengths.append(cum_length)
             cum_length += length
 
     def __len__(self):
-        return sum(self.bin_lengths)
+        return sum(self.bucket_lengths)
 
     def __getitem__(self, index: int):
         for i, cum_length in enumerate(self.cum_lengths):
-            if index < cum_length + self.bin_lengths[i]:
+            if index < cum_length + self.bucket_lengths[i]:
                 return self.datasets[i][index - cum_length]
         raise IndexError("Index out of range")
 
@@ -79,8 +81,8 @@ class BucketDirectoryDatasink(DataSink):
             )
         return self.data_sinks[bin]
 
-    def write(self, data: dict):
-        latent_length = data.get("latent_length")
+    def write(self, item: dict):
+        latent_length = item.get("latent_length")
         data_sink = self._get_data_sink(latent_length)
-        data_sink.write(data)
+        data_sink.write(item)
         return True

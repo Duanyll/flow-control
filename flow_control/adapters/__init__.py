@@ -2,7 +2,7 @@ from typing import Annotated
 
 from pydantic import PlainValidator
 
-from .base import BaseModelAdapter
+from .base import BaseModelAdapter, Batch
 from .flux1 import parse_adapter as parse_flux1_adapter
 from .longcat import parse_adapter as parse_longcat_adapter
 from .qwen import parse_adapter as parse_qwen_adapter
@@ -26,4 +26,5 @@ ModelAdapter = Annotated[BaseModelAdapter, PlainValidator(parse_model_adapter)]
 
 __all__ = [
     "ModelAdapter",
+    "Batch",
 ]

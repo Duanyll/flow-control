@@ -3,7 +3,7 @@ from typing import Literal
 
 import torch
 
-from flow_control.adapters import ModelAdapter
+from flow_control.adapters import Batch, ModelAdapter
 
 from .simple_euler import SimpleEulerSampler
 
@@ -12,7 +12,7 @@ class ShiftedEulerSampler(SimpleEulerSampler):
     """
     Shifted Euler Sampler for Flow Matching Models.
     """
-    
+
     # --- 基础配置 ---
     steps: int = 28
     shift_strategy: Literal["linear", "squared", "constant", "none"] = "linear"
@@ -32,12 +32,12 @@ class ShiftedEulerSampler(SimpleEulerSampler):
 
     # --- 策略参数 (Flux / Qwen 常用) ---
     base_image_seq_len: int = 256
-    max_image_seq_len: int = 4096 # 8192 for Qwen-Image
+    max_image_seq_len: int = 4096  # 8192 for Qwen-Image
     base_shift: float = 0.5
-    max_shift: float = 1.15 # 0.9 for Qwen-Image
-    
+    max_shift: float = 1.15  # 0.9 for Qwen-Image
+
     # --- 策略参数 (Constant 常用) ---
-    shift_value: float = 1.0 
+    shift_value: float = 1.0
     """
     Constant shift value when using 'constant' shift strategy.
     """
@@ -46,12 +46,12 @@ class ShiftedEulerSampler(SimpleEulerSampler):
     # 是否将 sigma 的终点拉伸到特定值 (Diffusers 中的 shift_terminal)
     shift_terminal: float | None = None
     # 0.02 for Qwen-Image
-    
+
     def sample(
         self,
         model: ModelAdapter,
-        batch: dict,
-        negative_batch: dict | None = None,
+        batch: Batch,
+        negative_batch: Batch | None = None,
         t_start: float = 1.0,
         t_end: float = 0.0,
     ) -> torch.Tensor:
@@ -64,7 +64,7 @@ class ShiftedEulerSampler(SimpleEulerSampler):
 
         # 2. 生成并处理 Sigmas
         sigmas = self._make_shifted_sigmas(seq_len, t_start, t_end)
-        
+
         # 3. 调用父类的采样循环
         return self._euler_sample(model, batch, sigmas, negative_batch)
 
@@ -73,7 +73,7 @@ class ShiftedEulerSampler(SimpleEulerSampler):
     ) -> torch.Tensor:
         # 生成基础的时间步 (线性)
         t = torch.linspace(t_start, t_end, self.steps + 1)
-        
+
         # 计算 Shift Factor (S = exp(mu))
         shift_factor = self._calculate_shift_factor(seq_len)
 
@@ -94,10 +94,10 @@ class ShiftedEulerSampler(SimpleEulerSampler):
 
     def _calculate_shift_factor(self, seq_len: int) -> float:
         """根据策略计算 shift factor (S)"""
-        
+
         if self.shift_strategy == "none":
             return 1.0
-            
+
         elif self.shift_strategy == "constant":
             return self.shift_value
 
@@ -112,6 +112,6 @@ class ShiftedEulerSampler(SimpleEulerSampler):
         elif self.shift_strategy == "squared":
             mu = (seq_len / self.base_image_seq_len) ** 0.5
             return mu
-        
+
         else:
             raise ValueError(f"Unknown shift strategy: {self.shift_strategy}")

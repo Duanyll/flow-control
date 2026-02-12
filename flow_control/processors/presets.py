@@ -1,8 +1,9 @@
 from typing import Literal
 
+from pydantic import BaseModel
+
 from flow_control.utils.resize import ResolutionList
 
-from .base import BaseProcessor
 from .components.encoder import ClipTextEncoder, Encoder, Qwen25VLEncoder, T5TextEncoder
 from .components.prompts import PromptStr, parse_prompt
 from .components.vae import VAE, Flux1VAE, QwenImageVAE
@@ -10,7 +11,7 @@ from .components.vae import VAE, Flux1VAE, QwenImageVAE
 # ---------------------------------- Flux.1 ---------------------------------- #
 
 
-class Flux1Preset(BaseProcessor):
+class Flux1Preset(BaseModel):
     vae: VAE = Flux1VAE()
     encoder: Encoder = T5TextEncoder()
     pooled_encoder: Encoder | None = ClipTextEncoder()
@@ -46,7 +47,7 @@ class Flux1Preset(BaseProcessor):
 # -------------------------------- Qwen-Image -------------------------------- #
 
 
-class QwenImagePreset(BaseProcessor):
+class QwenImagePreset(BaseModel):
     vae: VAE = QwenImageVAE()
     encoder: Encoder = Qwen25VLEncoder()
 
@@ -88,7 +89,7 @@ class QwenImageLayeredPreset(QwenImagePreset):
 # ------------------------------- Longcat Image ------------------------------ #
 
 
-class LongcatImagePreset(BaseProcessor):
+class LongcatImagePreset(BaseModel):
     vae: VAE = Flux1VAE()
     encoder: Encoder = Qwen25VLEncoder(
         pretrained_model_id="meituan-longcat/LongCat-Image",

@@ -29,8 +29,8 @@ class HsdpEngineConfig(BaseModel):
     gradient_checkpointing: bool = True
 
 
-class HsdpEngine(Stateful):
-    conf: HsdpEngineConfig
+class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
+    conf: TConfig
 
     world_size: int
     rank: int

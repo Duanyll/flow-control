@@ -3,6 +3,15 @@ from typing import Annotated, Any, Literal
 
 import torch
 from pydantic import PlainValidator
+from transformers import (
+    CLIPTextModel,
+    CLIPTokenizer,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2Tokenizer,
+    Qwen2VLProcessor,
+    T5EncoderModel,
+    T5Tokenizer,
+)
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
@@ -11,7 +20,7 @@ from flow_control.utils.types import TorchDType
 logger = get_logger(__name__)
 
 
-class BaseEncoder(HfModelLoader):
+class BaseEncoder[T](HfModelLoader[T]):
     type: str
 
     chat_template: str = "{user}"
@@ -38,7 +47,17 @@ class BaseEncoder(HfModelLoader):
         raise NotImplementedError("Encode method must be implemented by subclasses.")
 
 
-class T5TextEncoder(BaseEncoder):
+class GenerativeEncoder:
+    def generate(
+        self,
+        prompt: str,
+        images: list[torch.Tensor] | None = None,
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> str:
+        raise NotImplementedError("Generate method must be implemented by subclasses.")
+
+
+class T5TextEncoder(BaseEncoder[T5EncoderModel]):
     type: str = "t5"
 
     library: Literal["diffusers", "transformers"] = "transformers"
@@ -47,7 +66,7 @@ class T5TextEncoder(BaseEncoder):
     subfolder: str | None = "text_encoder_2"
     dtype: TorchDType | Literal["auto"] = torch.bfloat16
 
-    tokenizer: HfModelLoader = HfModelLoader(
+    tokenizer: HfModelLoader[T5Tokenizer] = HfModelLoader(
         library="transformers",
         class_name="T5Tokenizer",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
@@ -80,7 +99,7 @@ class T5TextEncoder(BaseEncoder):
         return prompt_embeds
 
 
-class ClipTextEncoder(BaseEncoder):
+class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
     type: str = "clip"
 
     library: Literal["diffusers", "transformers"] = "transformers"
@@ -89,7 +108,7 @@ class ClipTextEncoder(BaseEncoder):
     subfolder: str | None = "text_encoder"
     dtype: TorchDType | Literal["auto"] = torch.bfloat16
 
-    tokenizer: HfModelLoader = HfModelLoader(
+    tokenizer: HfModelLoader[CLIPTokenizer] = HfModelLoader(
         library="transformers",
         class_name="CLIPTokenizer",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
@@ -125,7 +144,9 @@ class ClipTextEncoder(BaseEncoder):
         return pooled_prompt_embeds
 
 
-class Qwen25VLEncoder(BaseEncoder):
+class Qwen25VLEncoder(
+    BaseEncoder[Qwen2_5_VLForConditionalGeneration], GenerativeEncoder
+):
     type: str = "qwen_2_5_vl"
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "Qwen2_5_VLForConditionalGeneration"
@@ -133,14 +154,14 @@ class Qwen25VLEncoder(BaseEncoder):
     subfolder: str | None = "text_encoder"
     dtype: TorchDType | Literal["auto"] = torch.bfloat16
 
-    tokenizer: HfModelLoader = HfModelLoader(
+    tokenizer: HfModelLoader[Qwen2Tokenizer] = HfModelLoader(
         library="transformers",
         class_name="Qwen2Tokenizer",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="tokenizer",
     )
 
-    vl_processor: HfModelLoader = HfModelLoader(
+    vl_processor: HfModelLoader[Qwen2VLProcessor] = HfModelLoader(
         library="transformers",
         class_name="Qwen2VLProcessor",
         pretrained_model_id="Qwen/Qwen-Image-Edit",
@@ -215,16 +236,25 @@ class Qwen25VLEncoder(BaseEncoder):
 
         vl_processor = self.vl_processor.model
         model = self.model
-        prefix_inputs = vl_processor(text=prefix, return_tensors="pt").to(model.device)
+        prefix_inputs = vl_processor(
+            text=prefix, text_kwargs={"return_tensors": "pt"}
+        ).to(model.device)
         prompt_inputs = vl_processor(
             images=images,
             text=pretokenized_inputs,
-            padding="max_length" if self.tokenizer_enforce_pad_token else False,
-            is_split_into_words=True,
-            max_length=self.tokenizer_max_length,
-            return_tensors="pt",
+            text_kwargs={
+                "padding": "max_length" if self.tokenizer_enforce_pad_token else False,
+                "is_split_into_words": True,
+                "max_length": self.tokenizer_max_length,
+                "return_tensors": "pt",
+            },
+            images_kwargs={
+                "return_tensors": "pt",
+            },
         ).to(model.device)
-        suffix_inputs = vl_processor(text=suffix, return_tensors="pt").to(model.device)
+        suffix_inputs = vl_processor(
+            text=suffix, text_kwargs={"return_tensors": "pt"}
+        ).to(model.device)
 
         # When is_split_into_words=True is passed, returned inputs_ids and attention_mask
         # will not have batch dimension. However, pixel_values and image_grid_thw will
@@ -274,8 +304,8 @@ class Qwen25VLEncoder(BaseEncoder):
         model_inputs = vl_processor(
             text=text_input,
             images=images,
-            padding=True,
-            return_tensors="pt",
+            text_kwargs={"padding": True, "return_tensors": "pt"},
+            images_kwargs={"return_tensors": "pt"},
         ).to(model.device)
         generated_ids = model.generate(
             **model_inputs, max_new_tokens=self.generate_max_new_tokens

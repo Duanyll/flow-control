@@ -50,6 +50,7 @@ class HsdpInferenceConfig(HsdpEngineConfig):
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
     save_preview_dir: str | None = None
+    save_intermediate: bool = False
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
@@ -58,9 +59,7 @@ class HsdpInferenceConfig(HsdpEngineConfig):
         return self
 
 
-class HsdpInference(HsdpEngine):
-    conf: HsdpInferenceConfig
-
+class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
     @property
     def model(self):
         return self.conf.model
@@ -78,13 +77,13 @@ class HsdpInference(HsdpEngine):
         return self.conf.processor
 
     def __init__(self, **kwargs):
-        self.conf = HsdpInferenceConfig(**kwargs)  # type: ignore
+        self.conf = HsdpInferenceConfig(**kwargs)
         super().__init__(**kwargs)
 
     dataloader: StatefulDataLoader
 
     def make_dataloader(self):
-        dataset: Any = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
+        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -178,14 +177,17 @@ class HsdpInference(HsdpEngine):
                     clean_latents = self.sampler.sample(
                         self.model, batch, negative_batch=negative_batch
                     )
-                    image = tensor_to_pil(
-                        self.processor.decode_output(clean_latents, batch)
-                    )
+                    result = self.processor.decode_output(clean_latents, batch)
+                    result = deep_move_to_device(result, torch.device("cpu"))
+                    image = tensor_to_pil(result["clean_image"])
                     key = batch.get("__key__", None)
                     if key == "__padding__":
                         continue
                     if datasink is not None:
-                        datasink.write(batch)
+                        if self.conf.save_intermediate:
+                            batch.update(result)
+                            result = batch
+                        datasink.write(result)
                     if self.conf.save_preview_dir is not None:
                         image.save(
                             os.path.join(self.conf.save_preview_dir, f"{key}.png")

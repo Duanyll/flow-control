@@ -15,7 +15,13 @@ from flow_control.utils.resize import (
     resize_to_resolution,
 )
 
-from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..base import (
+    BaseProcessor,
+    DecodedBatch,
+    InputBatch,
+    ProcessedBatch,
+    TrainInputBatch,
+)
 from ..components.llm import parse_llm_json_output
 from ..components.prompts import PromptStr, parse_prompt
 
@@ -44,7 +50,17 @@ class EfficientLayeredProcessedBatch(ProcessedBatch):
     text_lengths: list[int]
 
 
-class EfficientLayeredProcessor(BaseProcessor):
+class EfficientLayeredDecodedBatch(DecodedBatch):
+    layer_images: list[torch.Tensor]
+
+
+class EfficientLayeredProcessor(
+    BaseProcessor[
+        EfficientLayeredInputBatch,
+        EfficientLayeredTrainInputBatch,
+        EfficientLayeredProcessedBatch,
+    ]
+):
     encoder_prompt: PromptStr
     fg_caption_prompt: PromptStr = parse_prompt("@efficient_layered_caption_fg_en")
     bg_caption_prompt: PromptStr = parse_prompt("@efficient_layered_caption_bg_en")
@@ -289,7 +305,7 @@ class EfficientLayeredProcessor(BaseProcessor):
 
     def decode_output(
         self, output_latent: torch.Tensor, batch: EfficientLayeredProcessedBatch
-    ) -> torch.Tensor:
+    ) -> EfficientLayeredDecodedBatch:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         latent_len_per_image = [
             (bottom - top) * (right - left) // ratio
@@ -307,14 +323,16 @@ class EfficientLayeredProcessor(BaseProcessor):
                 latents, (layer_size[1] - layer_size[0], layer_size[3] - layer_size[2])
             )
             decoded_layers.append(decoded_layer)
-        batch["layer_images"] = decoded_layers  # type: ignore
         if self.annotate_preview_image:
             merged_image = merge_images(
                 decoded_layers, border_width=4, draw_labels=True
             )
         else:
             merged_image = merge_images(decoded_layers)
-        return merged_image
+        return EfficientLayeredDecodedBatch(
+            clean_image=merged_image,
+            layer_images=decoded_layers,
+        )
 
     def initialize_latents(
         self,

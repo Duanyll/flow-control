@@ -1,6 +1,6 @@
 import torch
 
-from flow_control.adapters import ModelAdapter
+from flow_control.adapters import Batch, ModelAdapter
 
 from .simple_euler import SimpleEulerSampler
 
@@ -14,10 +14,10 @@ class MomentumGuidedSampler(SimpleEulerSampler):
     def sample(
         self,
         model: ModelAdapter,
-        batch: dict,
-        negative_batch: dict | None = None,
-        t_start=1,
-        t_end=0,
+        batch: Batch,
+        negative_batch: Batch | None = None,
+        t_start: float = 1,
+        t_end: float = 0,
     ) -> torch.Tensor:
         self._momentum = None
         return super().sample(model, batch, negative_batch, t_start, t_end)
@@ -27,8 +27,8 @@ class MomentumGuidedSampler(SimpleEulerSampler):
         model: ModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
-        batch: dict,
-        negative_batch: dict | None,
+        batch: Batch,
+        negative_batch: Batch | None,
     ) -> torch.Tensor:
         velocity = super().get_guided_velocity(
             model, latents, timestep, batch, negative_batch

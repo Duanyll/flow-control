@@ -5,7 +5,7 @@ handles trainable parameters.
 """
 
 import re
-from enum import Enum
+from enum import StrEnum
 from typing import Any, cast
 
 import torch
@@ -22,9 +22,7 @@ from diffusers.models.embeddings import (
     PixArtAlphaTextProjection,
     TimestepEmbedding,
 )
-from torch.utils._python_dispatch import (
-    is_traceable_wrapper_subclass,  # type: ignore[import]
-)
+from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 from .logging import get_logger, warn_once
 
@@ -174,7 +172,7 @@ class LayerwiseUpcastingHook(ModelHook):
         return output
 
 
-class LayerwiseUpcastingGranularity(str, Enum):
+class LayerwiseUpcastingGranularity(StrEnum):
     r"""
     An enumeration class that defines the granularity of the layerwise upcasting process.
     Granularity can be one of the following:

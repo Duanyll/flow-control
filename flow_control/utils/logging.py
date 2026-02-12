@@ -45,7 +45,7 @@ def get_process_type():
     """
     # Check for LOCAL_RANK environment variable set by torchrun
     if os.getenv("LOCAL_RANK") is not None:
-        local_rank = int(os.getenv("LOCAL_RANK"))  # type: ignore
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
         return "main" if local_rank == 0 else "mpi_child"
 
     state = PartialState()

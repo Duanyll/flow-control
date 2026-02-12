@@ -99,7 +99,7 @@ class HsdpTrainerConfig(HsdpEngineConfig):
     latent_length_test_mode: bool = False
 
 
-class HsdpSftTrainer(HsdpEngine, Stateful):
+class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
     conf: HsdpTrainerConfig
 
     @property
@@ -143,7 +143,7 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
         return self.current_step // (len(self.dataloader) // self.grad_acc_steps)
 
     def __init__(self, **kwargs):
-        self.conf = HsdpTrainerConfig(**kwargs)  # type: ignore
+        self.conf = HsdpTrainerConfig(**kwargs)
         super().__init__(**kwargs)
 
     def init_tracker(self):
@@ -161,17 +161,19 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
 
     def make_optimizer_and_scheduler(self):
         params = [p for p in self.transformer.parameters() if p.requires_grad]
+        num_trainable_params = sum(p.numel() for p in params)
+        if num_trainable_params == 0:
+            raise RuntimeError("No trainable parameters found in the model.")
         self.optimizer = parse_optimizer(
             self.conf.optimizer, params, ema_decay=self.conf.ema_decay
         )
-        num_trainable_params = sum(p.numel() for p in params)
         logger.info(
             f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
         )
         self.scheduler = parse_scheduler(self.conf.scheduler, self.optimizer)
 
     def make_train_dataloader(self):
-        dataset: Any = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
+        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -194,9 +196,7 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             self.sample_dataloader = None
             return
         self.processor.load_models("decode", device=self.device)
-        dataset: Any = PaddingAwareDatasetWrapper(
-            parse_dataset(self.conf.sample_dataset)
-        )
+        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.sample_dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -218,6 +218,8 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
             self.transformer, [self.optimizer], options=StateDictOptions(strict=False)
         )
         transformer_state_dict = self.model.filter_state_dict(transformer_state_dict)
+        if len(transformer_state_dict) == 0:
+            raise RuntimeError("Nothing to save in transformer state dict.")
         return {
             "transformer": transformer_state_dict,
             "optimizer": optimizer_state_dict,
@@ -312,7 +314,9 @@ class HsdpSftTrainer(HsdpEngine, Stateful):
                         self.model, batch, negative_batch=negative_batch
                     )
                     image = tensor_to_pil(
-                        self.processor.decode_output(clean_latents, batch)
+                        self.processor.decode_output(clean_latents, batch)[
+                            "clean_image"
+                        ]
                     )
                     key = batch.get("__key__", "unknown")
                     self.log_images(image, key)

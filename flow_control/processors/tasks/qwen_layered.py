@@ -7,7 +7,13 @@ from flow_control.utils.common import ensure_alpha_channel
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
 
-from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..base import (
+    BaseProcessor,
+    DecodedBatch,
+    InputBatch,
+    ProcessedBatch,
+    TrainInputBatch,
+)
 from ..components.prompts import PromptStr, parse_prompt
 
 
@@ -31,7 +37,16 @@ class QwenLayeredProcessedBatch(ProcessedBatch):
     num_layers: int
 
 
-class QwenImageLayeredProcessor(BaseProcessor):
+class QwenLayeredDecodedBatch(DecodedBatch):
+    base_image: torch.Tensor
+    layer_images: list[torch.Tensor]
+
+
+class QwenImageLayeredProcessor(
+    BaseProcessor[
+        QwenLayeredInputBatch, QwenLayeredTrainInputBatch, QwenLayeredProcessedBatch
+    ]
+):
     default_num_layers: int = 4
     encoder_prompt: PromptStr
     caption_prompt: PromptStr = parse_prompt("@qwen_layered_caption_en")
@@ -39,11 +54,11 @@ class QwenImageLayeredProcessor(BaseProcessor):
     save_negative: bool = False
 
     @torch.no_grad()
-    def encode_latents(self, images: torch.Tensor | list[torch.Tensor]):
-        if not isinstance(images, list):
-            images = [images]
+    def encode_latents(self, image: torch.Tensor | list[torch.Tensor]):
+        if not isinstance(image, list):
+            image = [image]
 
-        all_images = torch.cat([ensure_alpha_channel(image) for image in images], dim=0)
+        all_images = torch.cat([ensure_alpha_channel(img) for img in image], dim=0)
         latents = self.vae.encode(all_images)
         latents = self._pack_latents_layered(latents)
         return latents
@@ -57,7 +72,7 @@ class QwenImageLayeredProcessor(BaseProcessor):
         )
 
     @torch.no_grad()
-    def decode_latents(
+    def decode_latents_layered(
         self, latents: torch.Tensor, size: tuple[int, int]
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         latents = self._unpack_latents_layered(latents, size)
@@ -145,16 +160,22 @@ class QwenImageLayeredProcessor(BaseProcessor):
 
     def decode_output(
         self, output_latent: torch.Tensor, batch: ProcessedBatch
-    ) -> torch.Tensor:
-        base_image, layer_images = self.decode_latents(
+    ) -> QwenLayeredDecodedBatch:
+        base_image, layer_images = self.decode_latents_layered(
             output_latent, batch["image_size"]
         )
-        batch["clean_image"] = base_image  # type: ignore
-        batch["layer_images"] = layer_images  # type: ignore
-        return merge_images([base_image, *layer_images])
+        return QwenLayeredDecodedBatch(
+            clean_image=merge_images([base_image, *layer_images]),
+            base_image=base_image,
+            layer_images=layer_images,
+        )
 
     def initialize_latents(
-        self, batch: ProcessedBatch, generator=None, device=None, dtype=torch.bfloat16
+        self,
+        batch: QwenLayeredProcessedBatch,
+        generator=None,
+        device=None,
+        dtype=torch.bfloat16,
     ):
         if device is None:
             device = self.device
@@ -162,7 +183,7 @@ class QwenImageLayeredProcessor(BaseProcessor):
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
-        f = batch.get("num_layers", 0) + 1
+        f = batch["num_layers"] + 1
         latents = torch.randn(
             (f, c, h, w), generator=generator, device=device, dtype=dtype
         )

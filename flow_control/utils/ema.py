@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 from torch.optim import Optimizer
@@ -123,7 +124,7 @@ class EMAOptimizer(Optimizer):
                 p_fp32 = p.to(torch.float32)
                 ema_buffer.mul_(self.ema_decay).add_(p_fp32, alpha=1 - self.ema_decay)
 
-    def step(self, closure=None):
+    def step(self, closure: Any = None):
         if self.ema_applied:
             raise RuntimeError("EMA shadow is applied, cannot step optimizer.")
         loss = super().step(closure)

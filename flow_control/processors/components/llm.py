@@ -271,7 +271,7 @@ def parse_llm_json_output(llm_output: str) -> Any:
 
     try:
         # 尝试直接用标准 json 库解析
-        return json5.loads(potential_json_str)  # type: ignore
+        return json5.loads(potential_json_str)
     except json.JSONDecodeError:
         pass  # 如果失败，继续后续步骤
 
@@ -287,7 +287,7 @@ def parse_llm_json_output(llm_output: str) -> Any:
     # 3. 使用 json5 进行解析
     try:
         # 使用 json5.loads，它可以处理注释、末尾逗号等
-        return json5.loads(json_str)  # type: ignore
+        return json5.loads(json_str)
     except Exception:
         # 可以选择在这里增加一个使用标准库 json 的回退尝试
         try:

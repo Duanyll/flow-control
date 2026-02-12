@@ -1,11 +1,10 @@
-from typing import Any
-
 import torch
 import torch.nn as nn
 from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
+from peft import LoraConfig
 
-from flow_control.adapters.base import BaseModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -103,21 +102,40 @@ class PatchedQwenEmbedRope(nn.Module):
         return vid_freqs, txt_freqs
 
 
-class BaseQwenImageAdapter(BaseModelAdapter):
-    @property
-    def transformer(self) -> QwenImageTransformer2DModel:
-        return self.hf_model.model  # type: ignore
+class QwenImageBatch(Batch):
+    prompt_embeds: torch.Tensor
+    """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
 
-    @transformer.setter
-    def transformer(self, value: Any):
-        self.hf_model.model = value
 
-    hf_model: HfModelLoader = HfModelLoader(
+class QwenImageAdapter[TBatch: QwenImageBatch](
+    BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
+):
+    hf_model: HfModelLoader = HfModelLoader[QwenImageTransformer2DModel](
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image",
         subfolder="transformer",
         dtype=torch.bfloat16,
+    )
+    peft_lora_config: LoraConfig = LoraConfig(
+        target_parameters=[
+            "attn.to_k",
+            "attn.to_q",
+            "attn.to_v",
+            "attn.to_out.0",
+            "attn.add_k_proj",
+            "attn.add_q_proj",
+            "attn.add_v_proj",
+            "attn.to_add_out",
+            "img_mlp.net.2",
+            "img_mod.1",
+            "txt_mlp.net.2",
+            "txt_mod.1",
+        ],
+        exclude_modules=[
+            "59.txt_mlp.net.2",
+            "59.attn.to_add_out",
+        ],
     )
 
     def load_transformer(self, device: torch.device) -> None:
@@ -130,13 +148,9 @@ class BaseQwenImageAdapter(BaseModelAdapter):
             scale_rope=orig_module.scale_rope,
         )
 
-    class BatchType(BaseModelAdapter.BatchType):
-        prompt_embeds: torch.Tensor
-        """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: TBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

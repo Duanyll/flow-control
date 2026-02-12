@@ -32,7 +32,7 @@ class TIEProcessedBatch(ProcessedBatch):
     reference_sizes: list[tuple[int, int]]
 
 
-class TIEProcessor(BaseProcessor):
+class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessedBatch]):
     encoder_prompt: PromptStr
     default_negative_prompt: str = " "
     save_negative: bool = False
@@ -119,7 +119,7 @@ class TIEProcessor(BaseProcessor):
             )
         return result
 
-    async def get_latent_length(self, batch: TIEProcessedBatch):
+    def get_latent_length(self, batch: TIEProcessedBatch):
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (
             super().get_latent_length(batch)

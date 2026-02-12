@@ -1,6 +1,6 @@
 import torch
 
-from flow_control.adapters.base import BaseModelAdapter
+from flow_control.adapters import Batch, ModelAdapter
 
 from .base import BaseSampler, make_sample_progress
 
@@ -10,21 +10,21 @@ class SimpleEulerSampler(BaseSampler):
 
     def sample(
         self,
-        model: BaseModelAdapter,
-        batch: dict,
-        negative_batch: dict | None = None,
-        t_start=1.0,
-        t_end=0.0,
+        model: ModelAdapter,
+        batch: Batch,
+        negative_batch: Batch | None = None,
+        t_start: float = 1.0,
+        t_end: float = 0.0,
     ) -> torch.Tensor:
         sigmas = torch.linspace(t_start, t_end, self.steps + 1)
         return self._euler_sample(model, batch, sigmas, negative_batch)
 
     def _euler_sample(
         self,
-        model: BaseModelAdapter,
-        batch: dict,
+        model: ModelAdapter,
+        batch: Batch,
         sigmas: torch.Tensor,
-        negative_batch: dict | None = None,
+        negative_batch: Batch | None = None,
     ) -> torch.Tensor:
         device = model.device
         dtype = model.dtype

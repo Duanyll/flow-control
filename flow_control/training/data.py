@@ -5,16 +5,18 @@ import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import Dataset, Sampler
 
-from ..utils.logging import get_logger
+from flow_control.datasets import MapDataset
+from flow_control.datasets.bucket_directory import BucketDataset
+from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class PaddingAwareDatasetWrapper(Dataset):
-    def __init__(self, dataset):
+    def __init__(self, dataset: MapDataset):
         self.dataset = dataset
-        if hasattr(dataset, "lengths"):
-            self.lengths = dataset.lengths
+        if isinstance(dataset, BucketDataset):
+            self.bucket_lengths = dataset.bucket_lengths
 
     def __len__(self):
         return len(self.dataset)
@@ -67,10 +69,10 @@ class DistributedBucketSampler(Sampler, Stateful):
                 "To distinguish padding samples from real samples, please wrap your dataset with PaddingAwareDatasetWrapper."
             )
 
-        if hasattr(dataset, "lengths"):
-            self.lengths = dataset.lengths  # type: ignore[attr-defined]
+        if hasattr(dataset, "bucket_lengths"):
+            self.lengths = dataset.bucket_lengths
         else:
-            self.lengths = [len(dataset)]  # type: ignore
+            self.lengths = [len(dataset)]
 
         logger.info(
             f"Initialized DistributedBucketSampler with {len(self.lengths)} buckets and {sum(self.lengths)} samples."

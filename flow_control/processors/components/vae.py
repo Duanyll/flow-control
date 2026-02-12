@@ -1,9 +1,12 @@
 import io
 import pickle
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import httpx
 import torch
+from diffusers import AutoencoderKL, AutoencoderKLQwenImage, ModelMixin
+from diffusers.models.autoencoders.autoencoder_kl import DecoderOutput
+from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from einops import rearrange
 from pydantic import PlainValidator
 
@@ -34,11 +37,11 @@ def _deserialize_tensor(
     return tensor.to(device=device, dtype=dtype)
 
 
-class BaseVAE(HfModelLoader):
+class BaseVAE[T: ModelMixin](HfModelLoader[T]):
     type: str
     endpoint: str | None = None
 
-    def _load_model(self, device: torch.device) -> None:
+    def _load_model(self, device: torch.device):
         return super().load_model(device)
 
     def load_model(self, device: torch.device):
@@ -46,7 +49,8 @@ class BaseVAE(HfModelLoader):
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")
             self._verify_remote_vae()
             self._model = None
-            return None
+            # Cast to T so don't have to force downstream checks for model usage
+            return cast(T, None)
         else:
             return super().load_model(device)
 
@@ -136,7 +140,7 @@ class BaseVAE(HfModelLoader):
         return _deserialize_tensor(response.content, device, dtype)
 
 
-class Flux1VAE(BaseVAE):
+class Flux1VAE(BaseVAE[AutoencoderKL]):
     type: str = "flux1"
 
     library: Literal["diffusers", "transformers"] = "diffusers"
@@ -148,22 +152,26 @@ class Flux1VAE(BaseVAE):
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         images = images * 2 - 1
         images = images.to(torch.bfloat16)
-        latent = self.model.encode(images).latent_dist.sample()
-        latent = (
-            latent - self.model.config.shift_factor
-        ) * self.model.config.scaling_factor
+        latent = cast(
+            AutoencoderKLOutput, self.model.encode(images)
+        ).latent_dist.sample()
+        latent = (latent - self.model.config["shift_factor"]) * self.model.config[
+            "scaling_factor"
+        ]
         return latent
 
     def _decode(self, latents: torch.Tensor) -> torch.Tensor:
-        latents = (
-            latents / self.model.config.scaling_factor
-        ) + self.model.config.shift_factor
-        image = self.model.decode(latents).sample
+        latents = (latents / self.model.config["scaling_factor"]) + self.model.config[
+            "shift_factor"
+        ]
+        image = cast(
+            DecoderOutput, self.model.decode(cast(torch.FloatTensor, latents))
+        ).sample
         image = (image + 1) / 2
         return image
 
 
-class QwenImageVAE(BaseVAE):
+class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
     type: str = "qwen"
 
     library: Literal["diffusers", "transformers"] = "diffusers"
@@ -178,15 +186,17 @@ class QwenImageVAE(BaseVAE):
             images = rearrange(images, "b c h w -> b c 1 h w")
         images = images * 2 - 1
         images = images.to(torch.bfloat16)
-        latents = self.model.encode(images).latent_dist.mode()
+        latents = cast(
+            AutoencoderKLOutput, self.model.encode(images)
+        ).latent_dist.mode()
         latents_mean = (
-            torch.tensor(self.model.config.latents_mean)
-            .view(1, self.model.config.z_dim, 1, 1, 1)
+            torch.tensor(self.model.config["latents_mean"])
+            .view(1, self.model.config["z_dim"], 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
         latents_std = (
-            torch.tensor(self.model.config.latents_std)
-            .view(1, self.model.config.z_dim, 1, 1, 1)
+            torch.tensor(self.model.config["latents_std"])
+            .view(1, self.model.config["z_dim"], 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
         latents = (latents - latents_mean) / latents_std
@@ -199,18 +209,18 @@ class QwenImageVAE(BaseVAE):
         if not has_frame_dim:
             latents = rearrange(latents, "b c h w -> b c 1 h w")
         latents_mean = (
-            torch.tensor(self.model.config.latents_mean)
-            .view(1, self.model.config.z_dim, 1, 1, 1)
+            torch.tensor(self.model.config["latents_mean"])
+            .view(1, self.model.config["z_dim"], 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
         # In the original implementation, latents are scaled by 1/stddev during encoding
         latents_std = (
-            torch.tensor(self.model.config.latents_std)
-            .view(1, self.model.config.z_dim, 1, 1, 1)
+            torch.tensor(self.model.config["latents_std"])
+            .view(1, self.model.config["z_dim"], 1, 1, 1)
             .to(latents.device, latents.dtype)
         )
         latents = latents * latents_std + latents_mean
-        images = self.model.decode(latents).sample
+        images = cast(DecoderOutput, self.model.decode(latents)).sample
         images = (images + 1) / 2
         if not has_frame_dim:
             images = rearrange(images, "b c 1 h w -> b c h w")

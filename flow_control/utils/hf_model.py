@@ -9,7 +9,7 @@ from .types import TorchDType
 logger = get_logger(__name__)
 
 
-class HfModelLoader(BaseModel):
+class HfModelLoader[T](BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     library: Literal["diffusers", "transformers"]
@@ -21,17 +21,19 @@ class HfModelLoader(BaseModel):
 
     extra_from_pretrained_kwargs: dict[str, Any] = {}
 
-    _model: Any = None
+    _model: T | None = None
 
     @property
-    def model(self) -> Any:
+    def model(self) -> T:
+        if self._model is None:
+            raise ValueError("Model not loaded yet. Call load_model() first.")
         return self._model
 
     @model.setter
-    def model(self, value: Any):
+    def model(self, value: T):
         self._model = value
 
-    def load_model(self, device: torch.device) -> Any:
+    def load_model(self, device: torch.device) -> T:
         if self.library == "diffusers":
             import diffusers
 

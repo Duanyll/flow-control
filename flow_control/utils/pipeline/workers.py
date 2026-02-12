@@ -227,7 +227,7 @@ def _sync_stage_loop(
                 time.sleep(0.5)
             continue
 
-        results = stage.process(item)
+        results: Any = stage.process(item)
         output_count = len(results)
 
         for result in results:

@@ -1,13 +1,22 @@
 import torch
 import torch.nn as nn
+from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from .base import BaseQwenImageAdapter
+from ..base import BaseModelAdapter
+from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
+
+
+class QwenImageLayeredBatch(QwenImageBatch):
+    num_layers: int
+    """Number of layers in the layered image generation."""
+    image_latents: torch.Tensor
+    """`[B, N, D]` Tensor representing input image latents."""
 
 
 class PatchedQwenEmbedLayer3DRope(nn.Module):
@@ -120,8 +129,8 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
         return vid_freqs, txt_freqs
 
 
-class QwenImageLayeredAdapter(BaseQwenImageAdapter):
-    hf_model: HfModelLoader = HfModelLoader(
+class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
+    hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image-Layered",
@@ -130,7 +139,7 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
     )
 
     def load_transformer(self, device: torch.device) -> None:
-        super().load_transformer(device=device)
+        BaseModelAdapter.load_transformer(self, device=device)
         # Replace self.transformer.pos_embed with the above impl
         orig_module = self.transformer.pos_embed
         self.transformer.pos_embed = PatchedQwenEmbedLayer3DRope(  # type: ignore
@@ -139,15 +148,9 @@ class QwenImageLayeredAdapter(BaseQwenImageAdapter):
             scale_rope=orig_module.scale_rope,
         )
 
-    class BatchType(BaseQwenImageAdapter.BatchType):
-        num_layers: int
-        """Number of layers in the layered image generation."""
-        image_latents: torch.Tensor
-        """`[B, N, D]` Tensor representing input image latents."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: QwenImageLayeredBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

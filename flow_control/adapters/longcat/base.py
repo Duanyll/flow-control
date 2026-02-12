@@ -1,28 +1,33 @@
-from typing import Any, NotRequired
+from typing import NotRequired
 
 import torch
 from diffusers import LongCatImageTransformer2DModel
 from einops import rearrange
 
-from flow_control.adapters.base import BaseModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class BaseLongCatAdapter(BaseModelAdapter):
+class LongCatBatch(Batch):
+    prompt_embeds: torch.Tensor
+    """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
+    txt_ids: NotRequired[torch.Tensor]
+    """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
+           Usually all zeros. Will be calculated if not present."""
+    img_ids: NotRequired[torch.Tensor]
+    """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
+           Will be calculated if not present."""
+
+
+class LongCatAdapter[TBatch: LongCatBatch](
+    BaseModelAdapter[LongCatImageTransformer2DModel, TBatch]
+):
     """
     Meituan LongCat-Image is a smaller Flux.1-like MMDiT model with Qwen2.5-VL as the text encoder.
     """
-
-    @property
-    def transformer(self) -> LongCatImageTransformer2DModel:
-        return self.hf_model.model
-
-    @transformer.setter
-    def transformer(self, value: Any):
-        self.hf_model.model = value
 
     hf_model: HfModelLoader = HfModelLoader(
         library="diffusers",
@@ -36,19 +41,9 @@ class BaseLongCatAdapter(BaseModelAdapter):
     vae_scale_factor: int = 8
     image_offset: int = 512
 
-    class BatchType(BaseModelAdapter.BatchType):
-        prompt_embeds: torch.Tensor
-        """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
-        txt_ids: NotRequired[torch.Tensor]
-        """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
-           Usually all zeros. Will be calculated if not present."""
-        img_ids: NotRequired[torch.Tensor]
-        """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
-           Will be calculated if not present."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: LongCatBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         if "txt_ids" not in batch:

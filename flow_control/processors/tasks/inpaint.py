@@ -28,7 +28,9 @@ class InpaintProcessedBatch(ProcessedBatch):
     inpaint_mask: torch.Tensor
 
 
-class InpaintProcessor(BaseProcessor):
+class InpaintProcessor(
+    BaseProcessor[InpaintInputBatch, InpaintTrainInputBatch, InpaintProcessedBatch]
+):
     encoder_prompt: PromptStr
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "

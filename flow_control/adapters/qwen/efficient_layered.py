@@ -8,7 +8,8 @@ from einops import rearrange, repeat
 from flow_control.utils.common import ensure_compiled_flex_attention
 from flow_control.utils.logging import get_logger
 
-from .base import BaseQwenImageAdapter
+from ..base import BaseModelAdapter
+from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
 
@@ -153,7 +154,35 @@ class EfficientLayeredQwenEmbedRope(nn.Module):
         return vid_freqs, txt_freqs
 
 
-class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
+class EfficientLayeredQwenImageBatch(QwenImageBatch):
+    image_latents: torch.Tensor
+    """
+        `[B, N, D]` Tensor representing input image latents.
+        """
+    layer_boxes: list[tuple[int, int, int, int]]
+    """
+        `(top, bottom, left, right)` in pixels for each layer in the image. Should be aligned with
+        multiples of 16. `top` and `left` are inclusive, `bottom` and `right` are exclusive.
+        """
+    text_lengths: list[int]
+    """
+        Lengths of prompts corresponding to each layer in the image.
+        """
+    prompt_embeds: torch.Tensor
+    """
+        `[B, N, D]` Multimodal embeddings per layer from Qwen2.5-VL-7B, already concatenated
+        along the sequence dimension.
+        """
+    noisy_latents: torch.Tensor
+    """
+        `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
+        """
+    block_mask: NotRequired[flex_attention.BlockMask | None]
+
+
+class EfficientLayeredQwenImageAdapter(
+    QwenImageAdapter[EfficientLayeredQwenImageBatch]
+):
     attn_mask_mode: Literal["full", "text-only", "per-layer", "per-layer-strict"] = (
         "text-only"
     )
@@ -170,33 +199,8 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
     attn_block_size: int = 128
     base_image_index: Literal[0, -1] = 0
 
-    class BatchType(BaseQwenImageAdapter.BatchType):
-        image_latents: torch.Tensor
-        """
-        `[B, N, D]` Tensor representing input image latents.
-        """
-        layer_boxes: list[tuple[int, int, int, int]]
-        """
-        `(top, bottom, left, right)` in pixels for each layer in the image. Should be aligned with
-        multiples of 16. `top` and `left` are inclusive, `bottom` and `right` are exclusive.
-        """
-        text_lengths: list[int]
-        """
-        Lengths of prompts corresponding to each layer in the image.
-        """
-        prompt_embeds: torch.Tensor
-        """
-        `[B, N, D]` Multimodal embeddings per layer from Qwen2.5-VL-7B, already concatenated
-        along the sequence dimension.
-        """
-        noisy_latents: torch.Tensor
-        """
-        `[B, N, D]` The noisy latents to denoise, each layer is already concatenated along N dimension.
-        """
-        block_mask: NotRequired[flex_attention.BlockMask | None]
-
     def load_transformer(self, device: torch.device) -> None:
-        super().load_transformer(device=device)
+        BaseModelAdapter.load_transformer(self, device=device)
         # Must use flex attention backend for block masks
         ensure_compiled_flex_attention()
         self.transformer.set_attention_backend("flex")
@@ -290,7 +294,7 @@ class EfficientLayeredQwenImageAdapter(BaseQwenImageAdapter):
         else:
             raise ValueError(f"Unknown attn_mask_mode: {self.attn_mask_mode}")
 
-    def predict_velocity(self, batch: BatchType, timestep):
+    def predict_velocity(self, batch: EfficientLayeredQwenImageBatch, timestep):
         b, n, d = batch["noisy_latents"].shape
         h, w = batch["image_size"]
 

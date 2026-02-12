@@ -3,12 +3,19 @@ import torch
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from .base import BaseQwenImageAdapter
+from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
 
 
-class QwenImageEditAdapter(BaseQwenImageAdapter):
+class QwenImageEditBatch(QwenImageBatch):
+    reference_latents: list[torch.Tensor]
+    """List of `[B, N, D]` Tensors representing VAE encoded reference images."""
+    reference_sizes: list[tuple[int, int]]
+    """List of `(H, W)` tuples representing the sizes of the reference images."""
+
+
+class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
     hf_model: HfModelLoader = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
@@ -17,15 +24,9 @@ class QwenImageEditAdapter(BaseQwenImageAdapter):
         dtype=torch.bfloat16,
     )
 
-    class BatchType(BaseQwenImageAdapter.BatchType):
-        reference_latents: list[torch.Tensor]
-        """List of `[B, N, D]` Tensors representing VAE encoded reference images."""
-        reference_sizes: list[tuple[int, int]]
-        """List of `(H, W)` tuples representing the sizes of the reference images."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: QwenImageEditBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

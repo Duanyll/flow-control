@@ -3,7 +3,7 @@ Abstract base classes for pipeline framework.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Coroutine, Iterator
 from typing import Any
 
 
@@ -30,7 +30,7 @@ class PipelineStage(ABC):
         pass
 
     @abstractmethod
-    def process(self, item: Any) -> list[Any]:
+    def process(self, item: Any) -> list[Any] | Coroutine[Any, Any, list[Any]]:
         """
         Process a single input item.
 

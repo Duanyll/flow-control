@@ -1,10 +1,15 @@
 import torch
 from einops import repeat
 
-from .peft_lora import Flux1PeftLoraAdapter
+from .base import Flux1Adapter, Flux1Batch
 
 
-class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
+class Flux1NConcatBatch(Flux1Batch):
+    control_latents: torch.Tensor
+    """`[B, N, D]` The VAE encoded control condition image."""
+
+
+class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
     """
     Adapter for applying control to the model through concatenating the conditional image latent
     to the noisy input latent along the N dimension.
@@ -12,13 +17,9 @@ class Flux1NConcatAdapter(Flux1PeftLoraAdapter):
     This is used by the PhotoDoddle model.
     """
 
-    class BatchType(Flux1PeftLoraAdapter.BatchType):
-        control_latents: torch.Tensor
-        """`[B, N, D]` The VAE encoded control condition image."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: Flux1NConcatBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

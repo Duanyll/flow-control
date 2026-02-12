@@ -1,13 +1,15 @@
-from typing import Literal
-
 import torch
+from peft import LoraConfig
 
-from flow_control.utils.common import ensure_trainable
-
-from .base import BaseFlux1Adapter
+from .base import Flux1Adapter, Flux1Batch
 
 
-class Flux1DConcatAdapter(BaseFlux1Adapter):
+class Flux1DConcatBatch(Flux1Batch):
+    control_latents: torch.Tensor
+    """`[B, N, D]` The VAE encoded control condition image."""
+
+
+class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     """
     Adapter for applying control to the model through concating the conditional image latent
     to the noisy input latent along the D dimension. It changes the shape of x_embedder layer.
@@ -15,15 +17,19 @@ class Flux1DConcatAdapter(BaseFlux1Adapter):
     This is used by Flux.1 Canny and Flux.1 Depth models.
     """
 
-    train_norm_layers: bool = True
-    lora_layers: Literal["all-linear"] | list[str] = "all-linear"
-    rank: int = 128
-    use_lora_bias: bool = True
     input_dimension: int = 128
 
-    class BatchType(BaseFlux1Adapter.BatchType):
-        control_latents: torch.Tensor
-        """`[B, N, D]` The VAE encoded control condition image."""
+    peft_lora_rank: int = 128
+    peft_lora_config: LoraConfig = LoraConfig(
+        target_modules="all-linear", lora_bias=True
+    )
+    extra_trainable_modules: list[str] = [
+        "x_embedder",
+        "norm_q",
+        "norm_k",
+        "norm_added_q",
+        "norm_added_k",
+    ]
 
     def _install_modules(self):
         transformer = self.transformer
@@ -46,9 +52,10 @@ class Flux1DConcatAdapter(BaseFlux1Adapter):
             transformer.x_embedder = new_linear
 
         super()._install_modules()
-        ensure_trainable(transformer.x_embedder)
 
-    def predict_velocity(self, batch: dict, timestep: torch.Tensor) -> torch.Tensor:
+    def predict_velocity(
+        self, batch: Flux1DConcatBatch, timestep: torch.Tensor
+    ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = (
@@ -83,10 +90,3 @@ class Flux1DConcatAdapter(BaseFlux1Adapter):
         )[0]
 
         return model_pred
-
-    def filter_state_dict(self, state_dict):
-        filterd = super().filter_state_dict(state_dict)
-        for k, v in state_dict.items():
-            if "x_embedder" in k:
-                filterd[k] = v
-        return filterd

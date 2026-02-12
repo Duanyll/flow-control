@@ -1,3 +1,4 @@
+import sys
 from typing import Annotated, Any
 
 import torch
@@ -62,6 +63,10 @@ def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
 
         ctor = Prodigy
     elif class_name.endswith("8bit") or class_name.startswith("Paged"):
+        if sys.platform == "darwin":
+            raise ImportError(
+                f"bitsandbytes optimizers are not supported on macOS: {class_name}"
+            )
         import bitsandbytes as bnb  # type: ignore
 
         ctor = getattr(bnb.optim, class_name)

@@ -21,7 +21,7 @@ class T2IProcessedBatch(ProcessedBatch):
     pooled_prompt_embeds: torch.Tensor | None
 
 
-class T2IProcessor(BaseProcessor):
+class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessedBatch]):
     encoder_prompt: PromptStr
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "

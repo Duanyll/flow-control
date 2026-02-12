@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Any, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict
@@ -12,7 +11,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from flow_control.adapters import ModelAdapter
+from flow_control.adapters import Batch, ModelAdapter
 from flow_control.utils.logging import console, get_logger, warn_once
 
 logger = get_logger(__name__)
@@ -46,8 +45,8 @@ class BaseSampler(BaseModel, ABC):
     def sample(
         self,
         model: ModelAdapter,
-        batch: dict,
-        negative_batch: dict | None = None,
+        batch: Batch,
+        negative_batch: Batch | None = None,
         t_start=1.0,
         t_end=0.0,
     ) -> torch.Tensor:
@@ -58,19 +57,18 @@ class BaseSampler(BaseModel, ABC):
         model: ModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
-        batch: dict,
-        negative_batch: dict | None,
+        batch: Batch,
+        negative_batch: Batch | None,
     ) -> torch.Tensor:
         dtype = batch["noisy_latents"].dtype
         batch["noisy_latents"] = latents.to(dtype)
-        cond = model.predict_velocity(cast(Any, batch), timestep).float()
+        cond = model.predict_velocity(batch, timestep).float()
         if self.cfg_scale > 1.0:
             if negative_batch is not None:
                 negative_batch["noisy_latents"] = latents.to(dtype)
-                uncond = model.predict_velocity(
-                    cast(Any, negative_batch), timestep
-                ).float()
+                uncond = model.predict_velocity(negative_batch, timestep).float()
                 combined_velocity = uncond + (cond - uncond) * self.cfg_scale
+
                 if self.enable_cfg_renorm:
                     cond_norm = torch.norm(cond, dim=2, keepdim=True)
                     noise_norm = torch.norm(combined_velocity, dim=2, keepdim=True)

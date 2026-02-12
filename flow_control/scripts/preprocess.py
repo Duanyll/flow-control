@@ -25,11 +25,11 @@ class TorchDatasetSource(DataSource):
         if dataset_args is None:
             dataset_args = {}
         self.dataset = parse_dataset(dataset_args)
-        self.total = len(self.dataset)  # type: ignore
+        self.total = len(self.dataset)
         self.processing_limit = processing_limit
 
     def scan(self) -> Iterator[tuple[Any, int | None]]:
-        limit = len(self.dataset)  # type: ignore
+        limit = len(self.dataset)
         if self.processing_limit is not None:
             limit = min(limit, self.processing_limit)
         for idx in range(limit):
@@ -50,7 +50,7 @@ class TorchDatasetLoaderStage(PipelineStage):
         self.dataset = parse_dataset(dataset_args)
 
     def process(self, item: Any) -> Any:
-        data = self.dataset[item]  # type: ignore
+        data = self.dataset[item]
         return [data]
 
 
@@ -80,18 +80,18 @@ class ProcessorStage(PipelineStage):
         self.processor.load_models("encode", device=self.device)
         self.logger.info("Processor models loaded.")
 
-    async def process(self, batch: Any) -> Any:
-        with torch.no_grad(), dump_if_failed(self.logger, batch):
-            batch = deep_move_to_device(batch, self.device)
+    async def process(self, item: Any) -> list[Any]:
+        with torch.no_grad(), dump_if_failed(self.logger, item):
+            item = deep_move_to_device(item, self.device)
             if self.processing_mode == "inference":
-                output = await self.processor.prepare_inference_batch(batch)
+                output = await self.processor.prepare_inference_batch(item)
             else:
-                output = await self.processor.prepare_training_batch(batch)
+                output = await self.processor.prepare_training_batch(item)
             if self.save_intermediate:
-                batch.update(output)
-                output = batch
+                item.update(output)
+                output = item
             if "__key__" not in output:
-                output["__key__"] = batch.get("__key__", None)  # type: ignore
+                output["__key__"] = item.get("__key__", None)  # type: ignore
             output = deep_move_to_device(output, torch.device("cpu"))
         return [output]
 

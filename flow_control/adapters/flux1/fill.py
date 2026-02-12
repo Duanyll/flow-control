@@ -1,26 +1,27 @@
 import torch
 from einops import pack, rearrange
 
-from .base import BaseFlux1Adapter
+from .base import Flux1Adapter, Flux1Batch
 
 
-class Flux1FillAdapter(BaseFlux1Adapter):
+class Flux1FillBatch(Flux1Batch):
+    inpaint_latents: torch.Tensor
+    """`[B, N, D]` The latents of the inpainted image."""
+    inpaint_mask: torch.Tensor
+    """`[B, 1, H, W]` The inpainting mask. Can be a boolean tensor or a tuple of
+        (indices, values) for sparse representation."""
+
+
+class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
     """
     Adapter for the FLUX.1 fill model.
     """
 
     enforce_mask: bool = False
 
-    class BatchType(BaseFlux1Adapter.BatchType):
-        inpaint_latents: torch.Tensor
-        """`[B, N, D]` The latents of the inpainted image."""
-        inpaint_mask: torch.Tensor
-        """`[B, 1, H, W]` The inpainting mask. Can be a boolean tensor or a tuple of
-        (indices, values) for sparse representation."""
-
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: Flux1FillBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

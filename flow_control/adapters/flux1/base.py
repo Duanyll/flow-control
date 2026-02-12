@@ -1,26 +1,34 @@
-from typing import Any, NotRequired
+from typing import NotRequired
 
 import torch
 from diffusers import FluxTransformer2DModel
 from einops import rearrange
+from peft import LoraConfig
 
-from flow_control.adapters.base import BaseModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class BaseFlux1Adapter(BaseModelAdapter):
-    @property
-    def transformer(self) -> FluxTransformer2DModel:
-        return self.hf_model.model
+class Flux1Batch(Batch):
+    pooled_prompt_embeds: torch.Tensor
+    """`[B, D]` Pooled text embeddings from the CLIP text encoder."""
+    prompt_embeds: torch.Tensor
+    """`[B, N, D]` Text embeddings from T5XXL text encoder."""
+    txt_ids: NotRequired[torch.Tensor]
+    """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
+        Usually all zeros. Will be calculated if not present."""
+    img_ids: NotRequired[torch.Tensor]
+    """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
+        Will be calculated if not present."""
 
-    @transformer.setter
-    def transformer(self, value: Any):
-        self.hf_model.model = value
 
-    hf_model: HfModelLoader = HfModelLoader(
+class Flux1Adapter[TBatch: Flux1Batch](
+    BaseModelAdapter[FluxTransformer2DModel, TBatch]
+):
+    hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",
         pretrained_model_id="black-forest-labs/FLUX.1-dev",
@@ -34,22 +42,26 @@ class BaseFlux1Adapter(BaseModelAdapter):
     """
     patch_size: int = 2
     vae_scale_factor: int = 8
-
-    class BatchType(BaseModelAdapter.BatchType):
-        pooled_prompt_embeds: torch.Tensor
-        """`[B, D]` Pooled text embeddings from the CLIP text encoder."""
-        prompt_embeds: torch.Tensor
-        """`[B, N, D]` Text embeddings from T5XXL text encoder."""
-        txt_ids: NotRequired[torch.Tensor]
-        """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
-           Usually all zeros. Will be calculated if not present."""
-        img_ids: NotRequired[torch.Tensor]
-        """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
-           Will be calculated if not present."""
+    peft_lora_config: LoraConfig = LoraConfig(
+        target_modules=[
+            "attn.to_k",
+            "attn.to_q",
+            "attn.to_v",
+            "attn.to_out.0",
+            "attn.add_k_proj",
+            "attn.add_q_proj",
+            "attn.add_v_proj",
+            "attn.to_add_out",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "ff_context.net.0.proj",
+            "ff_context.net.2",
+        ]
+    )
 
     def predict_velocity(
         self,
-        batch: BatchType,
+        batch: TBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
@@ -83,7 +95,7 @@ class BaseFlux1Adapter(BaseModelAdapter):
 
         return model_pred
 
-    def _make_txt_ids(self, prompt_embeds):
+    def _make_txt_ids(self, prompt_embeds: torch.Tensor):
         b, n, d = prompt_embeds.shape
         return torch.zeros(
             (n, 3), dtype=prompt_embeds.dtype, device=prompt_embeds.device
