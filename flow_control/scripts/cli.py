@@ -9,7 +9,13 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    for name in ["preprocess", "generate-dcp-seed", "launch", "vae-server"]:
+    for name in [
+        "preprocess",
+        "preprocess-ray",
+        "generate-dcp-seed",
+        "launch",
+        "vae-server",
+    ]:
         sub = subparsers.add_parser(name)
         sub.add_argument(
             "config_path", type=str, help="Path to the configuration file."
@@ -27,6 +33,8 @@ def _dispatch(command: str, config_path: str) -> None:
     """Lazy-import and run the appropriate subcommand."""
     if command == "preprocess":
         from flow_control.scripts.preprocess import run
+    elif command == "preprocess-ray":
+        from flow_control.scripts.preprocess_ray import run
     elif command == "generate-dcp-seed":
         from flow_control.scripts.generate_dcp_seed import run
     elif command == "launch":

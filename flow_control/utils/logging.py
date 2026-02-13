@@ -42,7 +42,12 @@ def get_process_type():
     - 'main': Normal main process import
     - 'mpi_child': Subprocess launched by accelerate
     - 'mp_spawn_child': Subprocess spawned by multiprocessing
+    - 'ray_worker': Ray Data worker (set via FLOW_CONTROL_RAY_WORKER env var)
     """
+    # Check for Ray worker env var before PartialState() which can have side effects
+    if os.getenv("FLOW_CONTROL_RAY_WORKER"):
+        return "ray_worker"
+
     # Check for LOCAL_RANK environment variable set by torchrun
     if os.getenv("LOCAL_RANK") is not None:
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -198,13 +203,19 @@ diffusers.utils.logging.disable_default_handler()
 diffusers.utils.logging.disable_progress_bar()
 diffusers.utils.logging.set_verbosity(global_log_level)
 
-if process_type != "mp_spawn_child":
+if process_type == "ray_worker":
+    _basic_handler = logging.StreamHandler()
+    _basic_handler.setFormatter(
+        logging.Formatter("%(levelname)s - %(name)s - %(message)s")
+    )
+    setup_global_handler(_basic_handler)
+elif process_type != "mp_spawn_child":
     setup_global_handler(rich_handler)
 
 logging.captureWarnings(True)
 
 httpx_logger = logging.getLogger("httpx")
-httpx_logger.setLevel(global_log_level)
+httpx_logger.setLevel(logging.WARNING)  # Httpx info logs are too verbose
 
 if enable_console:
     _print_banner()
