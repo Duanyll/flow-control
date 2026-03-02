@@ -9,6 +9,7 @@ from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2Tokenizer,
     Qwen2VLProcessor,
+    Qwen3ForCausalLM,
     T5EncoderModel,
     T5Tokenizer,
 )
@@ -324,10 +325,55 @@ class Qwen25VLEncoder(
         return output_text.strip()
 
 
+class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
+    type: str = "qwen3"
+    library: Literal["diffusers", "transformers"] = "transformers"
+    class_name: str = "Qwen3ForCausalLM"
+    pretrained_model_id: str = "Tongyi-MAI/Z-Image"
+    subfolder: str | None = "text_encoder"
+    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+
+    tokenizer: HfModelLoader[Qwen2Tokenizer] = HfModelLoader(
+        library="transformers",
+        class_name="Qwen2Tokenizer",
+        pretrained_model_id="Tongyi-MAI/Z-Image",
+        subfolder="tokenizer",
+    )
+
+    max_sequence_length: int = 512
+
+    def encode(self, prompt, images=None, system_prompt=None):
+        messages = [{"role": "user", "content": prompt}]
+        formated_prompt = self.tokenizer.model.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        assert isinstance(formated_prompt, str)
+        text_inputs = self.tokenizer.model(
+            [formated_prompt],
+            padding="max_length",
+            max_length=self.max_sequence_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids.to(self.model.device)
+        prompt_masks = text_inputs.attention_mask.to(self.model.device).bool()
+        prompt_embeds = self.model(
+            input_ids=text_input_ids,
+            attention_mask=prompt_masks,
+            output_hidden_states=True,
+        ).hidden_states[-2]
+        prompt_embeds = prompt_embeds[0][prompt_masks[0]]
+        return prompt_embeds
+
+
 ENCODER_REGISTRY = {
     "t5": T5TextEncoder,
     "clip": ClipTextEncoder,
     "qwen25vl": Qwen25VLEncoder,
+    "qwen3": Qwen3Encoder,
 }
 
 

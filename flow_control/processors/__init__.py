@@ -10,6 +10,7 @@ from .presets import (
     QwenImageEditPreset,
     QwenImageLayeredPreset,
     QwenImagePreset,
+    ZImagePreset,
 )
 from .tasks.efficient_layered import EfficientLayeredProcessor
 from .tasks.inpaint import InpaintProcessor
@@ -34,6 +35,7 @@ PROCESSOR_PRESET_REGISTRY = {
     "qwen_image_layered": QwenImageLayeredPreset,
     "longcat_image": LongcatImagePreset,
     "longcat_image_edit": LongcatImageEditPreset,
+    "zimage": ZImagePreset,
 }
 
 

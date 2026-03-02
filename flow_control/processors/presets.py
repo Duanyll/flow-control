@@ -4,7 +4,13 @@ from pydantic import BaseModel
 
 from flow_control.utils.resize import ResolutionList
 
-from .components.encoder import ClipTextEncoder, Encoder, Qwen25VLEncoder, T5TextEncoder
+from .components.encoder import (
+    ClipTextEncoder,
+    Encoder,
+    Qwen3Encoder,
+    Qwen25VLEncoder,
+    T5TextEncoder,
+)
 from .components.prompts import PromptStr, parse_prompt
 from .components.vae import VAE, Flux1VAE, QwenImageVAE
 
@@ -132,3 +138,22 @@ class LongcatImagePreset(BaseModel):
 
 class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
+
+
+# ---------------------------------- Z-Image --------------------------------- #
+
+
+class ZImagePreset(BaseModel):
+    vae: VAE = Flux1VAE()
+    encoder: Encoder = Qwen3Encoder()
+
+    # https://github.com/Tongyi-MAI/Z-Image says the model support arbitrary resolutions
+    # between 512x512 and 2048x2048
+    default_resolution: tuple[int, int] = (1024, 1024)
+    resize_mode: Literal["list", "multiple_of"] = "multiple_of"
+    multiple_of: int = 32
+    total_pixels: int = 0
+
+    encoder_prompt: PromptStr = ""
+    default_negative_prompt: PromptStr = ""
+    save_negative: bool = True

@@ -1,0 +1,26 @@
+seed_checkpoint_dir = "./demo/seed/zimage"
+save_preview_dir = "./demo/inference_zimage_t2i_preview"
+
+hsdp_shard_dim = 1
+
+[model]
+arch = "zimage"
+type = "base"
+
+[dataset]
+type = "pickle_directory"
+path = "./demo/preprocess_zimage_t2i"
+
+[sampler]
+type = "shifted_euler"
+steps = 50
+cfg_scale = 5.0
+enable_cfg_renorm = true
+
+[processor]
+task = "t2i"
+preset = "zimage"
+
+[launch]
+type = "inference"
+devices = 4
