@@ -1,6 +1,6 @@
 seed_checkpoint_dir = "./demo/seed/zimage"
 save_preview_dir = "./demo/inference_zimage_t2i_preview"
-
+seed = 1024
 hsdp_shard_dim = 1
 
 [model]
@@ -13,7 +13,7 @@ path = "./demo/preprocess_zimage_t2i"
 
 [sampler]
 type = "shifted_euler"
-steps = 50
+steps = 30
 cfg_scale = 4.0
 enable_cfg_renorm = true
 

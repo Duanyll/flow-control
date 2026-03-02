@@ -177,7 +177,9 @@ log_level: int = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), loggin
 global_log_level: int = getattr(
     logging, os.getenv("GLOBAL_LOG_LEVEL", "WARNING").upper(), logging.WARNING
 )
-rich_handler = RichHandler(console=console, rich_tracebacks=True)
+rich_handler = RichHandler(
+    console=console, rich_tracebacks=True, enable_link_path=False
+)
 
 transformers.utils.logging.disable_default_handler()
 transformers.utils.logging.disable_progress_bar()
