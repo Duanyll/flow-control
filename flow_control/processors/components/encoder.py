@@ -342,6 +342,10 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
 
     max_sequence_length: int = 512
 
+    def load_model(self, device):
+        self.tokenizer.load_model(device)
+        return super().load_model(device)
+
     def encode(self, prompt, images=None, system_prompt=None):
         messages = [{"role": "user", "content": prompt}]
         formated_prompt = self.tokenizer.model.apply_chat_template(
@@ -365,7 +369,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
             attention_mask=prompt_masks,
             output_hidden_states=True,
         ).hidden_states[-2]
-        prompt_embeds = prompt_embeds[0][prompt_masks[0]]
+        prompt_embeds = prompt_embeds[prompt_masks].unsqueeze(0)
         return prompt_embeds
 
 

@@ -6,11 +6,13 @@ from .base import BaseModelAdapter, Batch
 from .flux1 import parse_adapter as parse_flux1_adapter
 from .longcat import parse_adapter as parse_longcat_adapter
 from .qwen import parse_adapter as parse_qwen_adapter
+from .zimage import parse_adapter as parse_zimage_adapter
 
 MODEL_ADAPTER_PARSERS = {
     "flux1": parse_flux1_adapter,
     "qwen": parse_qwen_adapter,
     "longcat": parse_longcat_adapter,
+    "zimage": parse_zimage_adapter,
 }
 
 

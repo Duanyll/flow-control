@@ -31,7 +31,6 @@ import transformers
 from accelerate.state import PartialState
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.panel import Panel
 
 from .describe import describe
 
@@ -151,21 +150,6 @@ def get_version() -> str:
     return result
 
 
-BANNER = r"""
-  _____ _                  ____            _             _ 
- |  ___| | _____      __  / ___|___  _ __ | |_ _ __ ___ | |
- | |_  | |/ _ \ \ /\ / / | |   / _ \| '_ \| __| '__/ _ \| |
- |  _| | | (_) \ V  V /  | |__| (_) | | | | |_| | | (_) | |
- |_|   |_|\___/ \_/\_/    \____\___/|_| |_|\__|_|  \___/|_|
-"""
-
-
-def _print_banner():
-    console.print(
-        Panel.fit(BANNER, subtitle=f"[bold green]{get_version()}[/bold green]")
-    )
-
-
 @contextlib.contextmanager
 def dump_if_failed(logger: logging.Logger, obj: Any, save: bool = False):
     try:
@@ -216,10 +200,6 @@ logging.captureWarnings(True)
 
 httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)  # Httpx info logs are too verbose
-
-if enable_console:
-    _print_banner()
-
 
 __all__ = [
     "get_logger",

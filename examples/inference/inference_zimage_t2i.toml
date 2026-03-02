@@ -14,7 +14,7 @@ path = "./demo/preprocess_zimage_t2i"
 [sampler]
 type = "shifted_euler"
 steps = 50
-cfg_scale = 5.0
+cfg_scale = 4.0
 enable_cfg_renorm = true
 
 [processor]
@@ -23,4 +23,4 @@ preset = "zimage"
 
 [launch]
 type = "inference"
-devices = 4
+devices = [4, 5, 6, 7]
