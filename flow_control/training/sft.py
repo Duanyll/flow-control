@@ -81,7 +81,7 @@ class HsdpTrainerConfig(HsdpEngineConfig):
 
     checkpoint_root: str
     seed_checkpoint_dir: str | None = None
-    logging_dir: str = "."
+    aim_repo: str = "."
     experiment_name: str
     resume_from_dir: str | None = None
     checkpoint_steps: int = 500
@@ -150,13 +150,13 @@ class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
         if not self.is_main_process:
             return
         self.tracker = aim.Run(
-            repo=self.conf.logging_dir, experiment=self.conf.experiment_name
+            repo=self.conf.aim_repo, experiment=self.conf.experiment_name
         )
         conf_dump = self.conf.model_dump(mode="json", warnings="none")
         conf_dump["__version__"] = get_version()
         self.tracker["hparams"] = conf_dump
         logger.info(
-            f"Initialized Aim tracker at {self.conf.logging_dir}, experiment={self.conf.experiment_name}."
+            f"Initialized Aim tracker at {self.conf.aim_repo}, experiment={self.conf.experiment_name}."
         )
 
     def make_optimizer_and_scheduler(self):

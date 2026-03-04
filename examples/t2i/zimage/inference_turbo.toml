@@ -1,3 +1,5 @@
+# Z-Image Turbo shares same preprocessing as Z-Image (./preprocess.toml)
+
 seed_checkpoint_dir = "./demo/seed/zimage_turbo"
 save_preview_dir = "./demo/inference_zimage_turbo_t2i_preview"
 seed = 1024

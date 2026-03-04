@@ -1,0 +1,32 @@
+seed_checkpoint_dir = "./demo/seed/flux2_klein_4b"
+save_preview_dir = "./demo/inference_flux2_klein_4b_t2i_preview"
+
+hsdp_shard_dim = 1
+
+[model]
+arch = "flux2"
+type = "base"
+
+[model.hf_model]
+library = "diffusers"
+class_name = "Flux2Transformer2DModel"
+pretrained_model_id = "black-forest-labs/FLUX.2-klein-4B"
+subfolder = "transformer"
+dtype = "bfloat16"
+
+[dataset]
+type = "pickle_directory"
+path = "./demo/preprocess_flux2_klein_4b_t2i"
+
+[sampler]
+type = "flux2_shift"
+steps = 4
+cfg_scale = 1.0
+
+[processor]
+task = "t2i"
+preset = "flux2_klein_4b"
+
+[launch]
+type = "inference"
+devices = 4

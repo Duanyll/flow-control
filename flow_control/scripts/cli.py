@@ -12,7 +12,7 @@ def main():
     for name in [
         "preprocess",
         "preprocess-ray",
-        "generate-dcp-seed",
+        "seed",
         "launch",
         "vae-server",
     ]:
@@ -35,8 +35,8 @@ def _dispatch(command: str, config_path: str) -> None:
         from flow_control.scripts.preprocess import run
     elif command == "preprocess-ray":
         from flow_control.scripts.preprocess_ray import run
-    elif command == "generate-dcp-seed":
-        from flow_control.scripts.generate_dcp_seed import run
+    elif command == "seed":
+        from flow_control.scripts.seed import run
     elif command == "launch":
         from flow_control.scripts.launch import run
     elif command == "vae-server":
