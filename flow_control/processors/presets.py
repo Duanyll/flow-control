@@ -121,6 +121,8 @@ class LongcatImagePreset(BaseModel):
     default_negative_prompt: PromptStr = ""
     save_negative: bool = True
 
+    t2i_enhance_prompt: PromptStr = parse_prompt("@longcat_t2i_enhance_en")
+
 
 class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
@@ -200,6 +202,9 @@ class Flux2Preset(BaseModel):
     encoder_prompt: PromptStr = parse_prompt("@flux2_encoder")
     default_negative_prompt: PromptStr = ""
     save_negative: bool = False
+
+    t2i_enhance_prompt: PromptStr = parse_prompt("@flux2_t2i_enhance")
+    tie_enhance_prompt: PromptStr = parse_prompt("@flux2_tie_enhance")
 
 
 class Flux2Klein9BPreset(Flux2Preset):

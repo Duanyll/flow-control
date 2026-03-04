@@ -267,6 +267,8 @@ PROMPTS: dict[str, str] = {
     "flux2_t2i_enhance": FLUX2_T2I_ENHANCE,
     "flux2_tie_enhance": FLUX2_TIE_ENHANCE,
     "default_t2i_caption": "As an image captioning expert, generate a descriptive text prompt based on an image content, suitable for input to a text-to-image model. Output ONLY the description string. Do not include introductory or concluding remarks.",
+    "default_t2i_enhance": FLUX2_T2I_ENHANCE,
+    "default_tie_enhance": FLUX2_TIE_ENHANCE,
 }
 
 

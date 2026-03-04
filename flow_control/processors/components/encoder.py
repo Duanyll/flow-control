@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.logging import get_logger
+from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
@@ -50,6 +50,18 @@ class BaseEncoder[T](HfModelLoader[T]):
         raise NotImplementedError("Encode method must be implemented by subclasses.")
 
 
+def warn_no_image_support(func):
+    def wrapper(self, prompt, images=None, system_prompt=None):
+        if images:
+            warn_once(
+                logger,
+                f"{self.__class__.__name__} does not support image inputs. Ignoring provided images.",
+            )
+        return func(self, prompt, images=None, system_prompt=system_prompt)
+
+    return wrapper
+
+
 class GenerativeEncoder:
     def generate(
         self,
@@ -80,6 +92,7 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
         self.tokenizer.load_model(device)
         return super().load_model(device)
 
+    @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt: str | None = None):
         tokenizer = self.tokenizer.model
         model = self.model
@@ -124,6 +137,7 @@ class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
         self.tokenizer.load_model(device)
         return super().load_model(device)
 
+    @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt: str | None = None):
         tokenizer = self.tokenizer.model
         model = self.model
@@ -351,6 +365,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
         self.tokenizer.load_model(device)
         return super().load_model(device)
 
+    @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt=None):
         messages = [{"role": "user", "content": prompt}]
         formated_prompt = self.tokenizer.model.apply_chat_template(
@@ -397,6 +412,7 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
         subfolder="tokenizer",
     )
 
+    encode_with_images: bool = False
     max_sequence_length: int = 512
     hidden_state_layers: list[int] = [10, 20, 30]
     temperature: float = 0.7
@@ -435,7 +451,11 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
 
     def encode(self, prompt, images=None, system_prompt=None):
         # Ignore input images, Flux.2 does not use them for encoding.
-        messages = self.format_prompt(prompt, images=[], system_prompt=system_prompt)
+        messages = self.format_prompt(
+            prompt,
+            images=images if self.encode_with_images else None,
+            system_prompt=system_prompt,
+        )
         tokenizer: Any = self.tokenizer.model
         # The PixtralProcessor's apply_chat_template is badly typed
         inputs = tokenizer.apply_chat_template(

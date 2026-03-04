@@ -83,23 +83,36 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
             torch.cuda.manual_seed_all(seed)
         logger.info(f"Random seed set to {seed} for rank {self.rank}.")
 
-    def load_transformer_from_seed(
-        self, model: ModelAdapter, seed_checkpoint_dir: str | None = None
+    def load_transformer(
+        self,
+        model: ModelAdapter,
+        seed_checkpoint_dir: str | None = None,
     ) -> ModelAdapter:
-        with torch.device("meta"):
-            model.load_transformer(device=torch.device("meta"))
-            if self.conf.gradient_checkpointing:
-                if (
-                    hasattr(model.transformer, "_supports_gradient_checkpointing")
-                    and model.transformer._supports_gradient_checkpointing
-                ):
-                    model.transformer.enable_gradient_checkpointing()
-                else:
-                    warn_once(
-                        logger,
-                        "Gradient checkpointing is enabled in the config, "
-                        "but the transformer model does not support it.",
-                    )
+        if seed_checkpoint_dir is not None:
+            with torch.device("meta"):
+                model.load_transformer(device=torch.device("meta"))
+        else:
+            if self.conf.hsdp_shard_dim > 1:
+                logger.warning(
+                    "HSDP sharding is enabled but loading transformer without DCP seed "
+                    "checkpoint. The transformer will be loaded on CPU and then sharded, "
+                    "which may be slow and memory-intensive for large models. "
+                )
+            load_device = (
+                torch.device("cpu") if self.conf.hsdp_shard_dim > 1 else self.device
+            )
+            model.load_transformer(device=load_device)
+
+        if self.conf.gradient_checkpointing:
+            if (
+                hasattr(model.transformer, "_supports_gradient_checkpointing")
+                and model.transformer._supports_gradient_checkpointing
+            ):
+                model.transformer.enable_gradient_checkpointing()
+            else:
+                logger.warning(
+                    f"Gradient checkpointing is enabled but {model.transformer.__class__.__name__} does not support it."
+                )
 
         fsdp_layers: list[str] = (
             model.transformer._no_split_modules or model.transformer._repeated_blocks
@@ -116,10 +129,16 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
                 count += 1
         fully_shard(model.transformer, mesh=self.mesh)
         logger.info(f"Transformer is sharded with {count} FSDP layers.")
-        model.transformer.to_empty(device=self.device)
-        logger.info("Transformer is materialized on to GPU.")
 
         if seed_checkpoint_dir is not None:
+            if not os.path.exists(os.path.join(seed_checkpoint_dir, ".metadata")):
+                raise ValueError(
+                    f"Seed checkpoint directory {seed_checkpoint_dir} does not exist or "
+                    "is not a valid DCP checkpoint. Set launch.generate_seed = true or "
+                    "manually generate the seed checkpoint with `flow-control seed` command."
+                )
+            model.transformer.to_empty(device=self.device)
+            logger.info("Transformer is materialized on to GPU.")
             logger.info(
                 f"Loading seed checkpoint from {seed_checkpoint_dir} into transformer..."
             )
@@ -132,12 +151,6 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
                 planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
             )
             logger.info("Seed checkpoint loaded into transformer.")
-        elif not model.all_trainable:
-            warn_once(
-                logger,
-                "Model is not fully trainable and no seed checkpoint is provided. "
-                "This may lead to uninitialized parameters.",
-            )
         return model
 
     def save_transformer_to_seed(self, model: ModelAdapter, seed_checkpoint_dir: str):

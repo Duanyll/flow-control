@@ -24,11 +24,22 @@ class T2IProcessedBatch(ProcessedBatch):
 class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessedBatch]):
     encoder_prompt: PromptStr
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
+    t2i_enhance_prompt: PromptStr = parse_prompt("@default_t2i_enhance")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    enable_enhance: bool = False
+
+    async def enhance_prompt(self, prompt: str) -> str:
+        if not self.enable_enhance:
+            return prompt
+        return await self.chat_completion(
+            prompt=prompt, system_prompt=self.t2i_enhance_prompt
+        )
 
     async def prepare_inference_batch(self, batch: T2IInputBatch) -> T2IProcessedBatch:
         image_size = batch.get("image_size", None) or self.default_resolution
+
+        batch["prompt"] = await self.enhance_prompt(batch["prompt"])
 
         result = T2IProcessedBatch(
             image_size=image_size,
@@ -53,6 +64,8 @@ class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessed
                 self.caption_prompt, images=[clean_image]
             )
         clean_latents = self.encode_latents(clean_image)
+
+        batch["prompt"] = prompt = await self.enhance_prompt(prompt)
 
         result = T2IProcessedBatch(
             image_size=image_size,

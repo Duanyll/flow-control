@@ -9,7 +9,7 @@ from flow_control.utils.resize import (
 )
 
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
-from ..components.prompts import PromptStr
+from ..components.prompts import PromptStr, parse_prompt
 
 
 class TIEInputBatch(InputBatch):
@@ -34,8 +34,10 @@ class TIEProcessedBatch(ProcessedBatch):
 
 class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessedBatch]):
     encoder_prompt: PromptStr
+    tie_enhance_prompt: PromptStr = parse_prompt("@default_tie_enhance")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    enable_enhance: bool = False
 
     reference_image_resize_mode: Literal["multiple_of", "list", "match_latent"] = (
         "match_latent"
@@ -65,6 +67,17 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
             "reference_sizes": reference_sizes,
         }
 
+    async def enhance_prompt(
+        self, prompt: str, reference_images: list[torch.Tensor]
+    ) -> str:
+        if not self.enable_enhance:
+            return prompt
+        return await self.chat_completion(
+            prompt=prompt,
+            system_prompt=self.tie_enhance_prompt,
+            images=reference_images,
+        )
+
     async def prepare_inference_batch(self, batch: TIEInputBatch) -> TIEProcessedBatch:
         if (image_size := batch.get("image_size", None)) is None:
             if len(batch["reference_images"]) > 0:
@@ -77,6 +90,10 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
                 )
             else:
                 batch["image_size"] = image_size = self.default_resolution
+
+        batch["prompt"] = await self.enhance_prompt(
+            batch["prompt"], batch["reference_images"]
+        )
 
         result = TIEProcessedBatch(
             image_size=image_size,
@@ -102,6 +119,11 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
         batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
         clean_latents = self.encode_latents(clean_image)
+
+        batch["prompt"] = await self.enhance_prompt(
+            batch["prompt"], batch["reference_images"]
+        )
+
         result = TIEProcessedBatch(
             image_size=image_size,
             clean_latents=clean_latents,
@@ -112,6 +134,7 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
             ),
             **self.encode_reference_images(batch["reference_images"], image_size),
         )
+        
         if self.save_negative:
             result["negative"] = self.encode_prompt(
                 self.default_negative_prompt,

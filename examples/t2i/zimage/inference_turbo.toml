@@ -1,6 +1,3 @@
-# Z-Image Turbo shares same preprocessing as Z-Image (./preprocess.toml)
-
-seed_checkpoint_dir = "./demo/seed/zimage_turbo"
 save_preview_dir = "./demo/inference_zimage_turbo_t2i_preview"
 seed = 1024
 hsdp_shard_dim = 1
@@ -31,4 +28,5 @@ preset = "zimage"
 
 [launch]
 type = "inference"
-devices = [4, 5, 6, 7]
+devices = 4
+preprocess_config = "./examples/t2i/zimage/preprocess.toml"

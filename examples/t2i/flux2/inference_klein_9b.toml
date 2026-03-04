@@ -1,4 +1,3 @@
-seed_checkpoint_dir = "./demo/seed/flux2_klein_9b"
 save_preview_dir = "./demo/inference_flux2_klein_9b_t2i_preview"
 
 hsdp_shard_dim = 1
@@ -30,3 +29,4 @@ preset = "flux2_klein_9b"
 [launch]
 type = "inference"
 devices = 4
+preprocess_config = "examples/t2i/flux2/preprocess_klein_9b.toml"

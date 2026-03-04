@@ -80,7 +80,9 @@ class HsdpTrainerConfig(HsdpEngineConfig):
     loss_weighting: LossWeighting = UniformLossWeighting()
 
     checkpoint_root: str
-    seed_checkpoint_dir: str | None = None
+    # It is required to use a seed checkpoint for training to ensure consistent 
+    # initialization across processes.
+    seed_checkpoint_dir: str
     aim_repo: str = "."
     experiment_name: str
     resume_from_dir: str | None = None
@@ -462,7 +464,7 @@ class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
 
         self.set_seed()
         self.init_tracker()
-        self.load_transformer_from_seed(self.model, self.conf.seed_checkpoint_dir)
+        self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
         self.make_sample_dataloader_maybe()
@@ -522,7 +524,7 @@ class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
         )
 
         self.set_seed()
-        self.load_transformer_from_seed(self.model)
+        self.load_transformer(self.model)
         self.make_optimizer_and_scheduler()
 
         console.rule("[bold blue]Starting latent length test[/bold blue]")

@@ -1,4 +1,4 @@
-seed_checkpoint_dir = "./demo/seed/flux2"
+seed_checkpoint_dir = "/dev/shm/flow-control/seed"
 save_preview_dir = "./demo/inference_flux2_t2i_preview"
 
 hsdp_shard_dim = 4
@@ -23,6 +23,8 @@ preset = "flux2"
 [launch]
 type = "inference"
 devices = 4
+generate_dcp_seed = true
+preprocess_config = "examples/t2i/flux2/preprocess.toml"
 
 [launch.env]
 NCCL_CUMEM_HOST_ENABLE = "0"

@@ -136,7 +136,7 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
     @distributed_main
     def run(self):
         self.set_seed()
-        self.load_transformer_from_seed(self.model, self.conf.seed_checkpoint_dir)
+        self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
         self.processor.load_models("decode", device=self.device)
         self.make_dataloader()
 
