@@ -2,10 +2,10 @@ import torch
 
 from flow_control.adapters import Batch, ModelAdapter
 
-from .simple_euler import SimpleEulerSampler
+from .euler import EulerSampler
 
 
-class MomentumGuidedSampler(SimpleEulerSampler):
+class MomentumGuidedSampler(EulerSampler):
     alpha: float
     beta: float
 

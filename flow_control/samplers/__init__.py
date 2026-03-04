@@ -3,15 +3,23 @@ from typing import Annotated
 from pydantic import PlainValidator
 
 from .base import BaseSampler
+from .euler import EulerSampler
 from .momentum import MomentumGuidedSampler
-from .shift import ShiftedEulerSampler
-from .simple_euler import SimpleEulerSampler
+from .shift import (
+    ConstantShiftSampler,
+    Flux2ShiftSampler,
+    LinearShiftSampler,
+    SquaredShiftSampler,
+)
 
 SAMPLER_REGISTRY = {
     "base": BaseSampler,
-    "simple_euler": SimpleEulerSampler,
+    "euler": EulerSampler,
     "momentum": MomentumGuidedSampler,
-    "shifted_euler": ShiftedEulerSampler,
+    "constant_shift": ConstantShiftSampler,
+    "linear_shift": LinearShiftSampler,
+    "squared_shift": SquaredShiftSampler,
+    "flux2_shift": Flux2ShiftSampler,
 }
 
 

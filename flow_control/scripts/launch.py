@@ -10,8 +10,7 @@ from rich import print
 class LaunchConfig(BaseModel):
     type: Literal["sft", "inference"]
     devices: int | list[int]
-    omp_num_threads: int | None = None
-    nccl_p2p_level: str | None = None
+    env: dict[str, str] = {}
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
@@ -58,21 +57,15 @@ def run(config_path: str) -> None:
         launch_config.type,
     ]
 
+    envs = launch_config.env
     if isinstance(launch_config.devices, list):
-        visible_devices = ",".join(str(d) for d in launch_config.devices)
-        print(f"[green]Setting CUDA_VISIBLE_DEVICES: [/green]{visible_devices}")
-        os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
-    if launch_config.omp_num_threads is None:
-        launch_config.omp_num_threads = (os.cpu_count() or 0) // num_processes
-    if launch_config.omp_num_threads > 0:
-        print(
-            f"[green]Setting OMP_NUM_THREADS: [/green]{launch_config.omp_num_threads}"
-        )
-        os.environ["OMP_NUM_THREADS"] = str(launch_config.omp_num_threads)
-
-    if launch_config.nccl_p2p_level:
-        print(f"[green]Setting NCCL_P2P_LEVEL: [/green]{launch_config.nccl_p2p_level}")
-        os.environ["NCCL_P2P_LEVEL"] = launch_config.nccl_p2p_level
+        envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
+    if "OMP_NUM_THREADS" not in envs:
+        omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
+        envs["OMP_NUM_THREADS"] = str(omp_threads)
+    for k, v in envs.items():
+        print(f"[blue]Setting environment variable:[/blue] {k}={v}")
+        os.environ[k] = v
 
     print(f"[blue]Executing command:[/blue] {' '.join(cmd)}")
     os.execvp(cmd[0], cmd)

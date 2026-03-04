@@ -19,7 +19,7 @@ type = "pickle_directory"
 path = "./demo/preprocess_zimage_t2i"
 
 [sampler]
-type = "shifted_euler"
+type = "linear_shift"
 steps = 8
 cfg_scale = 1.0
 

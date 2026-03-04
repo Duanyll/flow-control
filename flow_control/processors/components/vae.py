@@ -1,10 +1,15 @@
 import io
 import pickle
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import httpx
 import torch
-from diffusers import AutoencoderKL, AutoencoderKLQwenImage, ModelMixin
+from diffusers import (
+    AutoencoderKL,
+    AutoencoderKLFlux2,
+    AutoencoderKLQwenImage,
+    ModelMixin,
+)
 from diffusers.models.autoencoders.autoencoder_kl import DecoderOutput
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from einops import rearrange
@@ -227,9 +232,78 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
         return images
 
 
+class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
+    type: str = "flux2"
+
+    library: Literal["diffusers", "transformers"] = "diffusers"
+    class_name: str = "AutoencoderKLFlux2"
+    pretrained_model_id: str = "black-forest-labs/FLUX.2-dev"
+    subfolder: str | None = "vae"
+    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+
+    patch_size: int = 2
+
+    def _pack_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        return rearrange(
+            latents,
+            "b c (h p1) (w p2) -> b (c p1 p2) h w",
+            p1=self.patch_size,
+            p2=self.patch_size,
+        )
+
+    def _unpack_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        return rearrange(
+            latents,
+            "b (c p1 p2) h w -> b c (h p1) (w p2)",
+            p1=self.patch_size,
+            p2=self.patch_size,
+        )
+
+    def _encode(self, images: torch.Tensor):
+        images = images * 2 - 1
+        images = images.to(torch.bfloat16)
+        latents = cast(
+            AutoencoderKLOutput, self.model.encode(images)
+        ).latent_dist.sample()
+
+        bn: Any = self.model.bn
+        latents_bn_mean = bn.running_mean.view(1, -1, 1, 1).to(
+            latents.device, latents.dtype
+        )
+        latents_bn_std = torch.sqrt(
+            bn.running_var.view(1, -1, 1, 1) + self.model.config["batch_norm_eps"]
+        ).to(latents.device, latents.dtype)
+
+        # bn is applied to the 2x2 packed latents
+        latents = self._pack_latents(latents)
+        latents = (latents - latents_bn_mean) / latents_bn_std
+        latents = self._unpack_latents(latents)
+        return latents
+
+    def _decode(self, latents):
+        bn: Any = self.model.bn
+        latents_bn_mean = bn.running_mean.view(1, -1, 1, 1).to(
+            latents.device, latents.dtype
+        )
+        latents_bn_std = torch.sqrt(
+            bn.running_var.view(1, -1, 1, 1) + self.model.config["batch_norm_eps"]
+        ).to(latents.device, latents.dtype)
+
+        latents = self._pack_latents(latents)
+        latents = latents * latents_bn_std + latents_bn_mean
+        latents = self._unpack_latents(latents)
+
+        image = cast(
+            DecoderOutput, self.model.decode(cast(torch.FloatTensor, latents))
+        ).sample
+        image = (image + 1) / 2
+        return image
+
+
 VAE_REGISTRY = {
     "flux1": Flux1VAE,
     "qwen": QwenImageVAE,
+    "flux2": Flux2VAE,
 }
 
 

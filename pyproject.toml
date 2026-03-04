@@ -113,6 +113,7 @@ select = [
 ]
 ignore = [
     "E501",  # line too long
+    "E741",  # ambiguous variable name
     "B027",  # empty function in abstract class
 ]
 exclude = [
@@ -129,3 +130,9 @@ typeCheckingMode = "standard"
 # HuggingFace officially uses private imports a lot, so we disable the check here.
 reportPrivateImportUsage = "none"
 reportUnnecessaryTypeIgnoreComment = "error"
+ignore = [
+  ".venv/**",
+  "**/sites-packages/**",
+  "flow_control/third_party/**",
+  "notebooks/**",
+]

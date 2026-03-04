@@ -36,7 +36,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
         dtype=torch.bfloat16,
     )
 
-    guidance: float | None = 3.5
+    guidance: float = 3.5
     """
     Guidance scale for DISTILLED classifier-free guidance as timestep embeddings.
     """
@@ -66,11 +66,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
-        guidance = (
-            torch.full((b,), self.guidance, device=device)
-            if self.guidance is not None
-            else None
-        )
+        guidance = torch.full((b,), self.guidance, device=device)
 
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])

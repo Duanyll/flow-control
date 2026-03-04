@@ -58,11 +58,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
-        guidance = (
-            torch.full((b,), self.guidance, device=device)
-            if self.guidance is not None
-            else None
-        )
+        guidance = torch.full((b,), self.guidance, device=device)
 
         noisy_model_input = torch.cat(
             (batch["noisy_latents"], batch["control_latents"]), dim=2

@@ -5,6 +5,9 @@ from pydantic import PlainValidator
 from .base import BaseProcessor
 from .presets import (
     Flux1Preset,
+    Flux2Klein4BPreset,
+    Flux2Klein9BPreset,
+    Flux2Preset,
     LongcatImageEditPreset,
     LongcatImagePreset,
     QwenImageEditPreset,
@@ -36,6 +39,9 @@ PROCESSOR_PRESET_REGISTRY = {
     "longcat_image": LongcatImagePreset,
     "longcat_image_edit": LongcatImageEditPreset,
     "zimage": ZImagePreset,
+    "flux2": Flux2Preset,
+    "flux2_klein_4b": Flux2Klein4BPreset,
+    "flux2_klein_9b": Flux2Klein9BPreset,
 }
 
 
@@ -44,8 +50,11 @@ def parse_processor(conf: dict) -> BaseProcessor:
     ctor = PROCESSOR_TASK_REGISTRY[task]
     if "preset" in conf:
         preset_name = conf["preset"]
+        preset_ctor = PROCESSOR_PRESET_REGISTRY[preset_name]
         ctor = type(
-            "MixinProcessor", (PROCESSOR_PRESET_REGISTRY[preset_name], ctor), {}
+            f"{preset_ctor.__name__.replace('Preset', '')}{ctor.__name__}",
+            (preset_ctor, ctor),
+            {},
         )
     return ctor(**conf)
 

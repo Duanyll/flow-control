@@ -6,6 +6,8 @@ from pydantic import PlainValidator
 from transformers import (
     CLIPTextModel,
     CLIPTokenizer,
+    Mistral3ForConditionalGeneration,
+    PixtralProcessor,
     Qwen2_5_VLForConditionalGeneration,
     Qwen2Tokenizer,
     Qwen2VLProcessor,
@@ -29,7 +31,7 @@ class BaseEncoder[T](HfModelLoader[T]):
 
     def _format_prompt(
         self, prompt: str, images: Any | None = None, system_prompt: str | None = None
-    ) -> str:
+    ) -> Any:
         user_prompt = prompt
         for i in range(len(images or [])):
             user_prompt += self.image_template.format(index=i + 1)
@@ -180,7 +182,7 @@ class Qwen25VLEncoder(
     ]
     drop_suffix_tokens: bool = False
     tokenizer_max_length: int = 1024
-    tokenizer_enforce_pad_token: bool = False
+    keep_padding_tokens: bool = False
     generate_max_new_tokens: int = 512
 
     def _split_quotation(self, prompt: str):
@@ -244,7 +246,7 @@ class Qwen25VLEncoder(
             images=images,
             text=pretokenized_inputs,
             text_kwargs={
-                "padding": "max_length" if self.tokenizer_enforce_pad_token else False,
+                "padding": "max_length" if self.keep_padding_tokens else False,
                 "is_split_into_words": True,
                 "max_length": self.tokenizer_max_length,
                 "return_tensors": "pt",
@@ -341,6 +343,9 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
     )
 
     max_sequence_length: int = 512
+    hidden_state_layers: list[int] = [-2]
+    enable_thinking: bool = True
+    keep_padding_tokens: bool = False
 
     def load_model(self, device):
         self.tokenizer.load_model(device)
@@ -352,7 +357,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=self.enable_thinking,
         )
         assert isinstance(formated_prompt, str)
         text_inputs = self.tokenizer.model(
@@ -364,13 +369,143 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
         )
         text_input_ids = text_inputs.input_ids.to(self.model.device)
         prompt_masks = text_inputs.attention_mask.to(self.model.device).bool()
-        prompt_embeds = self.model(
+        hidden_states = self.model(
             input_ids=text_input_ids,
             attention_mask=prompt_masks,
             output_hidden_states=True,
-        ).hidden_states[-2]
-        prompt_embeds = prompt_embeds[prompt_masks].unsqueeze(0)
+        ).hidden_states
+        prompt_embeds = torch.cat(
+            [hidden_states[i] for i in self.hidden_state_layers], dim=2
+        )
+        if not self.keep_padding_tokens:
+            prompt_embeds = prompt_embeds[prompt_masks].unsqueeze(0)
         return prompt_embeds
+
+
+class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeEncoder):
+    type: str = "mistral3"
+    library: Literal["diffusers", "transformers"] = "transformers"
+    class_name: str = "Mistral3ForConditionalGeneration"
+    pretrained_model_id: str = "black-forest-labs/FLUX.2-dev"
+    subfolder: str | None = "text_encoder"
+    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+
+    tokenizer: HfModelLoader[PixtralProcessor] = HfModelLoader(
+        library="transformers",
+        class_name="PixtralProcessor",
+        pretrained_model_id="black-forest-labs/FLUX.2-dev",
+        subfolder="tokenizer",
+    )
+
+    max_sequence_length: int = 512
+    hidden_state_layers: list[int] = [10, 20, 30]
+    temperature: float = 0.7
+
+    def load_model(self, device):
+        self.tokenizer.load_model(device)
+        return super().load_model(device)
+
+    def format_prompt(
+        self,
+        prompt: str,
+        images: list[torch.Tensor] | None = None,
+        system_prompt: str | None = None,
+    ) -> Any:
+        cleaned_prompt = prompt.replace("[IMG]", "")
+        messages = [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": system_prompt or ""},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    *(
+                        [{"type": "image", "image": image} for image in images]
+                        if images
+                        else []
+                    ),
+                    {"type": "text", "text": cleaned_prompt},
+                ],
+            },
+        ]
+        return messages
+
+    def encode(self, prompt, images=None, system_prompt=None):
+        # Ignore input images, Flux.2 does not use them for encoding.
+        messages = self.format_prompt(prompt, images=[], system_prompt=system_prompt)
+        tokenizer: Any = self.tokenizer.model
+        # The PixtralProcessor's apply_chat_template is badly typed
+        inputs = tokenizer.apply_chat_template(
+            [messages],
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_sequence_length,
+        )
+
+        device = self.model.device
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        output = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+
+        hidden_states = torch.cat(
+            [output.hidden_states[i] for i in self.hidden_state_layers], dim=2
+        )
+        return hidden_states
+
+    def generate(
+        self, prompt, images=None, system_prompt="You are a helpful assistant."
+    ):
+        messages = self.format_prompt(prompt, images, system_prompt)
+        tokenizer: Any = self.tokenizer.model
+        inputs = tokenizer.apply_chat_template(
+            [messages],
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=2048,
+        )
+
+        device = self.model.device
+        inputs["input_ids"] = inputs["input_ids"].to(device)
+        inputs["attention_mask"] = inputs["attention_mask"].to(device)
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(
+                device=device, dtype=self.model.dtype
+            )
+
+        generated_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=True,
+            temperature=self.temperature,
+            use_cache=True,
+        )
+
+        input_length = inputs["input_ids"].shape[1]
+        generated_tokens = generated_ids[:, input_length:]
+
+        result = tokenizer.tokenizer.batch_decode(
+            generated_tokens,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True,
+        )
+        return result[0].strip()
 
 
 ENCODER_REGISTRY = {
@@ -378,6 +513,7 @@ ENCODER_REGISTRY = {
     "clip": ClipTextEncoder,
     "qwen25vl": Qwen25VLEncoder,
     "qwen3": Qwen3Encoder,
+    "mistral3": Mistral3Encoder,
 }
 
 

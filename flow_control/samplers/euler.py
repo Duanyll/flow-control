@@ -5,7 +5,7 @@ from flow_control.adapters import Batch, ModelAdapter
 from .base import BaseSampler, make_sample_progress
 
 
-class SimpleEulerSampler(BaseSampler):
+class EulerSampler(BaseSampler):
     steps: int = 50
 
     def sample(

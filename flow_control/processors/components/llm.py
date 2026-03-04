@@ -54,9 +54,6 @@ class LLMClient(BaseModel):
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
-            # 显式创建一个 Connector
-            # force_close=True: 每次请求后强制关闭连接，禁止复用
-            # limit=self.max_concurrency: 限制连接池大小，配合 semaphore 避免过载
             connector = aiohttp.TCPConnector(
                 limit=self.max_concurrency if self.max_concurrency > 0 else 64,
                 force_close=True,
@@ -97,7 +94,6 @@ class LLMClient(BaseModel):
             if self.model != "auto":
                 return self.model
 
-            # Fetch first available model from the API
             session = self._get_session()
             async with session.get(f"{self.base_url}/models") as resp:
                 resp.raise_for_status()
@@ -202,10 +198,6 @@ def _extract_last_json_block(text: str) -> str:
     从文本中提取最后一个被 markdown 包围的 JSON 代码块。
     支持 ```json ... ``` 和 ``` ... ``` 格式。
     """
-    # 正则表达式查找 markdown 代码块
-    # (?:json)? 表示 "json" 这个词是可选的
-    # \s* 匹配任何空白字符（包括换行符）
-    # ([\s\S]*?) 非贪婪地匹配所有字符，直到下一个 ```
     pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
     matches = re.findall(pattern, text)
 
@@ -286,12 +278,9 @@ def parse_llm_json_output(llm_output: str) -> Any:
 
     # 3. 使用 json5 进行解析
     try:
-        # 使用 json5.loads，它可以处理注释、末尾逗号等
         return json5.loads(json_str)
     except Exception:
-        # 可以选择在这里增加一个使用标准库 json 的回退尝试
         try:
-            # 去掉常见的注释（一个简单的实现）
             no_comments = re.sub(r"//.*", "", json_str)
             no_comments = re.sub(r"/\*[\s\S]*?\*/", "", no_comments, flags=re.MULTILINE)
             return json.loads(no_comments)

@@ -2,17 +2,39 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import ResolutionList
 
 from .components.encoder import (
     ClipTextEncoder,
     Encoder,
+    Mistral3Encoder,
     Qwen3Encoder,
     Qwen25VLEncoder,
     T5TextEncoder,
 )
 from .components.prompts import PromptStr, parse_prompt
-from .components.vae import VAE, Flux1VAE, QwenImageVAE
+from .components.vae import VAE, Flux1VAE, Flux2VAE, QwenImageVAE
+
+FLUX1_RESOLUTIONS = [
+    (672, 1568),
+    (688, 1504),
+    (720, 1456),
+    (752, 1392),
+    (800, 1328),
+    (832, 1248),
+    (880, 1184),
+    (944, 1104),
+    (1024, 1024),
+    (1104, 944),
+    (1184, 880),
+    (1248, 832),
+    (1328, 800),
+    (1392, 752),
+    (1456, 720),
+    (1504, 688),
+    (1568, 672),
+]
 
 # ---------------------------------- Flux.1 ---------------------------------- #
 
@@ -24,25 +46,7 @@ class Flux1Preset(BaseModel):
 
     default_resolution: tuple[int, int] = (1024, 1024)
     resize_mode: Literal["list", "multiple_of"] = "list"
-    preferred_resolutions: ResolutionList = [
-        (672, 1568),
-        (688, 1504),
-        (720, 1456),
-        (752, 1392),
-        (800, 1328),
-        (832, 1248),
-        (880, 1184),
-        (944, 1104),
-        (1024, 1024),
-        (1104, 944),
-        (1184, 880),
-        (1248, 832),
-        (1328, 800),
-        (1392, 752),
-        (1456, 720),
-        (1504, 688),
-        (1568, 672),
-    ]
+    preferred_resolutions: ResolutionList = FLUX1_RESOLUTIONS
     multiple_of: int = 32
     total_pixels: int = 1024 * 1024
 
@@ -104,30 +108,12 @@ class LongcatImagePreset(BaseModel):
         split_quotation=True,
         drop_suffix_tokens=True,
         tokenizer_max_length=512,
-        tokenizer_enforce_pad_token=True,
+        keep_padding_tokens=True,
     )
 
     default_resolution: tuple[int, int] = (1024, 1024)
     resize_mode: Literal["list", "multiple_of"] = "list"
-    preferred_resolutions: ResolutionList = [
-        (672, 1568),
-        (688, 1504),
-        (720, 1456),
-        (752, 1392),
-        (800, 1328),
-        (832, 1248),
-        (880, 1184),
-        (944, 1104),
-        (1024, 1024),
-        (1104, 944),
-        (1184, 880),
-        (1248, 832),
-        (1328, 800),
-        (1392, 752),
-        (1456, 720),
-        (1504, 688),
-        (1568, 672),
-    ]
+    preferred_resolutions: ResolutionList = FLUX1_RESOLUTIONS
     multiple_of: int = 32
     total_pixels: int = 1024 * 1024
 
@@ -191,3 +177,62 @@ class ZImagePreset(BaseModel):
     encoder_prompt: PromptStr = ""
     default_negative_prompt: PromptStr = ""
     save_negative: bool = True
+
+
+# ---------------------------------- Flux.2 ---------------------------------- #
+
+
+class Flux2Preset(BaseModel):
+    vae: VAE = Flux2VAE()
+    encoder: Encoder = Mistral3Encoder()
+
+    latent_channels: int = 32
+
+    # Flux.2 can support arbitrary resolutions between 0.1MP and 2MP
+    # https://www.reddit.com/r/StableDiffusion/comments/1enxdga/flux_recommended_resolutions_from_01_to_20/
+    # https://docs.google.com/spreadsheets/d/1p913YOU9A6rC0nasQPvKWsNDrE-OOUHU4-AZI8Eqois/edit?usp=sharing
+    default_resolution: tuple[int, int] = (1024, 1024)
+    preferred_resolutions: ResolutionList = FLUX1_RESOLUTIONS
+    resize_mode: Literal["multiple_of"] = "multiple_of"
+    multiple_of: int = 32
+    total_pixels: int = 0
+
+    encoder_prompt: PromptStr = parse_prompt("@flux2_encoder")
+    default_negative_prompt: PromptStr = ""
+    save_negative: bool = False
+
+
+class Flux2Klein9BPreset(Flux2Preset):
+    encoder: Encoder = Qwen3Encoder(
+        pretrained_model_id="black-forest-labs/FLUX.2-klein-9B",
+        subfolder="text_encoder",
+        hidden_state_layers=[9, 18, 27],
+        enable_thinking=False,
+        keep_padding_tokens=True,
+        tokenizer=HfModelLoader(
+            library="transformers",
+            class_name="Qwen2TokenizerFast",
+            pretrained_model_id="black-forest-labs/FLUX.2-klein-9B",
+            subfolder="tokenizer",
+        ),
+    )
+
+    encoder_prompt: PromptStr = ""
+
+
+class Flux2Klein4BPreset(Flux2Preset):
+    encoder: Encoder = Qwen3Encoder(
+        pretrained_model_id="black-forest-labs/FLUX.2-klein-4B",
+        subfolder="text_encoder",
+        hidden_state_layers=[9, 18, 27],
+        enable_thinking=False,
+        keep_padding_tokens=True,
+        tokenizer=HfModelLoader(
+            library="transformers",
+            class_name="Qwen2TokenizerFast",
+            pretrained_model_id="black-forest-labs/FLUX.2-klein-4B",
+            subfolder="tokenizer",
+        ),
+    )
+
+    encoder_prompt: PromptStr = ""
