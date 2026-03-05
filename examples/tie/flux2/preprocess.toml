@@ -1,0 +1,33 @@
+num_loader_workers = 1
+# Each processor worker uses 2 GPUs. If using multiple workers, 
+# processor_devices should be set to [0, 2, 4, ...] accordingly.
+processor_devices = [0]
+num_threads_per_worker = 8
+queue_size = 16
+num_sink_workers = 1
+processing_mode = "inference"
+
+[dataset]
+type = "csv"
+path = "./examples/tie_en.csv"
+attachment_dir = "./examples/assets"
+
+[dataset.column_types]
+prompt = "str"
+reference_images = "attachment_list"
+
+[processor]
+task = "tie"
+preset = "flux2"
+resize_mode = "multiple_of"
+total_pixels = 1048576 # 1024 * 1024
+
+[processor.encoder]
+type = "mistral3"
+# Do model parallelism with 2 GPUs, each GPU holds 32GB of the model.
+device_memory_distribution = ["32GiB", "32GiB"]
+no_split_modules = ["MistralDecoderLayer"]
+
+[output]
+type = "pickle_directory"
+path = "./demo/preprocess_flux2_tie"

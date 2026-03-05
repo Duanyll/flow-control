@@ -49,6 +49,7 @@ class Flux1Preset(BaseModel):
     preferred_resolutions: ResolutionList = FLUX1_RESOLUTIONS
     multiple_of: int = 32
     total_pixels: int = 1024 * 1024
+    max_reference_images: int = 4
 
     encoder_prompt: PromptStr = ""
     save_negative: bool = False
@@ -80,7 +81,9 @@ class QwenImagePreset(BaseModel):
 
 
 class QwenImageEditPreset(QwenImagePreset):
+    encoder: Encoder = Qwen25VLEncoder(tokenizer_max_length=0)
     encoder_prompt: PromptStr = parse_prompt("@qwen_image_edit_encoder")
+    max_reference_images: int = 3
 
 
 class QwenImageLayeredPreset(QwenImagePreset):
@@ -108,6 +111,7 @@ class LongcatImagePreset(BaseModel):
         split_quotation=True,
         drop_suffix_tokens=True,
         tokenizer_max_length=512,
+        resize_mode="scale",
         keep_padding_tokens=True,
     )
 
@@ -126,6 +130,7 @@ class LongcatImagePreset(BaseModel):
 
 class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
+    max_reference_images: int = 1
 
 
 # ---------------------------------- Z-Image --------------------------------- #
@@ -198,6 +203,7 @@ class Flux2Preset(BaseModel):
     resize_mode: Literal["multiple_of"] = "multiple_of"
     multiple_of: int = 32
     total_pixels: int = 0
+    max_reference_images: int = 10
 
     encoder_prompt: PromptStr = parse_prompt("@flux2_encoder")
     default_negative_prompt: PromptStr = ""

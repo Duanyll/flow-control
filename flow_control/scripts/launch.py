@@ -7,11 +7,13 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from rich import print
 
 
 class LaunchConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     type: Literal["sft", "inference"]
     devices: int | list[int]
     generate_dcp_seed: bool = False
@@ -24,7 +26,9 @@ def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
         config_data = tomllib.load(f)
     if "launch" not in config_data:
         raise ValueError("Launch configuration section is missing in the config file.")
-    return LaunchConfig(**config_data["launch"]), config_data
+    launch_config = LaunchConfig(**config_data["launch"])
+    del config_data["launch"]
+    return launch_config, config_data
 
 
 def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
@@ -94,13 +98,15 @@ def try_generate_dcp_seed(
     if launch_config.generate_dcp_seed:
         if "seed_checkpoint_dir" not in config_data:
             print(
-                "[yellow]Warning:[/yellow] 'launch.generate_dcp_seed' is True but 'seed_checkpoint_dir' is not specified in the config. Skipping DCP seed generation."
+                "[yellow]Warning:[/yellow] 'launch.generate_dcp_seed' is True but 'seed_checkpoint_dir' is not specified "
+                "in the config. Skipping DCP seed generation."
             )
             return None
         dir: str = config_data["seed_checkpoint_dir"]
         if not is_on_ram_disk(dir):
             print(
-                f"[yellow]Warning:[/yellow] 'seed_checkpoint_dir' ({dir}) is not on a RAM disk. DCP seed generation may be slow and could wear out your SSD. Consider using a RAM disk for better performance and longevity."
+                f"[yellow]Warning:[/yellow] 'seed_checkpoint_dir' ({dir}) is not on a RAM disk. DCP seed generation may "
+                "be slow and could wear out your SSD. Consider using a RAM disk for better performance and longevity."
             )
         if os.path.exists(dir):
             print(f"[blue]Removing existing seed checkpoint directory:[/blue] {dir}")

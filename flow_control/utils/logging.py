@@ -25,6 +25,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import diffusers
+import rich.traceback
 import torch
 import torch.multiprocessing as mp
 import transformers
@@ -180,6 +181,7 @@ global_log_level: int = getattr(
 rich_handler = RichHandler(
     console=console, rich_tracebacks=True, enable_link_path=False
 )
+rich.traceback.install(console=console)
 
 transformers.utils.logging.disable_default_handler()
 transformers.utils.logging.disable_progress_bar()

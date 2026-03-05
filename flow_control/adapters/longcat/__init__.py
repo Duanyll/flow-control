@@ -1,7 +1,9 @@
 from .base import LongCatAdapter
+from .edit import LongCatEditAdapter
 
 ADAPTER_REGISTRY = {
     "base": LongCatAdapter,
+    "edit": LongCatEditAdapter,
 }
 
 

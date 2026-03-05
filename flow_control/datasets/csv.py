@@ -22,13 +22,13 @@ class CsvDataset(Dataset):
         self,
         path: str,
         column_types: dict[str, CsvColumnType],
-        attachments_dir: str | None = None,
+        attachment_dir: str | None = None,
     ):
         self.path = path
         self.column_types = column_types
-        if not attachments_dir:
-            attachments_dir = os.path.dirname(path)
-        self.attachments_dir = attachments_dir
+        if not attachment_dir:
+            attachment_dir = os.path.dirname(path)
+        self.attachment_dir = attachment_dir
 
         self.data = []
         with open(path) as f:
@@ -51,11 +51,11 @@ class CsvDataset(Dataset):
             elif column_type == "json":
                 processed_row[column] = json.loads(value)
             elif column_type == "attachment":
-                attachment_path = os.path.join(self.attachments_dir, value)
+                attachment_path = os.path.join(self.attachment_dir, value)
                 processed_row[column] = self.load_attachment(attachment_path)
             elif column_type == "attachment_list":
                 attachment_paths = [
-                    os.path.join(self.attachments_dir, v.strip())
+                    os.path.join(self.attachment_dir, v.strip())
                     for v in value.split(";")
                 ]
                 processed_row[column] = [

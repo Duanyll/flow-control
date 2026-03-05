@@ -8,7 +8,7 @@ from typing import Any, Literal, TypedDict
 import aiohttp
 import json5
 import torch
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from flow_control.utils.common import tensor_to_pil
 from flow_control.utils.logging import get_logger
@@ -39,6 +39,8 @@ class Message(TypedDict):
 
 
 class LLMClient(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     timeout: int = 120

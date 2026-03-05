@@ -1,6 +1,9 @@
 from typing import Literal
 
 import torch
+from diffusers import FluxTransformer2DModel
+
+from flow_control.utils.hf_model import HfModelLoader
 
 from .base import Flux1Adapter, Flux1Batch
 
@@ -13,6 +16,14 @@ class Flux1KontextBatch(Flux1Batch):
 
 
 class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
+    hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
+        library="diffusers",
+        class_name="FluxTransformer2DModel",
+        pretrained_model_id="black-forest-labs/FLUX.1-Kontext-dev",
+        subfolder="transformer",
+        dtype=torch.bfloat16,
+    )
+
     pe_mode: Literal["3d", "diagonal", "stacked"] = "3d"
     pe_index_scale: int = 1
 

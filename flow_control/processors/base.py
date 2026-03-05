@@ -57,7 +57,7 @@ class BaseProcessor[
 ](BaseModel, ABC):
     task: str
     preset: str
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     # ---------------------------------- Loading --------------------------------- #
 
@@ -226,13 +226,17 @@ class BaseProcessor[
     default_resolution: tuple[int, int]
     multiple_of: int
     total_pixels: int = 0
+    no_upscale: bool = False
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         if self.resize_mode == "list":
             image = resize_to_closest_resolution(image, self.preferred_resolutions)
         elif self.resize_mode == "multiple_of":
             image = resize_to_multiple_of(
-                image, multiple=self.multiple_of, pixels=self.total_pixels
+                image,
+                multiple=self.multiple_of,
+                pixels=self.total_pixels,
+                no_upscale=self.no_upscale,
             )
         return image
 

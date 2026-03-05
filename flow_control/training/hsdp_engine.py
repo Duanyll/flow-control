@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -18,12 +18,14 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.fsdp import fully_shard
 
 from flow_control.adapters import ModelAdapter
-from flow_control.utils.logging import console, get_logger, warn_once
+from flow_control.utils.logging import console, get_logger
 
 logger = get_logger(__name__)
 
 
 class HsdpEngineConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     seed: int = 42
     hsdp_shard_dim: int = 1
     gradient_checkpointing: bool = True

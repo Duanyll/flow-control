@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
 from flow_control.processors import parse_processor
@@ -87,6 +87,7 @@ class ProcessorStage(PipelineStage):
                 output = await self.processor.prepare_inference_batch(item)
             else:
                 output = await self.processor.prepare_training_batch(item)
+            output["latent_length"] = self.processor.get_latent_length(output)
             if self.save_intermediate:
                 item.update(output)
                 output = item
@@ -97,6 +98,8 @@ class ProcessorStage(PipelineStage):
 
 
 class PreprocessConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     dataset: dict
     processor: dict
     output: dict

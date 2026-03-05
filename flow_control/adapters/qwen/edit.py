@@ -1,4 +1,5 @@
 import torch
+from diffusers import QwenImageTransformer2DModel
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
@@ -16,7 +17,7 @@ class QwenImageEditBatch(QwenImageBatch):
 
 
 class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
-    hf_model: HfModelLoader = HfModelLoader(
+    hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image-Edit-2509",

@@ -11,7 +11,7 @@ class MomentumGuidedSampler(EulerSampler):
 
     _momentum: torch.Tensor | None = None
 
-    def sample(
+    def _sample(
         self,
         model: ModelAdapter,
         batch: Batch,
@@ -20,7 +20,7 @@ class MomentumGuidedSampler(EulerSampler):
         t_end: float = 0,
     ) -> torch.Tensor:
         self._momentum = None
-        return super().sample(model, batch, negative_batch, t_start, t_end)
+        return super()._sample(model, batch, negative_batch, t_start, t_end)
 
     def get_guided_velocity(
         self,

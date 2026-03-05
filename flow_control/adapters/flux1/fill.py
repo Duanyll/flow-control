@@ -1,5 +1,8 @@
 import torch
+from diffusers import FluxTransformer2DModel
 from einops import pack, rearrange
+
+from flow_control.utils.hf_model import HfModelLoader
 
 from .base import Flux1Adapter, Flux1Batch
 
@@ -16,6 +19,13 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
     """
     Adapter for the FLUX.1 fill model.
     """
+    hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
+        library="diffusers",
+        class_name="FluxTransformer2DModel",
+        pretrained_model_id="black-forest-labs/FLUX.1-Fill-dev",
+        subfolder="transformer",
+        dtype=torch.bfloat16,
+    )
 
     enforce_mask: bool = False
 

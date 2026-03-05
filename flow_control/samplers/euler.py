@@ -8,7 +8,7 @@ from .base import BaseSampler, make_sample_progress
 class EulerSampler(BaseSampler):
     steps: int = 50
 
-    def sample(
+    def _sample(
         self,
         model: ModelAdapter,
         batch: Batch,

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 
 import torch
+import torch.distributed as dist
 from pydantic import BaseModel, ConfigDict
 from rich.progress import (
     BarColumn,
@@ -33,7 +34,7 @@ def make_sample_progress() -> Progress:
 
 class BaseSampler(BaseModel, ABC):
     type: str
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     cfg_scale: float = 7.5
     seed: int = 42
@@ -41,8 +42,35 @@ class BaseSampler(BaseModel, ABC):
     cfg_renorm_eps: float = 1e-8
     cfg_renorm_min: float = 0.0
 
-    @abstractmethod
+    _negative_pass: bool = False
+
+    def _sync_negative_pass(self, negative_pass: bool):
+        if dist.is_initialized():
+            negative_pass_tensor = torch.tensor(negative_pass, device="cuda")
+            dist.all_reduce(negative_pass_tensor, op=dist.ReduceOp.MAX)
+            self._negative_pass = negative_pass_tensor.item() > 0
+        else:
+            self._negative_pass = negative_pass
+
     def sample(
+        self,
+        model: ModelAdapter,
+        batch: Batch,
+        negative_batch: Batch | None = None,
+        t_start=1.0,
+        t_end=0.0,
+    ) -> torch.Tensor:
+        if self.cfg_scale > 1.0 and negative_batch is None:
+            warn_once(
+                logger,
+                "cfg_scale > 1.0 but no negative_batch provided. This will disable classifier-free guidance.",
+            )
+        has_negative = self.cfg_scale > 1.0 and negative_batch is not None
+        self._sync_negative_pass(has_negative)
+        return self._sample(model, batch, negative_batch, t_start, t_end)
+
+    @abstractmethod
+    def _sample(
         self,
         model: ModelAdapter,
         batch: Batch,
@@ -63,7 +91,7 @@ class BaseSampler(BaseModel, ABC):
         dtype = batch["noisy_latents"].dtype
         batch["noisy_latents"] = latents.to(dtype)
         cond = model.predict_velocity(batch, timestep).float()
-        if self.cfg_scale > 1.0:
+        if self._negative_pass:
             if negative_batch is not None:
                 negative_batch["noisy_latents"] = latents.to(dtype)
                 uncond = model.predict_velocity(negative_batch, timestep).float()
@@ -77,10 +105,8 @@ class BaseSampler(BaseModel, ABC):
                     ).clamp(min=self.cfg_renorm_min, max=1.0)
                 return combined_velocity
             else:
-                warn_once(
-                    logger,
-                    "CFG scale > 1.0 but no negative batch provided. Running without CFG.",
-                )
+                # Must do an empty forward pass to sync with other processes
+                _ = model.predict_velocity(batch, timestep)
                 return cond
         else:
             return cond

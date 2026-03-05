@@ -35,7 +35,7 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
     arch: str
     type: str | list[str]
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     @property
     def transformer(self) -> TModel:

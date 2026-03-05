@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 class VAEServerConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     host: str = "0.0.0.0"
     port: int = 8000

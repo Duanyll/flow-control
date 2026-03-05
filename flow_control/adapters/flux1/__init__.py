@@ -1,6 +1,7 @@
 from .base import Flux1Adapter
 from .d_concat import Flux1DConcatAdapter
 from .fill import Flux1FillAdapter
+from .kontext import Flux1KontextAdapter
 from .n_concat import Flux1NConcatAdapter
 
 ADAPTER_REGISTRY = {
@@ -8,6 +9,7 @@ ADAPTER_REGISTRY = {
     "d_concat": Flux1DConcatAdapter,
     "n_concat": Flux1NConcatAdapter,
     "fill": Flux1FillAdapter,
+    "kontext": Flux1KontextAdapter,
 }
 
 

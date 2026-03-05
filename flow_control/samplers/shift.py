@@ -31,7 +31,7 @@ class ShiftedEulerSampler(EulerSampler):
 
         return t
 
-    def sample(
+    def _sample(
         self,
         model: ModelAdapter,
         batch: Batch,

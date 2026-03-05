@@ -126,7 +126,11 @@ def resize_to_closest_resolution(
 
 
 def resize_to_multiple_of(
-    image: torch.Tensor, multiple: int, crop: bool = True, pixels: int = 0
+    image: torch.Tensor,
+    multiple: int,
+    crop: bool = True,
+    pixels: int = 0,
+    no_upscale: bool = False,
 ) -> torch.Tensor:
     """
     Resize an image so that its dimensions are multiples of a given number.
@@ -139,6 +143,9 @@ def resize_to_multiple_of(
         raise ValueError("Image tensor must have 4 dimensions (B, C, H, W).")
 
     _, _, orig_height, orig_width = image.shape
+    orig_pixels = orig_height * orig_width
+    if no_upscale and pixels > 0 and orig_pixels <= pixels:
+        pixels = 0
 
     # --- Step 1: Calculate Target Height/Width ---
     if pixels > 0:

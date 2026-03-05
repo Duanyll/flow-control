@@ -2,10 +2,12 @@ import math
 from typing import Annotated
 
 import torch
-from pydantic import BaseModel, PlainValidator
+from pydantic import BaseModel, ConfigDict, PlainValidator
 
 
 class BaseTimestepWeighting(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     type: str
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
@@ -61,6 +63,8 @@ TimestepWeighting = Annotated[
 
 
 class BaseLossWeighting(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     type: str
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:

@@ -110,7 +110,7 @@ class QwenImageBatch(Batch):
 class QwenImageAdapter[TBatch: QwenImageBatch](
     BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
 ):
-    hf_model: HfModelLoader = HfModelLoader[QwenImageTransformer2DModel](
+    hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
         pretrained_model_id="Qwen/Qwen-Image",

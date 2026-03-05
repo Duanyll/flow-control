@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from rich.progress import Progress
 
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
@@ -13,6 +13,8 @@ logger = get_logger(__name__)
 
 
 class RayPreprocessConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     dataset: dict
     processor: dict
     output: dict

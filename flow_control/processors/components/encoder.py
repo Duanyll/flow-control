@@ -18,6 +18,7 @@ from transformers import (
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
+from flow_control.utils.resize import resize_to_multiple_of, resize_to_resolution
 from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
@@ -199,6 +200,27 @@ class Qwen25VLEncoder(
     keep_padding_tokens: bool = False
     generate_max_new_tokens: int = 512
 
+    resize_mode: Literal["none", "scale", "pixels"] = "pixels"
+    image_pixels: int = 384 * 384
+    image_multiple: int = 32
+    image_scale: int = 2
+
+    def _resize_image(self, image: torch.Tensor) -> torch.Tensor:
+        if self.resize_mode == "none":
+            return image
+        elif self.resize_mode == "scale":
+            new_size = (
+                image.shape[2] // self.image_scale,
+                image.shape[3] // self.image_scale,
+            )
+            return resize_to_resolution(image, new_size)
+        elif self.resize_mode == "pixels":
+            return resize_to_multiple_of(
+                image, self.image_multiple, pixels=self.image_pixels
+            )
+        else:
+            raise ValueError(f"Invalid resize mode: {self.resize_mode}")
+
     def _split_quotation(self, prompt: str):
         patterns = []
         for q1, q2 in self.quote_pairs:
@@ -227,6 +249,14 @@ class Qwen25VLEncoder(
             result.append((part, is_quoted))
         return result
 
+    def _get_image_pad_len(self, images: list[torch.Tensor]) -> int:
+        if not images:
+            return 0
+        processor: Any = self.vl_processor.model
+        image_inputs = processor.image_processor(images=images, return_tensors="pt")
+        merge_length = processor.image_processor.merge_size**2
+        return sum(i.prod() // merge_length for i in image_inputs["image_grid_thw"])
+
     def load_model(self, device):
         self.tokenizer.load_model(device)
         self.vl_processor.load_model(device)
@@ -251,6 +281,17 @@ class Qwen25VLEncoder(
         else:
             pretokenized_inputs.append(prompt)
 
+        max_length = self.tokenizer_max_length
+        if images:
+            images = [self._resize_image(image) for image in images]
+
+            # FIXME: There is something wrong with LongCat-Image-Edit when caculating 
+            # the required number of image padding tokens. The behavior is strange in 
+            # the original codebase as well. 
+
+            if self.keep_padding_tokens and self.tokenizer_max_length > 0:
+                max_length += self._get_image_pad_len(images) - len(images)
+
         vl_processor = self.vl_processor.model
         model = self.model
         prefix_inputs = vl_processor(
@@ -260,9 +301,11 @@ class Qwen25VLEncoder(
             images=images,
             text=pretokenized_inputs,
             text_kwargs={
-                "padding": "max_length" if self.keep_padding_tokens else False,
+                "padding": "max_length"
+                if self.keep_padding_tokens and max_length > 0
+                else False,
                 "is_split_into_words": True,
-                "max_length": self.tokenizer_max_length,
+                "max_length": max_length if max_length > 0 else None,
                 "return_tensors": "pt",
             },
             images_kwargs={

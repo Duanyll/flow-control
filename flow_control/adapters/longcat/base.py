@@ -39,13 +39,8 @@ class LongCatAdapter[TBatch: LongCatBatch](
 
     patch_size: int = 2
     vae_scale_factor: int = 8
-    image_offset: int = 512
 
-    def predict_velocity(
-        self,
-        batch: LongCatBatch,
-        timestep: torch.Tensor,
-    ) -> torch.Tensor:
+    def predict_velocity(self, batch: TBatch, timestep: torch.Tensor) -> torch.Tensor:
         if "txt_ids" not in batch:
             batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"].shape[1])
         if "img_ids" not in batch:
@@ -54,11 +49,12 @@ class LongCatAdapter[TBatch: LongCatBatch](
                 batch["image_size"][0] // scale,
                 batch["image_size"][1] // scale,
             )
+            prompt_len = batch["prompt_embeds"].shape[1]
             batch["img_ids"] = self._make_img_ids(
                 latent_size,
                 index=1,
-                h_offset=self.image_offset,
-                w_offset=self.image_offset,
+                h_offset=prompt_len,
+                w_offset=prompt_len,
             )
 
         model_pred = self.transformer(
