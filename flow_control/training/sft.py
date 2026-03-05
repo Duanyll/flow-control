@@ -80,7 +80,7 @@ class HsdpTrainerConfig(HsdpEngineConfig):
     loss_weighting: LossWeighting = UniformLossWeighting()
 
     checkpoint_root: str
-    # It is required to use a seed checkpoint for training to ensure consistent 
+    # It is required to use a seed checkpoint for training to ensure consistent
     # initialization across processes.
     seed_checkpoint_dir: str
     aim_repo: str = "."
@@ -217,9 +217,10 @@ class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
 
     def state_dict(self):
         transformer_state_dict, optimizer_state_dict = get_state_dict(
-            self.transformer, [self.optimizer], options=StateDictOptions(strict=False)
+            self.transformer,
+            [self.optimizer],
+            options=StateDictOptions(strict=False, ignore_frozen_params=True),
         )
-        transformer_state_dict = self.model.filter_state_dict(transformer_state_dict)
         if len(transformer_state_dict) == 0:
             raise RuntimeError("Nothing to save in transformer state dict.")
         return {
@@ -236,7 +237,7 @@ class HsdpSftTrainer(HsdpEngine[HsdpTrainerConfig], Stateful):
             [self.optimizer],
             model_state_dict=state_dict["transformer"],
             optim_state_dict=state_dict["optimizer"],
-            options=StateDictOptions(strict=False),
+            options=StateDictOptions(strict=False, ignore_frozen_params=True),
         )
         self.dataloader.load_state_dict(state_dict["dataloader"])
         self.scheduler.load_state_dict(state_dict["scheduler"])

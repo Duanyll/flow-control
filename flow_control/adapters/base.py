@@ -114,19 +114,6 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
         """
         pass
 
-    def filter_state_dict(self, state_dict: dict) -> dict:
-        """
-        Filter the state_dict before saving. By default, only the trainable parameters are kept.
-
-        :param state_dict: The original state_dict.
-        :return: The filtered state_dict.
-        """
-        return {
-            k: state_dict[k]
-            for k, v in self.transformer.named_parameters()
-            if v.requires_grad and k in state_dict
-        }
-
     @abstractmethod
     def predict_velocity(
         self,
