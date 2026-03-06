@@ -28,9 +28,16 @@ class EulerSampler(BaseSampler):
         negative_batch: Batch | None = None,
         t_start: float = 1.0,
         t_end: float = 0.0,
-    ) -> torch.Tensor:
+        return_trajectory: bool = False,
+    ) -> torch.Tensor | SdeTrajectory:
         sigmas = torch.linspace(t_start, t_end, self.steps + 1)
-        return self._euler_sample(model, batch, sigmas, negative_batch)
+        return self._euler_sample(
+            model,
+            batch,
+            sigmas,
+            negative_batch,
+            return_trajectory=return_trajectory,
+        )
 
     def _euler_sample(
         self,
@@ -38,12 +45,18 @@ class EulerSampler(BaseSampler):
         batch: Batch,
         sigmas: torch.Tensor,
         negative_batch: Batch | None = None,
-    ) -> torch.Tensor:
+        return_trajectory: bool = False,
+    ) -> torch.Tensor | SdeTrajectory:
         device = model.device
         dtype = model.dtype
 
         sigmas = sigmas.to(device=device, dtype=torch.float32)
         latents = batch["noisy_latents"].float()
+
+        all_latents = [latents] if return_trajectory else None
+        all_log_probs: list[torch.Tensor] = []
+        all_means: list[torch.Tensor] = []
+        all_std_devs: list[torch.Tensor] = []
 
         with make_sample_progress() as progress:
             task = progress.add_task("Sampling", total=self.steps)
@@ -55,12 +68,39 @@ class EulerSampler(BaseSampler):
                 velocity = self.get_guided_velocity(
                     model, latents, timestep, batch, negative_batch
                 )
-                dt = t_next - t_cur
-                latents = latents + velocity * dt
+                latents, log_prob, mean, std_dev = self.sde_step(
+                    velocity, latents, t_cur, t_next
+                )
+
+                if return_trajectory:
+                    assert all_latents is not None
+                    all_latents.append(latents)
+                    all_log_probs.append(log_prob)
+                    all_means.append(mean)
+                    all_std_devs.append(std_dev)
 
                 progress.advance(task)
 
-        return latents.to(dtype)
+        if not return_trajectory:
+            return latents.to(dtype)
+
+        stacked_latents = torch.stack(all_latents, dim=1)
+        stacked_log_probs = torch.stack(all_log_probs, dim=1)
+        stacked_means = torch.stack(all_means, dim=1)
+        stacked_std_devs = torch.stack(
+            [
+                s if isinstance(s, torch.Tensor) else torch.tensor(s, device=device)
+                for s in all_std_devs
+            ]
+        )
+
+        return SdeTrajectory(
+            latents=stacked_latents,
+            log_probs=stacked_log_probs,
+            timesteps=sigmas,
+            means=stacked_means,
+            std_devs=stacked_std_devs,
+        )
 
     def sde_step(
         self,
@@ -91,21 +131,18 @@ class EulerSampler(BaseSampler):
             return next_latent, log_prob, mean, std_dev
 
         if self.sde_type == "sde":
-            # Handle edge case: when sigma=1, use the next sigma value to
-            # avoid division by zero in sigma / (1 - sigma)
-            sigma_safe = torch.where(
+            # Match flow_grpo: only guard the denominator when sigma == 1.
+            sigma_denom = torch.where(
                 sigma == 1.0,
                 sigma_next,
                 sigma,
             )
-            std_dev_t = torch.sqrt(sigma_safe / (1 - sigma_safe)) * self.noise_level
+            std_dev_t = torch.sqrt(sigma / (1 - sigma_denom)) * self.noise_level
 
             # SDE mean update
             mean = (
-                latent * (1 + std_dev_t**2 / (2 * sigma_safe) * dt)
-                + velocity
-                * (1 + std_dev_t**2 * (1 - sigma_safe) / (2 * sigma_safe))
-                * dt
+                latent * (1 + std_dev_t**2 / (2 * sigma) * dt)
+                + velocity * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
             )
 
             noise_scale = std_dev_t * torch.sqrt(-dt)
@@ -152,70 +189,6 @@ class EulerSampler(BaseSampler):
             std_dev_scalar = std_dev_t
 
         return next_latent, log_prob, mean, std_dev_scalar
-
-    def _euler_sample_with_logprob(
-        self,
-        model: ModelAdapter,
-        batch: Batch,
-        sigmas: torch.Tensor,
-        negative_batch: Batch | None = None,
-    ) -> SdeTrajectory:
-        """Full SDE sampling loop, recording trajectory for GRPO training."""
-        device = model.device
-        dtype = model.dtype
-
-        sigmas = sigmas.to(device=device, dtype=torch.float32)
-        latents = batch["noisy_latents"].float()
-
-        all_latents = [latents]
-        all_log_probs: list[torch.Tensor] = []
-        all_means: list[torch.Tensor] = []
-        all_std_devs: list[torch.Tensor] = []
-
-        with make_sample_progress() as progress:
-            task = progress.add_task("SDE Sampling", total=self.steps)
-
-            for i in range(self.steps):
-                sigma_cur = sigmas[i : i + 1]
-                sigma_next = sigmas[i + 1 : i + 2]
-                timestep = sigma_cur.to(dtype=dtype)
-                velocity = self.get_guided_velocity(
-                    model, latents, timestep, batch, negative_batch
-                )
-
-                latents, log_prob, mean, std_dev = self.sde_step(
-                    velocity, latents, sigma_cur, sigma_next
-                )
-
-                all_latents.append(latents)
-                all_log_probs.append(log_prob)
-                all_means.append(mean)
-                all_std_devs.append(std_dev)
-
-                progress.advance(task)
-
-        # Stack into trajectory tensors
-        # all_latents: list of [B, N, D] -> [B, T+1, N, D]
-        stacked_latents = torch.stack(all_latents, dim=1)
-        # all_log_probs: list of [B] -> [B, T]
-        stacked_log_probs = torch.stack(all_log_probs, dim=1)
-        # all_means: list of [B, N, D] -> [B, T, N, D]
-        stacked_means = torch.stack(all_means, dim=1)
-        # all_std_devs: list of scalar tensors -> [T]
-        stacked_std_devs = torch.stack(
-            [
-                s if isinstance(s, torch.Tensor) else torch.tensor(s, device=device)
-                for s in all_std_devs
-            ]
-        )
-
-        return SdeTrajectory(
-            latents=stacked_latents,
-            log_probs=stacked_log_probs,
-            timesteps=sigmas,
-            means=stacked_means,
-            std_devs=stacked_std_devs,
-        )
 
     def compute_logprob_at_step(
         self,

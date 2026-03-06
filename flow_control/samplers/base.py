@@ -65,15 +65,21 @@ class BaseSampler(BaseModel, ABC):
         negative_batch: Batch | None = None,
         t_start=1.0,
         t_end=0.0,
-    ) -> torch.Tensor:
+        return_trajectory: bool = False,
+    ) -> torch.Tensor | SdeTrajectory:
         if self.cfg_scale > 1.0 and negative_batch is None:
             warn_once(
                 logger,
                 "cfg_scale > 1.0 but no negative_batch provided. This will disable classifier-free guidance.",
             )
-        has_negative = self.cfg_scale > 1.0 and negative_batch is not None
-        self._sync_negative_pass(has_negative)
-        return self._sample(model, batch, negative_batch, t_start, t_end)
+        return self._sample(
+            model,
+            batch,
+            negative_batch,
+            t_start,
+            t_end,
+            return_trajectory=return_trajectory,
+        )
 
     @abstractmethod
     def _sample(
@@ -83,36 +89,9 @@ class BaseSampler(BaseModel, ABC):
         negative_batch: Batch | None = None,
         t_start=1.0,
         t_end=0.0,
-    ) -> torch.Tensor:
+        return_trajectory: bool = False,
+    ) -> torch.Tensor | SdeTrajectory:
         raise NotImplementedError()
-
-    def sample_with_logprob(
-        self,
-        model: ModelAdapter,
-        batch: Batch,
-        negative_batch: Batch | None = None,
-    ) -> SdeTrajectory:
-        """SDE sampling with log probability tracking. Subclasses must override."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support sample_with_logprob. "
-            "Use an SDE-capable sampler (e.g., ShiftedEulerSampler with noise_level > 0)."
-        )
-
-    def compute_logprob_at_step(
-        self,
-        model: ModelAdapter,
-        batch: Batch,
-        latent_t: torch.Tensor,
-        latent_t_minus_1: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        negative_batch: Batch | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute log_prob of a known transition under current policy. Subclasses must override."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support compute_logprob_at_step. "
-            "Use an SDE-capable sampler (e.g., ShiftedEulerSampler with noise_level > 0)."
-        )
 
     def get_guided_velocity(
         self,
@@ -122,6 +101,10 @@ class BaseSampler(BaseModel, ABC):
         batch: Batch,
         negative_batch: Batch | None,
     ) -> torch.Tensor:
+        # Sync per-call so CFG behavior is correct even when callers bypass sample().
+        has_negative = self.cfg_scale > 1.0 and negative_batch is not None
+        self._sync_negative_pass(has_negative)
+
         dtype = batch["noisy_latents"].dtype
         batch["noisy_latents"] = latents.to(dtype)
         cond = model.predict_velocity(batch, timestep).float()

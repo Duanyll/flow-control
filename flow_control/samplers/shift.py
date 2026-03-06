@@ -38,7 +38,8 @@ class ShiftedEulerSampler(EulerSampler):
         negative_batch: Batch | None = None,
         t_start: float = 1.0,
         t_end: float = 0.0,
-    ) -> torch.Tensor:
+        return_trajectory: bool = False,
+    ) -> torch.Tensor | SdeTrajectory:
         if self.latent_length_from == "actual":
             seq_len = batch["noisy_latents"].shape[1]
         else:
@@ -46,23 +47,13 @@ class ShiftedEulerSampler(EulerSampler):
             seq_len = h * w // 256  # assuming patch size 16x16
 
         sigmas = self._make_shifted_sigmas(seq_len, t_start, t_end)
-        return self._euler_sample(model, batch, sigmas, negative_batch)
-
-    def sample_with_logprob(
-        self,
-        model: ModelAdapter,
-        batch: Batch,
-        negative_batch: Batch | None = None,
-    ) -> SdeTrajectory:
-        """SDE sampling with log probability tracking. Uses shifted sigmas."""
-        if self.latent_length_from == "actual":
-            seq_len = batch["noisy_latents"].shape[1]
-        else:
-            h, w = batch["image_size"]
-            seq_len = h * w // 256  # assuming patch size 16x16
-
-        sigmas = self._make_shifted_sigmas(seq_len, t_start=1.0, t_end=0.0)
-        return self._euler_sample_with_logprob(model, batch, sigmas, negative_batch)
+        return self._euler_sample(
+            model,
+            batch,
+            sigmas,
+            negative_batch,
+            return_trajectory=return_trajectory,
+        )
 
 
 class ConstantShiftSampler(ShiftedEulerSampler):

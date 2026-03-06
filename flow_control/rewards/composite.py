@@ -34,21 +34,34 @@ class CompositeReward(BaseReward):
 
     def score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Compute weighted sum of reward scores for a single sample."""
-        total = torch.tensor(0.0)
+        total: torch.Tensor | None = None
         for weight, reward in self._reward_instances:
-            total = total + weight * reward.score(batch).to(total.device)
+            reward_score = reward.score(batch)
+            weighted = weight * reward_score
+            if total is None:
+                total = weighted
+            else:
+                total = total + weighted.to(device=total.device, dtype=total.dtype)
+        if total is None:
+            raise RuntimeError("CompositeReward requires at least one child reward.")
         return total
 
     def score_detailed(
         self, batch: dict[str, Any]
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute weighted sum with per-reward breakdown."""
-        total = torch.tensor(0.0)
+        total: torch.Tensor | None = None
         details: dict[str, torch.Tensor] = {}
         for weight, reward in self._reward_instances:
-            s = reward.score(batch).to(total.device)
-            details[reward.type] = s
-            total = total + weight * s
+            reward_score = reward.score(batch)
+            details[reward.type] = reward_score
+            weighted = weight * reward_score
+            if total is None:
+                total = weighted
+            else:
+                total = total + weighted.to(device=total.device, dtype=total.dtype)
+        if total is None:
+            raise RuntimeError("CompositeReward requires at least one child reward.")
         return total, details
 
     def unload_model(self) -> None:

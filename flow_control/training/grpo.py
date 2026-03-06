@@ -15,7 +15,8 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.datasets import parse_dataset
 from flow_control.rewards import Reward
-from flow_control.samplers.euler import SdeTrajectory
+from flow_control.samplers import Sampler
+from flow_control.samplers.euler import EulerSampler, SdeTrajectory
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -33,6 +34,7 @@ logger = get_logger(__name__)
 
 class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     reward: Reward
+    train_sampler: Sampler | None = None
 
     # GRPO hyperparameters
     num_samples_per_prompt: int = 4
@@ -66,6 +68,15 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
     def __init__(self, **kwargs):
         self.conf = HsdpGrpoTrainerConfig(**kwargs)
         super().__init__(**kwargs)
+
+    @property
+    def grpo_sampler(self) -> EulerSampler:
+        sampler = self.conf.train_sampler if self.conf.train_sampler else self.sampler
+        if not isinstance(sampler, EulerSampler):
+            raise TypeError(
+                "GRPO training requires an EulerSampler-compatible train_sampler."
+            )
+        return sampler
 
     def make_optimizer_and_scheduler(self, enable_init_backup: bool = False):
         need_init = self.conf.kl_beta > 0 and self.model.peft_lora_rank == 0
@@ -191,15 +202,21 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
             negative_batch: Any = (
                 self.processor.get_negative_batch(batch)
-                if self.sampler.cfg_scale > 1.0
+                if self.grpo_sampler.cfg_scale > 1.0
                 else None
             )
 
-            # SDE sample with log_prob
+            # Sample and record trajectory for GRPO.
             with torch.no_grad():
-                trajectory: SdeTrajectory = self.sampler.sample_with_logprob(
-                    self.model, batch, negative_batch=negative_batch
+                sample_out = self.grpo_sampler.sample(
+                    self.model,
+                    batch,
+                    negative_batch=negative_batch,
+                    return_trajectory=True,
                 )
+            if not isinstance(sample_out, dict):
+                raise RuntimeError("GRPO sampling expected trajectory output.")
+            trajectory: SdeTrajectory = sample_out
 
             # Decode final latents to images and merge into batch
             final_latents = trajectory["latents"][:, -1]
@@ -319,7 +336,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     sigma = sigmas[j : j + 1]
                     sigma_next = sigmas[j + 1 : j + 2]
 
-                    log_prob, mean, std_dev = self.sampler.compute_logprob_at_step(
+                    log_prob, mean, std_dev = self.grpo_sampler.compute_logprob_at_step(
                         self.model,
                         batch,
                         latent_t,
@@ -332,7 +349,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     ref_mean = None
                     if self.conf.kl_beta > 0:
                         with torch.no_grad(), self.reference_model():
-                            _, ref_mean, _ = self.sampler.compute_logprob_at_step(
+                            _, ref_mean, _ = self.grpo_sampler.compute_logprob_at_step(
                                 self.model,
                                 batch,
                                 latent_t,

@@ -48,7 +48,7 @@ class PerPromptAdvantage(AdvantageEstimator):
         advantages = torch.zeros_like(rewards)
         unique_ids = prompt_ids.unique()
 
-        global_std = rewards.std() + self.eps
+        global_std = rewards.std(correction=0) + self.eps
 
         for pid in unique_ids:
             mask = prompt_ids == pid
@@ -57,7 +57,7 @@ class PerPromptAdvantage(AdvantageEstimator):
             if self.use_global_std:
                 advantages[mask] = (group_rewards - group_mean) / global_std
             else:
-                group_std = group_rewards.std() + self.eps
+                group_std = group_rewards.std(correction=0) + self.eps
                 advantages[mask] = (group_rewards - group_mean) / group_std
 
         return advantages.unsqueeze(1).expand(-1, num_timesteps)
@@ -77,7 +77,7 @@ class GlobalAdvantage(AdvantageEstimator):
         num_timesteps: int,
     ) -> torch.Tensor:
         mean = rewards.mean()
-        std = rewards.std() + self.eps
+        std = rewards.std(correction=0) + self.eps
         advantages = (rewards - mean) / std
         return advantages.unsqueeze(1).expand(-1, num_timesteps)
 
