@@ -55,7 +55,12 @@ TorchDevice = Annotated[
 OptimizerConfig = dict[str, Any]
 
 
-def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
+def parse_optimizer(
+    conf: OptimizerConfig,
+    parameters,
+    ema_decay: float = 1.0,
+    enable_init_backup: bool = False,
+):
     conf = conf.copy()
     class_name = conf.pop("class_name")
     if class_name == "Prodigy":
@@ -72,10 +77,15 @@ def parse_optimizer(conf: OptimizerConfig, parameters, ema_decay: float = 1.0):
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
-    if ema_decay != 1.0:
+    if ema_decay != 1.0 or enable_init_backup:
         logger.info(f"Patching optimizer {class_name} with EMA decay {ema_decay}")
         ctor = make_ema_optimizer(ctor)
-        return ctor(parameters, ema_decay=ema_decay, **conf)
+        return ctor(
+            parameters,
+            ema_decay=ema_decay,
+            enable_init_backup=enable_init_backup,
+            **conf,
+        )
     else:
         return ctor(parameters, **conf)
 

@@ -12,9 +12,9 @@ from rich import print
 
 
 class LaunchConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
-    type: Literal["sft", "inference"]
+    type: Literal["sft", "grpo", "inference"]
     devices: int | list[int]
     generate_dcp_seed: bool = False
     preprocess_config: str | None = None
@@ -37,6 +37,11 @@ def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
         from flow_control.training.sft import HsdpSftTrainer
 
         trainer = HsdpSftTrainer(**config_data)
+        trainer.run()
+    elif launch_config.type == "grpo":
+        from flow_control.training.grpo import HsdpGrpoTrainer
+
+        trainer = HsdpGrpoTrainer(**config_data)
         trainer.run()
     elif launch_config.type == "inference":
         from flow_control.training.inference import HsdpInference
@@ -81,7 +86,12 @@ def is_on_ram_disk(path):
 
 
 def try_preprocess_data(preprocess_config: str) -> None:
-    command = [sys.executable, "-m", "flow_control.scripts.preprocess", preprocess_config]
+    command = [
+        sys.executable,
+        "-m",
+        "flow_control.scripts.preprocess",
+        preprocess_config,
+    ]
     print(f"[blue]Executing data preprocessing command:[/blue] {' '.join(command)}")
     try:
         subprocess.run(command, check=True)
@@ -157,7 +167,9 @@ def run(config_path: str) -> None:
 
         envs = launch_config.env
         if isinstance(launch_config.devices, list):
-            envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
+            envs["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(d) for d in launch_config.devices
+            )
         if "OMP_NUM_THREADS" not in envs:
             omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
             envs["OMP_NUM_THREADS"] = str(omp_threads)

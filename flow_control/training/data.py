@@ -183,6 +183,114 @@ class DistributedBucketSampler(Sampler, Stateful):
         self.counter = state_dict["counter"]
 
 
+class DistributedKRepeatSampler(Sampler, Stateful):
+    """GRPO sampler: select M unique prompts, repeat each K times, distribute across GPUs.
+
+    Each epoch yields ``num_batches * batch_per_rank`` indices for the current rank,
+    where:
+
+    - ``total_samples = num_replicas * batch_per_rank = M * K``
+    - ``M = total_samples / K`` unique prompts per epoch batch
+    - ``batch_per_rank = total_samples / num_replicas`` samples per GPU
+
+    Unlike :class:`DistributedBucketSampler`, this sampler:
+
+    - Ensures the same prompt appears *K* times for advantage estimation.
+    - Yields one index at a time (batch_size=1 convention).
+    - Runs for *num_batches* iterations per epoch.
+    """
+
+    def __init__(
+        self,
+        dataset: PaddingAwareDatasetWrapper,
+        batch_per_rank: int,
+        k: int,
+        num_batches: int,
+        num_replicas: int | None = None,
+        rank: int | None = None,
+        seed: int = 0,
+    ):
+        super().__init__(None)  # type: ignore[arg-type]
+        if num_replicas is None:
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.batch_per_rank = batch_per_rank
+        self.k = k
+        self.num_batches = num_batches
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+
+        self.total_samples = self.num_replicas * self.batch_per_rank
+        if self.total_samples % self.k != 0:
+            raise ValueError(
+                f"total_samples ({self.total_samples}) must be divisible by k ({self.k}). "
+                f"Got num_replicas={num_replicas}, batch_per_rank={batch_per_rank}."
+            )
+        self.m = self.total_samples // self.k  # number of unique prompts per batch
+
+        self.epoch = 0
+        self.batch_counter = 0
+        self.within_batch_counter = 0
+
+    def __iter__(self):
+        for batch_idx in range(self.batch_counter, self.num_batches):
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch * self.num_batches + batch_idx)
+
+            # Select m unique prompts
+            dataset_size = len(self.dataset)
+            indices = torch.randperm(dataset_size, generator=g)[: self.m].tolist()
+
+            # Repeat each K times
+            repeated = [idx for idx in indices for _ in range(self.k)]
+
+            # Shuffle
+            perm = torch.randperm(len(repeated), generator=g).tolist()
+            shuffled = [repeated[i] for i in perm]
+
+            # Split to ranks
+            rank_indices = shuffled[
+                self.rank * self.batch_per_rank : (self.rank + 1) * self.batch_per_rank
+            ]
+
+            # Yield one at a time, resuming from within_batch_counter
+            start = self.within_batch_counter if batch_idx == self.batch_counter else 0
+            for i in range(start, len(rank_indices)):
+                yield rank_indices[i]
+                self.within_batch_counter = i + 1
+
+            self.within_batch_counter = 0
+            self.batch_counter = batch_idx + 1
+
+        # Reset for next epoch
+        self.batch_counter = 0
+        self.within_batch_counter = 0
+
+    def __len__(self):
+        return self.num_batches * self.batch_per_rank
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        self.batch_counter = 0
+        self.within_batch_counter = 0
+
+    def state_dict(self):
+        return {
+            "epoch": self.epoch,
+            "batch_counter": self.batch_counter,
+            "within_batch_counter": self.within_batch_counter,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.epoch = state_dict["epoch"]
+        self.batch_counter = state_dict["batch_counter"]
+        self.within_batch_counter = state_dict["within_batch_counter"]
+
+
 # This library is designed to work with batch size 1 datasets.
 # For larger batch sizes, use gradient accumulation.
 # Dataset should return tensors with batch dimension 1.

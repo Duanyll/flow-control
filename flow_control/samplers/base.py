@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -14,6 +17,9 @@ from rich.progress import (
 
 from flow_control.adapters import Batch, ModelAdapter
 from flow_control.utils.logging import console, get_logger, warn_once
+
+if TYPE_CHECKING:
+    from .euler import SdeTrajectory
 
 logger = get_logger(__name__)
 
@@ -34,7 +40,7 @@ def make_sample_progress() -> Progress:
 
 class BaseSampler(BaseModel, ABC):
     type: str
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     cfg_scale: float = 7.5
     seed: int = 42
@@ -79,6 +85,34 @@ class BaseSampler(BaseModel, ABC):
         t_end=0.0,
     ) -> torch.Tensor:
         raise NotImplementedError()
+
+    def sample_with_logprob(
+        self,
+        model: ModelAdapter,
+        batch: Batch,
+        negative_batch: Batch | None = None,
+    ) -> SdeTrajectory:
+        """SDE sampling with log probability tracking. Subclasses must override."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support sample_with_logprob. "
+            "Use an SDE-capable sampler (e.g., ShiftedEulerSampler with noise_level > 0)."
+        )
+
+    def compute_logprob_at_step(
+        self,
+        model: ModelAdapter,
+        batch: Batch,
+        latent_t: torch.Tensor,
+        latent_t_minus_1: torch.Tensor,
+        sigma: torch.Tensor,
+        sigma_next: torch.Tensor,
+        negative_batch: Batch | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute log_prob of a known transition under current policy. Subclasses must override."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support compute_logprob_at_step. "
+            "Use an SDE-capable sampler (e.g., ShiftedEulerSampler with noise_level > 0)."
+        )
 
     def get_guided_velocity(
         self,
