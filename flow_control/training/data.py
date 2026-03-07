@@ -3,7 +3,8 @@ import math
 import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset
+from torch.utils.data import Sampler as TorchSampler
 
 from flow_control.datasets import MapDataset
 from flow_control.datasets.bucket_directory import BucketDataset
@@ -46,7 +47,7 @@ def _repeat_as_padding(
     return padding
 
 
-class DistributedBucketSampler(Sampler, Stateful):
+class DistributedBucketSampler(TorchSampler, Stateful):
     def __init__(
         self,
         dataset: PaddingAwareDatasetWrapper,
@@ -183,15 +184,14 @@ class DistributedBucketSampler(Sampler, Stateful):
         self.counter = state_dict["counter"]
 
 
-class DistributedKRepeatSampler(Sampler, Stateful):
+class DistributedKRepeatSampler(TorchSampler, Stateful):
     """GRPO sampler: select M unique prompts, repeat each K times, distribute across GPUs.
 
-    Each epoch yields ``num_batches * batch_per_rank`` indices for the current rank,
-    where:
+    The total number of rollouts per batch is ``M * K`` (global, GPU-invariant).
+    These are evenly distributed across ``num_replicas`` GPUs, so each rank
+    gets ``M * K / num_replicas`` samples per batch.
 
-    - ``total_samples = num_replicas * batch_per_rank = M * K``
-    - ``M = total_samples / K`` unique prompts per epoch batch
-    - ``batch_per_rank = total_samples / num_replicas`` samples per GPU
+    Each epoch yields ``num_batches * per_rank`` indices for the current rank.
 
     Unlike :class:`DistributedBucketSampler`, this sampler:
 
@@ -203,7 +203,7 @@ class DistributedKRepeatSampler(Sampler, Stateful):
     def __init__(
         self,
         dataset: PaddingAwareDatasetWrapper,
-        batch_per_rank: int,
+        num_prompts_per_batch: int,
         k: int,
         num_batches: int,
         num_replicas: int | None = None,
@@ -217,20 +217,21 @@ class DistributedKRepeatSampler(Sampler, Stateful):
             rank = dist.get_rank()
 
         self.dataset = dataset
-        self.batch_per_rank = batch_per_rank
+        self.m = num_prompts_per_batch
         self.k = k
         self.num_batches = num_batches
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
 
-        self.total_samples = self.num_replicas * self.batch_per_rank
-        if self.total_samples % self.k != 0:
+        self.total_samples = self.m * self.k
+        if self.total_samples % self.num_replicas != 0:
             raise ValueError(
-                f"total_samples ({self.total_samples}) must be divisible by k ({self.k}). "
-                f"Got num_replicas={num_replicas}, batch_per_rank={batch_per_rank}."
+                f"num_prompts_per_batch * k ({self.total_samples}) must be divisible "
+                f"by num_replicas ({num_replicas}). "
+                f"Got num_prompts_per_batch={num_prompts_per_batch}, k={k}."
             )
-        self.m = self.total_samples // self.k  # number of unique prompts per batch
+        self.per_rank = self.total_samples // self.num_replicas
 
         self.epoch = 0
         self.batch_counter = 0
@@ -254,7 +255,7 @@ class DistributedKRepeatSampler(Sampler, Stateful):
 
             # Split to ranks
             rank_indices = shuffled[
-                self.rank * self.batch_per_rank : (self.rank + 1) * self.batch_per_rank
+                self.rank * self.per_rank : (self.rank + 1) * self.per_rank
             ]
 
             # Yield one at a time, resuming from within_batch_counter
@@ -271,7 +272,7 @@ class DistributedKRepeatSampler(Sampler, Stateful):
         self.within_batch_counter = 0
 
     def __len__(self):
-        return self.num_batches * self.batch_per_rank
+        return self.num_batches * self.per_rank
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch

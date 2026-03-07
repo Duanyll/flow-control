@@ -1,10 +1,11 @@
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import torch
 import torch.distributed as dist
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
@@ -13,6 +14,7 @@ from rich.progress import (
 )
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from flow_control.adapters.base import Batch
 from flow_control.datasets import parse_dataset
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
@@ -37,23 +39,39 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     train_sampler: Sampler | None = None
 
     # GRPO hyperparameters
-    num_samples_per_prompt: int = 4
     num_batches_per_epoch: int = 2
+    num_prompts_per_batch: int = 4
+    num_rollouts_per_prompt: int = 4
+
     num_inner_epochs: int = 1
+    train_batch_size: int = 4
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
+    timestep_selection: Literal[
+        "all_except_last", "random_contiguous", "random_fraction"
+    ] = "all_except_last"
     timestep_fraction: float = 1.0
+    timestep_window_size: int | None = None
     advantage: Advantage = PerPromptAdvantage()
+
+    # Optimization / training loop
+    train_epochs: int = 100
+    checkpoint_epochs: int = 5
+    validation_epochs: int = 20
 
     # Override defaults from base
     optimizer: dict[str, Any] = {"class_name": "AdamW", "lr": 3e-4}
-    global_batch_size: int = 4
     ema_decay: float = 1.0
-    sample_steps: int = 20
     num_dataloader_workers: int = 0
 
-    train_batch_size: int | None = None
+
+class Rollout(TypedDict):
+    trajectory: SdeTrajectory
+    reward: torch.Tensor
+    key: str
+    batch: Batch
+    negative_batch: Batch | None
 
 
 class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
@@ -62,8 +80,23 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
     current_epoch: int = 0
 
     @property
-    def batch_per_rank(self) -> int:
-        return self.conf.global_batch_size // self.world_size
+    def rollout_batch_per_rank(self) -> int:
+        """Number of rollouts per rank per batch (derived from global settings)."""
+        total = self.conf.num_prompts_per_batch * self.conf.num_rollouts_per_prompt
+        if total % self.world_size != 0:
+            raise ValueError(
+                f"num_prompts_per_batch * num_rollouts_per_prompt ({total}) "
+                f"must be divisible by world_size ({self.world_size})."
+            )
+        return total // self.world_size
+
+    @property
+    def grad_acc_steps(self) -> int:
+        if self.conf.train_batch_size % self.world_size != 0:
+            raise ValueError(
+                f"global_batch_size ({self.conf.train_batch_size}) must be divisible by world_size ({self.world_size})."
+            )
+        return self.conf.train_batch_size // self.world_size
 
     def __init__(self, **kwargs):
         self.conf = HsdpGrpoTrainerConfig(**kwargs)
@@ -88,8 +121,8 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
         sampler = DistributedKRepeatSampler(
             dataset=dataset,
-            batch_per_rank=self.batch_per_rank,
-            k=self.conf.num_samples_per_prompt,
+            num_prompts_per_batch=self.conf.num_prompts_per_batch,
+            k=self.conf.num_rollouts_per_prompt,
             num_batches=self.conf.num_batches_per_epoch,
             num_replicas=self.world_size,
             rank=self.rank,
@@ -175,77 +208,223 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         metrics["train/loss"] = loss.detach()
         return loss, metrics
 
-    # --- Core training phases ---
+    def _num_train_timesteps(self, num_timesteps: int) -> int:
+        if num_timesteps <= 1:
+            return 1
 
-    def _collect_samples(self) -> list[dict[str, Any]]:
-        """Sampling phase: generate images and compute rewards."""
-        samples: list[dict[str, Any]] = []
-        self.transformer.eval()
+        max_train_timesteps = num_timesteps - 1  # Skip the last step by default.
+        if self.conf.timestep_selection == "all_except_last":
+            return max_train_timesteps
+        if self.conf.timestep_selection == "random_contiguous":
+            if self.conf.timestep_window_size is None:
+                return max_train_timesteps
+            if self.conf.timestep_window_size <= 0:
+                raise ValueError("timestep_window_size must be > 0.")
+            return min(self.conf.timestep_window_size, max_train_timesteps)
+        if self.conf.timestep_selection == "random_fraction":
+            if not (0.0 < self.conf.timestep_fraction <= 1.0):
+                raise ValueError("timestep_fraction must be in (0, 1].")
+            return max(1, int(max_train_timesteps * self.conf.timestep_fraction))
+        raise ValueError(f"Unknown timestep_selection: {self.conf.timestep_selection}")
 
-        for batch_idx, batch in enumerate(self.dataloader):
-            if batch_idx >= self.conf.num_batches_per_epoch * self.batch_per_rank:
-                break
+    def _select_train_timesteps(self, num_timesteps: int) -> list[int]:
+        if num_timesteps <= 1:
+            return [0]
 
-            batch = deep_move_to_device(batch, self.device)
-            batch = deep_cast_float_dtype(batch, self.model.dtype)
+        trainable = list(range(num_timesteps - 1))
+        if self.conf.timestep_selection == "all_except_last":
+            return trainable
 
-            # Initialize noise
-            generator = torch.Generator(device=self.device).manual_seed(
-                self.conf.seed + self.current_epoch * 10000 + batch_idx
-            )
-            self.processor.initialize_latents(
-                batch,
-                generator=generator,
-                device=self.device,
-                dtype=self.model.dtype,
-            )
+        num_train_timesteps = self._num_train_timesteps(num_timesteps)
+        if self.conf.timestep_selection == "random_contiguous":
+            max_start = len(trainable) - num_train_timesteps
+            start = torch.randint(0, max_start + 1, (1,)).item()
+            return trainable[start : start + num_train_timesteps]
 
-            negative_batch: Any = (
-                self.processor.get_negative_batch(batch)
-                if self.grpo_sampler.cfg_scale > 1.0
-                else None
-            )
+        perm = torch.randperm(len(trainable))[:num_train_timesteps].tolist()
+        return sorted(trainable[i] for i in perm)
 
-            # Sample and record trajectory for GRPO.
-            with torch.no_grad():
-                sample_out = self.grpo_sampler.sample(
+    def _gather_mean_scalar(self, value: float) -> float:
+        values: list[Any] = [None] * self.world_size
+        dist.all_gather_object(values, value)
+        return sum(float(v) for v in values) / len(values)
+
+    def _log_step_metrics(self, metric_tensors: dict[str, list[torch.Tensor]]) -> None:
+        local_metrics: dict[str, float] = {}
+        for key, values in metric_tensors.items():
+            if len(values) == 0:
+                continue
+            local_metrics[key] = torch.stack(values).mean().item()
+        local_metrics["train/lr"] = float(self.scheduler.get_last_lr()[0])
+        gathered_metrics = {
+            key: self._gather_mean_scalar(value) for key, value in local_metrics.items()
+        }
+        self.log_metrics(gathered_metrics)
+
+    def _compute_loss_at_item(
+        self,
+        rollout: Rollout,
+        rollout_advantages: torch.Tensor,
+        timestep_idx: int,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        trajectory = rollout["trajectory"]
+        batch = rollout["batch"]
+        negative_batch = rollout["negative_batch"]
+        old_log_probs = trajectory["log_probs"][0]  # [T]
+        sigmas = trajectory["timesteps"]  # [T+1]
+
+        latent_t = trajectory["latents"][:, timestep_idx]
+        latent_next = trajectory["latents"][:, timestep_idx + 1]
+        sigma = sigmas[timestep_idx : timestep_idx + 1]
+        sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
+
+        log_prob, mean, std_dev = self.grpo_sampler.compute_logprob_at_step(
+            self.model,
+            batch,
+            latent_t,
+            latent_next,
+            sigma,
+            sigma_next,
+            negative_batch=negative_batch,
+        )
+
+        ref_mean = None
+        if self.conf.kl_beta > 0:
+            with torch.no_grad(), self.reference_model():
+                _, ref_mean, _ = self.grpo_sampler.compute_logprob_at_step(
                     self.model,
                     batch,
+                    latent_t,
+                    latent_next,
+                    sigma,
+                    sigma_next,
                     negative_batch=negative_batch,
-                    return_trajectory=True,
                 )
-            if not isinstance(sample_out, dict):
-                raise RuntimeError("GRPO sampling expected trajectory output.")
-            trajectory: SdeTrajectory = sample_out
 
-            # Decode final latents to images and merge into batch
-            final_latents = trajectory["latents"][:, -1]
-            decoded = self.processor.decode_output(final_latents, batch)
-            batch.update(decoded)
+        loss, metrics = self.grpo_loss(
+            log_prob=log_prob,
+            old_log_prob=old_log_probs[timestep_idx : timestep_idx + 1],
+            advantages=rollout_advantages[timestep_idx : timestep_idx + 1],
+            clip_range=self.conf.clip_range,
+            adv_clip_max=self.conf.adv_clip_max,
+            mean=mean,
+            ref_mean=ref_mean,
+            std_dev=std_dev,
+            kl_beta=self.conf.kl_beta,
+        )
+        return loss, metrics
 
-            # Compute reward — score() receives the full batch dict
-            with torch.no_grad():
-                reward = self.conf.reward.score(batch)
+    def _build_train_items(
+        self, num_rollouts: int, num_timesteps: int
+    ) -> list[tuple[int, int]]:
+        train_items: list[tuple[int, int]] = []
+        for rollout_idx in range(num_rollouts):
+            step_indices = self._select_train_timesteps(num_timesteps)
+            train_items.extend((rollout_idx, j) for j in step_indices)
+        return train_items
 
-            samples.append(
-                {
-                    "trajectory": trajectory,
-                    "reward": reward.view(1) if reward.ndim == 0 else reward,
-                    "key": batch.get("__key__", "unknown"),
-                    "batch": batch,
-                    "negative_batch": negative_batch,
-                }
+    def _warn_if_non_divisible(self, num_train_items: int) -> None:
+        if (
+            num_train_items % self.grad_acc_steps != 0
+            and self.is_main_process
+            and self.current_epoch == 0
+        ):
+            logger.warning(
+                "Local loss count (%d) is not divisible by grad_acc_steps (%d). "
+                "The tail update uses a smaller effective batch.",
+                num_train_items,
+                self.grad_acc_steps,
             )
 
-        return samples
+    # --- Core training phases ---
 
-    def _compute_advantages(self, samples: list[dict[str, Any]]) -> torch.Tensor:
+    def _collect_rollouts(self) -> list[Rollout]:
+        """Rollout phase: generate images and compute rewards."""
+        rollouts: list[Rollout] = []
+        self.transformer.eval()
+
+        total_rollouts = self.conf.num_batches_per_epoch * self.rollout_batch_per_rank
+        rollout_progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            TextColumn("• Reward: {task.fields[reward]:.4f}"),
+            console=console,
+        )
+        rollout_task = rollout_progress.add_task(
+            "Rollout...", total=total_rollouts, reward=0.0
+        )
+
+        with rollout_progress:
+            for batch_idx, batch in enumerate(self.dataloader):
+                if batch_idx >= total_rollouts:
+                    break
+
+                batch = deep_move_to_device(batch, self.device)
+                batch = deep_cast_float_dtype(batch, self.model.dtype)
+
+                # Initialize noise
+                generator = torch.Generator(device=self.device).manual_seed(
+                    self.conf.seed + self.current_epoch * 10000 + batch_idx
+                )
+                self.processor.initialize_latents(
+                    batch,
+                    generator=generator,
+                    device=self.device,
+                    dtype=self.model.dtype,
+                )
+
+                negative_batch: Any = (
+                    self.processor.get_negative_batch(batch)
+                    if self.grpo_sampler.cfg_scale > 1.0
+                    else None
+                )
+
+                # Run rollout and record trajectory for GRPO.
+                with torch.no_grad():
+                    rollout_out = self.grpo_sampler.sample(
+                        self.model,
+                        batch,
+                        negative_batch=negative_batch,
+                        return_trajectory=True,
+                    )
+                if not isinstance(rollout_out, dict):
+                    raise RuntimeError("GRPO rollout expected trajectory output.")
+                trajectory: SdeTrajectory = rollout_out
+
+                # Decode final latents to images and merge into batch
+                final_latents = trajectory["latents"][:, -1]
+                decoded = self.processor.decode_output(final_latents, batch)
+                batch.update(decoded)
+
+                # Compute reward — score() receives the full batch dict
+                with torch.no_grad():
+                    reward = self.conf.reward.score(batch)
+
+                rollouts.append(
+                    {
+                        "trajectory": trajectory,
+                        "reward": reward.view(1) if reward.ndim == 0 else reward,
+                        "key": batch.get("__key__", "unknown"),
+                        "batch": batch,
+                        "negative_batch": negative_batch,
+                    }
+                )
+                rollout_progress.update(rollout_task, reward=reward.mean().item())
+                rollout_progress.advance(rollout_task)
+
+        return rollouts
+
+    def _compute_advantages(self, rollouts: list[Rollout]) -> torch.Tensor:
         """Compute advantages using gathered rewards across all GPUs.
 
-        Uses the ``__key__`` field from each sample's batch to group samples
+        Uses the ``__key__`` field from each rollout's batch to group rollouts
         that belong to the same prompt for per-prompt advantage estimation.
         """
-        local_rewards = torch.cat([s["reward"] for s in samples], dim=0)
+        local_rewards = torch.cat([s["reward"] for s in rollouts], dim=0)
 
         # Gather rewards across all processes
         gathered_rewards_list: list[torch.Tensor] = [
@@ -255,7 +434,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         gathered_rewards = torch.cat(gathered_rewards_list, dim=0)
 
         # Gather keys across processes to identify prompt groups
-        local_keys = [s["key"] for s in samples]
+        local_keys = [s["key"] for s in rollouts]
         all_keys_nested: list[Any] = [None] * self.world_size
         dist.all_gather_object(all_keys_nested, local_keys)
         all_keys: list[str] = []
@@ -270,7 +449,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             device=gathered_rewards.device,
         )
 
-        num_timesteps = samples[0]["trajectory"]["log_probs"].shape[1]
+        num_timesteps = rollouts[0]["trajectory"]["log_probs"].shape[1]
 
         # Compute advantages [global_B, T]
         advantages = self.conf.advantage.compute(
@@ -298,101 +477,87 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         end = start + local_b
         return advantages[start:end]
 
-    def _train_on_samples(
+    def _train_on_rollouts(
         self,
-        samples: list[dict[str, Any]],
+        rollouts: list[Rollout],
         advantages: torch.Tensor,
     ):
-        """Training phase: update model using collected samples and advantages."""
+        """Training phase: update model using collected rollouts and advantages."""
         self.transformer.train()
 
-        num_timesteps = samples[0]["trajectory"]["log_probs"].shape[1]
-        num_train_timesteps = max(1, int(num_timesteps * self.conf.timestep_fraction))
+        num_timesteps = rollouts[0]["trajectory"]["log_probs"].shape[1]
+        num_train_timesteps = self._num_train_timesteps(num_timesteps)
+        total_items = self.conf.num_inner_epochs * len(rollouts) * num_train_timesteps
 
-        for _inner_epoch in range(self.conf.num_inner_epochs):
-            perm = torch.randperm(len(samples))
-            shuffled_samples = [samples[perm[i]] for i in range(len(samples))]
-            shuffled_advantages = advantages[perm]
+        train_progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            TextColumn("• Loss: {task.fields[loss]:.4f}"),
+            console=console,
+        )
+        train_task = train_progress.add_task("Training...", total=total_items, loss=0.0)
 
-            for sample_idx, sample in enumerate(shuffled_samples):
-                trajectory = sample["trajectory"]
-                batch = sample["batch"]
-                negative_batch = sample["negative_batch"]
-                sample_advantages = shuffled_advantages[sample_idx]  # [T]
-                old_log_probs = trajectory["log_probs"][0]  # [T]
-                sigmas = trajectory["timesteps"]  # [T+1]
+        with train_progress:
+            for _inner_epoch in range(self.conf.num_inner_epochs):
+                perm = torch.randperm(len(rollouts))
+                shuffled_rollouts = [rollouts[perm[i]] for i in range(len(rollouts))]
+                shuffled_advantages = advantages[perm]
 
-                if self.conf.timestep_fraction < 1.0:
-                    step_indices = sorted(
-                        torch.randperm(num_timesteps)[:num_train_timesteps].tolist()
-                    )
-                else:
-                    step_indices = list(range(num_timesteps))
+                train_items = self._build_train_items(
+                    len(shuffled_rollouts), num_timesteps
+                )
 
-                metrics: dict[str, torch.Tensor] = {}
-                for j in step_indices:
-                    latent_t = trajectory["latents"][:, j]
-                    latent_next = trajectory["latents"][:, j + 1]
-                    sigma = sigmas[j : j + 1]
-                    sigma_next = sigmas[j + 1 : j + 2]
-
-                    log_prob, mean, std_dev = self.grpo_sampler.compute_logprob_at_step(
-                        self.model,
-                        batch,
-                        latent_t,
-                        latent_next,
-                        sigma,
-                        sigma_next,
-                        negative_batch=negative_batch,
+                if len(train_items) == 0:
+                    raise RuntimeError(
+                        "No training items were selected in GRPO inner epoch."
                     )
 
-                    ref_mean = None
-                    if self.conf.kl_beta > 0:
-                        with torch.no_grad(), self.reference_model():
-                            _, ref_mean, _ = self.grpo_sampler.compute_logprob_at_step(
-                                self.model,
-                                batch,
-                                latent_t,
-                                latent_next,
-                                sigma,
-                                sigma_next,
-                                negative_batch=negative_batch,
+                self._warn_if_non_divisible(len(train_items))
+
+                for chunk_start in range(0, len(train_items), self.grad_acc_steps):
+                    chunk = train_items[chunk_start : chunk_start + self.grad_acc_steps]
+                    chunk_size = len(chunk)
+                    metrics_accum: dict[str, list[torch.Tensor]] = {}
+
+                    for micro_idx, (rollout_idx, j) in enumerate(chunk):
+                        is_sync_step = micro_idx == chunk_size - 1
+                        self.transformer.set_requires_gradient_sync(is_sync_step)
+
+                        loss, metrics = self._compute_loss_at_item(
+                            rollout=shuffled_rollouts[rollout_idx],
+                            rollout_advantages=shuffled_advantages[rollout_idx],
+                            timestep_idx=j,
+                        )
+
+                        if not torch.isfinite(loss):
+                            raise RuntimeError(
+                                f"Non-finite GRPO loss detected: {loss.item()}. "
+                                f"(rollout_idx={rollout_idx}, timestep={j})"
                             )
 
-                    loss, metrics = self.grpo_loss(
-                        log_prob=log_prob,
-                        old_log_prob=old_log_probs[j : j + 1],
-                        advantages=sample_advantages[j : j + 1],
-                        clip_range=self.conf.clip_range,
-                        adv_clip_max=self.conf.adv_clip_max,
-                        mean=mean,
-                        ref_mean=ref_mean,
-                        std_dev=std_dev,
-                        kl_beta=self.conf.kl_beta,
-                    )
+                        (loss / chunk_size).backward()
+                        for key, value in metrics.items():
+                            metrics_accum.setdefault(key, []).append(value.detach())
+                        train_progress.advance(train_task)
 
-                    loss.backward()
-
-                # Step optimizer after all timesteps for this sample
-                if self.conf.clip_grad_norm > 0.0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.transformer.parameters(), self.conf.clip_grad_norm
-                    )
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-
-                self.current_step += 1
-
-                # Gather and log metrics
-                all_metrics: dict[str, float] = {}
-                for key, value in metrics.items():
-                    values_list: list[Any] = [None] * self.world_size
-                    dist.all_gather_object(values_list, value.item())
-                    all_metrics[key] = sum(
-                        v for v in values_list if v is not None
-                    ) / len(values_list)
-                self.log_metrics(all_metrics)
+                    if self.conf.clip_grad_norm > 0.0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.transformer.parameters(), self.conf.clip_grad_norm
+                        )
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+                    self.current_step += 1
+                    self._log_step_metrics(metrics_accum)
+                    if "train/loss" in metrics_accum:
+                        avg_loss = (
+                            torch.stack(metrics_accum["train/loss"]).mean().item()
+                        )
+                        train_progress.update(train_task, loss=avg_loss)
 
     # --- Main loop ---
 
@@ -403,7 +568,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
-        self.make_sample_dataloader_maybe()
+        self.make_validation_dataloader_maybe()
 
         # Load processor for VAE decoding
         self.processor.load_models("decode", device=self.device)
@@ -414,14 +579,20 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         if self.conf.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.conf.resume_from_dir)
 
-        self.sample_and_log()
+        self.validate_and_log()
+        logger.info(
+            "GRPO optimization uses global_batch_size=%d, world_size=%d, grad_acc_steps=%d.",
+            self.conf.train_batch_size,
+            self.world_size,
+            self.grad_acc_steps,
+        )
 
         console.rule("[bold blue]Starting GRPO training[/bold blue]")
 
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Epoch: {task.fields[epoch]}"),
+            TextColumn(" Epoch: {task.fields[epoch]}/{task.fields[total_epochs]}"),
             TextColumn(" Step: {task.fields[step]}"),
             BarColumn(),
             TimeElapsedColumn(),
@@ -430,39 +601,39 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         )
         task = progress.add_task(
             "GRPO Training...",
-            total=self.conf.train_steps,
-            completed=self.current_step,
+            total=self.conf.train_epochs,
+            completed=self.current_epoch,
             epoch=self.current_epoch,
+            total_epochs=self.conf.train_epochs,
             step=self.current_step,
         )
 
         with progress, DistributedExitSignal(self) as exit_signal:
-            while self.current_step < self.conf.train_steps:
+            while self.current_epoch < self.conf.train_epochs:
                 if hasattr(self.dataloader.sampler, "set_epoch"):
                     self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
 
-                # Sampling phase
-                logger.info(f"Epoch {self.current_epoch}: starting sampling phase...")
-                samples = self._collect_samples()
+                # Rollout phase
+                logger.info(f"Epoch {self.current_epoch}: starting rollout phase...")
+                rollouts = self._collect_rollouts()
 
                 # Advantage computation
-                advantages = self._compute_advantages(samples)
+                advantages = self._compute_advantages(rollouts)
 
                 # Training phase
                 logger.info(f"Epoch {self.current_epoch}: starting training phase...")
-                self._train_on_samples(samples, advantages)
+                self._train_on_rollouts(rollouts, advantages)
 
+                self.current_epoch += 1
                 progress.update(
                     task,
-                    completed=self.current_step,
+                    completed=self.current_epoch,
                     epoch=self.current_epoch,
                     step=self.current_step,
                 )
 
-                del samples, advantages
+                del rollouts, advantages
                 torch.cuda.empty_cache()
-
-                self.current_epoch += 1
 
                 if exit_signal:
                     logger.info(
@@ -471,12 +642,18 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
                     return
 
-                if self.current_step % self.conf.checkpoint_steps == 0:
+                if self.conf.checkpoint_epochs > 0 and (
+                    self.current_epoch % self.conf.checkpoint_epochs == 0
+                    or self.current_epoch == self.conf.train_epochs
+                ):
                     self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
                     self.rotate_checkpoints_maybe()
 
-                if self.current_epoch % self.conf.sample_steps == 0:
-                    self.sample_and_log()
+                if (
+                    self.conf.validation_epochs > 0
+                    and self.current_epoch % self.conf.validation_epochs == 0
+                ):
+                    self.validate_and_log()
 
         with apply_ema_maybe(self.optimizer):
             self.save_dcp_checkpoint(

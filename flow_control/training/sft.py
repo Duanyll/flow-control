@@ -45,6 +45,11 @@ logger = get_logger(__name__)
 
 
 class HsdpTrainerConfig(HsdpTrainerBaseConfig):
+    global_batch_size: int = 16
+    train_steps: int = 10000
+    checkpoint_steps: int = 500
+    validation_steps: int = 1000
+
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     loss_weighting: LossWeighting = UniformLossWeighting()
 
@@ -198,8 +203,8 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
             self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
             self.rotate_checkpoints_maybe()
 
-        if self.current_step % self.conf.sample_steps == 0:
-            self.sample_and_log()
+        if self.current_step % self.conf.validation_steps == 0:
+            self.validate_and_log()
 
         return self.current_step >= self.conf.train_steps
 
@@ -221,12 +226,12 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
-        self.make_sample_dataloader_maybe()
+        self.make_validation_dataloader_maybe()
 
         if self.conf.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.conf.resume_from_dir)
 
-        self.sample_and_log()
+        self.validate_and_log()
 
         console.rule("[bold blue]Starting training[/bold blue]")
 

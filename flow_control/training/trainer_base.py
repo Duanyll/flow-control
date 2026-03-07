@@ -62,7 +62,7 @@ class HsdpTrainerBaseConfig(HsdpEngineConfig):
     processor: Processor
 
     dataset: DatasetConfig
-    sample_dataset: DatasetConfig | None = None
+    validation_dataset: DatasetConfig | None = None
 
     optimizer: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
     scheduler: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
@@ -72,14 +72,10 @@ class HsdpTrainerBaseConfig(HsdpEngineConfig):
     aim_repo: str = "."
     experiment_name: str
     resume_from_dir: str | None = None
-    checkpoint_steps: int = 500
     checkpoint_limit: int = 5
-    sample_steps: int = 1000
 
     num_dataloader_workers: int = 4
 
-    global_batch_size: int = 16
-    train_steps: int = 10000
     ema_decay: float = 0.999
     clip_grad_norm: float = 1.0
 
@@ -116,7 +112,7 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
     dataloader: StatefulDataLoader
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler._LRScheduler
-    sample_dataloader: StatefulDataLoader | None = None
+    validation_dataloader: StatefulDataLoader | None = None
     tracker: aim.Run
 
     current_step: int = 0
@@ -153,13 +149,17 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
         )
         self.scheduler = parse_scheduler(self.conf.scheduler, self.optimizer)
 
-    def make_sample_dataloader_maybe(self):
-        if self.conf.sample_dataset is None:
-            logger.info("No sample dataset provided, skipping sample dataloader.")
-            self.sample_dataloader = None
+    def make_validation_dataloader_maybe(self):
+        if self.conf.validation_dataset is None:
+            logger.info(
+                "No validation dataset provided, skipping validation dataloader."
+            )
+            self.validation_dataloader = None
             return
         self.processor.load_models("decode", device=self.device)
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.sample_dataset))
+        dataset = PaddingAwareDatasetWrapper(
+            parse_dataset(self.conf.validation_dataset)
+        )
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -168,7 +168,7 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             seed=self.conf.seed,
             grad_acc_steps=1,
         )
-        self.sample_dataloader = StatefulDataLoader(
+        self.validation_dataloader = StatefulDataLoader(
             dataset,
             batch_size=1,
             sampler=sampler,
@@ -265,11 +265,11 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             dist.gather_object(image, None, dst=0)
             dist.gather_object(key, None, dst=0)
 
-    # --- Sample and log ---
+    # --- Validation ---
 
-    def make_sample_progress_bar(self):
-        if self.sample_dataloader is None:
-            raise RuntimeError("Sample dataloader is not initialized.")
+    def make_validation_progress_bar(self):
+        if self.validation_dataloader is None:
+            raise RuntimeError("Validation dataloader is not initialized.")
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -279,24 +279,24 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             TimeRemainingColumn(),
             console=console,
             transient=True,
-            disable=len(self.sample_dataloader) <= 1,
+            disable=len(self.validation_dataloader) <= 1,
         )
         task = progress.add_task(
-            "Sampling...",
-            total=len(self.sample_dataloader),
+            "Validating...",
+            total=len(self.validation_dataloader),
         )
         return progress, task
 
     @torch.no_grad()
-    def sample_and_log(self):
-        if self.sample_dataloader is None:
+    def validate_and_log(self):
+        if self.validation_dataloader is None:
             return
 
-        logger.info(f"Sampling at step {self.current_step}...")
-        progress, task = self.make_sample_progress_bar()
+        logger.info(f"Validating at step {self.current_step}...")
+        progress, task = self.make_validation_progress_bar()
         self.transformer.eval()
         with apply_ema_maybe(self.optimizer), progress:
-            for batch in self.sample_dataloader:
+            for batch in self.validation_dataloader:
                 with dump_if_failed(logger, batch):
                     batch = deep_cast_float_dtype(batch, self.model.dtype)
                     batch = deep_move_to_device(batch, self.device)
@@ -317,6 +317,11 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
                     clean_latents = self.sampler.sample(
                         self.model, batch, negative_batch=negative_batch
                     )
+                    if not isinstance(clean_latents, torch.Tensor):
+                        raise RuntimeError(
+                            "validate_and_log expects sampler.sample(..., return_trajectory=False) "
+                            "to return a tensor."
+                        )
                     image = tensor_to_pil(
                         self.processor.decode_output(clean_latents, batch)[
                             "clean_image"
@@ -326,4 +331,4 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
                     self.log_images(image, key)
                     progress.advance(task)
         self.transformer.train()
-        logger.info(f"Completed sampling at step {self.current_step}.")
+        logger.info(f"Completed validation at step {self.current_step}.")
