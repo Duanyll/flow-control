@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from flow_control.utils.common import tensor_to_pil
 from flow_control.utils.logging import get_logger
+from flow_control.utils.resize import resize_to_multiple_of
 
 logger = get_logger(__name__)
 
@@ -39,7 +40,7 @@ class Message(TypedDict):
 
 
 class LLMClient(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
@@ -49,6 +50,9 @@ class LLMClient(BaseModel):
     temperature: float = 0.7
     max_concurrency: int = 0  # 0 means no limit
     extra_generate_kwargs: dict[str, Any] = {}
+
+    image_multiple_of: int = 16
+    image_max_pixels: int = 1024 * 1024
 
     _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
     _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
@@ -113,6 +117,12 @@ class LLMClient(BaseModel):
                 return model_name
 
     def _tensor_to_base64url(self, tensor: torch.Tensor) -> str:
+        tensor = resize_to_multiple_of(
+            tensor,
+            self.image_multiple_of,
+            pixels=self.image_max_pixels,
+            no_upscale=True,
+        )
         pil_image = tensor_to_pil(tensor)
         buffered = io.BytesIO()
         pil_image.save(buffered, format="PNG")
@@ -126,6 +136,7 @@ class LLMClient(BaseModel):
         images: list[torch.Tensor] | None = None,
         system_prompt: str = "You are a helpful assistant.",
         context: list[Message] | None = None,
+        strip_think: bool = True,
     ) -> tuple[str, list[Message]]:
         semaphore = self._get_semaphore()
 
@@ -172,6 +183,10 @@ class LLMClient(BaseModel):
                     raise ValueError("No choices returned from LLM API")
                 message = choices[0].get("message", {})
                 content = message.get("content", "")
+
+                if strip_think and "</think>" in content:
+                    content = content.split("</think>")[-1].strip()
+
                 messages.append({"role": "assistant", "content": content})
                 return content, messages
 

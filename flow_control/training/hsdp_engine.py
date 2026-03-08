@@ -24,11 +24,12 @@ logger = get_logger(__name__)
 
 
 class HsdpEngineConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
     seed: int = 42
     hsdp_shard_dim: int = 1
     gradient_checkpointing: bool = True
+    async_save: bool = True
 
 
 class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
@@ -60,7 +61,8 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
         self.rank = int(os.environ["RANK"])
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
-        dist.init_process_group(backend="nccl", device_id=self.local_rank)
+        backend = "cpu:gloo,cuda:nccl" if self.conf.async_save else "nccl"
+        dist.init_process_group(backend=backend, device_id=self.local_rank)
         self.mesh = dist.device_mesh.init_device_mesh(
             "cuda",
             mesh_shape=(
@@ -160,7 +162,7 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
         model_sd, _ = get_state_dict(
             model.transformer, [], options=StateDictOptions(strict=False)
         )
-        dcp.save(model_sd, checkpoint_id=seed_checkpoint_dir)
+        dcp.save(model_sd, checkpoint_id=seed_checkpoint_dir, no_dist=True)
         logger.info(f"Saved DCP seed checkpoint to {seed_checkpoint_dir}.")
 
     def state_dict(self):
@@ -185,14 +187,19 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
 
     def save_dcp_checkpoint(self, checkpoint_dir: str):
         if self._checkpoint_future is not None:
-            logger.warning("Still waiting for previous checkpoint to finish.")
+            if not self._checkpoint_future.done():
+                logger.warning("Still waiting for previous checkpoint to finish.")
             self._checkpoint_future.result()
         state_dict = {"app": self}
         # will call self.state_dict() internally
-        self._checkpoint_future = dcp.async_save(
-            state_dict, checkpoint_id=checkpoint_dir
-        )
-        logger.info(f"Started async DCP checkpoint to {checkpoint_dir}.")
+        if self.conf.async_save:
+            self._checkpoint_future = dcp.async_save(
+                state_dict, checkpoint_id=checkpoint_dir
+            )
+            logger.info(f"Started async DCP save to {checkpoint_dir}.")
+        else:
+            dcp.save(state_dict, checkpoint_id=checkpoint_dir)
+            logger.info(f"Saved DCP checkpoint to {checkpoint_dir}.")
 
     def cleanup(self):
         if self._checkpoint_future is not None:

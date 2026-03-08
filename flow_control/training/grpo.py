@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 from typing import Any, Literal, TypedDict
 
@@ -576,6 +577,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         # Load reward model
         self.conf.reward.load_model(self.device)
 
+        os.makedirs(self.conf.checkpoint_root, exist_ok=True)
         if self.conf.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.conf.resume_from_dir)
 

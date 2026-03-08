@@ -1,4 +1,5 @@
 import math
+import os
 import time
 from typing import Any
 
@@ -227,6 +228,7 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
         self.make_validation_dataloader_maybe()
+        os.makedirs(self.conf.checkpoint_root, exist_ok=True)
 
         if self.conf.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.conf.resume_from_dir)

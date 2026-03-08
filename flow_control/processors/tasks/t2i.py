@@ -29,12 +29,18 @@ class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessed
     save_negative: bool = False
     enable_enhance: bool = False
 
+    prepend_trigger_words: str | None = None
+
     async def enhance_prompt(self, prompt: str) -> str:
-        if not self.enable_enhance:
-            return prompt
-        return await self.chat_completion(
-            prompt=prompt, system_prompt=self.t2i_enhance_prompt
-        )
+        if self.enable_enhance:
+            prompt = await self.chat_completion(
+                prompt=prompt, system_prompt=self.t2i_enhance_prompt
+            )
+        if self.prepend_trigger_words is not None and not prompt.startswith(
+            self.prepend_trigger_words
+        ):
+            prompt = self.prepend_trigger_words + prompt
+        return prompt
 
     async def prepare_inference_batch(self, batch: T2IInputBatch) -> T2IProcessedBatch:
         image_size = batch.get("image_size", None) or self.default_resolution

@@ -98,7 +98,7 @@ class ProcessorStage(PipelineStage):
 
 
 class PreprocessConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
     dataset: dict
     processor: dict
@@ -107,6 +107,9 @@ class PreprocessConfig(BaseModel):
     num_loader_workers: int = 1
     num_sink_workers: int = 1
     processor_devices: list[int] = [0]
+    # FIXME: When processor_concurrency > 1, sometimes we encounter uncatchable tensor reduction errors when the
+    # processor finished processing one item and puts the result into the output queue. (Investigation needed, but not
+    # a priority since we will eventually move to ray for orchestration)
     processor_concurrency: int = 1  # Max concurrent async calls per processor worker
     num_threads_per_worker: int = 8
     queue_size: int = 16

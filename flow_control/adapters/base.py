@@ -33,7 +33,7 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
     """
 
     arch: str
-    type: str | list[str]
+    type: str
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
