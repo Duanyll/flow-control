@@ -30,10 +30,7 @@ from flow_control.utils.logging import (
 )
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
-from .hsdp_engine import (
-    DistributedExitSignal,
-    distributed_main,
-)
+from .hsdp_engine import distributed_main
 from .trainer_base import HsdpTrainerBase, HsdpTrainerBaseConfig
 from .weighting import (
     LogitNormalTimestepWeighting,
@@ -172,11 +169,8 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
             self.tracker.track(lr, name="train/lr", step=self.current_step)
         return avg_loss, lr
 
-    def _after_sync_step(self, total_loss: float, progress, task, exit_signal) -> bool:
-        """Handle optimizer step, logging, checkpointing after a gradient sync.
-
-        Returns True if training should stop early.
-        """
+    def _after_sync_step(self, total_loss: float, progress, task):
+        """Handle optimizer step, logging, checkpointing after a gradient sync."""
         if self.conf.clip_grad_norm > 0.0:
             torch.nn.utils.clip_grad_norm_(
                 self.transformer.parameters(), self.conf.clip_grad_norm
@@ -191,13 +185,6 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         progress.update(task, loss=avg_loss, lr=lr)
         progress.advance(task)
 
-        if exit_signal:
-            logger.info(
-                "Exit signal received. Saving checkpoint and exiting training loop..."
-            )
-            self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
-            return True
-
         if (self.current_step % self.conf.checkpoint_steps == 0) or (
             self.current_step == self.conf.train_steps
         ):
@@ -206,8 +193,6 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
 
         if self.current_step % self.conf.validation_steps == 0:
             self.validate_and_log()
-
-        return self.current_step >= self.conf.train_steps
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -239,7 +224,7 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
 
         progress, task = self.make_train_progress_bar()
 
-        with progress, DistributedExitSignal(self) as exit_signal:
+        with progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
                 total_loss = 0.0
@@ -261,14 +246,10 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
                     if not is_sync_step:
                         continue
 
-                    should_stop = self._after_sync_step(
-                        total_loss, progress, task, exit_signal
-                    )
+                    self._after_sync_step(total_loss, progress, task)
                     total_loss = 0.0
 
-                    if should_stop:
-                        if exit_signal:
-                            return
+                    if self.current_step >= self.conf.train_steps:
                         break
 
         with apply_ema_maybe(self.optimizer):

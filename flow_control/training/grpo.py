@@ -29,7 +29,7 @@ from flow_control.utils.logging import console, get_logger
 
 from .advantage import Advantage, PerPromptAdvantage
 from .data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn
-from .hsdp_engine import DistributedExitSignal, distributed_main
+from .hsdp_engine import distributed_main
 from .trainer_base import HsdpTrainerBase, HsdpTrainerBaseConfig
 
 logger = get_logger(__name__)
@@ -610,7 +610,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             step=self.current_step,
         )
 
-        with progress, DistributedExitSignal(self) as exit_signal:
+        with progress:
             while self.current_epoch < self.conf.train_epochs:
                 if hasattr(self.dataloader.sampler, "set_epoch"):
                     self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
@@ -636,13 +636,6 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
                 del rollouts, advantages
                 torch.cuda.empty_cache()
-
-                if exit_signal:
-                    logger.info(
-                        "Exit signal received. Saving checkpoint and exiting..."
-                    )
-                    self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
-                    return
 
                 if self.conf.checkpoint_epochs > 0 and (
                     self.current_epoch % self.conf.checkpoint_epochs == 0

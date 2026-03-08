@@ -1,8 +1,5 @@
 import os
 import random
-import signal
-import sys
-from contextlib import ContextDecorator
 from typing import Any
 
 import numpy as np
@@ -18,7 +15,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.fsdp import fully_shard
 
 from flow_control.adapters import ModelAdapter
-from flow_control.utils.logging import console, get_logger
+from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -220,43 +217,3 @@ def distributed_main(func):
             self.cleanup()
 
     return wrapper
-
-
-class DistributedExitSignal(ContextDecorator):
-    def __init__(self, hsdp_engine: HsdpEngine):
-        super().__init__()
-
-        self.sigint_received = False
-        self.original_handler = None
-        self.hsdp_engine = hsdp_engine
-
-    def __enter__(self):
-        self.original_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, self.handle_sigint)
-        logger.info("Registered SIGINT handler for distributed exit signal.")
-        return self
-
-    def __exit__(self, *exc):
-        signal.signal(signal.SIGINT, self.original_handler)
-        logger.info("Restored original SIGINT handler.")
-        return False
-
-    def handle_sigint(self, signum, frame):
-        if self.sigint_received:
-            logger.error("Second SIGINT received. Exiting immediately.")
-            # Do not catch further SIGINTs
-            signal.signal(signal.SIGINT, self.original_handler)
-            sys.exit(1)
-        else:
-            self.sigint_received = True
-            console.rule("[red]SIGINT[/red]")
-            logger.warning(
-                "SIGINT received. Waiting to save state after current step... Press Ctrl+C again to force exit."
-            )
-
-    def __bool__(self):
-        exit_flag_tensor = torch.tensor(
-            int(self.sigint_received), device=self.hsdp_engine.device
-        )
-        dist.all_reduce(exit_flag_tensor, op=dist.ReduceOp.MAX)
-        return bool(exit_flag_tensor.item())
