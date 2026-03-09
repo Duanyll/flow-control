@@ -429,6 +429,7 @@ class Pipeline:
             TimeRemainingColumn(),
             TextColumn("{task.fields[extra]}"),
             console=console,
+            # disable=True   # XXX: For debugging.
         ) as progress:
             source_task = progress.add_task(
                 f"[cyan]{self.source.name}", total=None, extra=""

@@ -5,7 +5,7 @@ queue_size = 16
 num_sink_workers = 1
 processing_mode = "training"
 save_intermediate = true
-processor_concurrency = 1
+processor_concurrency = 8
 
 [dataset]
 type = "plain_directory"
@@ -17,7 +17,7 @@ preset = "flux1"
 caption_prompt = "Act as a text-to-image prompt generator. Output STRICTLY the prompt text with no conversational filler. Write a vivid, full-sentence scene description. Begin directly with the main subject, action, and lighting. Always end the description with 'Artwork by Christian Boragine'."
 
 [processor.llm]
-base_url = "http://192.168.6.113:10001/v1"
+base_url = "http://192.168.123.125:10001/v1"
 api_key = "vllm"
 
 [output]

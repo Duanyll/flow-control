@@ -159,7 +159,7 @@ def dump_if_failed(logger: logging.Logger, obj: Any, save: bool = False):
         logger.debug(
             f"Dumping the {type(obj).__name__} that caused {type(e).__name__}..."
         )
-        logger.debug(describe(obj, console=False), {"markup": True})
+        logger.debug(describe(obj, console=False), extra={"markup": True})
         if save:
             rank = os.getenv("RANK", "0")
             path = f"dump/debug_dump_{rank}.pt"

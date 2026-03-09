@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import queue
 import time
+from collections.abc import Coroutine
 from logging.handlers import QueueHandler
 from multiprocessing.synchronize import Event as EventType
 from typing import Any
@@ -14,8 +15,51 @@ from typing import Any
 import torch
 import torch.multiprocessing as mp
 
+from ..common import deep_apply_tensor_fn
 from ..logging import get_logger, setup_global_handler
 from .base import DataSink, DataSource, PipelineStage
+
+
+class _NoGradCoroutine(Coroutine):
+    """Wraps a coroutine so that ``grad_enabled`` is forced to ``False``
+    every time execution resumes from an ``await``.
+
+    ``torch.no_grad()`` uses a simple save/restore of the global
+    ``grad_enabled`` flag, which breaks when multiple asyncio tasks
+    interleave.  This wrapper side-steps the issue entirely: no matter
+    what another task did to the flag while we were suspended, we
+    always re-disable grad before running the next segment of user code.
+
+    Users who need grad locally can still use ``torch.enable_grad()``
+    for **synchronous** sections.  If an ``await`` happens inside such a
+    section, grad will be re-disabled on resume — which is the only
+    safe behaviour given that another task may have run in between.
+    """
+
+    __slots__ = ("_coro",)
+
+    def __init__(self, coro: Coroutine):
+        self._coro = coro
+
+    def send(self, value):
+        torch.set_grad_enabled(False)
+        return self._coro.send(value)
+
+    def throw(self, typ, val=None, tb=None):
+        torch.set_grad_enabled(False)
+        return self._coro.throw(typ, val, tb)
+
+    def close(self):
+        return self._coro.close()
+
+    def __next__(self):
+        return self.send(None)
+
+    def __iter__(self):
+        return self
+
+    def __await__(self):
+        return self
 
 
 def _setup_worker_logging(name: str, log_queue: mp.Queue):
@@ -227,22 +271,16 @@ def _sync_stage_loop(
                 time.sleep(0.5)
             continue
 
+        torch.set_grad_enabled(False)
         results: Any = stage.process(item)
-        output_count = len(results)
-
-        for result in results:
-            if not _safe_put(
-                output_queue,
-                result,
-                logger=worker_logger,
-                shutdown_event=shutdown_event,
-            ):
-                break
-
-        if output_count == 0:
-            _safe_put(progress_queue, ("stage", stage_index, "filtered", 1))
-        else:
-            _safe_put(progress_queue, ("stage", stage_index, "produced", output_count))
+        _report_stage_output(
+            results,
+            stage_index,
+            output_queue,
+            progress_queue,
+            shutdown_event,
+            worker_logger,
+        )
 
 
 def _report_stage_output(
@@ -253,8 +291,25 @@ def _report_stage_output(
     shutdown_event: EventType,
     worker_logger,
 ) -> None:
-    """Put stage results into output queue and report progress."""
+    """Put stage results into output queue and report progress.
+
+    Before enqueueing, every tensor is detached, moved to CPU, and placed in
+    shared memory.  This is necessary because:
+
+    * ``detach()`` – ``torch.no_grad()`` is **not** asyncio-safe.  When
+      multiple async stage tasks interleave, their save/restore of the global
+      ``grad_enabled`` flag can get out of sync, producing non-leaf tensors
+      with ``requires_grad=True`` that PyTorch refuses to pickle across
+      process boundaries.
+    * ``share_memory_()`` – ``mp.Queue.put()`` pickles items in a background
+      ``_feed`` thread.  If the full ``reduce_tensor`` path is used, a
+      failure there silently drops the item and the pipeline hangs.
+      Shared-memory tensors take a trivial fast-path instead.
+    """
     for result in results:
+        result = deep_apply_tensor_fn(
+            result, lambda x: x.detach().cpu().share_memory_()
+        )
         if not _safe_put(
             output_queue,
             result,
@@ -286,7 +341,7 @@ async def _async_process_item(
         if shutdown_event.is_set():
             return
         try:
-            results = await stage.process(item)  # type: ignore[misc]
+            results = await _NoGradCoroutine(stage.process(item))  # type: ignore[misc]
             _report_stage_output(
                 results,
                 stage_index,
