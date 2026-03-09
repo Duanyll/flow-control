@@ -1,3 +1,5 @@
+#:schema ../../../schema/preprocess.schema.json
+
 num_loader_workers = 1
 processor_devices = [0]
 num_threads_per_worker = 8
@@ -16,13 +18,7 @@ reference_images = "attachment_list"
 
 [processor]
 task = "tie"
-preset = "flux2"
-
-[processor.encoder]
-type = "mistral3"
-# Do model parallelism with 2 GPUs, each GPU holds 32GB of the model.
-device_memory_distribution = ["32GiB", "32GiB"]
-no_split_modules = ["MistralDecoderLayer"]
+preset = "flux1"
 
 [output]
 type = "pickle_directory"

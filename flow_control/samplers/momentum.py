@@ -1,11 +1,14 @@
+from typing import Literal
+
 import torch
 
-from flow_control.adapters import Batch, ModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 
 from .euler import EulerSampler, SdeTrajectory
 
 
 class MomentumGuidedSampler(EulerSampler):
+    type: Literal["momentum"] = "momentum"
     alpha: float
     beta: float
 
@@ -13,7 +16,7 @@ class MomentumGuidedSampler(EulerSampler):
 
     def _sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         negative_batch: Batch | None = None,
         t_start: float = 1,
@@ -32,7 +35,7 @@ class MomentumGuidedSampler(EulerSampler):
 
     def get_guided_velocity(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
         batch: Batch,

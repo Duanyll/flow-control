@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from diffusers import FluxTransformer2DModel
@@ -28,6 +28,8 @@ class Flux1Batch(Batch):
 class Flux1Adapter[TBatch: Flux1Batch](
     BaseModelAdapter[FluxTransformer2DModel, TBatch]
 ):
+    arch: Literal["flux1"] = "flux1"
+    type: Literal["base"] = "base"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

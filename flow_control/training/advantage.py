@@ -2,13 +2,12 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, PlainValidator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Tag
 
 
 class AdvantageEstimator(BaseModel, ABC):
     """Advantage normalization strategy."""
 
-    type: str
     model_config = ConfigDict(extra="forbid")
 
     @abstractmethod
@@ -34,8 +33,7 @@ class AdvantageEstimator(BaseModel, ABC):
 class PerPromptAdvantage(AdvantageEstimator):
     """Per-prompt normalization: normalize within each prompt group."""
 
-    # Narrow the discriminator field for Pydantic; safe because Pydantic handles this at runtime.
-    type: Literal["per_prompt"] = "per_prompt"  # type: ignore[assignment]
+    type: Literal["per_prompt"] = "per_prompt"
     use_global_std: bool = True
     eps: float = 1e-4
 
@@ -66,8 +64,7 @@ class PerPromptAdvantage(AdvantageEstimator):
 class GlobalAdvantage(AdvantageEstimator):
     """Global normalization: (r - mean) / (std + eps)."""
 
-    # Narrow the discriminator field for Pydantic; safe because Pydantic handles this at runtime.
-    type: Literal["global"] = "global"  # type: ignore[assignment]
+    type: Literal["global"] = "global"
     eps: float = 1e-4
 
     def compute(
@@ -82,21 +79,17 @@ class GlobalAdvantage(AdvantageEstimator):
         return advantages.unsqueeze(1).expand(-1, num_timesteps)
 
 
-ADVANTAGE_REGISTRY: dict[str, type[AdvantageEstimator]] = {
-    "per_prompt": PerPromptAdvantage,
-    "global": GlobalAdvantage,
-}
+def _passthrough_advantage(v: object) -> object:
+    """Allow already-instantiated AdvantageEstimator instances to pass through."""
+    if isinstance(v, AdvantageEstimator):
+        return v
+    return v
 
 
-def parse_advantage(conf: dict | AdvantageEstimator) -> AdvantageEstimator:
-    """Parse an advantage estimator from a dict or pass through an existing instance."""
-    if isinstance(conf, AdvantageEstimator):
-        return conf
-    adv_type = conf["type"]
-    adv_class = ADVANTAGE_REGISTRY.get(adv_type)
-    if adv_class is None:
-        raise ValueError(f"Unknown advantage type: {adv_type}")
-    return adv_class(**conf)
+_AdvantageUnion = Annotated[
+    Annotated[PerPromptAdvantage, Tag("per_prompt")]
+    | Annotated[GlobalAdvantage, Tag("global")],
+    Discriminator("type"),
+]
 
-
-Advantage = Annotated[AdvantageEstimator, PlainValidator(parse_advantage)]
+Advantage = Annotated[_AdvantageUnion, BeforeValidator(_passthrough_advantage)]

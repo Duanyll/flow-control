@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from diffusers import FluxTransformer2DModel
 from einops import pack, rearrange
@@ -19,6 +21,8 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
     """
     Adapter for the FLUX.1 fill model.
     """
+
+    type: Literal["fill"] = "fill"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

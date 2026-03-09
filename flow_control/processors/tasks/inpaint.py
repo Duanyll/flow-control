@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 
@@ -31,7 +31,8 @@ class InpaintProcessedBatch(ProcessedBatch):
 class InpaintProcessor(
     BaseProcessor[InpaintInputBatch, InpaintTrainInputBatch, InpaintProcessedBatch]
 ):
-    encoder_prompt: PromptStr
+    task: Literal["inpaint"] = "inpaint"
+    encoder_prompt: PromptStr = ""
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "
     save_negative: bool = False

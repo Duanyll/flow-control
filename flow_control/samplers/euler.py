@@ -3,7 +3,7 @@ from typing import Literal, TypedDict
 
 import torch
 
-from flow_control.adapters import Batch, ModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 
 from .base import BaseSampler, make_sample_progress
 
@@ -17,13 +17,14 @@ class SdeTrajectory(TypedDict):
 
 
 class EulerSampler(BaseSampler):
+    type: Literal["euler"] = "euler"
     steps: int = 50
     noise_level: float = 0.0  # 0.0 = pure ODE (default), >0 = SDE
     sde_type: Literal["sde", "cps"] = "sde"
 
     def _sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         negative_batch: Batch | None = None,
         t_start: float = 1.0,
@@ -41,7 +42,7 @@ class EulerSampler(BaseSampler):
 
     def _euler_sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         sigmas: torch.Tensor,
         negative_batch: Batch | None = None,
@@ -192,7 +193,7 @@ class EulerSampler(BaseSampler):
 
     def compute_logprob_at_step(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         latent_t: torch.Tensor,
         latent_t_minus_1: torch.Tensor,

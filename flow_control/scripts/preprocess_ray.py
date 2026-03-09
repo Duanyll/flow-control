@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 
 class RayPreprocessConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra="forbid")
 
     dataset: dict
     processor: dict

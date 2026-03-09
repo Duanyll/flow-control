@@ -2,7 +2,7 @@ import re
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import PlainValidator
+from pydantic import Discriminator, Tag
 from transformers import (
     CLIPTextModel,
     CLIPTokenizer,
@@ -25,8 +25,6 @@ logger = get_logger(__name__)
 
 
 class BaseEncoder[T](HfModelLoader[T]):
-    type: str
-
     chat_template: str = "{user}"
     image_template: str = ""
 
@@ -74,7 +72,7 @@ class GenerativeEncoder:
 
 
 class T5TextEncoder(BaseEncoder[T5EncoderModel]):
-    type: str = "t5"
+    type: Literal["t5"] = "t5"
 
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "T5EncoderModel"
@@ -117,7 +115,7 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
 
 
 class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
-    type: str = "clip"
+    type: Literal["clip"] = "clip"
 
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "CLIPTextModel"
@@ -165,7 +163,7 @@ class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
 class Qwen25VLEncoder(
     BaseEncoder[Qwen2_5_VLForConditionalGeneration], GenerativeEncoder
 ):
-    type: str = "qwen_2_5_vl"
+    type: Literal["qwen25vl"] = "qwen25vl"
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "Qwen2_5_VLForConditionalGeneration"
     pretrained_model_id: str = "Qwen/Qwen-Image"
@@ -285,9 +283,9 @@ class Qwen25VLEncoder(
         if images:
             images = [self._resize_image(image) for image in images]
 
-            # FIXME: There is something wrong with LongCat-Image-Edit when caculating 
-            # the required number of image padding tokens. The behavior is strange in 
-            # the original codebase as well. 
+            # FIXME: There is something wrong with LongCat-Image-Edit when caculating
+            # the required number of image padding tokens. The behavior is strange in
+            # the original codebase as well.
 
             if self.keep_padding_tokens and self.tokenizer_max_length > 0:
                 max_length += self._get_image_pad_len(images) - len(images)
@@ -385,7 +383,7 @@ class Qwen25VLEncoder(
 
 
 class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
-    type: str = "qwen3"
+    type: Literal["qwen3"] = "qwen3"
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "Qwen3ForCausalLM"
     pretrained_model_id: str = "Tongyi-MAI/Z-Image"
@@ -441,7 +439,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
 
 
 class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeEncoder):
-    type: str = "mistral3"
+    type: Literal["mistral3"] = "mistral3"
     library: Literal["diffusers", "transformers"] = "transformers"
     class_name: str = "Mistral3ForConditionalGeneration"
     pretrained_model_id: str = "black-forest-labs/FLUX.2-dev"
@@ -571,21 +569,11 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
         return result[0].strip()
 
 
-ENCODER_REGISTRY = {
-    "t5": T5TextEncoder,
-    "clip": ClipTextEncoder,
-    "qwen25vl": Qwen25VLEncoder,
-    "qwen3": Qwen3Encoder,
-    "mistral3": Mistral3Encoder,
-}
-
-
-def parse_encoder(config: dict[str, Any]) -> BaseEncoder:
-    encoder_type = config["type"]
-    encoder_class = ENCODER_REGISTRY.get(encoder_type)
-    if encoder_class is None:
-        raise ValueError(f"Unsupported encoder type: {encoder_type}")
-    return encoder_class(**config)
-
-
-Encoder = Annotated[BaseEncoder, PlainValidator(parse_encoder)]
+Encoder = Annotated[
+    Annotated[T5TextEncoder, Tag("t5")]
+    | Annotated[ClipTextEncoder, Tag("clip")]
+    | Annotated[Qwen25VLEncoder, Tag("qwen25vl")]
+    | Annotated[Qwen3Encoder, Tag("qwen3")]
+    | Annotated[Mistral3Encoder, Tag("mistral3")],
+    Discriminator("type"),
+]

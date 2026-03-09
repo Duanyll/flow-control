@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from diffusers import Flux2Transformer2DModel
@@ -27,6 +27,9 @@ class Flux2Batch(Batch):
 class Flux2Adapter[TBatch: Flux2Batch](
     BaseModelAdapter[Flux2Transformer2DModel, TBatch]
 ):
+    arch: Literal["flux2"] = "flux2"
+    type: Literal["base"] = "base"
+
     hf_model: HfModelLoader[Flux2Transformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="Flux2Transformer2DModel",
@@ -118,7 +121,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
             if "img_ids" not in batch:
                 batch["img_ids"] = self.make_latent_ids(batch["image_size"])
             img_ids = batch["img_ids"]
-        
+
         if "txt_ids" not in batch:
             batch["txt_ids"] = self.make_text_ids(batch["prompt_embeds"])
         txt_ids = batch["txt_ids"]

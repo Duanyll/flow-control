@@ -5,20 +5,10 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
 from rich import print
 
-
-class LaunchConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["sft", "grpo", "inference"]
-    devices: int | list[int]
-    generate_dcp_seed: bool = False
-    preprocess_config: str | None = None
-    env: dict[str, str] = {}
+from flow_control.config import LaunchConfig
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
@@ -27,7 +17,6 @@ def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
     if "launch" not in config_data:
         raise ValueError("Launch configuration section is missing in the config file.")
     launch_config = LaunchConfig(**config_data["launch"])
-    del config_data["launch"]
     return launch_config, config_data
 
 

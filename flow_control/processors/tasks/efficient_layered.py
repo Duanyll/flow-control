@@ -61,7 +61,8 @@ class EfficientLayeredProcessor(
         EfficientLayeredProcessedBatch,
     ]
 ):
-    encoder_prompt: PromptStr
+    task: Literal["efficient_layered"] = "efficient_layered"
+    encoder_prompt: PromptStr = ""
     fg_caption_prompt: PromptStr = parse_prompt("@efficient_layered_caption_fg_en")
     bg_caption_prompt: PromptStr = parse_prompt("@efficient_layered_caption_bg_en")
     default_negative_prompt: str = " "

@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 
@@ -22,7 +22,8 @@ class T2IProcessedBatch(ProcessedBatch):
 
 
 class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessedBatch]):
-    encoder_prompt: PromptStr
+    task: Literal["t2i"] = "t2i"
+    encoder_prompt: PromptStr = ""
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     t2i_enhance_prompt: PromptStr = parse_prompt("@default_t2i_enhance")
     default_negative_prompt: str = " "

@@ -36,7 +36,8 @@ class TIEProcessedBatch(ProcessedBatch):
 
 
 class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessedBatch]):
-    encoder_prompt: PromptStr
+    task: Literal["tie"] = "tie"
+    encoder_prompt: PromptStr = ""
     tie_enhance_prompt: PromptStr = parse_prompt("@default_tie_enhance")
     default_negative_prompt: str = " "
     save_negative: bool = False

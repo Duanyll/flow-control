@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from einops import repeat
 
@@ -16,6 +18,8 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
 
     This is used by the PhotoDoddle model.
     """
+
+    type: Literal["n_concat"] = "n_concat"
 
     def predict_velocity(
         self,

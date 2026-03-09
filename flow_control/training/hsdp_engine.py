@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel, ConfigDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -14,19 +13,11 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.fsdp import fully_shard
 
-from flow_control.adapters import ModelAdapter
+from flow_control.adapters.base import BaseModelAdapter
+from flow_control.config import HsdpEngineConfig
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-class HsdpEngineConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    seed: int = 42
-    hsdp_shard_dim: int = 1
-    gradient_checkpointing: bool = True
-    async_save: bool = True
 
 
 class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
@@ -86,9 +77,9 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
 
     def load_transformer(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         seed_checkpoint_dir: str | None = None,
-    ) -> ModelAdapter:
+    ) -> BaseModelAdapter:
         if seed_checkpoint_dir is not None:
             with torch.device("meta"):
                 model.load_transformer(device=torch.device("meta"))
@@ -154,7 +145,9 @@ class HsdpEngine[TConfig: HsdpEngineConfig](Stateful):
             logger.info("Seed checkpoint loaded into transformer.")
         return model
 
-    def save_transformer_to_seed(self, model: ModelAdapter, seed_checkpoint_dir: str):
+    def save_transformer_to_seed(
+        self, model: BaseModelAdapter, seed_checkpoint_dir: str
+    ):
         logger.info(f"Saving DCP seed checkpoint to {seed_checkpoint_dir}...")
         model_sd, _ = get_state_dict(
             model.transformer, [], options=StateDictOptions(strict=False)

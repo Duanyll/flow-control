@@ -1,6 +1,7 @@
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import PlainValidator
+from pydantic import Discriminator, GetCoreSchemaHandler, Tag
+from pydantic_core import CoreSchema, core_schema
 
 from .base import BaseProcessor
 from .presets import (
@@ -59,8 +60,81 @@ def parse_processor(conf: dict) -> BaseProcessor:
     return ctor(**conf)
 
 
-Processor = Annotated[BaseProcessor, PlainValidator(parse_processor)]
+# Schema-only union of task classes for JSON schema generation
+_ProcessorTaskUnion = Annotated[
+    Annotated[T2IProcessor, Tag("t2i")]
+    | Annotated[T2IControlProcessor, Tag("t2i_control")]
+    | Annotated[InpaintProcessor, Tag("inpaint")]
+    | Annotated[EfficientLayeredProcessor, Tag("efficient_layered")]
+    | Annotated[QwenImageLayeredProcessor, Tag("qwen_layered")]
+    | Annotated[TIEProcessor, Tag("tie")],
+    Discriminator("task"),
+]
+
+
+class _ProcessorAnnotation:
+    """Custom annotation for Processor type.
+
+    - Core schema: wraps the task union schema so $defs are shared with the parent.
+    - Runtime: uses parse_processor for preset mixin composition.
+    - JSON schema: the union schema's JSON schema is generated automatically.
+    """
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        # Generate the union schema through the handler so all $defs are
+        # registered in the parent's schema generation context.
+        union_schema = handler.generate_schema(_ProcessorTaskUnion)
+        return core_schema.with_info_wrap_validator_function(
+            cls._validate,
+            union_schema,
+        )
+
+    @staticmethod
+    def _validate(value: Any, handler: Any, info: Any) -> BaseProcessor:
+        # Ignore the union handler — use parse_processor for runtime
+        if isinstance(value, BaseProcessor):
+            return value
+        if isinstance(value, dict):
+            return parse_processor(value)
+        raise ValueError(f"Expected dict or BaseProcessor, got {type(value)}")
+
+
+Processor = Annotated[BaseProcessor, _ProcessorAnnotation]
+
+
+class _ProcessorConfigAnnotation:
+    """Custom annotation for ProcessorConfig type.
+
+    Same JSON schema as Processor (full task union with $defs), but the
+    validated value stays as a plain dict so it can cross multiprocessing
+    boundaries. Runtime validation is done via parse_processor.
+    """
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        union_schema = handler.generate_schema(_ProcessorTaskUnion)
+        return core_schema.with_info_wrap_validator_function(
+            cls._validate,
+            union_schema,
+        )
+
+    @staticmethod
+    def _validate(value: Any, handler: Any, info: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            parse_processor(value)  # validate, discard the instance
+            return value
+        raise ValueError(f"Expected dict, got {type(value)}")
+
+
+ProcessorConfig = Annotated[dict[str, Any], _ProcessorConfigAnnotation]
 
 __all__ = [
     "Processor",
+    "ProcessorConfig",
+    "parse_processor",
 ]

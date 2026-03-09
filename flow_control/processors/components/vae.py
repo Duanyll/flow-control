@@ -13,7 +13,7 @@ from diffusers import (
 from diffusers.models.autoencoders.autoencoder_kl import DecoderOutput
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from einops import rearrange
-from pydantic import PlainValidator
+from pydantic import Discriminator, Tag
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
@@ -43,7 +43,6 @@ def _deserialize_tensor(
 
 
 class BaseVAE[T: ModelMixin](HfModelLoader[T]):
-    type: str
     endpoint: str | None = None
 
     def _load_model(self, device: torch.device):
@@ -146,7 +145,7 @@ class BaseVAE[T: ModelMixin](HfModelLoader[T]):
 
 
 class Flux1VAE(BaseVAE[AutoencoderKL]):
-    type: str = "flux1"
+    type: Literal["flux1"] = "flux1"
 
     library: Literal["diffusers", "transformers"] = "diffusers"
     class_name: str = "AutoencoderKL"
@@ -177,7 +176,7 @@ class Flux1VAE(BaseVAE[AutoencoderKL]):
 
 
 class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
-    type: str = "qwen"
+    type: Literal["qwen"] = "qwen"
 
     library: Literal["diffusers", "transformers"] = "diffusers"
     class_name: str = "AutoencoderKLQwenImage"
@@ -233,7 +232,7 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
 
 
 class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
-    type: str = "flux2"
+    type: Literal["flux2"] = "flux2"
 
     library: Literal["diffusers", "transformers"] = "diffusers"
     class_name: str = "AutoencoderKLFlux2"
@@ -300,19 +299,9 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
         return image
 
 
-VAE_REGISTRY = {
-    "flux1": Flux1VAE,
-    "qwen": QwenImageVAE,
-    "flux2": Flux2VAE,
-}
-
-
-def parse_vae(conf: dict) -> BaseVAE:
-    vae_type = conf.pop("type")
-    vae_class = VAE_REGISTRY.get(vae_type)
-    if vae_class is None:
-        raise ValueError(f"Unknown VAE type: {vae_type}")
-    return vae_class(**conf)
-
-
-VAE = Annotated[BaseVAE, PlainValidator(parse_vae)]
+VAE = Annotated[
+    Annotated[Flux1VAE, Tag("flux1")]
+    | Annotated[QwenImageVAE, Tag("qwen")]
+    | Annotated[Flux2VAE, Tag("flux2")],
+    Discriminator("type"),
+]

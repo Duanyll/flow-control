@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from pydantic import PlainValidator
+from pydantic import Discriminator, Tag
 
 from .base import BaseSampler
 from .euler import EulerSampler
@@ -12,26 +12,16 @@ from .shift import (
     SquaredShiftSampler,
 )
 
-SAMPLER_REGISTRY = {
-    "base": BaseSampler,
-    "euler": EulerSampler,
-    "momentum": MomentumGuidedSampler,
-    "constant_shift": ConstantShiftSampler,
-    "linear_shift": LinearShiftSampler,
-    "squared_shift": SquaredShiftSampler,
-    "flux2_shift": Flux2ShiftSampler,
-}
-
-
-def parse_sampler(conf: dict) -> BaseSampler:
-    sampler_type = conf["type"]
-    sampler_class = SAMPLER_REGISTRY.get(sampler_type)
-    if sampler_class is None:
-        raise ValueError(f"Unknown sampler type: {sampler_type}")
-    return sampler_class(**conf)
-
-
-Sampler = Annotated[BaseSampler, PlainValidator(parse_sampler)]
+Sampler = Annotated[
+    Annotated[BaseSampler, Tag("base")]
+    | Annotated[EulerSampler, Tag("euler")]
+    | Annotated[MomentumGuidedSampler, Tag("momentum")]
+    | Annotated[ConstantShiftSampler, Tag("constant_shift")]
+    | Annotated[LinearShiftSampler, Tag("linear_shift")]
+    | Annotated[SquaredShiftSampler, Tag("squared_shift")]
+    | Annotated[Flux2ShiftSampler, Tag("flux2_shift")],
+    Discriminator("type"),
+]
 
 __all__ = [
     "Sampler",

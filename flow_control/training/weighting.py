@@ -1,28 +1,26 @@
 import math
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, PlainValidator
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag
 
 
 class BaseTimestepWeighting(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    type: str
+    model_config = ConfigDict(extra="forbid")
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         raise NotImplementedError
 
 
 class UniformTimestepWeighting(BaseTimestepWeighting):
-    type: str = "uniform"
+    type: Literal["uniform"] = "uniform"
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         return torch.rand(batch_size)
 
 
 class LogitNormalTimestepWeighting(BaseTimestepWeighting):
-    type: str = "logit_normal"
+    type: Literal["logit_normal"] = "logit_normal"
     mean: float = 0.0
     std: float = 1.0
 
@@ -33,7 +31,7 @@ class LogitNormalTimestepWeighting(BaseTimestepWeighting):
 
 
 class ModeTimestepWeighting(BaseTimestepWeighting):
-    type: str = "mode"
+    type: Literal["mode"] = "mode"
     scale: float = 1.29
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
@@ -42,51 +40,37 @@ class ModeTimestepWeighting(BaseTimestepWeighting):
         return u
 
 
-TIMESTEP_WEIGHTING_REGISTRY = {
-    "uniform": UniformTimestepWeighting,
-    "logit_normal": LogitNormalTimestepWeighting,
-    "mode": ModeTimestepWeighting,
-}
-
-
-def parse_timestep_weighting(conf: dict) -> BaseTimestepWeighting:
-    weighting_type = conf["type"]
-    weighting_class = TIMESTEP_WEIGHTING_REGISTRY.get(weighting_type)
-    if weighting_class is None:
-        raise ValueError(f"Unknown timestep weighting type: {weighting_type}")
-    return weighting_class(**conf)
-
-
 TimestepWeighting = Annotated[
-    BaseTimestepWeighting, PlainValidator(parse_timestep_weighting)
+    Annotated[UniformTimestepWeighting, Tag("uniform")]
+    | Annotated[LogitNormalTimestepWeighting, Tag("logit_normal")]
+    | Annotated[ModeTimestepWeighting, Tag("mode")],
+    Discriminator("type"),
 ]
 
 
 class BaseLossWeighting(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    type: str
+    model_config = ConfigDict(extra="forbid")
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
 
 class UniformLossWeighting(BaseLossWeighting):
-    type: str = "uniform"
+    type: Literal["uniform"] = "uniform"
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(timesteps)
 
 
 class SigmaSquaredLossWeighting(BaseLossWeighting):
-    type: str = "sigma_squared"
+    type: Literal["sigma_squared"] = "sigma_squared"
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         return timesteps ** (-2.0)
 
 
 class CosmapLossWeighting(BaseLossWeighting):
-    type: str = "cosmap"
+    type: Literal["cosmap"] = "cosmap"
 
     def get_weights(self, timesteps: torch.Tensor) -> torch.Tensor:
         bot = 1 - 2 * timesteps + 2 * (timesteps**2)
@@ -94,22 +78,12 @@ class CosmapLossWeighting(BaseLossWeighting):
         return weights
 
 
-LOSS_WEIGHTING_REGISTRY = {
-    "uniform": UniformLossWeighting,
-    "sigma_squared": SigmaSquaredLossWeighting,
-    "cosmap": CosmapLossWeighting,
-}
-
-
-def parse_loss_weighting(conf: dict) -> BaseLossWeighting:
-    weighting_type = conf["type"]
-    weighting_class = LOSS_WEIGHTING_REGISTRY.get(weighting_type)
-    if weighting_class is None:
-        raise ValueError(f"Unknown loss weighting type: {weighting_type}")
-    return weighting_class(**conf)
-
-
-LossWeighting = Annotated[BaseLossWeighting, PlainValidator(parse_loss_weighting)]
+LossWeighting = Annotated[
+    Annotated[UniformLossWeighting, Tag("uniform")]
+    | Annotated[SigmaSquaredLossWeighting, Tag("sigma_squared")]
+    | Annotated[CosmapLossWeighting, Tag("cosmap")],
+    Discriminator("type"),
+]
 
 __all__ = [
     "TimestepWeighting",

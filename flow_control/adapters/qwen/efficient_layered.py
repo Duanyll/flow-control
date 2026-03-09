@@ -183,6 +183,8 @@ class EfficientLayeredQwenImageBatch(QwenImageBatch):
 class EfficientLayeredQwenImageAdapter(
     QwenImageAdapter[EfficientLayeredQwenImageBatch]
 ):
+    type: Literal["efficient_layered"] = "efficient_layered"
+
     attn_mask_mode: Literal["full", "text-only", "per-layer", "per-layer-strict"] = (
         "text-only"
     )

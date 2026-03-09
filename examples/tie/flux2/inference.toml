@@ -1,3 +1,5 @@
+#:schema ../../../schema/inference.schema.json
+
 seed_checkpoint_dir = "/dev/shm/flow-control/seed"
 save_preview_dir = "./demo/inference_flux2_tie_preview"
 

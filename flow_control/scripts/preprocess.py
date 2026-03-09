@@ -4,8 +4,13 @@ from typing import Any, Literal
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
-from flow_control.processors import parse_processor
+from flow_control.datasets import (
+    DATASINK_REGISTRY,
+    DatasetConfig,
+    DatasinkConfig,
+    parse_dataset,
+)
+from flow_control.processors import ProcessorConfig, parse_processor
 from flow_control.utils.common import deep_move_to_device, load_config_file
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
@@ -100,9 +105,9 @@ class ProcessorStage(PipelineStage):
 class PreprocessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    dataset: dict
-    processor: dict
-    output: dict
+    dataset: DatasetConfig
+    processor: ProcessorConfig
+    output: DatasinkConfig
 
     num_loader_workers: int = 1
     num_sink_workers: int = 1

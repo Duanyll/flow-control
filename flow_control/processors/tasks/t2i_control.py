@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 
@@ -31,7 +31,8 @@ class T2IControlProcessor(
         T2IControlInputBatch, T2IControlTrainInputBatch, T2IControlProcessedBatch
     ]
 ):
-    encoder_prompt: PromptStr
+    task: Literal["t2i_control"] = "t2i_control"
+    encoder_prompt: PromptStr = ""
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "
     save_negative: bool = False

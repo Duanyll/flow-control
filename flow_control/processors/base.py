@@ -14,9 +14,9 @@ from flow_control.utils.resize import (
 )
 from flow_control.utils.types import TorchDevice
 
-from .components.encoder import Encoder, GenerativeEncoder
+from .components.encoder import Encoder, GenerativeEncoder, T5TextEncoder
 from .components.llm import LLMClient
-from .components.vae import VAE
+from .components.vae import VAE, Flux1VAE
 
 
 class InputBatch(TypedDict):
@@ -56,13 +56,13 @@ class BaseProcessor[
     TProcessed: ProcessedBatch,
 ](BaseModel, ABC):
     task: str
-    preset: str
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
+    preset: str = ""
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     # ---------------------------------- Loading --------------------------------- #
 
-    vae: VAE
-    encoder: Encoder
+    vae: VAE = Flux1VAE()
+    encoder: Encoder = T5TextEncoder()
     pooled_encoder: Encoder | None = None
     llm: LLMClient | None = None
 
@@ -221,10 +221,10 @@ class BaseProcessor[
 
     # ---------------------------- Resizing Utilities ---------------------------- #
 
-    resize_mode: Literal["list", "multiple_of"]
-    preferred_resolutions: ResolutionList
-    default_resolution: tuple[int, int]
-    multiple_of: int
+    resize_mode: Literal["list", "multiple_of"] = "multiple_of"
+    preferred_resolutions: ResolutionList = []
+    default_resolution: tuple[int, int] = (1024, 1024)
+    multiple_of: int = 32
     total_pixels: int = 0
     no_upscale: bool = False
 

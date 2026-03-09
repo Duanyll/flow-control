@@ -2,7 +2,7 @@ import sys
 from typing import Annotated, Any
 
 import torch
-from pydantic import BeforeValidator, PlainSerializer
+from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
 
 from .ema import make_ema_optimizer
 from .logging import get_logger
@@ -43,16 +43,38 @@ TorchDType = Annotated[
     torch.dtype,
     BeforeValidator(validate_torch_dtype),
     PlainSerializer(serialize_torch_dtype, return_type=str),
+    WithJsonSchema(
+        {"type": "string", "description": "PyTorch dtype (e.g. float32, bfloat16)"}
+    ),
 ]
 
 TorchDevice = Annotated[
     torch.device,
     BeforeValidator(validate_torch_device),
     PlainSerializer(serialize_torch_device, return_type=str),
+    WithJsonSchema(
+        {"type": "string", "description": "PyTorch device (e.g. cuda:0, cpu)"}
+    ),
 ]
 
 
-OptimizerConfig = dict[str, Any]
+OptimizerConfig = Annotated[
+    dict[str, Any],
+    WithJsonSchema(
+        {
+            "type": "object",
+            "properties": {
+                "class_name": {
+                    "type": "string",
+                    "description": "Optimizer class name (e.g. AdamW, Prodigy)",
+                },
+                "lr": {"type": "number", "description": "Learning rate"},
+            },
+            "required": ["class_name"],
+            "additionalProperties": True,
+        }
+    ),
+]
 
 
 def parse_optimizer(
@@ -90,7 +112,22 @@ def parse_optimizer(
         return ctor(parameters, **conf)
 
 
-SchedulerConfig = dict[str, Any]
+SchedulerConfig = Annotated[
+    dict[str, Any],
+    WithJsonSchema(
+        {
+            "type": "object",
+            "properties": {
+                "class_name": {
+                    "type": "string",
+                    "description": "LR scheduler class name (e.g. ConstantLR, CosineAnnealingLR)",
+                },
+            },
+            "required": ["class_name"],
+            "additionalProperties": True,
+        }
+    ),
+]
 
 
 def parse_scheduler(conf: SchedulerConfig, optimizer: torch.optim.Optimizer):

@@ -21,16 +21,32 @@ def main():
             "config_path", type=str, help="Path to the configuration file."
         )
 
+    schema_sub = subparsers.add_parser(
+        "schema", help="Generate JSON schemas for config types."
+    )
+    schema_sub.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write schema files (default: schema).",
+    )
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         sys.exit(1)
 
-    _dispatch(args.command, args.config_path)
+    _dispatch(args.command, args)
 
 
-def _dispatch(command: str, config_path: str) -> None:
+def _dispatch(command: str, args: argparse.Namespace) -> None:
     """Lazy-import and run the appropriate subcommand."""
+    if command == "schema":
+        from flow_control.scripts.schema import run as run_schema
+
+        run_schema(**({"output_dir": args.output_dir} if args.output_dir else {}))
+        return
+
     if command == "preprocess":
         from flow_control.scripts.preprocess import run
     elif command == "preprocess-ray":
@@ -44,7 +60,7 @@ def _dispatch(command: str, config_path: str) -> None:
     else:
         raise ValueError(f"Unknown command: {command}")
 
-    run(config_path)
+    run(args.config_path)
 
 
 if __name__ == "__main__":

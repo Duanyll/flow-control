@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 
 
 class HfModelLoader[T](BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     library: Literal["diffusers", "transformers"]
     class_name: str
@@ -25,6 +25,40 @@ class HfModelLoader[T](BaseModel):
     extra_from_pretrained_kwargs: dict[str, Any] = {}
 
     _model: T | None = None
+
+    # @classmethod
+    # def __get_pydantic_json_schema__(
+    #     cls, source: Any, handler: GetJsonSchemaHandler
+    # ) -> JsonSchemaValue:
+    #     # Generic type parameter T is not JSON-serializable; emit a fixed
+    #     # schema based on the declared fields (excluding T).
+    #     return {
+    #         "type": "object",
+    #         "properties": {
+    #             "library": {"enum": ["diffusers", "transformers"]},
+    #             "class_name": {"type": "string"},
+    #             "pretrained_model_id": {"type": "string"},
+    #             "revision": {"type": "string", "default": "main"},
+    #             "subfolder": {"type": ["string", "null"], "default": None},
+    #             "dtype": {"type": "string", "default": "auto"},
+    #             "device_memory_distribution": {
+    #                 "type": ["array", "null"],
+    #                 "items": {"type": "string"},
+    #                 "default": None,
+    #             },
+    #             "no_split_modules": {
+    #                 "type": ["array", "null"],
+    #                 "items": {"type": "string"},
+    #                 "default": None,
+    #             },
+    #             "extra_from_pretrained_kwargs": {
+    #                 "type": "object",
+    #                 "additionalProperties": True,
+    #                 "default": {},
+    #             },
+    #         },
+    #         "required": ["library", "class_name", "pretrained_model_id"],
+    #     }
 
     @property
     def model(self) -> T:
@@ -109,7 +143,7 @@ class HfModelLoader[T](BaseModel):
                 (device_idx + i): mem
                 for i, mem in enumerate(self.device_memory_distribution)
             },
-            no_split_module_classes=no_split_modules
+            no_split_module_classes=no_split_modules,
         )
         device_str = ", ".join(
             f"cuda:{device_idx + i}={mem}"

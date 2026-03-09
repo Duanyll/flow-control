@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torchvision.transforms as T
@@ -10,7 +10,7 @@ from .base import BaseReward
 class CLIPScoreReward(BaseReward):
     """CLIP-based text-image alignment reward."""
 
-    type: str = "clip_score"
+    type: Literal["clip_score"] = "clip_score"
     model_name: str = "openai/clip-vit-large-patch14"
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")

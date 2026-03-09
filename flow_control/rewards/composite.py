@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import ConfigDict, PrivateAttr
@@ -9,7 +9,7 @@ from .base import BaseReward
 class CompositeReward(BaseReward):
     """Weighted combination of multiple reward functions."""
 
-    type: str = "composite"
+    type: Literal["composite"] = "composite"
     rewards: list[tuple[float, Any]]  # (weight, reward_config_dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")

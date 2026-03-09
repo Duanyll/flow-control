@@ -1,3 +1,5 @@
+#:schema ../../../schema/inference.schema.json
+
 save_preview_dir = "./demo/inference_zimage_turbo_t2i_preview"
 seed = 1024
 hsdp_shard_dim = 1

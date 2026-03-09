@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
@@ -15,7 +15,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from flow_control.adapters import Batch, ModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.utils.logging import console, get_logger, warn_once
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ def make_sample_progress() -> Progress:
 
 
 class BaseSampler(BaseModel, ABC):
-    type: str
+    type: Literal["base"] = "base"
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     cfg_scale: float = 7.5
@@ -60,7 +60,7 @@ class BaseSampler(BaseModel, ABC):
 
     def sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         negative_batch: Batch | None = None,
         t_start=1.0,
@@ -84,7 +84,7 @@ class BaseSampler(BaseModel, ABC):
     @abstractmethod
     def _sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         negative_batch: Batch | None = None,
         t_start=1.0,
@@ -95,7 +95,7 @@ class BaseSampler(BaseModel, ABC):
 
     def get_guided_velocity(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         latents: torch.Tensor,
         timestep: torch.Tensor,
         batch: Batch,

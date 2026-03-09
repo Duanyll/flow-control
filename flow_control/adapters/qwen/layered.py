@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 import torch.nn as nn
 from diffusers import QwenImageTransformer2DModel
@@ -130,6 +132,8 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
 
 
 class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
+    type: Literal["layered"] = "layered"
+
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",

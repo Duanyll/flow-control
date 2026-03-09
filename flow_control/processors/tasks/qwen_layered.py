@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from einops import rearrange
@@ -47,8 +47,9 @@ class QwenImageLayeredProcessor(
         QwenLayeredInputBatch, QwenLayeredTrainInputBatch, QwenLayeredProcessedBatch
     ]
 ):
+    task: Literal["qwen_layered"] = "qwen_layered"
     default_num_layers: int = 4
-    encoder_prompt: PromptStr
+    encoder_prompt: PromptStr = ""
     caption_prompt: PromptStr = parse_prompt("@qwen_layered_caption_en")
     default_negative_prompt: str = " "
     save_negative: bool = False

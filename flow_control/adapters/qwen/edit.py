@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from diffusers import QwenImageTransformer2DModel
 
@@ -17,6 +19,7 @@ class QwenImageEditBatch(QwenImageBatch):
 
 
 class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
+    type: Literal["edit"] = "edit"
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",

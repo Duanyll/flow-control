@@ -4,18 +4,10 @@ from .fill import Flux1FillAdapter
 from .kontext import Flux1KontextAdapter
 from .n_concat import Flux1NConcatAdapter
 
-ADAPTER_REGISTRY = {
-    "base": Flux1Adapter,
-    "d_concat": Flux1DConcatAdapter,
-    "n_concat": Flux1NConcatAdapter,
-    "fill": Flux1FillAdapter,
-    "kontext": Flux1KontextAdapter,
-}
-
-
-def parse_adapter(conf: dict) -> Flux1Adapter:
-    adapter_type = conf["type"]
-    adapter_class = ADAPTER_REGISTRY.get(adapter_type)
-    if adapter_class is None:
-        raise ValueError(f"Unknown adapter type: {adapter_type}")
-    return adapter_class(**conf)
+__all__ = [
+    "Flux1Adapter",
+    "Flux1DConcatAdapter",
+    "Flux1NConcatAdapter",
+    "Flux1FillAdapter",
+    "Flux1KontextAdapter",
+]

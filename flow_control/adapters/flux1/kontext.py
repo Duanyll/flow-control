@@ -16,6 +16,7 @@ class Flux1KontextBatch(Flux1Batch):
 
 
 class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
+    type: Literal["kontext"] = "kontext"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

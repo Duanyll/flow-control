@@ -1,6 +1,7 @@
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Annotated, Any, TypeGuard
 
 from datasets import load_dataset
+from pydantic import WithJsonSchema
 from torch.utils.data import ConcatDataset, Dataset
 
 from flow_control.utils.pipeline import DataSink
@@ -13,7 +14,22 @@ from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 
-DatasetConfig = dict[str, Any]
+DatasetConfig = Annotated[
+    dict[str, Any],
+    WithJsonSchema(
+        {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, huggingface, multi)",
+                },
+            },
+            "required": ["type"],
+            "additionalProperties": True,
+        }
+    ),
+]
 
 DATASET_REGISTRY = {
     "lmdb": LMDBDataset,
@@ -73,7 +89,22 @@ def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
-DatasinkConfig = dict[str, Any]
+DatasinkConfig = Annotated[
+    dict[str, Any],
+    WithJsonSchema(
+        {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Datasink type (e.g. lmdb, pickle_directory, raw_directory, bucket_directory)",
+                },
+            },
+            "required": ["type"],
+            "additionalProperties": True,
+        }
+    ),
+]
 
 DATASINK_REGISTRY = {
     "lmdb": LMDBDataSink,

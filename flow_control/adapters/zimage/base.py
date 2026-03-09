@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from diffusers import ZImageTransformer2DModel
 from einops import rearrange
@@ -17,6 +19,9 @@ class ZImageBatch(Batch):
 class ZImageAdapter[TBatch: ZImageBatch](
     BaseModelAdapter[ZImageTransformer2DModel, TBatch]
 ):
+    arch: Literal["zimage"] = "zimage"
+    type: Literal["base"] = "base"
+
     vae_scale_factor: int = 8
     hf_model: HfModelLoader[ZImageTransformer2DModel] = HfModelLoader(
         library="diffusers",

@@ -1,4 +1,4 @@
-from typing import NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from diffusers import LongCatImageTransformer2DModel
@@ -29,7 +29,10 @@ class LongCatAdapter[TBatch: LongCatBatch](
     Meituan LongCat-Image is a smaller Flux.1-like MMDiT model with Qwen2.5-VL as the text encoder.
     """
 
-    hf_model: HfModelLoader = HfModelLoader(
+    arch: Literal["longcat"] = "longcat"
+    type: Literal["base"] = "base"
+
+    hf_model: HfModelLoader[LongCatImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="LongCatImageTransformer2DModel",
         pretrained_model_id="meituan-longcat/LongCat-Image",

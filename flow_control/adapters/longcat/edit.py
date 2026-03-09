@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 
 from flow_control.utils.hf_model import HfModelLoader
@@ -13,6 +15,7 @@ class LongCatEditBatch(LongCatBatch):
 
 
 class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
+    type: Literal["edit"] = "edit"
     hf_model: HfModelLoader = HfModelLoader(
         library="diffusers",
         class_name="LongCatImageTransformer2DModel",

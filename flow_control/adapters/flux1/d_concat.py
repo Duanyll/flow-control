@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 from peft import LoraConfig
 
@@ -17,6 +19,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     This is used by Flux.1 Canny and Flux.1 Depth models.
     """
 
+    type: Literal["d_concat"] = "d_concat"
     input_dimension: int = 128
 
     peft_lora_rank: int = 128

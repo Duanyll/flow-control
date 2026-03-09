@@ -129,6 +129,8 @@ max-complexity = 10
 typeCheckingMode = "standard"
 # HuggingFace officially uses private imports a lot, so we disable the check here.
 reportPrivateImportUsage = "none"
+# Pydantic discriminated unions require Literal overrides of `type` fields in subclasses.
+reportIncompatibleVariableOverride = "none"
 reportUnnecessaryTypeIgnoreComment = "error"
 ignore = [
   ".venv/**",

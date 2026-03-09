@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 import torch.nn as nn
 from diffusers import QwenImageTransformer2DModel
@@ -110,6 +112,9 @@ class QwenImageBatch(Batch):
 class QwenImageAdapter[TBatch: QwenImageBatch](
     BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
 ):
+    arch: Literal["qwen"] = "qwen"
+    type: Literal["base"] = "base"
+
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",

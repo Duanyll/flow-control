@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import ConfigDict, PrivateAttr
@@ -9,7 +9,7 @@ from .base import BaseReward
 class PickScoreReward(BaseReward):
     """PickScore-based preference reward."""
 
-    type: str = "pickscore"
+    type: Literal["pickscore"] = "pickscore"
     processor_name: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
     model_name: str = "yuvalkirstain/PickScore_v1"
 

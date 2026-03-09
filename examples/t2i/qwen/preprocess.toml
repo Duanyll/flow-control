@@ -1,3 +1,5 @@
+#:schema ../../../schema/preprocess.schema.json
+
 num_loader_workers = 1
 processor_devices = [0]
 num_threads_per_worker = 8

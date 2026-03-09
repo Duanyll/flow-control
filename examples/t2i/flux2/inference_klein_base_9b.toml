@@ -1,3 +1,5 @@
+#:schema ../../../schema/inference.schema.json
+
 seed_checkpoint_dir = "./demo/seed/flux2_klein_base_9b"
 save_preview_dir = "./demo/inference_flux2_klein_base_9b_t2i_preview"
 

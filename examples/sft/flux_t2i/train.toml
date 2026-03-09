@@ -1,3 +1,5 @@
+#:schema ../../../schema/sft.schema.json
+
 checkpoint_root = "./runs/sft/flux"
 # seed_checkpoint_dir = "./runs/sft/flux/seed"
 seed_checkpoint_dir = "/dev/shm/flow-control/seed"

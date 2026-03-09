@@ -3,7 +3,7 @@ from typing import Literal
 
 import torch
 
-from flow_control.adapters import Batch, ModelAdapter
+from flow_control.adapters.base import BaseModelAdapter, Batch
 
 from .euler import EulerSampler, SdeTrajectory
 
@@ -33,7 +33,7 @@ class ShiftedEulerSampler(EulerSampler):
 
     def _sample(
         self,
-        model: ModelAdapter,
+        model: BaseModelAdapter,
         batch: Batch,
         negative_batch: Batch | None = None,
         t_start: float = 1.0,
@@ -57,6 +57,7 @@ class ShiftedEulerSampler(EulerSampler):
 
 
 class ConstantShiftSampler(ShiftedEulerSampler):
+    type: Literal["constant_shift"] = "constant_shift"
     shift_value: float = 1.0
 
     def _calculate_shift_factor(self, seq_len: int) -> float:
@@ -64,6 +65,7 @@ class ConstantShiftSampler(ShiftedEulerSampler):
 
 
 class LinearShiftSampler(ShiftedEulerSampler):
+    type: Literal["linear_shift"] = "linear_shift"
     base_image_seq_len: int = 256
     max_image_seq_len: int = 4096
     base_shift: float = 0.5
@@ -79,6 +81,7 @@ class LinearShiftSampler(ShiftedEulerSampler):
 
 
 class SquaredShiftSampler(ShiftedEulerSampler):
+    type: Literal["squared_shift"] = "squared_shift"
     base_image_seq_len: int = 256
 
     def _calculate_shift_factor(self, seq_len: int) -> float:
@@ -87,6 +90,7 @@ class SquaredShiftSampler(ShiftedEulerSampler):
 
 
 class Flux2ShiftSampler(ShiftedEulerSampler):
+    type: Literal["flux2_shift"] = "flux2_shift"
     a1: float = 8.73809524e-05
     b1: float = 1.89833333
     a2: float = 0.00016927
