@@ -1,3 +1,4 @@
+import asyncio
 import math
 from typing import Any, Literal
 
@@ -83,6 +84,26 @@ class CompositeReward(BaseReward):
         if total is None:
             raise RuntimeError("CompositeReward requires at least one child reward.")
         return total, details
+
+    async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+        """Async version that scores children concurrently."""
+        if self.is_remote:
+            return await self._async_remote_batch_call(
+                "/score", batch, fields=self._batch_fields
+            )
+        scores = await asyncio.gather(
+            *(r.async_score(batch) for r in self._reward_instances)
+        )
+        total: torch.Tensor | None = None
+        for reward, score in zip(self._reward_instances, scores, strict=True):
+            weighted = reward.weight * score
+            if total is None:
+                total = weighted
+            else:
+                total = total + weighted.to(device=total.device, dtype=total.dtype)
+        if total is None:
+            raise RuntimeError("CompositeReward requires at least one child reward.")
+        return total
 
     def _unload_model(self) -> None:
         for reward in self._reward_instances:

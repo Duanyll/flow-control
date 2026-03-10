@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import contextmanager
 from typing import Any, Literal, TypedDict
@@ -340,11 +341,17 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
     # --- Core training phases ---
 
     def _collect_rollouts(self) -> list[Rollout]:
-        """Rollout phase: generate images and compute rewards."""
+        """Rollout phase: generate images, decode, then score rewards concurrently.
+
+        Reward scoring is launched asynchronously right after each sample's VAE
+        decode completes, so network-bound reward requests (e.g. LLM judges)
+        overlap with subsequent GPU rollouts.
+        """
         rollouts: list[Rollout] = []
         self.transformer.eval()
 
         total_rollouts = self.conf.num_batches_per_epoch * self.rollout_batch_per_rank
+
         rollout_progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -352,12 +359,12 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
-            TextColumn("• Reward: {task.fields[reward]:.4f}"),
             console=console,
         )
-        rollout_task = rollout_progress.add_task(
-            "Rollout...", total=total_rollouts, reward=0.0
-        )
+        rollout_task = rollout_progress.add_task("Rollout...", total=total_rollouts)
+
+        loop = asyncio.new_event_loop()
+        reward_tasks: list[asyncio.Task[torch.Tensor]] = []
 
         with rollout_progress:
             for batch_idx, batch in enumerate(self.dataloader):
@@ -398,24 +405,39 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
                 # Decode final latents to images and merge into batch
                 final_latents = trajectory["latents"][:, -1]
-                decoded = self.processor.decode_output(final_latents, batch)
-                batch.update(decoded)
-
-                # Compute reward — score() receives the full batch dict
                 with torch.no_grad():
-                    reward = self.conf.reward.score(batch)
+                    decoded = self.processor.decode_output(final_latents, batch)
+                batch.update(decoded)
 
                 rollouts.append(
                     {
                         "trajectory": trajectory,
-                        "reward": reward.view(1) if reward.ndim == 0 else reward,
+                        "reward": torch.tensor(0.0),  # placeholder, filled below
                         "key": batch.get("__key__", "unknown"),
                         "batch": batch,
                         "negative_batch": negative_batch,
                     }
                 )
-                rollout_progress.update(rollout_task, reward=reward.mean().item())
+
+                # Fire async reward immediately so it overlaps with next GPU rollout
+                reward_tasks.append(
+                    loop.create_task(self.conf.reward.async_score(batch))
+                )
                 rollout_progress.advance(rollout_task)
+
+        # Await all outstanding reward tasks
+        rewards: list[torch.Tensor] = loop.run_until_complete(
+            asyncio.gather(*reward_tasks)
+        )
+        loop.close()
+
+        for rollout, reward in zip(rollouts, rewards, strict=True):
+            rollout["reward"] = reward.view(1) if reward.ndim == 0 else reward
+
+        reward_mean = torch.stack([r["reward"] for r in rollouts]).mean().item()
+        logger.info(
+            f"Epoch {self.current_epoch}: rollout reward_mean={reward_mean:.4f}"
+        )
 
         return rollouts
 
