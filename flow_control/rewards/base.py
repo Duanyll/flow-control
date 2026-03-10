@@ -15,7 +15,7 @@ class BaseReward(BaseModel, ABC):
     """
 
     type: str
-
+    weight: float = 1.0
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     @abstractmethod

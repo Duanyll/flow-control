@@ -2,8 +2,6 @@
 # Rewritten from mmdet/models/backbones/swin.py as clean nn.Module classes.
 # Based on mmdet code, Copyright (c) OpenMMLab. All rights reserved.
 
-from __future__ import annotations
-
 import math
 from copy import deepcopy
 

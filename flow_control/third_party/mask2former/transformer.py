@@ -3,8 +3,6 @@
 # with pure PyTorch implementations.
 # Based on mmcv and mmdet code, Copyright (c) OpenMMLab. All rights reserved.
 
-from __future__ import annotations
-
 import math
 import warnings
 

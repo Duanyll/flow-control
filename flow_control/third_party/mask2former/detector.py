@@ -1,7 +1,7 @@
 # Top-level Mask2Former detector for inference.
 # Combines SwinTransformer backbone, Mask2FormerHead, and post-processing.
 
-from __future__ import annotations
+import os
 
 import torch
 import torch.nn as nn
@@ -16,23 +16,8 @@ from .swin import SwinTransformer
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-# fmt: off
-COCO_THING_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
-    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
-    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
-    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-    "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
-    "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush",
-]
-# fmt: on
+with open(os.path.join(os.path.dirname(__file__), "object_names.txt")) as f:
+    COCO_THING_CLASSES = [line.strip() for line in f]
 
 
 class Mask2FormerDetector(nn.Module):

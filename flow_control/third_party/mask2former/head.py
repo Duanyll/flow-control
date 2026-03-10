@@ -2,8 +2,6 @@
 # Rewritten from mmdet/models/dense_heads/mask2former_head.py.
 # Based on mmdet code, Copyright (c) OpenMMLab. All rights reserved.
 
-from __future__ import annotations
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

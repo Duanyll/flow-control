@@ -2,8 +2,6 @@
 # Rewritten from mmdet/models/layers/msdeformattn_pixel_decoder.py.
 # Based on mmdet code, Copyright (c) OpenMMLab. All rights reserved.
 
-from __future__ import annotations
-
 import math
 
 import torch
