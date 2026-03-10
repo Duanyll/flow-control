@@ -8,7 +8,7 @@ relative positions.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 import numpy as np
 import torch
@@ -35,6 +35,32 @@ COLORS = [
     "black",
     "white",
 ]
+
+
+GenevalIncludeSpec = TypedDict(
+    "GenevalIncludeSpec",
+    {
+        "class": str,
+        "count": int,
+        "color": NotRequired[str],
+        "position": NotRequired[tuple[str, int]],  # (relation, target_group_index)
+    },
+)
+
+GenevalExcludeSpec = TypedDict(
+    "GenevalExcludeSpec",
+    {
+        "class": str,
+        "count": int,
+    },
+)
+
+
+class GenEvalMetadata(TypedDict):
+    tag: str
+    prompt: str
+    include: NotRequired[list[GenevalIncludeSpec]]
+    exclude: NotRequired[list[GenevalExcludeSpec]]
 
 
 class GenevalReward(BaseReward):
@@ -66,7 +92,11 @@ class GenevalReward(BaseReward):
     _classnames: list[str] = PrivateAttr(default_factory=list)
     _color_classifiers: dict[str, Any] = PrivateAttr(default_factory=dict)
 
-    def load_model(self, device: torch.device) -> None:
+    @property
+    def _batch_fields(self) -> set[str]:
+        return {"clean_image", "metadata", "prompt"}
+
+    def _load_model(self, device: torch.device) -> None:
         import open_clip
 
         from flow_control.third_party.mask2former import (
@@ -96,7 +126,7 @@ class GenevalReward(BaseReward):
     def _postprocess_detections(
         self,
         result: Any,
-        metadata: dict[str, Any],
+        metadata: GenEvalMetadata,
     ) -> dict[str, list[tuple[np.ndarray, np.ndarray | None]]]:
         """Convert InstanceResult into per-class detection dict.
 
@@ -200,7 +230,7 @@ class GenevalReward(BaseReward):
         self,
         image: Image.Image,
         detected: dict[str, list[tuple[np.ndarray, np.ndarray | None]]],
-        req: dict[str, Any],
+        req: GenevalIncludeSpec,
         matched_groups: list[list[tuple[np.ndarray, np.ndarray | None]] | None],
     ) -> tuple[bool, list[float], list[str]]:
         """Evaluate a single 'include' requirement.
@@ -260,7 +290,7 @@ class GenevalReward(BaseReward):
         self,
         image: Image.Image,
         detected: dict[str, list[tuple[np.ndarray, np.ndarray | None]]],
-        metadata: dict[str, Any],
+        metadata: GenEvalMetadata,
     ) -> tuple[bool, float, str]:
         """Evaluate image against metadata specification.
 
@@ -299,9 +329,11 @@ class GenevalReward(BaseReward):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         image = batch["clean_image"]  # [1, C, H, W] in [0, 1]
         metadata = batch["metadata"]
+        if "prompt" not in metadata:
+            metadata["prompt"] = batch["prompt"]
 
         # Run detection
         results = self._detector(image.to(self._device))
@@ -318,7 +350,7 @@ class GenevalReward(BaseReward):
 
         return torch.tensor(score, device=image.device, dtype=image.dtype)
 
-    def unload_model(self) -> None:
+    def _unload_model(self) -> None:
         import gc
 
         del self._detector, self._clip_model, self._clip_transform

@@ -41,11 +41,18 @@ class CompositeReward(BaseReward):
                 "Consider normalizing weights for interpretability."
             )
 
-    def load_model(self, device: torch.device) -> None:
+    @property
+    def _batch_fields(self) -> set[str]:
+        fields = set()
+        for reward in self._reward_instances:
+            fields.update(reward._batch_fields)
+        return fields
+
+    def _load_model(self, device: torch.device) -> None:
         for reward in self._reward_instances:
             reward.load_model(device)
 
-    def score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Compute weighted sum of reward scores for a single sample."""
         total: torch.Tensor | None = None
         for reward in self._reward_instances:
@@ -77,6 +84,6 @@ class CompositeReward(BaseReward):
             raise RuntimeError("CompositeReward requires at least one child reward.")
         return total, details
 
-    def unload_model(self) -> None:
+    def _unload_model(self) -> None:
         for reward in self._reward_instances:
             reward.unload_model()

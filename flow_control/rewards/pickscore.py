@@ -19,7 +19,11 @@ class PickScoreReward(BaseReward):
     _processor: Any = PrivateAttr(default=None)
     _device: Any = PrivateAttr(default=None)
 
-    def load_model(self, device: torch.device) -> None:
+    @property
+    def _batch_fields(self) -> set[str]:
+        return {"clean_image", "prompt"}
+
+    def _load_model(self, device: torch.device) -> None:
         from transformers import CLIPModel, CLIPProcessor
 
         self._device = device
@@ -30,7 +34,7 @@ class PickScoreReward(BaseReward):
         self._model = model.to(device)  # type: ignore[reportArgumentType]
 
     @torch.no_grad()
-    def score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Compute PickScore for a single sample.
 
         Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -74,7 +78,7 @@ class PickScoreReward(BaseReward):
         # Normalize to ~[0, 1] range
         return scores / 26.0
 
-    def unload_model(self) -> None:
+    def _unload_model(self) -> None:
         import gc
 
         del self._model, self._processor

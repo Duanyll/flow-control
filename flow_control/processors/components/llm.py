@@ -61,6 +61,7 @@ class LLMClient(BaseModel):
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             connector = aiohttp.TCPConnector(
+                # There has to be some limit to tcp connections or we might run out of file descriptors
                 limit=self.max_concurrency if self.max_concurrency > 0 else 64,
                 force_close=True,
             )

@@ -1,8 +1,5 @@
-import io
-import pickle
 from typing import Annotated, Any, Literal, cast
 
-import httpx
 import torch
 from diffusers import (
     AutoencoderKL,
@@ -17,87 +14,24 @@ from pydantic import Discriminator, Tag
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
+from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
 
-# Use a long timeout for large tensor transfers
-REMOTE_VAE_TIMEOUT = httpx.Timeout(timeout=300.0)
 
-
-def _serialize_tensor(tensor: torch.Tensor) -> bytes:
-    """Serialize tensor to bytes, converting to bf16 first."""
-    tensor = tensor.to(torch.bfloat16).cpu()
-    buffer = io.BytesIO()
-    pickle.dump(tensor, buffer)
-    return buffer.getvalue()
-
-
-def _deserialize_tensor(
-    data: bytes, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
-    """Deserialize tensor from bytes."""
-    buffer = io.BytesIO(data)
-    tensor: torch.Tensor = pickle.load(buffer)  # noqa: S301
-    return tensor.to(device=device, dtype=dtype)
-
-
-class BaseVAE[T: ModelMixin](HfModelLoader[T]):
+class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     endpoint: str | None = None
-
-    def _load_model(self, device: torch.device):
-        return super().load_model(device)
 
     def load_model(self, device: torch.device):
         if self.endpoint is not None:
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")
-            self._verify_remote_vae()
+            self._init_remote(device)
             self._model = None
             # Cast to T so don't have to force downstream checks for model usage
             return cast(T, None)
         else:
             return super().load_model(device)
-
-    def _verify_remote_vae(self):
-        """Verify that the remote VAE server is available and serves the correct model."""
-        with httpx.Client(timeout=REMOTE_VAE_TIMEOUT) as client:
-            try:
-                response = client.get(f"{self.endpoint}/health")
-                response.raise_for_status()
-            except httpx.HTTPError as e:
-                raise ConnectionError(
-                    f"Failed to connect to remote VAE server at {self.endpoint}: {e}"
-                ) from e
-
-            info = response.json()
-            remote_model_id = info.get("pretrained_model_id")
-            remote_revision = info.get("revision")
-            remote_subfolder = info.get("subfolder")
-
-            mismatches = []
-            if remote_model_id != self.pretrained_model_id:
-                mismatches.append(
-                    f"pretrained_model_id: local={self.pretrained_model_id}, "
-                    f"remote={remote_model_id}"
-                )
-            if remote_revision != self.revision:
-                mismatches.append(
-                    f"revision: local={self.revision}, remote={remote_revision}"
-                )
-            if remote_subfolder != self.subfolder:
-                mismatches.append(
-                    f"subfolder: local={self.subfolder}, remote={remote_subfolder}"
-                )
-
-            if mismatches:
-                raise ValueError(
-                    "Remote VAE server model mismatch:\n" + "\n".join(mismatches)
-                )
-
-            logger.info(
-                f"Remote VAE server verified: {remote_model_id} "
-                f"(revision={remote_revision}, subfolder={remote_subfolder})"
-            )
 
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         return self.model.encode(images).latent_dist.sample()
@@ -106,42 +40,26 @@ class BaseVAE[T: ModelMixin](HfModelLoader[T]):
         return self.model.decode(latents).sample
 
     def encode(self, images: torch.Tensor) -> torch.Tensor:
-        if self.endpoint is not None:
-            return self._remote_encode(images)
-        else:
-            return self._encode(images)
+        if self.is_remote:
+            return self._remote_tensor_call("/encode", images)
+        return self._encode(images)
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        if self.endpoint is not None:
-            return self._remote_decode(latents)
-        else:
-            return self._decode(latents)
+        if self.is_remote:
+            return self._remote_tensor_call("/decode", latents)
+        return self._decode(latents)
 
-    def _remote_encode(self, images: torch.Tensor) -> torch.Tensor:
-        """Encode images using remote VAE server."""
-        device = images.device
-        dtype = images.dtype
-        data = _serialize_tensor(images)
-        logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB to remote VAE for encoding"
-        )
-        with httpx.Client(timeout=REMOTE_VAE_TIMEOUT) as client:
-            response = client.post(f"{self.endpoint}/encode", content=data)
-            response.raise_for_status()
-        return _deserialize_tensor(response.content, device, dtype)
+    async def async_encode(self, images: torch.Tensor) -> torch.Tensor:
+        """Async version of ``encode`` for use in async pipelines."""
+        if self.is_remote:
+            return await self._async_remote_tensor_call("/encode", images)
+        return self._encode(images)
 
-    def _remote_decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """Decode latents using remote VAE server."""
-        device = latents.device
-        dtype = latents.dtype
-        data = _serialize_tensor(latents)
-        logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB to remote VAE for decoding"
-        )
-        with httpx.Client(timeout=REMOTE_VAE_TIMEOUT) as client:
-            response = client.post(f"{self.endpoint}/decode", content=data)
-            response.raise_for_status()
-        return _deserialize_tensor(response.content, device, dtype)
+    async def async_decode(self, latents: torch.Tensor) -> torch.Tensor:
+        """Async version of ``decode`` for use in async pipelines."""
+        if self.is_remote:
+            return await self._async_remote_tensor_call("/decode", latents)
+        return self._decode(latents)
 
 
 class Flux1VAE(BaseVAE[AutoencoderKL]):

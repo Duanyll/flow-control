@@ -15,6 +15,7 @@ def main():
         "seed",
         "launch",
         "vae-server",
+        "reward-server",
     ]:
         sub = subparsers.add_parser(name)
         sub.add_argument(
@@ -57,6 +58,8 @@ def _dispatch(command: str, args: argparse.Namespace) -> None:
         from flow_control.scripts.launch import run
     elif command == "vae-server":
         from flow_control.scripts.vae_server import run
+    elif command == "reward-server":
+        from flow_control.scripts.reward_server import run
     else:
         raise ValueError(f"Unknown command: {command}")
 

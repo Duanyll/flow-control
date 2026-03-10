@@ -20,7 +20,11 @@ class CLIPScoreReward(BaseReward):
     _transform: Any = PrivateAttr(default=None)
     _device: Any = PrivateAttr(default=None)
 
-    def load_model(self, device: torch.device) -> None:
+    @property
+    def _batch_fields(self) -> set[str]:
+        return {"clean_image", "prompt"}
+
+    def _load_model(self, device: torch.device) -> None:
         from transformers import CLIPModel, CLIPProcessor
 
         self._device = device
@@ -61,7 +65,7 @@ class CLIPScoreReward(BaseReward):
         self._transform = T.Compose(transforms)
 
     @torch.no_grad()
-    def score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Compute CLIP score for a single sample.
 
         Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -82,7 +86,7 @@ class CLIPScoreReward(BaseReward):
         # Normalize score to ~[0, 1] range
         return outputs.logits_per_image.diagonal() / 30.0
 
-    def unload_model(self) -> None:
+    def _unload_model(self) -> None:
         import gc
 
         del self._model, self._processor, self._transform

@@ -5,11 +5,13 @@ from pydantic import Discriminator, Tag, TypeAdapter
 from .base import BaseReward
 from .clip_score import CLIPScoreReward
 from .composite import CompositeReward
+from .geneval import GenevalReward
 from .pickscore import PickScoreReward
 
 Reward = Annotated[
     Annotated[CLIPScoreReward, Tag("clip_score")]
     | Annotated[PickScoreReward, Tag("pickscore")]
+    | Annotated[GenevalReward, Tag("geneval")]
     | Annotated[CompositeReward, Tag("composite")],
     Discriminator("type"),
 ]

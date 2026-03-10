@@ -6,12 +6,12 @@ This is the `flow_control` module, which provides training utilities for flow-ma
 
 Use `uv` for package management. Rules to follow:
 
-1. When adding, removing, or modifying dependencies, never edit `pyproject.toml` directly. Instead, use `uv add`, `uv remove` commands to manage dependencies.
-2. To run python scripts in correct environment, use `uv run <script>` or `uv run -m <module>` instead of `python <script>` or `python -m <module>`.
+1. Use `uv add`, `uv remove` commands to manage dependencies, never edit `pyproject.toml` directly.
+2. To run python scripts, use `uv run <script>` or `uv run -m <module>`, never directly call `python <script>` or `python -m <module>`.
 
 ## Type hints and linting
 
-Use `pyright` for type checking, and `ruff` for linting and formatting. To manually run type checking and linting, use the following commands:
+Use `pyright` for type checking, and `ruff` for linting and formatting, with commands:
 
 ```bash
 uv run pyright <path_to_check>
@@ -22,32 +22,29 @@ uv run ruff check --fix <path_to_check>
 Rules to follow:
 
 1. Always try to maintain type hints in the code. We use Python 3.12, so prefer using `dict`, `list`, `|`, etc. over `Dict`, `List`, `Union` from `typing`.
-2. If you encounter type errors, try to fix them by adding or adjusting type hints. If you have to use `Any` or `# type: ignore`, please add a comment describing why it's necessary and what the expected types are.
-3. Try to follow style guidelines enforced by `ruff`. Most style issues can be automatically fixed with first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
+2. Try to use `TypedDict` for dicts with fixed structure, instead of using `dict[str, Any]`.
+3. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
+4. The automated diagnostics from IDE after you edit the code may be stale or incorrect. Call above CLI commands to get accurate diagnostics.
 
 ## Code structure
 
 1. The main code for the `flow_control` module is located in the `flow_control` directory.
-2. Entrypoints: The entrypoint scripts facing users are located in the `flow_control/scripts` directory. Read code here to understand how to use the module, and add new entrypoint scripts here if needed. 
-3. Testing and examples: we do not maintain traditional unit tests. Any code outside `flow_control/scripts` may contain a simple `if __name__ == "__main__":` block for quick testing and debugging. More complicated examples and usage demonstrations (e.g., requires multiple mock classes or multiprocessing) of individual modules should be placed in the `examples` directory at the root of the repository.
+2. The entrypoint scripts facing users are located in the `flow_control/scripts` directory.
 
 ## Coding conventions
 
 ### Pydantic patterns
 
-For anything ouside `flow_control.utils`, we prefer: **Pass data through function arguments, and store configuration in Pydantic models.**
+We prefer to: **Pass data through function arguments, and store configuration in Pydantic models.**
 
 1. We extend `pydantic.BaseModel` to define classes for configuration, avoid spread untyped kwargs and dicts in the code.
 2. Behaviours are preferred to be methods of the config class. This means we can override the behaviour by extending the super class, making the code more modular. 
-   - See `flow_control.training.weighting` and `flow_control.utils.types` for examples of this pattern.
-   - `HsdpEngine` in `flow_control.training.hsdp_engine` is an exception, since it has to hold many non-pydantic states (e.g., dataloaders, optimizers, etc.), it has a separated `HsdpEngineConfig` class for configuration, and the engine itself is a `Stateful` class that holds all the states and behaviours.
-3. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 
 
 ### Logging and printing
 
 Rules to follow:
 
-1. Avoid using `print()` directly in the code. Instead, do the following:
+1. Avoid using `print()` directly in library code. Instead, do the following:
    ```python
    from flow_control.utils.logging import get_logger, console
    logger = get_logger(__name__)
@@ -61,5 +58,12 @@ Rules to follow:
 ### Batch processing and Tensor operations
 
 1. Prefer `einops` for tensor operations, instead of directly using `view()`, `reshape()`, `permute()`, etc. 
-2. Prefer to pass images as `torch.Tensor` in `BCHW` format and in `[0, 1]` range. To support images in different resolutions, we use `list` of `1CHW` tensors. You may find `pil_to_tensor` and `tensor_to_pil` functions in `flow_control.utils.image` useful.
+2. Prefer to pass images as `torch.Tensor` in `BCHW` format and in `[0, 1]` range. You may find `pil_to_tensor` and `tensor_to_pil` functions in `flow_control.utils.common` useful.
 3. If it brings extra complexity to support batch size > 1, just support batch size of 1. 
+
+## Workflow
+
+1. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 
+2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
+3. Make sure you fix all linting and type errors.
+4. You don't have to run tests that requires actual weights / datasets, unless the user instructs you to do so. 
