@@ -4,6 +4,7 @@ from typing import Any
 import torch
 from pydantic import ConfigDict
 
+from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.remote import RemoteOffloadable
 
 
@@ -76,6 +77,21 @@ class BaseReward(RemoteOffloadable, ABC):
                 "/score", batch, fields=self._batch_fields
             )
         return self._score(batch)
+
+    def supports_rollout_overlap(self) -> bool:
+        """Whether this reward can safely overlap with diffusion rollout work.
+
+        Remote rewards are safe by default because they do not execute model
+        compute in the trainer process once the request payload is prepared.
+        Local GPU rewards should keep the default ``False`` so rollout and
+        reward evaluation do not contend for the same device.
+        """
+        return self.is_remote
+
+    def prepare_batch_for_async(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Create a CPU snapshot of the fields needed by ``async_score``."""
+        filtered_batch = {k: v for k, v in batch.items() if k in self._batch_fields}
+        return deep_move_to_device(filtered_batch, torch.device("cpu"))
 
     def unload_model(self) -> None:
         """Unload reward model (local or remote)."""

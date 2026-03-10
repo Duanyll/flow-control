@@ -105,6 +105,11 @@ class CompositeReward(BaseReward):
             raise RuntimeError("CompositeReward requires at least one child reward.")
         return total
 
+    def supports_rollout_overlap(self) -> bool:
+        return all(
+            reward.supports_rollout_overlap() for reward in self._reward_instances
+        )
+
     def _unload_model(self) -> None:
         for reward in self._reward_instances:
             reward.unload_model()

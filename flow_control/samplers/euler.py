@@ -12,8 +12,6 @@ class SdeTrajectory(TypedDict):
     latents: torch.Tensor  # [B, T+1, N, D] all timestep latents
     log_probs: torch.Tensor  # [B, T] per-step log probabilities
     timesteps: torch.Tensor  # [T+1] sigma sequence
-    means: torch.Tensor  # [B, T, N, D] predicted means
-    std_devs: torch.Tensor  # [T] per-step standard deviations
 
 
 class EulerSampler(BaseSampler):
@@ -56,8 +54,6 @@ class EulerSampler(BaseSampler):
 
         all_latents = [latents] if return_trajectory else None
         all_log_probs: list[torch.Tensor] = []
-        all_means: list[torch.Tensor] = []
-        all_std_devs: list[torch.Tensor] = []
 
         with make_sample_progress() as progress:
             task = progress.add_task("Sampling", total=self.steps)
@@ -77,8 +73,6 @@ class EulerSampler(BaseSampler):
                     assert all_latents is not None
                     all_latents.append(latents)
                     all_log_probs.append(log_prob)
-                    all_means.append(mean)
-                    all_std_devs.append(std_dev)
 
                 progress.advance(task)
 
@@ -87,20 +81,11 @@ class EulerSampler(BaseSampler):
 
         stacked_latents = torch.stack(all_latents, dim=1)
         stacked_log_probs = torch.stack(all_log_probs, dim=1)
-        stacked_means = torch.stack(all_means, dim=1)
-        stacked_std_devs = torch.stack(
-            [
-                s if isinstance(s, torch.Tensor) else torch.tensor(s, device=device)
-                for s in all_std_devs
-            ]
-        )
 
         return SdeTrajectory(
             latents=stacked_latents,
             log_probs=stacked_log_probs,
             timesteps=sigmas,
-            means=stacked_means,
-            std_devs=stacked_std_devs,
         )
 
     def sde_step(

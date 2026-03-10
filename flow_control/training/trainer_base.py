@@ -3,6 +3,7 @@
 import os
 import shutil
 from abc import abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import aim
@@ -287,10 +288,22 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
         )
         return progress, task
 
+    def _default_on_sample(self, batch: dict[str, Any]) -> None:
+        """Default per-sample callback: log generated images."""
+        image = tensor_to_pil(batch["clean_image"])
+        key = batch.get("__key__", "unknown")
+        self.log_images(image, key)
+
     @torch.no_grad()
-    def validate_and_log(self):
+    def validate_and_log(
+        self,
+        on_sample: Callable[[dict[str, Any]], None] | None = None,
+    ):
         if self.validation_dataloader is None:
             return
+
+        if on_sample is None:
+            on_sample = self._default_on_sample
 
         logger.info(f"Validating at step {self.current_step}...")
         progress, task = self.make_validation_progress_bar()
@@ -322,13 +335,9 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
                             "validate_and_log expects sampler.sample(..., return_trajectory=False) "
                             "to return a tensor."
                         )
-                    image = tensor_to_pil(
-                        self.processor.decode_output(clean_latents, batch)[
-                            "clean_image"
-                        ]
-                    )
-                    key = batch.get("__key__", "unknown")
-                    self.log_images(image, key)
+                    decoded = self.processor.decode_output(clean_latents, batch)
+                    batch.update(decoded)
+                    on_sample(batch)
                     progress.advance(task)
         self.transformer.train()
         logger.info(f"Completed validation at step {self.current_step}.")

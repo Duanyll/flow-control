@@ -101,3 +101,6 @@ class UnifiedReward(BaseReward):
         reward = weighted_sum / (total_weight * 5.0) if total_weight > 0 else 0.0
 
         return torch.tensor(reward, dtype=torch.float32)
+
+    def supports_rollout_overlap(self) -> bool:
+        return True

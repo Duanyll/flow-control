@@ -1,5 +1,8 @@
 import asyncio
+import concurrent.futures
 import os
+import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, Literal, TypedDict
 
@@ -62,6 +65,9 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     checkpoint_epochs: int = 5
     validation_epochs: int = 20
 
+    # Validation mode: what to log during validation
+    validation_mode: Literal["images", "reward", "both"] = "both"
+
     # Override defaults from base
     optimizer: dict[str, Any] = {"class_name": "AdamW", "lr": 3e-4}
     ema_decay: float = 1.0
@@ -74,6 +80,37 @@ class Rollout(TypedDict):
     key: str
     batch: Batch
     negative_batch: Batch | None
+
+
+class RewardLoopThread:
+    """Run async reward requests in a dedicated event loop thread."""
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="grpo-reward-loop",
+            daemon=True,
+        )
+        self._started = False
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def submit(self, coro: Any) -> concurrent.futures.Future[torch.Tensor]:
+        if not self._started:
+            self._thread.start()
+            self._started = True
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def close(self) -> None:
+        if not self._started:
+            self._loop.close()
+            return
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+        self._loop.close()
 
 
 class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
@@ -270,15 +307,22 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         timestep_idx: int,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         trajectory = rollout["trajectory"]
-        batch = rollout["batch"]
-        negative_batch = rollout["negative_batch"]
-        old_log_probs = trajectory["log_probs"][0]  # [T]
-        sigmas = trajectory["timesteps"]  # [T+1]
+        batch = deep_move_to_device(rollout["batch"], self.device)
+        negative_batch = (
+            deep_move_to_device(rollout["negative_batch"], self.device)
+            if rollout["negative_batch"] is not None
+            else None
+        )
+        old_log_probs = trajectory["log_probs"][0].to(device=self.device)  # [T]
+        sigmas = trajectory["timesteps"].to(device=self.device)  # [T+1]
 
-        latent_t = trajectory["latents"][:, timestep_idx]
-        latent_next = trajectory["latents"][:, timestep_idx + 1]
+        latent_t = trajectory["latents"][:, timestep_idx].to(device=self.device)
+        latent_next = trajectory["latents"][:, timestep_idx + 1].to(device=self.device)
         sigma = sigmas[timestep_idx : timestep_idx + 1]
         sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
+        advantage_slice = rollout_advantages[timestep_idx : timestep_idx + 1].to(
+            device=self.device
+        )
 
         log_prob, mean, std_dev = self.grpo_sampler.compute_logprob_at_step(
             self.model,
@@ -306,7 +350,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         loss, metrics = self.grpo_loss(
             log_prob=log_prob,
             old_log_prob=old_log_probs[timestep_idx : timestep_idx + 1],
-            advantages=rollout_advantages[timestep_idx : timestep_idx + 1],
+            advantages=advantage_slice,
             clip_range=self.conf.clip_range,
             adv_clip_max=self.conf.adv_clip_max,
             mean=mean,
@@ -363,76 +407,99 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         )
         rollout_task = rollout_progress.add_task("Rollout...", total=total_rollouts)
 
-        loop = asyncio.new_event_loop()
-        reward_tasks: list[asyncio.Task[torch.Tensor]] = []
+        overlap_reward = self.conf.reward.supports_rollout_overlap()
+        reward_loop = RewardLoopThread() if overlap_reward else None
+        reward_futures: list[concurrent.futures.Future[torch.Tensor]] = []
 
-        with rollout_progress:
-            for batch_idx, batch in enumerate(self.dataloader):
-                if batch_idx >= total_rollouts:
-                    break
+        try:
+            with rollout_progress:
+                for batch_idx, batch in enumerate(self.dataloader):
+                    if batch_idx >= total_rollouts:
+                        break
 
-                batch = deep_move_to_device(batch, self.device)
-                batch = deep_cast_float_dtype(batch, self.model.dtype)
+                    batch = deep_move_to_device(batch, self.device)
+                    batch = deep_cast_float_dtype(batch, self.model.dtype)
 
-                # Initialize noise
-                generator = torch.Generator(device=self.device).manual_seed(
-                    self.conf.seed + self.current_epoch * 10000 + batch_idx
-                )
-                self.processor.initialize_latents(
-                    batch,
-                    generator=generator,
-                    device=self.device,
-                    dtype=self.model.dtype,
-                )
-
-                negative_batch: Any = (
-                    self.processor.get_negative_batch(batch)
-                    if self.grpo_sampler.cfg_scale > 1.0
-                    else None
-                )
-
-                # Run rollout and record trajectory for GRPO.
-                with torch.no_grad():
-                    rollout_out = self.grpo_sampler.sample(
-                        self.model,
-                        batch,
-                        negative_batch=negative_batch,
-                        return_trajectory=True,
+                    # Initialize noise
+                    generator = torch.Generator(device=self.device).manual_seed(
+                        self.conf.seed + self.current_epoch * 10000 + batch_idx
                     )
-                if not isinstance(rollout_out, dict):
-                    raise RuntimeError("GRPO rollout expected trajectory output.")
-                trajectory: SdeTrajectory = rollout_out
+                    self.processor.initialize_latents(
+                        batch,
+                        generator=generator,
+                        device=self.device,
+                        dtype=self.model.dtype,
+                    )
 
-                # Decode final latents to images and merge into batch
-                final_latents = trajectory["latents"][:, -1]
-                with torch.no_grad():
-                    decoded = self.processor.decode_output(final_latents, batch)
-                batch.update(decoded)
+                    negative_batch: Any = (
+                        self.processor.get_negative_batch(batch)
+                        if self.grpo_sampler.cfg_scale > 1.0
+                        else None
+                    )
 
-                rollouts.append(
-                    {
-                        "trajectory": trajectory,
+                    # Run rollout and record trajectory for GRPO.
+                    with torch.no_grad():
+                        rollout_out = self.grpo_sampler.sample(
+                            self.model,
+                            batch,
+                            negative_batch=negative_batch,
+                            return_trajectory=True,
+                        )
+                    if not isinstance(rollout_out, dict):
+                        raise RuntimeError("GRPO rollout expected trajectory output.")
+                    trajectory: SdeTrajectory = rollout_out
+
+                    # Decode final latents to images and merge into batch
+                    final_latents = trajectory["latents"][:, -1]
+                    with torch.no_grad():
+                        decoded = self.processor.decode_output(final_latents, batch)
+                    batch.update(decoded)
+
+                    rollout: Rollout = {
+                        "trajectory": {
+                            "latents": trajectory["latents"].cpu(),
+                            "log_probs": trajectory["log_probs"].cpu(),
+                            "timesteps": trajectory["timesteps"].cpu(),
+                        },
                         "reward": torch.tensor(0.0),  # placeholder, filled below
                         "key": batch.get("__key__", "unknown"),
-                        "batch": batch,
-                        "negative_batch": negative_batch,
+                        "batch": deep_move_to_device(batch, torch.device("cpu")),
+                        "negative_batch": (
+                            deep_move_to_device(
+                                negative_batch,
+                                torch.device("cpu"),
+                            )
+                            if negative_batch is not None
+                            else None
+                        ),
                     }
-                )
+                    rollouts.append(rollout)
 
-                # Fire async reward immediately so it overlaps with next GPU rollout
-                reward_tasks.append(
-                    loop.create_task(self.conf.reward.async_score(batch))
-                )
-                rollout_progress.advance(rollout_task)
+                    if reward_loop is not None:
+                        reward_batch = self.conf.reward.prepare_batch_for_async(batch)
+                        reward_futures.append(
+                            reward_loop.submit(
+                                self.conf.reward.async_score(reward_batch)
+                            )
+                        )
+                    else:
+                        reward = self._score_reward_blocking(batch)
+                        rollout["reward"] = (
+                            reward.view(1) if reward.ndim == 0 else reward
+                        )
+                        rollout["reward"] = rollout["reward"].cpu()
 
-        # Await all outstanding reward tasks
-        rewards: list[torch.Tensor] = loop.run_until_complete(
-            asyncio.gather(*reward_tasks)
-        )
-        loop.close()
+                    rollout_progress.advance(rollout_task)
 
-        for rollout, reward in zip(rollouts, rewards, strict=True):
-            rollout["reward"] = reward.view(1) if reward.ndim == 0 else reward
+            if reward_loop is not None:
+                rewards = [future.result() for future in reward_futures]
+                for rollout, reward in zip(rollouts, rewards, strict=True):
+                    rollout["reward"] = (
+                        reward.view(1) if reward.ndim == 0 else reward
+                    ).cpu()
+        finally:
+            if reward_loop is not None:
+                reward_loop.close()
 
         reward_mean = torch.stack([r["reward"] for r in rollouts]).mean().item()
         logger.info(
@@ -447,7 +514,9 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         Uses the ``__key__`` field from each rollout's batch to group rollouts
         that belong to the same prompt for per-prompt advantage estimation.
         """
-        local_rewards = torch.cat([s["reward"] for s in rollouts], dim=0)
+        local_rewards = torch.cat([s["reward"] for s in rollouts], dim=0).to(
+            self.device
+        )
 
         # Gather rewards across all processes
         gathered_rewards_list: list[torch.Tensor] = [
@@ -498,7 +567,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         local_b = local_rewards.shape[0]
         start = self.rank * local_b
         end = start + local_b
-        return advantages[start:end]
+        return advantages[start:end].cpu()
 
     def _train_on_rollouts(
         self,
@@ -581,6 +650,59 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                             torch.stack(metrics_accum["train/loss"]).mean().item()
                         )
                         train_progress.update(train_task, loss=avg_loss)
+
+    # --- Validation ---
+
+    def validate_and_log(
+        self,
+        on_sample: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        mode = self.conf.validation_mode
+        should_log_images = mode in ("images", "both")
+        should_log_reward = mode in ("reward", "both")
+
+        overlap_reward = (
+            should_log_reward and self.conf.reward.supports_rollout_overlap()
+        )
+        reward_loop = RewardLoopThread() if overlap_reward else None
+        reward_futures: list[concurrent.futures.Future[torch.Tensor]] = []
+        reward_values: list[torch.Tensor] = []
+
+        def grpo_on_sample(batch: dict[str, Any]) -> None:
+            if should_log_images:
+                self._default_on_sample(batch)
+            if not should_log_reward:
+                return
+            if reward_loop is not None:
+                reward_batch = self.conf.reward.prepare_batch_for_async(batch)
+                reward_futures.append(
+                    reward_loop.submit(self.conf.reward.async_score(reward_batch))
+                )
+                return
+            reward_values.append(self._score_reward_blocking(batch))
+
+        try:
+            super().validate_and_log(on_sample=grpo_on_sample)
+            if reward_loop is not None:
+                reward_values.extend(future.result() for future in reward_futures)
+        finally:
+            if reward_loop is not None:
+                reward_loop.close()
+
+        if reward_values:
+            local_mean = torch.stack(reward_values).mean().item()
+            val_reward_mean = self._gather_mean_scalar(local_mean)
+            self.log_metrics({"val/reward_mean": val_reward_mean})
+            logger.info(
+                f"Validation at step {self.current_step}: "
+                f"reward_mean={val_reward_mean:.4f}"
+            )
+
+    def _score_reward_blocking(self, batch: dict[str, Any]) -> torch.Tensor:
+        try:
+            return self.conf.reward.score(batch)
+        except NotImplementedError:
+            return asyncio.run(self.conf.reward.async_score(batch))
 
     # --- Main loop ---
 
