@@ -1,10 +1,16 @@
 import asyncio
 import math
-from typing import Literal, NotRequired
+from typing import Annotated, Literal, NotRequired
 
 import torch
 from einops import repeat
 
+from flow_control.utils.coercion import (
+    ImageTensor,
+    ImageTensorList,
+    JsonBeforeValidator,
+    JsonStrList,
+)
 from flow_control.utils.common import ensure_alpha_channel, remove_alpha_channel
 from flow_control.utils.draw import draw_bbox_on_image
 from flow_control.utils.logging import get_logger, warn_once
@@ -29,18 +35,20 @@ logger = get_logger(__name__)
 
 
 class EfficientLayeredInputBatch(InputBatch):
-    clean_image: torch.Tensor
-    layer_boxes: NotRequired[list[tuple[int, int, int, int]] | None]
-    layer_prompts: NotRequired[list[str] | None]
+    clean_image: ImageTensor
+    layer_boxes: NotRequired[
+        Annotated[list[tuple[int, int, int, int]], JsonBeforeValidator] | None
+    ]
+    layer_prompts: NotRequired[JsonStrList | None]
 
-    annotated_image: NotRequired[torch.Tensor]
+    annotated_image: NotRequired[ImageTensor]
 
 
 class EfficientLayeredTrainInputBatch(TrainInputBatch):
-    clean_image: torch.Tensor
-    layer_boxes: list[tuple[int, int, int, int]]
-    layer_images: list[torch.Tensor]
-    layer_prompts: NotRequired[list[str] | None]
+    clean_image: ImageTensor
+    layer_boxes: Annotated[list[tuple[int, int, int, int]], JsonBeforeValidator]
+    layer_images: ImageTensorList
+    layer_prompts: NotRequired[JsonStrList | None]
 
 
 class EfficientLayeredProcessedBatch(ProcessedBatch):

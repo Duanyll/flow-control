@@ -2,6 +2,8 @@ from typing import Literal, NotRequired
 
 import torch
 
+from flow_control.utils.coercion import ImageTensor
+
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
 from ..components.prompts import PromptStr, parse_prompt
 
@@ -13,7 +15,7 @@ class T2IInputBatch(InputBatch):
 
 class T2ITrainInputBatch(TrainInputBatch):
     prompt: NotRequired[str | None]
-    clean_image: torch.Tensor
+    clean_image: ImageTensor
 
 
 class T2IProcessedBatch(ProcessedBatch):

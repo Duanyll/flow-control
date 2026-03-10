@@ -8,7 +8,10 @@ from flow_control.utils.pipeline import DataSink
 
 from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
 from .csv import CsvDataset
+from .inline import InlineDataset
+from .jsonl import JsonlDataset
 from .lmdb import LMDBDataset, LMDBDataSink
+from .parquet import ParquetDataset
 from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
@@ -22,7 +25,7 @@ DatasetConfig = Annotated[
             "properties": {
                 "type": {
                     "type": "string",
-                    "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, huggingface, multi)",
+                    "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, jsonl, parquet, inline, huggingface, multi)",
                 },
             },
             "required": ["type"],
@@ -39,6 +42,9 @@ DATASET_REGISTRY = {
     "bucket_directory": BucketDirectoryDataset,
     "prism_layers_pro": PrismLayersProDataset,
     "csv": CsvDataset,
+    "inline": InlineDataset,
+    "jsonl": JsonlDataset,
+    "parquet": ParquetDataset,
 }
 
 if TYPE_CHECKING:

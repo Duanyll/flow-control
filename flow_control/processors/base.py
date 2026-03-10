@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Literal, NotRequired, TypedDict, TypeVar
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, TypeVar
 
 import torch
 from einops import rearrange, repeat
 from pydantic import BaseModel, ConfigDict
 
+from flow_control.utils.coercion import JsonBeforeValidator
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     ResolutionList,
@@ -20,11 +21,11 @@ from .components.vae import VAE, Flux1VAE
 
 
 class InputBatch(TypedDict):
-    pass
+    image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
 class TrainInputBatch(InputBatch):
-    pass
+    image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
 class ProcessedBatch(TypedDict):

@@ -3,6 +3,7 @@ from typing import Literal, NotRequired
 import torch
 from einops import rearrange
 
+from flow_control.utils.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.common import ensure_alpha_channel
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
@@ -18,16 +19,16 @@ from ..components.prompts import PromptStr, parse_prompt
 
 
 class QwenLayeredInputBatch(InputBatch):
-    clean_image: torch.Tensor
+    clean_image: ImageTensor
     prompt: NotRequired[str | None]
     negative_prompt: NotRequired[str | None]
     num_layers: NotRequired[int]
 
 
 class QwenLayeredTrainInputBatch(TrainInputBatch):
-    clean_image: torch.Tensor
+    clean_image: ImageTensor
     prompt: NotRequired[str | None]
-    layer_images: list[torch.Tensor]
+    layer_images: ImageTensorList
 
 
 class QwenLayeredProcessedBatch(ProcessedBatch):

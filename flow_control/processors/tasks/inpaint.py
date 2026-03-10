@@ -2,6 +2,7 @@ from typing import Literal, NotRequired
 
 import torch
 
+from flow_control.utils.coercion import ImageTensor
 from flow_control.utils.resize import resize_to_resolution
 
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
@@ -11,14 +12,14 @@ from ..components.prompts import PromptStr, parse_prompt
 class InpaintInputBatch(InputBatch):
     prompt: str
     negative_prompt: NotRequired[str | None]
-    inpaint_mask: torch.Tensor
-    clean_image: torch.Tensor
+    inpaint_mask: ImageTensor
+    clean_image: ImageTensor
 
 
 class InpaintTrainInputBatch(TrainInputBatch):
     prompt: NotRequired[str | None]
-    inpaint_mask: torch.Tensor
-    clean_image: torch.Tensor
+    inpaint_mask: ImageTensor
+    clean_image: ImageTensor
 
 
 class InpaintProcessedBatch(ProcessedBatch):

@@ -2,6 +2,7 @@ from typing import Literal, NotRequired, TypedDict
 
 import torch
 
+from flow_control.utils.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.resize import (
     resize_to_closest_resolution,
@@ -16,16 +17,15 @@ logger = get_logger(__name__)
 
 
 class TIEInputBatch(InputBatch):
-    image_size: NotRequired[tuple[int, int] | None]
     prompt: str
     negative_prompt: NotRequired[str | None]
-    reference_images: list[torch.Tensor]
+    reference_images: ImageTensorList
 
 
 class TIETrainInputBatch(TrainInputBatch):
     prompt: str
-    reference_images: list[torch.Tensor]
-    clean_image: torch.Tensor
+    reference_images: ImageTensorList
+    clean_image: ImageTensor
 
 
 class TIEProcessedBatch(ProcessedBatch):
