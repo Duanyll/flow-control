@@ -16,6 +16,7 @@ from rich.progress import (
 )
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.logging import console, get_logger, warn_once
 
 if TYPE_CHECKING:
@@ -72,6 +73,9 @@ class BaseSampler(BaseModel, ABC):
                 logger,
                 "cfg_scale > 1.0 but no negative_batch provided. This will disable classifier-free guidance.",
             )
+        batch = deep_move_to_device(batch, model.device)
+        if negative_batch is not None:
+            negative_batch = deep_move_to_device(negative_batch, model.device)
         return self._sample(
             model,
             batch,
@@ -105,13 +109,12 @@ class BaseSampler(BaseModel, ABC):
         has_negative = self.cfg_scale > 1.0 and negative_batch is not None
         self._sync_negative_pass(has_negative)
 
-        dtype = batch["noisy_latents"].dtype
-        batch["noisy_latents"] = latents.to(dtype)
-        cond = model.predict_velocity(batch, timestep).float()
+        batch["noisy_latents"] = latents
+        cond = model._predict_velocity(batch, timestep)
         if self._negative_pass:
             if negative_batch is not None:
-                negative_batch["noisy_latents"] = latents.to(dtype)
-                uncond = model.predict_velocity(negative_batch, timestep).float()
+                negative_batch["noisy_latents"] = latents
+                uncond = model._predict_velocity(negative_batch, timestep)
                 combined_velocity = uncond + (cond - uncond) * self.cfg_scale
 
                 if self.enable_cfg_renorm:
@@ -123,7 +126,7 @@ class BaseSampler(BaseModel, ABC):
                 return combined_velocity
             else:
                 # Must do an empty forward pass to sync with other processes
-                _ = model.predict_velocity(batch, timestep)
+                _ = model._predict_velocity(batch, timestep)
                 return cond
         else:
             return cond

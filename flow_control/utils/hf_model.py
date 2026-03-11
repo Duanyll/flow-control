@@ -18,7 +18,7 @@ class HfModelLoader[T](BaseModel):
     pretrained_model_id: str
     revision: str = "main"
     subfolder: str | None = None
-    dtype: TorchDType | Literal["auto"] = "auto"
+    dtype: TorchDType = torch.bfloat16
     device_memory_distribution: list[str] | None = None
     no_split_modules: list[str] | None = None
 
@@ -54,8 +54,7 @@ class HfModelLoader[T](BaseModel):
                     **self.extra_from_pretrained_kwargs,
                 )
                 model = model_cls(config)
-            if self.dtype != "auto":
-                model.to(dtype=self.dtype)
+            model.to(dtype=self.dtype)
         logger.info(
             f"Initialized model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
             f"on meta device with dtype {self.dtype}"
@@ -69,11 +68,11 @@ class HfModelLoader[T](BaseModel):
             "subfolder": self.subfolder,
             **self.extra_from_pretrained_kwargs,
         }
-        if self.dtype != "auto":
-            if self.library == "diffusers":
-                kwargs["torch_dtype"] = self.dtype
-            elif self.library == "transformers":
-                kwargs["dtype"] = self.dtype
+
+        if self.library == "diffusers":
+            kwargs["torch_dtype"] = self.dtype
+        elif self.library == "transformers":
+            kwargs["dtype"] = self.dtype
         model = model_cls.from_pretrained(
             self.pretrained_model_id,
             **kwargs,
@@ -125,11 +124,11 @@ class HfModelLoader[T](BaseModel):
             "device_map": device_map,
             **self.extra_from_pretrained_kwargs,
         }
-        if self.dtype != "auto":
-            if self.library == "diffusers":
-                kwargs["torch_dtype"] = self.dtype
-            elif self.library == "transformers":
-                kwargs["dtype"] = self.dtype
+
+        if self.library == "diffusers":
+            kwargs["torch_dtype"] = self.dtype
+        elif self.library == "transformers":
+            kwargs["dtype"] = self.dtype
         model = model_cls.from_pretrained(
             self.pretrained_model_id,
             **kwargs,

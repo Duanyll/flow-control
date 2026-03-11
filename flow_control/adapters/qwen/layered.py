@@ -152,7 +152,7 @@ class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
             scale_rope=orig_module.scale_rope,
         )
 
-    def predict_velocity(
+    def _predict_velocity(
         self,
         batch: QwenImageLayeredBatch,
         timestep: torch.Tensor,

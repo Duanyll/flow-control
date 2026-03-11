@@ -3,6 +3,8 @@ from typing import Any, Literal
 import torch
 from pydantic import ConfigDict, PrivateAttr
 
+from flow_control.utils.common import deep_cast_float_dtype, deep_move_to_device
+
 from .base import BaseReward
 
 
@@ -55,7 +57,9 @@ class PickScoreReward(BaseReward):
             max_length=77,
             return_tensors="pt",
         )
-        image_inputs = {k: v.to(device=self._device) for k, v in image_inputs.items()}
+        image_inputs = deep_cast_float_dtype(
+            deep_move_to_device(image_inputs, self._device), self._model.dtype
+        )
 
         text_inputs = self._processor(
             text=[prompt] if isinstance(prompt, str) else prompt,
@@ -64,7 +68,9 @@ class PickScoreReward(BaseReward):
             max_length=77,
             return_tensors="pt",
         )
-        text_inputs = {k: v.to(device=self._device) for k, v in text_inputs.items()}
+        text_inputs = deep_cast_float_dtype(
+            deep_move_to_device(text_inputs, self._device), self._model.dtype
+        )
 
         image_embs = self._model.get_image_features(**image_inputs)
         image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)

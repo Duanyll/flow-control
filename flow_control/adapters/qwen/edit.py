@@ -28,7 +28,7 @@ class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
         dtype=torch.bfloat16,
     )
 
-    def predict_velocity(
+    def _predict_velocity(
         self,
         batch: QwenImageEditBatch,
         timestep: torch.Tensor,

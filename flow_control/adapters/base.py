@@ -7,6 +7,7 @@ from einops import rearrange
 from peft import LoraConfig
 from pydantic import BaseModel, ConfigDict
 
+from flow_control.utils.common import deep_cast_float_dtype, deep_move_to_device
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDType
@@ -116,28 +117,37 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
         pass
 
     @abstractmethod
+    def _predict_velocity(
+        self,
+        batch: TBatch,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+
     def predict_velocity(
         self,
         batch: TBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Predict velocity with the input batch at the given timestep.
+        Predict the velocity for the given batch and timestep. Input batch will be casted
+        to desired dtype and moved to model device before being passed to `_predict_velocity`.
 
-        Parameters
-        ----------
-        batch : dict
-            Input batch containing the data.
+        batch: TBatch
+            The input batch containing the noisy latents and any additional information.
+        timestep: torch.Tensor
+            The current timestep for which to predict the velocity.
 
-        timestep : torch.Tensor([B])
-            The current timestep. Range is [0, 1], 0 for clean image, 1 for noise.
-
-        Returns
-        -------
-        torch.Tensor([B, C, H, W])
-            The predicted velocity in latent space.
+        Returns: torch.Tensor
+            The predicted velocity for the given batch and timestep. Will be kept on the
+            model device and cast to float32, which is most useful for any conscequent
+            computations.
         """
-        raise NotImplementedError()
+        batch = deep_cast_float_dtype(batch, self.dtype)
+        batch = deep_move_to_device(batch, self.device)
+        timestep = timestep.to(device=self.device, dtype=self.dtype)
+        velocity = self._predict_velocity(batch, timestep)
+        return velocity.float()
 
     def _pack_latents(self, latents):
         return rearrange(

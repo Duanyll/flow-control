@@ -4,6 +4,7 @@ import pickle
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -47,7 +48,7 @@ class PrismLayersProDataset(Dataset):
             if isinstance(v, dict) and "bytes" in v:
                 row_data[k] = pil_to_tensor(
                     Image.open(io.BytesIO(v["bytes"])).convert("RGBA")
-                )
+                ).to(torch.bfloat16)
 
         h, w = row_data["whole_image"].shape[1:3]
         output = {

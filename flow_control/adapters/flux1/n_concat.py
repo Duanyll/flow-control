@@ -21,7 +21,7 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
 
     type: Literal["n_concat"] = "n_concat"
 
-    def predict_velocity(
+    def _predict_velocity(
         self,
         batch: Flux1NConcatBatch,
         timestep: torch.Tensor,

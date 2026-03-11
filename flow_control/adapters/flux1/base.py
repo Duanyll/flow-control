@@ -61,7 +61,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
         ]
     )
 
-    def predict_velocity(
+    def _predict_velocity(
         self,
         batch: TBatch,
         timestep: torch.Tensor,

@@ -24,7 +24,7 @@ class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
         dtype=torch.bfloat16,
     )
 
-    def predict_velocity(
+    def _predict_velocity(
         self, batch: LongCatEditBatch, timestep: torch.Tensor
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

@@ -296,7 +296,7 @@ class EfficientLayeredQwenImageAdapter(
         else:
             raise ValueError(f"Unknown attn_mask_mode: {self.attn_mask_mode}")
 
-    def predict_velocity(self, batch: EfficientLayeredQwenImageBatch, timestep):
+    def _predict_velocity(self, batch: EfficientLayeredQwenImageBatch, timestep):
         b, n, d = batch["noisy_latents"].shape
         h, w = batch["image_size"]
 

@@ -184,7 +184,7 @@ class BaseProcessor[
         batch: TProcessed,
         generator: torch.Generator | None = None,
         device=None,
-        dtype=torch.bfloat16,
+        dtype=torch.float32,
     ) -> torch.Tensor:
         """
         Initializes noisy latents for the given batch based on its image size.

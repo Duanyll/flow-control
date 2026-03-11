@@ -78,7 +78,7 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
     class_name: str = "T5EncoderModel"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
     subfolder: str | None = "text_encoder_2"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     tokenizer: HfModelLoader[T5Tokenizer] = HfModelLoader(
         library="transformers",
@@ -87,9 +87,9 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
         subfolder="tokenizer_2",
     )
 
-    def load_model(self, device):
+    def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        return super().load_model(device)
+        return super().load_model(device, frozen)
 
     @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt: str | None = None):
@@ -121,7 +121,7 @@ class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
     class_name: str = "CLIPTextModel"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
     subfolder: str | None = "text_encoder"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     tokenizer: HfModelLoader[CLIPTokenizer] = HfModelLoader(
         library="transformers",
@@ -132,9 +132,9 @@ class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
 
     max_length: int = 77
 
-    def load_model(self, device):
+    def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        return super().load_model(device)
+        return super().load_model(device, frozen)
 
     @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt: str | None = None):
@@ -168,7 +168,7 @@ class Qwen25VLEncoder(
     class_name: str = "Qwen2_5_VLForConditionalGeneration"
     pretrained_model_id: str = "Qwen/Qwen-Image"
     subfolder: str | None = "text_encoder"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     tokenizer: HfModelLoader[Qwen2Tokenizer] = HfModelLoader(
         library="transformers",
@@ -255,9 +255,9 @@ class Qwen25VLEncoder(
         merge_length = processor.image_processor.merge_size**2
         return sum(i.prod() // merge_length for i in image_inputs["image_grid_thw"])
 
-    def load_model(self, device):
+    def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        self.vl_processor.load_model(device)
+        self.vl_processor.load_model(device, frozen)
         # Patch to a no-op for _check_special_mm_tokens
         self.vl_processor.model._check_special_mm_tokens = lambda *args, **kwargs: None
         return super().load_model(device)
@@ -388,7 +388,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
     class_name: str = "Qwen3ForCausalLM"
     pretrained_model_id: str = "Tongyi-MAI/Z-Image"
     subfolder: str | None = "text_encoder"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     tokenizer: HfModelLoader[Qwen2Tokenizer] = HfModelLoader(
         library="transformers",
@@ -402,9 +402,9 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
     enable_thinking: bool = True
     keep_padding_tokens: bool = False
 
-    def load_model(self, device):
+    def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        return super().load_model(device)
+        return super().load_model(device, frozen)
 
     @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt=None):
@@ -444,7 +444,7 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
     class_name: str = "Mistral3ForConditionalGeneration"
     pretrained_model_id: str = "black-forest-labs/FLUX.2-dev"
     subfolder: str | None = "text_encoder"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     tokenizer: HfModelLoader[PixtralProcessor] = HfModelLoader(
         library="transformers",
@@ -458,9 +458,9 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
     hidden_state_layers: list[int] = [10, 20, 30]
     temperature: float = 0.7
 
-    def load_model(self, device):
+    def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        return super().load_model(device)
+        return super().load_model(device, frozen)
 
     def format_prompt(
         self,

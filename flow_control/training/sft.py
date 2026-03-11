@@ -143,12 +143,11 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         clean = batch["clean_latents"].float()
         noise = torch.randn_like(clean, dtype=torch.float32)
         batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
-        batch = deep_cast_float_dtype(batch, self.model.dtype)
 
-        model_pred = self.model.predict_velocity(
+        model_pred = self.model._predict_velocity(
             batch, timesteps.to(dtype=self.model.dtype)
         ).float()
-        target = noise.float() - clean.float()
+        target = noise - clean
         loss = (model_pred - target) ** 2
         loss = reduce(loss, "b n d -> 1", reduction="mean")
 

@@ -102,7 +102,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
         else:
             return None
 
-    def predict_velocity(self, batch, timestep):
+    def _predict_velocity(self, batch, timestep):
         b, n, d = batch["noisy_latents"].shape
         guidance = self.make_guidance()
         if "reference_latents" in batch and "reference_sizes" in batch:

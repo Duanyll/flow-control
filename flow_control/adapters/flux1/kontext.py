@@ -28,7 +28,7 @@ class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
     pe_mode: Literal["3d", "diagonal", "stacked"] = "3d"
     pe_index_scale: int = 1
 
-    def predict_velocity(
+    def _predict_velocity(
         self, batch: Flux1KontextBatch, timestep: torch.Tensor
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

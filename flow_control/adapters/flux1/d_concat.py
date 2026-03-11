@@ -56,7 +56,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
 
         super()._install_modules()
 
-    def predict_velocity(
+    def _predict_velocity(
         self, batch: Flux1DConcatBatch, timestep: torch.Tensor
     ) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape

@@ -31,7 +31,7 @@ class ZImageAdapter[TBatch: ZImageBatch](
         dtype=torch.bfloat16,
     )
 
-    def predict_velocity(self, batch, timestep):
+    def _predict_velocity(self, batch, timestep):
         latent_h, latent_w = (
             batch["image_size"][0] // self.vae_scale_factor,
             batch["image_size"][1] // self.vae_scale_factor,

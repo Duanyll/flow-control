@@ -68,7 +68,7 @@ class BaseReward(RemoteOffloadable, ABC):
         and sends only the needed keys to save bandwidth."""
         if self.is_remote:
             return self._remote_batch_call("/score", batch, fields=self._batch_fields)
-        return self._score(batch)
+        return self._score(batch).float()
 
     async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Async version of ``score`` for use in async RL loops."""
@@ -76,7 +76,7 @@ class BaseReward(RemoteOffloadable, ABC):
             return await self._async_remote_batch_call(
                 "/score", batch, fields=self._batch_fields
             )
-        return self._score(batch)
+        return self._score(batch).float()
 
     def supports_rollout_overlap(self) -> bool:
         """Whether this reward can safely overlap with diffusion rollout work.

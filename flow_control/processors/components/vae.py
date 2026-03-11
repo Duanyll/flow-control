@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     endpoint: str | None = None
 
-    def load_model(self, device: torch.device):
+    def load_model(self, device: torch.device, frozen: bool = True):
         if self.endpoint is not None:
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")
             self._init_remote(device)
@@ -31,7 +31,7 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
             # Cast to T so don't have to force downstream checks for model usage
             return cast(T, None)
         else:
-            return super().load_model(device)
+            return super().load_model(device, frozen)
 
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         return self.model.encode(images).latent_dist.sample()
@@ -69,11 +69,11 @@ class Flux1VAE(BaseVAE[AutoencoderKL]):
     class_name: str = "AutoencoderKL"
     pretrained_model_id: str = "black-forest-labs/FLUX.1-dev"
     subfolder: str | None = "vae"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         images = images * 2 - 1
-        images = images.to(torch.bfloat16)
+        images = images.to(self.dtype)
         latent = cast(
             AutoencoderKLOutput, self.model.encode(images)
         ).latent_dist.sample()
@@ -100,14 +100,14 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
     class_name: str = "AutoencoderKLQwenImage"
     pretrained_model_id: str = "Qwen/Qwen-Image"
     subfolder: str | None = "vae"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         has_frame_dim = images.ndim == 5  # b, c, f, h, w
         if not has_frame_dim:
             images = rearrange(images, "b c h w -> b c 1 h w")
         images = images * 2 - 1
-        images = images.to(torch.bfloat16)
+        images = images.to(self.dtype)
         latents = cast(
             AutoencoderKLOutput, self.model.encode(images)
         ).latent_dist.mode()
@@ -156,7 +156,7 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
     class_name: str = "AutoencoderKLFlux2"
     pretrained_model_id: str = "black-forest-labs/FLUX.2-dev"
     subfolder: str | None = "vae"
-    dtype: TorchDType | Literal["auto"] = torch.bfloat16
+    dtype: TorchDType = torch.bfloat16
 
     patch_size: int = 2
 
@@ -178,7 +178,7 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
 
     def _encode(self, images: torch.Tensor):
         images = images * 2 - 1
-        images = images.to(torch.bfloat16)
+        images = images.to(self.dtype)
         latents = cast(
             AutoencoderKLOutput, self.model.encode(images)
         ).latent_dist.sample()

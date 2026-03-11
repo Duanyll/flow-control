@@ -33,7 +33,7 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
 
     enforce_mask: bool = False
 
-    def predict_velocity(
+    def _predict_velocity(
         self,
         batch: Flux1FillBatch,
         timestep: torch.Tensor,
@@ -79,5 +79,5 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
         """
         Pack the mask with PixelShuffle-like operation, as seen in Flux.1 Fill
         """
-        mask = mask.to(torch.bfloat16)
+        mask = mask.to(self.dtype)
         return rearrange(mask, "b (h ph) (w pw) -> b (ph pw) h w", ph=8, pw=8)

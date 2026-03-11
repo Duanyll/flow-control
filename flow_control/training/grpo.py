@@ -444,7 +444,6 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                         batch,
                         generator=generator,
                         device=self.device,
-                        dtype=self.model.dtype,
                     )
 
                     negative_batch: Any = (

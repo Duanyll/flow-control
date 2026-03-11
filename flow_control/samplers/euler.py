@@ -61,9 +61,8 @@ class EulerSampler(BaseSampler):
             for i in range(self.steps):
                 t_cur = sigmas[i : i + 1]
                 t_next = sigmas[i + 1 : i + 2]
-                timestep = t_cur.to(dtype=dtype)
                 velocity = self.get_guided_velocity(
-                    model, latents, timestep, batch, negative_batch
+                    model, latents, t_cur, batch, negative_batch
                 )
                 latents, log_prob, mean, std_dev = self.sde_step(
                     velocity, latents, t_cur, t_next
@@ -101,10 +100,10 @@ class EulerSampler(BaseSampler):
         All computation is performed in float32 to avoid bf16 overflow.
         When noise_level=0, degenerates to standard ODE (no noise, log_prob=0).
         """
-        velocity = velocity.float()
-        latent = latent.float()
+        velocity = velocity
+        latent = latent
         if prev_sample is not None:
-            prev_sample = prev_sample.float()
+            prev_sample = prev_sample
 
         dt = sigma_next - sigma  # negative (sigma decreases over time)
 
@@ -194,10 +193,8 @@ class EulerSampler(BaseSampler):
         Returns:
             (log_prob, mean, std_dev) tuple.
         """
-        dtype = model.dtype
-        timestep = sigma.to(dtype=dtype)
         velocity = self.get_guided_velocity(
-            model, latent_t.float(), timestep, batch, negative_batch
+            model, latent_t, sigma, batch, negative_batch
         )
 
         _, log_prob, mean, std_dev = self.sde_step(

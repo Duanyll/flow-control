@@ -229,7 +229,13 @@ class RawDirectoryDataset(Dataset):
                 type_name = obj["__type__"]
                 if type_name == "tensor" and "file" in obj:
                     file_path = os.path.join(sample_dir_path, obj["file"])
-                    return torch.load(file_path)
+                    tensor = torch.load(file_path, weights_only=True)
+                    if tensor.is_floating_point() and "dtype" in obj:
+                        dtype_name = obj["dtype"].split(".")[-1]
+                        stored_dtype = getattr(torch, dtype_name, None)
+                        if stored_dtype is not None:
+                            tensor = tensor.to(stored_dtype)
+                    return tensor
                 elif type_name == "image" and "file" in obj:
                     file_path = os.path.join(sample_dir_path, obj["file"])
                     pil_image = Image.open(file_path)
