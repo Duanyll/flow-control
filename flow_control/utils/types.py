@@ -4,7 +4,7 @@ from typing import Annotated, Any
 import torch
 from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
 
-from .ema import make_ema_optimizer
+from .ema import EMAConfig, make_ema_optimizer
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -80,7 +80,7 @@ OptimizerConfig = Annotated[
 def parse_optimizer(
     conf: OptimizerConfig,
     parameters,
-    ema_decay: float = 1.0,
+    ema_config: EMAConfig | None = None,
     enable_init_backup: bool = False,
 ):
     conf = conf.copy()
@@ -94,17 +94,19 @@ def parse_optimizer(
             raise ImportError(
                 f"bitsandbytes optimizers are not supported on macOS: {class_name}"
             )
-        import bitsandbytes as bnb  # type: ignore
+        import bitsandbytes as bnb
 
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
-    if ema_decay != 1.0 or enable_init_backup:
-        logger.info(f"Patching optimizer {class_name} with EMA decay {ema_decay}")
+    if ema_config is not None or enable_init_backup:
+        logger.info(
+            f"Patching optimizer {class_name} with EMA config {ema_config} and enable_init_backup={enable_init_backup}"
+        )
         ctor = make_ema_optimizer(ctor)
         return ctor(
             parameters,
-            ema_decay=ema_decay,
+            config=ema_config or EMAConfig(),
             enable_init_backup=enable_init_backup,
             **conf,
         )

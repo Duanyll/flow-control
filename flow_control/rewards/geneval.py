@@ -58,7 +58,6 @@ GenevalExcludeSpec = TypedDict(
 
 class GenEvalMetadata(TypedDict):
     tag: str
-    prompt: str
     include: NotRequired[list[GenevalIncludeSpec]]
     exclude: NotRequired[list[GenevalExcludeSpec]]
 
@@ -74,6 +73,21 @@ class GenevalReward(BaseReward):
 
     type: Literal["geneval"] = "geneval"
     checkpoint_path: str
+    """
+    Download the checkpoint from https://download.openmmlab.com/mmdetection/v3.0/mask2former/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco_20220504_001756-c9d0c4f2.pth
+    """
+    scoring_mode: Literal["reward_server", "original"] = "reward_server"
+    """Scoring variant to use for soft reward computation.
+
+    - ``"reward_server"``: Reproduces the behaviour of
+      `yifan123/reward-server <https://github.com/yifan123/reward-server>`_.
+      Strict count matching (``!=``), no exclude penalty in score, and the
+      original position double-append quirk.  More widely used in practice.
+    - ``"original"``: Aligns with the official GenEval binary evaluation
+      logic, extended with a soft score.  Lenient count matching (only
+      penalises too few), exclude contributes to score, and position reward
+      is cleanly conditional.
+    """
     clip_arch: str = "ViT-L-14"
     clip_pretrained: str = "openai"
     threshold: float = 0.3
@@ -94,7 +108,7 @@ class GenevalReward(BaseReward):
 
     @property
     def _batch_fields(self) -> set[str]:
-        return {"clean_image", "metadata", "prompt"}
+        return {"clean_image", "tag", "include", "exclude"}
 
     def _load_model(self, device: torch.device) -> None:
         import open_clip
@@ -118,6 +132,10 @@ class GenevalReward(BaseReward):
         self._clip_transform = clip_transform
         self._clip_tokenizer = open_clip.get_tokenizer(self.clip_arch)
         self._color_classifiers = {}
+
+        from clip_benchmark.metrics import zeroshot_classification as zsc
+
+        zsc.tqdm = lambda x, **kwargs: x  # disable tqdm in color classification
 
     # ------------------------------------------------------------------
     # Detection helpers
@@ -238,6 +256,21 @@ class GenevalReward(BaseReward):
         Returns:
             (matched, reward_components, reason_parts)
         """
+        if self.scoring_mode == "reward_server":
+            return self._evaluate_include_req_reward_server(
+                image, detected, req, matched_groups
+            )
+        return self._evaluate_include_req_original(image, detected, req, matched_groups)
+
+    def _evaluate_include_req_reward_server(
+        self,
+        image: Image.Image,
+        detected: dict[str, list[tuple[np.ndarray, np.ndarray | None]]],
+        req: GenevalIncludeSpec,
+        matched_groups: list[list[tuple[np.ndarray, np.ndarray | None]] | None],
+    ) -> tuple[bool, list[float], list[str]]:
+        """reward-server variant: strict count (``!=``), unclamped reward,
+        position double-append quirk."""
         classname = req["class"]
         matched = True
         rewards: list[float] = []
@@ -249,6 +282,71 @@ class GenevalReward(BaseReward):
             matched = False
             reason.append(
                 f"expected {classname}=={req['count']}, found {len(found_objects)}"
+            )
+            if "color" in req or "position" in req:
+                rewards.append(0.0)
+        else:
+            if "color" in req:
+                colors = self._color_classification(image, found_objects, classname)
+                rewards.append(
+                    1 - abs(req["count"] - colors.count(req["color"])) / req["count"]
+                )
+                if colors.count(req["color"]) != req["count"]:
+                    matched = False
+                    reason.append(
+                        f"expected {req['color']} {classname}"
+                        f">={req['count']}, found "
+                        f"{colors.count(req['color'])} {req['color']}; and "
+                        + ", ".join(
+                            f"{colors.count(c)} {c}" for c in COLORS if c in colors
+                        )
+                    )
+
+            if "position" in req and matched:
+                expected_rel, target_group = req["position"]
+                target = matched_groups[target_group]
+                if target is None:
+                    matched = False
+                    reason.append(f"no target for {classname} to be {expected_rel}")
+                    rewards.append(0.0)
+                else:
+                    position_ok = _check_position(
+                        found_objects, target, expected_rel, self.position_threshold
+                    )
+                    if not position_ok:
+                        matched = False
+                        reason.append(f"{classname} not {expected_rel} target")
+                        rewards.append(0.0)
+                    # Reproduce reward-server quirk: always append 1.0 after
+                    # the position loop, regardless of pass/fail.
+                    rewards.append(1.0)
+
+        return matched, rewards, reason
+
+    def _evaluate_include_req_original(
+        self,
+        image: Image.Image,
+        detected: dict[str, list[tuple[np.ndarray, np.ndarray | None]]],
+        req: GenevalIncludeSpec,
+        matched_groups: list[list[tuple[np.ndarray, np.ndarray | None]] | None],
+    ) -> tuple[bool, list[float], list[str]]:
+        """Original GenEval variant: lenient count (only penalises too few),
+        clamped reward, clean position scoring."""
+        classname = req["class"]
+        matched = True
+        rewards: list[float] = []
+        reason: list[str] = []
+        all_objects = detected.get(classname, [])
+        # Original geneval: take top-N by confidence, only fail if too few
+        found_objects = all_objects[: req["count"]]
+        rewards.append(
+            max(0.0, 1 - abs(req["count"] - len(all_objects)) / req["count"])
+        )
+
+        if len(found_objects) < req["count"]:
+            matched = False
+            reason.append(
+                f"expected {classname}>={req['count']}, found {len(found_objects)}"
             )
             if "color" in req or "position" in req:
                 rewards.append(0.0)
@@ -314,12 +412,17 @@ class GenevalReward(BaseReward):
 
         for req in metadata.get("exclude", []):
             classname = req["class"]
-            if len(detected.get(classname, [])) >= req["count"]:
+            found_count = len(detected.get(classname, []))
+            if found_count >= req["count"]:
                 correct = False
                 reason.append(
-                    f"expected {classname}<{req['count']}, "
-                    f"found {len(detected[classname])}"
+                    f"expected {classname}<{req['count']}, found {found_count}"
                 )
+                # reward-server ignores exclude in score; original penalises it
+                if self.scoring_mode == "original":
+                    rewards.append(0.0)
+            elif self.scoring_mode == "original":
+                rewards.append(1.0)
 
         score = sum(rewards) / len(rewards) if rewards else 0.0
         return correct, score, "\n".join(reason)
@@ -331,22 +434,22 @@ class GenevalReward(BaseReward):
     @torch.no_grad()
     def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         image = batch["clean_image"]  # [1, C, H, W] in [0, 1]
-        metadata = batch["metadata"]
-        if "prompt" not in metadata:
-            metadata["prompt"] = batch["prompt"]
 
         # Run detection
         results = self._detector(image.to(self._device))
         result = results[0]
 
         # Group detections by class
-        detected = self._postprocess_detections(result, metadata)
+        detected = self._postprocess_detections(result, batch)  # type: ignore
 
         # Convert to PIL for color classification
         image_pil = ImageOps.exif_transpose(tensor_to_pil(image[0]))
 
         # Evaluate
-        _, score, _ = self._evaluate_reward(image_pil, detected, metadata)
+        _, score, _ = self._evaluate_reward(image_pil, detected, batch)  # type: ignore
+
+        # Clamp score to [0, 1]
+        score = max(0.0, min(1.0, score))
 
         return torch.tensor(score, device=image.device, dtype=image.dtype)
 
@@ -457,3 +560,188 @@ def _relative_position(
     if dy > 0.5:
         relations.add("below")
     return relations
+
+
+if __name__ == "__main__":
+    import urllib.request
+    from pathlib import Path
+
+    from rich import print as rprint
+
+    from flow_control.third_party.mask2former import (
+        COCO_THING_CLASSES,
+        load_mask2former_swin_s,
+    )
+    from flow_control.utils.common import pil_to_tensor, tensor_to_pil
+    from flow_control.utils.draw import draw_bbox_on_image
+
+    data_dir = Path("./data")
+    data_dir.mkdir(exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # 1. Download checkpoint if needed
+    # ------------------------------------------------------------------
+    ckpt_url = (
+        "https://download.openmmlab.com/mmdetection/v3.0/mask2former/"
+        "mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco/"
+        "mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco_20220504_001756-c9d0c4f2.pth"
+    )
+    ckpt_path = data_dir / "mask2former_swin-s-p4-w7-224_coco.pth"
+    if not ckpt_path.exists():
+        rprint(f"[bold]Downloading checkpoint to[/] {ckpt_path} ...")
+        urllib.request.urlretrieve(ckpt_url, ckpt_path)
+        rprint("[bold green]Done.[/]")
+    else:
+        rprint(f"[bold]Checkpoint already exists at[/] {ckpt_path}")
+
+    # ------------------------------------------------------------------
+    # 2. Download test image (COCO val2017: 2 cats + 2 remotes on a couch)
+    # ------------------------------------------------------------------
+    image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
+    image_path = data_dir / "000000039769.jpg"
+    if not image_path.exists():
+        rprint(f"[bold]Downloading test image to[/] {image_path} ...")
+        urllib.request.urlretrieve(image_url, image_path)
+        rprint("[bold green]Done.[/]")
+
+    image_pil = Image.open(image_path).convert("RGB")
+    image_tensor = pil_to_tensor(image_pil)  # [1, C, H, W] in [0, 1]
+    rprint(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ==================================================================
+    # Part A: Verify Mask2Former detection directly
+    # ==================================================================
+    rprint("\n[bold cyan]===== Part A: Mask2Former Detection =====[/]")
+    detector = load_mask2former_swin_s(str(ckpt_path), device=device)
+    results = detector(image_tensor.to(device))
+    result = results[0]
+
+    rprint(f"[bold]Detected {len(result.scores)} instances[/]")
+    sorted_indices = result.scores.argsort(descending=True)
+    for idx in sorted_indices[:15]:
+        label_id = result.labels[idx].item()
+        score = result.scores[idx].item()
+        bbox = result.bboxes[idx].tolist()
+        name = (
+            COCO_THING_CLASSES[label_id]
+            if label_id < len(COCO_THING_CLASSES)
+            else f"class_{label_id}"
+        )
+        rprint(
+            f"  {name}: {score:.3f}  "
+            f"bbox=[{bbox[0]:.0f}, {bbox[1]:.0f}, {bbox[2]:.0f}, {bbox[3]:.0f}]"
+        )
+
+    # Draw detections and save visualization
+    top_indices = sorted_indices[:15]
+    # draw_bbox_on_image expects (top, bottom, left, right);
+    # detector outputs (x1, y1, x2, y2) = (left, top, right, bottom)
+    draw_boxes: list[tuple[int, int, int, int]] = [
+        (
+            int(result.bboxes[i][1].item()),  # top = y1
+            int(result.bboxes[i][3].item()),  # bottom = y2
+            int(result.bboxes[i][0].item()),  # left = x1
+            int(result.bboxes[i][2].item()),  # right = x2
+        )
+        for i in top_indices
+    ]
+    draw_labels = [
+        f"{COCO_THING_CLASSES[result.labels[i].item()]} {result.scores[i].item():.2f}"
+        for i in top_indices
+    ]
+    vis = draw_bbox_on_image(image_tensor[0].cpu(), draw_boxes, draw_labels)
+    vis_path = data_dir / "geneval_detection_vis.png"
+    tensor_to_pil(vis).save(vis_path)
+    rprint(f"[bold green]Saved detection visualization to[/] {vis_path}")
+
+    del detector
+    torch.cuda.empty_cache()
+
+    # ==================================================================
+    # Part B: Verify GenevalReward scoring (both modes)
+    # ==================================================================
+
+    # Test cases with different metadata scenarios
+    test_cases: list[tuple[str, GenEvalMetadata]] = [
+        (
+            "2 cats (correct count)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "cat", "count": 2}],
+            ),
+        ),
+        (
+            "3 cats (too many expected)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "cat", "count": 3}],
+            ),
+        ),
+        (
+            "1 cat (too few expected)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "cat", "count": 1}],
+            ),
+        ),
+        (
+            "2 tv remotes (correct)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "tv remote", "count": 2}],
+            ),
+        ),
+        (
+            "2 cats + 2 remotes",
+            GenEvalMetadata(
+                tag="two_object",
+                include=[
+                    {"class": "cat", "count": 2},
+                    {"class": "tv remote", "count": 2},
+                ],
+            ),
+        ),
+        (
+            "1 dog (absent)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "dog", "count": 1}],
+            ),
+        ),
+        (
+            "2 cats, excl dog (pass)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "cat", "count": 2}],
+                exclude=[{"class": "dog", "count": 1}],
+            ),
+        ),
+        (
+            "2 remotes, excl cat (fail)",
+            GenEvalMetadata(
+                tag="single_object",
+                include=[{"class": "tv remote", "count": 2}],
+                exclude=[{"class": "cat", "count": 1}],
+            ),
+        ),
+    ]
+
+    for mode in ("reward_server", "original"):
+        rprint(f"\n[bold cyan]===== Part B: scoring_mode={mode!r} =====[/]")
+        reward = GenevalReward(
+            checkpoint_path=str(ckpt_path),
+            scoring_mode=mode,
+        )
+        reward.load_model(device)
+        for desc, metadata in test_cases:
+            batch: dict[str, Any] = {
+                "clean_image": image_tensor.to(device),
+                **metadata,
+            }
+            score = reward._score(batch)
+            rprint(f"  {desc:<32s} → score = {score.item():.4f}")
+        reward.unload_model()
+
+    rprint("\n[bold green]All tests completed.[/]")

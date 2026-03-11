@@ -35,7 +35,7 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.ema import apply_ema_maybe
+from flow_control.utils.ema import EMAConfig, apply_ema_maybe
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -77,7 +77,7 @@ class HsdpTrainerBaseConfig(HsdpEngineConfig):
 
     num_dataloader_workers: int = 4
 
-    ema_decay: float = 0.999
+    ema: EMAConfig | None = None
     clip_grad_norm: float = 1.0
 
 
@@ -142,7 +142,7 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
         self.optimizer = parse_optimizer(
             self.conf.optimizer,
             params,
-            ema_decay=self.conf.ema_decay,
+            ema_config=self.conf.ema,
             enable_init_backup=enable_init_backup,
         )
         logger.info(

@@ -26,40 +26,6 @@ class HfModelLoader[T](BaseModel):
 
     _model: T | None = None
 
-    # @classmethod
-    # def __get_pydantic_json_schema__(
-    #     cls, source: Any, handler: GetJsonSchemaHandler
-    # ) -> JsonSchemaValue:
-    #     # Generic type parameter T is not JSON-serializable; emit a fixed
-    #     # schema based on the declared fields (excluding T).
-    #     return {
-    #         "type": "object",
-    #         "properties": {
-    #             "library": {"enum": ["diffusers", "transformers"]},
-    #             "class_name": {"type": "string"},
-    #             "pretrained_model_id": {"type": "string"},
-    #             "revision": {"type": "string", "default": "main"},
-    #             "subfolder": {"type": ["string", "null"], "default": None},
-    #             "dtype": {"type": "string", "default": "auto"},
-    #             "device_memory_distribution": {
-    #                 "type": ["array", "null"],
-    #                 "items": {"type": "string"},
-    #                 "default": None,
-    #             },
-    #             "no_split_modules": {
-    #                 "type": ["array", "null"],
-    #                 "items": {"type": "string"},
-    #                 "default": None,
-    #             },
-    #             "extra_from_pretrained_kwargs": {
-    #                 "type": "object",
-    #                 "additionalProperties": True,
-    #                 "default": {},
-    #             },
-    #         },
-    #         "required": ["library", "class_name", "pretrained_model_id"],
-    #     }
-
     @property
     def model(self) -> T:
         if self._model is None:
@@ -175,7 +141,7 @@ class HfModelLoader[T](BaseModel):
         self._model = model
         return model
 
-    def load_model(self, device: torch.device) -> T:
+    def load_model(self, device: torch.device, frozen: bool = True) -> T:
         if self.library == "diffusers":
             import diffusers
 
@@ -193,5 +159,8 @@ class HfModelLoader[T](BaseModel):
             self._load_with_device_map(model_cls, device)
         else:
             self._load_with_from_pretrained(model_cls, device)
+
+        if hasattr(self.model, "requires_grad_"):
+            self.model.requires_grad_(not frozen)  # type: ignore
 
         return self.model

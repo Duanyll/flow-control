@@ -45,11 +45,28 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
 
     # GRPO hyperparameters
     num_batches_per_epoch: int = 2
+    """
+    Number of "batches" to generate per epoch. The actual micro batch size on GPU is 
+    always 1. This means in each epoch, we will select `num_prompts_per_batch` unique
+    prompts for `num_batches_per_epoch` times, that is `num_batches_per_epoch * 
+    num_prompts_per_batch` prompts in total (may have duplicates across batches).
+    """
     num_prompts_per_batch: int = 4
+    """
+    Number of unique prompts to select for each batch. See `num_batches_per_epoch` for details.
+    """
     num_rollouts_per_prompt: int = 4
+    """
+    Number of rollouts to generate for each prompt.
+    """
 
     num_inner_epochs: int = 1
     train_batch_size: int = 4
+    """
+    How many (rollout, timestep) items should the optimizer see before each update step. 
+    Must be divisible by world_size. Gradient accumulation steps will be automatically
+    set to train_batch_size // world_size.
+    """
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
@@ -70,7 +87,6 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
 
     # Override defaults from base
     optimizer: dict[str, Any] = {"class_name": "AdamW", "lr": 3e-4}
-    ema_decay: float = 1.0
     num_dataloader_workers: int = 0
 
 
@@ -160,9 +176,9 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
         sampler = DistributedKRepeatSampler(
             dataset=dataset,
+            num_batches_per_epoch=self.conf.num_batches_per_epoch,
             num_prompts_per_batch=self.conf.num_prompts_per_batch,
-            k=self.conf.num_rollouts_per_prompt,
-            num_batches=self.conf.num_batches_per_epoch,
+            num_rollouts_per_prompt=self.conf.num_rollouts_per_prompt,
             num_replicas=self.world_size,
             rank=self.rank,
             seed=self.conf.seed,
@@ -414,15 +430,15 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         try:
             with rollout_progress:
                 for batch_idx, batch in enumerate(self.dataloader):
-                    if batch_idx >= total_rollouts:
-                        break
-
                     batch = deep_move_to_device(batch, self.device)
                     batch = deep_cast_float_dtype(batch, self.model.dtype)
 
                     # Initialize noise
                     generator = torch.Generator(device=self.device).manual_seed(
-                        self.conf.seed + self.current_epoch * 10000 + batch_idx
+                        self.conf.seed
+                        + self.current_epoch * 10000
+                        + batch_idx * self.world_size
+                        + self.rank
                     )
                     self.processor.initialize_latents(
                         batch,
@@ -727,7 +743,14 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
         self.validate_and_log()
         logger.info(
-            "GRPO optimization uses global_batch_size=%d, world_size=%d, grad_acc_steps=%d.",
+            f"GRPO rollouts in each epoch will randomly select {self.conf.num_prompts_per_batch}"
+            f" unique prompts for {self.conf.num_batches_per_epoch} times, and generate"
+            f" {self.conf.num_rollouts_per_prompt} rollouts for each prompt. That is "
+            f"{self.conf.num_batches_per_epoch * self.conf.num_prompts_per_batch * self.conf.num_rollouts_per_prompt}"
+            " rollouts in total (may have duplicates across batches)."
+        )
+        logger.info(
+            "GRPO optimization uses train_batch_size=%d, world_size=%d, grad_acc_steps=%d.",
             self.conf.train_batch_size,
             self.world_size,
             self.grad_acc_steps,

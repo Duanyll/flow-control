@@ -1,0 +1,25 @@
+#:schema ../../../schema/preprocess.schema.json
+
+num_loader_workers = 1
+processor_devices = [0]
+num_threads_per_worker = 8
+queue_size = 16
+num_sink_workers = 1
+# RL Training dataset is actually inference task
+processing_mode = "inference" 
+processing_limit = 32
+
+save_extra = true
+
+[dataset]
+type = "jsonl"
+path = "./data/geneval/test_metadata.jsonl"
+
+[processor]
+task = "t2i"
+preset = "flux1"
+default_resolution = [512, 512]
+
+[output]
+type = "pickle_directory"
+path = "./data/geneval_flux/validation"

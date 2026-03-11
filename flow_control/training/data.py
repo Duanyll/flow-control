@@ -203,9 +203,9 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
     def __init__(
         self,
         dataset: PaddingAwareDatasetWrapper,
+        num_batches_per_epoch: int,
         num_prompts_per_batch: int,
-        k: int,
-        num_batches: int,
+        num_rollouts_per_prompt: int,
         num_replicas: int | None = None,
         rank: int | None = None,
         seed: int = 0,
@@ -217,19 +217,19 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
             rank = dist.get_rank()
 
         self.dataset = dataset
-        self.m = num_prompts_per_batch
-        self.k = k
-        self.num_batches = num_batches
+        self.num_batches_per_epoch = num_batches_per_epoch
+        self.num_prompts_per_batch = num_prompts_per_batch
+        self.num_rollouts_per_prompt = num_rollouts_per_prompt
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
 
-        self.total_samples = self.m * self.k
+        self.total_samples = self.num_prompts_per_batch * self.num_rollouts_per_prompt
         if self.total_samples % self.num_replicas != 0:
             raise ValueError(
-                f"num_prompts_per_batch * k ({self.total_samples}) must be divisible "
+                f"num_prompts_per_batch * num_rollouts_per_prompt ({self.total_samples}) must be divisible "
                 f"by num_replicas ({num_replicas}). "
-                f"Got num_prompts_per_batch={num_prompts_per_batch}, k={k}."
+                f"Got num_prompts_per_batch={num_prompts_per_batch}, num_rollouts_per_prompt={num_rollouts_per_prompt}."
             )
         self.per_rank = self.total_samples // self.num_replicas
 
@@ -238,16 +238,22 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         self.within_batch_counter = 0
 
     def __iter__(self):
-        for batch_idx in range(self.batch_counter, self.num_batches):
+        for batch_idx in range(self.batch_counter, self.num_batches_per_epoch):
             g = torch.Generator()
-            g.manual_seed(self.seed + self.epoch * self.num_batches + batch_idx)
+            g.manual_seed(
+                self.seed + self.epoch * self.num_batches_per_epoch + batch_idx
+            )
 
             # Select m unique prompts
             dataset_size = len(self.dataset)
-            indices = torch.randperm(dataset_size, generator=g)[: self.m].tolist()
+            indices = torch.randperm(dataset_size, generator=g)[
+                : self.num_prompts_per_batch
+            ].tolist()
 
             # Repeat each K times
-            repeated = [idx for idx in indices for _ in range(self.k)]
+            repeated = [
+                idx for idx in indices for _ in range(self.num_rollouts_per_prompt)
+            ]
 
             # Shuffle
             perm = torch.randperm(len(repeated), generator=g).tolist()
@@ -272,7 +278,7 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         self.within_batch_counter = 0
 
     def __len__(self):
-        return self.num_batches * self.per_rank
+        return self.num_batches_per_epoch * self.per_rank
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch

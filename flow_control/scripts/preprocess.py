@@ -93,7 +93,7 @@ class ProcessorStage(PipelineStage):
         self,
         worker_id: int,
         device: int | None = None,
-        save_intermediate: bool = False,
+        save_extra: bool = False,
         processing_mode: Literal["inference", "training"] = "training",
         processor_args: dict | None = None,
     ):
@@ -106,7 +106,7 @@ class ProcessorStage(PipelineStage):
         self.logger.info(f"Using device: {self.device}")
         processor_args["device"] = self.device
         self.processor = parse_processor(processor_args)
-        self.save_intermediate = save_intermediate
+        self.save_extra = save_extra
         self.processing_mode = processing_mode
         self.logger.info(
             f"Initialized processor for {self.processing_mode}: {self.processor.__class__.__name__}"
@@ -122,7 +122,7 @@ class ProcessorStage(PipelineStage):
             else:
                 output = await self.processor.prepare_training_batch(item)
             output["latent_length"] = self.processor.get_latent_length(output)
-            if self.save_intermediate:
+            if self.save_extra:
                 item.update(output)
                 output = item
             if "__key__" not in output:
@@ -147,7 +147,7 @@ class PreprocessConfig(BaseModel):
     processing_limit: int | None = None  # Limit number of items to process
 
     processing_mode: Literal["inference", "training"]
-    save_intermediate: bool = False
+    save_extra: bool = False
     attachment_dir: str | None = None
     enable_coercion: bool = True
 
@@ -193,7 +193,7 @@ def run(config_path: str) -> None:
                 init_kwargs={
                     "processor_args": config.processor,
                     "processing_mode": config.processing_mode,
-                    "save_intermediate": config.save_intermediate,
+                    "save_extra": config.save_extra,
                 },
             ),
         ],

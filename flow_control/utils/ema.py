@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+from pydantic import BaseModel
 from torch.optim import Optimizer
 
 
@@ -33,6 +34,12 @@ def apply_init_maybe(optimizer: Optimizer):
             optimizer.restore_from_init_backup()
 
 
+class EMAConfig(BaseModel):
+    decay: float = 1.0
+    warmup: bool = True
+    interval: int = 1
+
+
 class EMAOptimizer(Optimizer):
     """Optimizer wrapper that maintains EMA of parameters.
 
@@ -59,17 +66,19 @@ class EMAOptimizer(Optimizer):
     def __init__(
         self,
         params,
-        ema_decay: float,
+        config: EMAConfig,
         enable_init_backup: bool = False,
         **kwargs,
     ):
         super().__init__(params, **kwargs)
-        self.ema_decay = ema_decay
+        self.ema_decay = config.decay
+        self.ema_warmup = config.warmup
+        self.ema_interval = config.interval
+
         self.enable_init_backup = enable_init_backup
         self.ema_applied = False
         self.init_backup_applied = False
-        self.enable_update = True
-        self._first_step = True
+        self.ema_step_count = 0
 
     @torch.no_grad()
     def apply_shadow(self):
@@ -129,7 +138,7 @@ class EMAOptimizer(Optimizer):
                 self.state[p]["init_backup"] = p.clone().to(torch.float32)
 
     @torch.no_grad()
-    def update_ema(self):
+    def update_ema(self, decay: float):
         """Update EMA buffers using foreach_lerp for batched computation."""
         # Initialize EMA buffers for new parameters
         for group in self.param_groups:
@@ -152,7 +161,31 @@ class EMAOptimizer(Optimizer):
 
         if ema_buffers:
             # ema = lerp(ema, param, 1 - decay) = decay * ema + (1 - decay) * param
-            torch._foreach_lerp_(ema_buffers, param_fp32, 1 - self.ema_decay)
+            torch._foreach_lerp_(ema_buffers, param_fp32, 1 - decay)
+
+    def state_dict(self):
+        sd = super().state_dict()
+        sd["enable_init_backup"] = self.enable_init_backup
+        sd["ema_applied"] = self.ema_applied
+        sd["init_backup_applied"] = self.init_backup_applied
+        sd["ema_step_count"] = self.ema_step_count
+        return sd
+
+    def load_state_dict(self, state_dict):
+        self.enable_init_backup = state_dict.pop("enable_init_backup", False)
+        self.ema_applied = state_dict.pop("ema_applied", False)
+        self.init_backup_applied = state_dict.pop("init_backup_applied", False)
+        self.ema_step_count = state_dict.pop("ema_step_count", 0)
+        super().load_state_dict(state_dict)
+
+    def get_current_decay(self):
+        if self.ema_warmup:
+            # TODO: make this configurable
+            return min(
+                (1 + self.ema_step_count) / (10 + self.ema_step_count), self.ema_decay
+            )
+        else:
+            return self.ema_decay
 
     def step(self, closure: Any = None):
         if self.ema_applied:
@@ -160,14 +193,14 @@ class EMAOptimizer(Optimizer):
         if self.init_backup_applied:
             raise RuntimeError("Init backup is applied, cannot step optimizer.")
 
-        if self._first_step and self.enable_init_backup and self.enable_update:
+        if self.ema_step_count == 0 and self.enable_init_backup:
             self._save_init_backup()
-            self._first_step = False
 
         loss = super().step(closure)
-
-        if self.enable_update:
-            self.update_ema()
+        self.ema_step_count += 1
+        decay = self.get_current_decay()
+        if decay < 1.0:
+            self.update_ema(decay)
 
         return loss
 

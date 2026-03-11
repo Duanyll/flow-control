@@ -186,7 +186,9 @@ def coerce_record(
 
     Fields not present in the TypedDict are passed through unchanged.
     """
-    return adapter.validate_python(raw, context={"attachment_dir": attachment_dir})
+    return adapter.validate_python(
+        raw, context={"attachment_dir": attachment_dir}, extra="allow"
+    )
 
 
 if __name__ == "__main__":
