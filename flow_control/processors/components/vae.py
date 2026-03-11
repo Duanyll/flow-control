@@ -86,6 +86,7 @@ class Flux1VAE(BaseVAE[AutoencoderKL]):
         latents = (latents / self.model.config["scaling_factor"]) + self.model.config[
             "shift_factor"
         ]
+        latents = latents.to(self.dtype)
         image = cast(
             DecoderOutput, self.model.decode(cast(torch.FloatTensor, latents))
         ).sample
@@ -142,6 +143,7 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
             .to(latents.device, latents.dtype)
         )
         latents = latents * latents_std + latents_mean
+        latents = latents.to(self.dtype)
         images = cast(DecoderOutput, self.model.decode(latents)).sample
         images = (images + 1) / 2
         if not has_frame_dim:
@@ -198,6 +200,7 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
         return latents
 
     def _decode(self, latents):
+        latents = latents.to(self.dtype)
         bn: Any = self.model.bn
         latents_bn_mean = bn.running_mean.view(1, -1, 1, 1).to(
             latents.device, latents.dtype

@@ -10,6 +10,7 @@ from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
     Progress,
+    SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
@@ -27,12 +28,11 @@ logger = get_logger(__name__)
 
 def make_sample_progress() -> Progress:
     return Progress(
-        TextColumn("[bold blue]{task.description}"),
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description:<20}"),
         BarColumn(complete_style="blue", finished_style="bold blue"),
         MofNCompleteColumn(),
-        "•",
         TimeElapsedColumn(),
-        "•",
         TimeRemainingColumn(),
         console=console,
         transient=True,
@@ -110,11 +110,11 @@ class BaseSampler(BaseModel, ABC):
         self._sync_negative_pass(has_negative)
 
         batch["noisy_latents"] = latents
-        cond = model._predict_velocity(batch, timestep)
+        cond = model.predict_velocity(batch, timestep)
         if self._negative_pass:
             if negative_batch is not None:
                 negative_batch["noisy_latents"] = latents
-                uncond = model._predict_velocity(negative_batch, timestep)
+                uncond = model.predict_velocity(negative_batch, timestep)
                 combined_velocity = uncond + (cond - uncond) * self.cfg_scale
 
                 if self.enable_cfg_renorm:
@@ -126,7 +126,7 @@ class BaseSampler(BaseModel, ABC):
                 return combined_velocity
             else:
                 # Must do an empty forward pass to sync with other processes
-                _ = model._predict_velocity(batch, timestep)
+                _ = model.predict_velocity(batch, timestep)
                 return cond
         else:
             return cond

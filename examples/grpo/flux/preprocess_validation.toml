@@ -7,7 +7,7 @@ queue_size = 16
 num_sink_workers = 1
 # RL Training dataset is actually inference task
 processing_mode = "inference" 
-processing_limit = 32
+processing_limit = 8
 
 save_extra = true
 

@@ -103,18 +103,18 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
     def make_train_progress_bar(self):
         progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Epoch: {task.fields[epoch]}/{task.fields[total_epochs]}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
-            TextColumn("• Loss: {task.fields[loss]:.4f}"),
-            TextColumn("• LR: {task.fields[lr]:.6f}"),
+            TextColumn("Epoch: {task.fields[epoch]}/{task.fields[total_epochs]}"),
+            TextColumn("Loss: {task.fields[loss]:.4f}"),
+            TextColumn("LR: {task.fields[lr]:.6f}"),
             console=console,
         )
         task = progress.add_task(
-            "Training...",
+            "Training",
             total=self.conf.train_steps,
             completed=self.current_step,
             epoch=self.current_epoch,
@@ -144,7 +144,7 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         noise = torch.randn_like(clean, dtype=torch.float32)
         batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
 
-        model_pred = self.model._predict_velocity(
+        model_pred = self.model.predict_velocity(
             batch, timesteps.to(dtype=self.model.dtype)
         ).float()
         target = noise - clean

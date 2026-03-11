@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
@@ -273,9 +274,9 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             raise RuntimeError("Validation dataloader is not initialized.")
         progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Batch: {task.completed}/{task.total}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
+            MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=console,
@@ -283,7 +284,7 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             disable=len(self.validation_dataloader) <= 1,
         )
         task = progress.add_task(
-            "Validating...",
+            "Validating",
             total=len(self.validation_dataloader),
         )
         return progress, task

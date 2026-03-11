@@ -122,11 +122,11 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
     def make_progress_bar(self):
         progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Batch: {task.completed}/{task.total}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            TextColumn("Batch: {task.completed}/{task.total}"),
             console=console,
         )
         task = progress.add_task("Inference", total=len(self.dataloader))

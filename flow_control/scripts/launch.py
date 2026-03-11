@@ -131,52 +131,40 @@ def try_generate_dcp_seed(
 def run(config_path: str) -> None:
     """Launch training as the parent process (sets up env, execs torchrun)."""
     launch_config, config = _load_launch_config(config_path)
-    seed_path = None
-    code = 1
-    try:
-        seed_path = try_generate_dcp_seed(config_path, launch_config, config)
-        if launch_config.preprocess_config:
-            try_preprocess_data(launch_config.preprocess_config)
 
-        num_processes = (
-            launch_config.devices
-            if isinstance(launch_config.devices, int)
-            else len(launch_config.devices)
-        )
-        cmd = [
-            "torchrun",
-            "--nproc_per_node",
-            str(num_processes),
-            "-m",
-            "flow_control.scripts.launch",
-            config_path,
-            "--type",
-            launch_config.type,
-        ]
+    try_generate_dcp_seed(config_path, launch_config, config)
+    if launch_config.preprocess_config:
+        try_preprocess_data(launch_config.preprocess_config)
 
-        envs = launch_config.env
-        if isinstance(launch_config.devices, list):
-            envs["CUDA_VISIBLE_DEVICES"] = ",".join(
-                str(d) for d in launch_config.devices
-            )
-        if "OMP_NUM_THREADS" not in envs:
-            omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
-            envs["OMP_NUM_THREADS"] = str(omp_threads)
-        for k, v in envs.items():
-            print(f"[blue]Setting environment variable:[/blue] {k}={v}")
-            os.environ[k] = v
+    num_processes = (
+        launch_config.devices
+        if isinstance(launch_config.devices, int)
+        else len(launch_config.devices)
+    )
+    cmd = [
+        "torchrun",
+        "--nproc_per_node",
+        str(num_processes),
+        "-m",
+        "flow_control.scripts.launch",
+        config_path,
+        "--type",
+        launch_config.type,
+    ]
 
-        print(f"[blue]Executing command:[/blue] {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
-        code = 0
-    except subprocess.CalledProcessError as e:
-        code = e.returncode
-        print(f"[red]Error during torchrun execution (exit code {code})[/red]")
-    finally:
-        if seed_path and os.path.exists(seed_path):
-            print(f"[blue]Cleaning up seed checkpoint directory:[/blue] {seed_path}")
-            shutil.rmtree(seed_path)
-    sys.exit(code)
+    envs = launch_config.env
+    if isinstance(launch_config.devices, list):
+        envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
+    if "OMP_NUM_THREADS" not in envs:
+        omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
+        envs["OMP_NUM_THREADS"] = str(omp_threads)
+    for k, v in envs.items():
+        print(f"[blue]Setting environment variable:[/blue] {k}={v}")
+        os.environ[k] = v
+
+    print(f"[blue]Executing command:[/blue] {' '.join(cmd)}")
+
+    os.execvp(cmd[0], cmd)
 
 
 def main():

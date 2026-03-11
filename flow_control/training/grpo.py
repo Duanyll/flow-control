@@ -414,14 +414,15 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
         rollout_progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=console,
+            transient=True,
         )
-        rollout_task = rollout_progress.add_task("Rollout...", total=total_rollouts)
+        rollout_task = rollout_progress.add_task("Rollout", total=total_rollouts)
 
         overlap_reward = self.conf.reward.supports_rollout_overlap()
         reward_loop = RewardLoopThread() if overlap_reward else None
@@ -516,18 +517,20 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             if reward_loop is not None:
                 reward_loop.close()
 
-        reward_mean = torch.stack([r["reward"] for r in rollouts]).mean().item()
-        logger.info(
-            f"Epoch {self.current_epoch}: rollout reward_mean={reward_mean:.4f}"
-        )
-
         return rollouts
 
-    def _compute_advantages(self, rollouts: list[Rollout]) -> torch.Tensor:
+    def _compute_advantages(
+        self, rollouts: list[Rollout]
+    ) -> tuple[torch.Tensor, float, float]:
         """Compute advantages using gathered rewards across all GPUs.
 
         Uses the ``__key__`` field from each rollout's batch to group rollouts
         that belong to the same prompt for per-prompt advantage estimation.
+
+        Returns:
+            advantages: Per-rollout advantages [B, T]
+            reward_mean: Mean reward across all rollouts
+            reward_std: Standard deviation of rewards across all rollouts
         """
         local_rewards = torch.cat([s["reward"] for s in rollouts], dim=0).to(
             self.device
@@ -573,7 +576,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                 "reward/adv_abs_mean": advantages.abs().mean().item(),
             }
         )
-        logger.info(
+        logger.debug(
             f"Epoch {self.current_epoch}: reward_mean={reward_mean:.4f}, "
             f"reward_std={reward_std:.4f}"
         )
@@ -582,7 +585,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         local_b = local_rewards.shape[0]
         start = self.rank * local_b
         end = start + local_b
-        return advantages[start:end].cpu()
+        return advantages[start:end].cpu(), reward_mean, reward_std
 
     def _train_on_rollouts(
         self,
@@ -598,15 +601,16 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
         train_progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
-            TextColumn("• Loss: {task.fields[loss]:.4f}"),
+            TextColumn("Loss: {task.fields[loss]:.4f}"),
             console=console,
+            transient=True,
         )
-        train_task = train_progress.add_task("Training...", total=total_items, loss=0.0)
+        train_task = train_progress.add_task("Training", total=total_items, loss=0.0)
 
         with train_progress:
             for _inner_epoch in range(self.conf.num_inner_epochs):
@@ -759,21 +763,25 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
 
         progress = Progress(
             SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TextColumn(" Epoch: {task.fields[epoch]}/{task.fields[total_epochs]}"),
-            TextColumn(" Step: {task.fields[step]}"),
+            TextColumn("[progress.description]{task.description:<20}"),
             BarColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            MofNCompleteColumn(),
+            TextColumn("Step: {task.fields[step]}"),
+            TextColumn("R̄: {task.fields[reward_mean]:.3f}"),
+            TextColumn("σ: {task.fields[reward_std]:.3f}"),
             console=console,
         )
         task = progress.add_task(
-            "GRPO Training...",
+            "GRPO Training",
             total=self.conf.train_epochs,
             completed=self.current_epoch,
             epoch=self.current_epoch,
             total_epochs=self.conf.train_epochs,
             step=self.current_step,
+            reward_mean=0.0,
+            reward_std=0.0,
         )
 
         with progress:
@@ -782,14 +790,14 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
 
                 # Rollout phase
-                logger.info(f"Epoch {self.current_epoch}: starting rollout phase...")
+                logger.debug(f"Epoch {self.current_epoch}: starting rollout phase...")
                 rollouts = self._collect_rollouts()
 
                 # Advantage computation
-                advantages = self._compute_advantages(rollouts)
+                advantages, reward_mean, reward_std = self._compute_advantages(rollouts)
 
                 # Training phase
-                logger.info(f"Epoch {self.current_epoch}: starting training phase...")
+                logger.debug(f"Epoch {self.current_epoch}: starting training phase...")
                 self._train_on_rollouts(rollouts, advantages)
 
                 self.current_epoch += 1
@@ -798,6 +806,8 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     completed=self.current_epoch,
                     epoch=self.current_epoch,
                     step=self.current_step,
+                    reward_mean=reward_mean,
+                    reward_std=reward_std,
                 )
 
                 del rollouts, advantages
