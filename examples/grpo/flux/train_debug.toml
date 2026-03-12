@@ -2,6 +2,7 @@ checkpoint_root = "./runs/geneval_flux_debug/"
 seed_checkpoint_dir = "/dev/shm/flow-control/seed"
 aim_repo = "aim://192.168.5.62:53800"
 experiment_name = "flux_grpo_demo_debug"
+async_save = false
 
 num_batches_per_epoch = 2
 num_prompts_per_batch = 2
