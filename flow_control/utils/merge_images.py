@@ -9,10 +9,6 @@ from .draw import generate_color, load_font
 
 
 class BinPacker:
-    """
-    二维装箱算法 (保持不变)
-    """
-
     def __init__(self):
         self.root = {"x": 0, "y": 0, "w": 0, "h": 0, "used": False}
 
@@ -125,13 +121,12 @@ def _render_pil(
     canvas = Image.new("RGBA", (canvas_w, canvas_h), bg_color)
     draw = ImageDraw.Draw(canvas) if (border_w > 0 or draw_labels) else None
 
-    # Load font for labels if needed
     font = None
     if draw_labels and draw:
         try:
             font = load_font(label_size)
         except Exception:
-            font = None  # Fall back to default font
+            font = None
 
     for block in blocks:
         if block.get("fit"):
@@ -139,28 +134,22 @@ def _render_pil(
             w, h = block["w"], block["h"]
             canvas.paste(block["img"], (x, y))
             if border_w > 0 and draw:
-                # Generate unique color for each block's border
                 border_color = generate_color(block["index"])
                 draw.rectangle(
                     [x, y, x + w - 1, y + h - 1], outline=border_color, width=border_w
                 )
-            # Draw label with index
             if draw_labels and draw:
                 label_text = str(block["index"])
-                # Generate the same color used for border
                 label_bg_color = generate_color(block["index"])
-                # Add a semi-transparent background for better readability
                 padding = 2
                 if font:
                     bbox = draw.textbbox((0, 0), label_text, font=font)
                     text_w = bbox[2] - bbox[0]
                     text_h = bbox[3] - bbox[1]
                 else:
-                    # Rough estimate for default font
                     text_w = len(label_text) * 8
                     text_h = 12
 
-                # Draw background rectangle with border color
                 bg_rect = [
                     x + padding,
                     y + padding,
@@ -169,7 +158,6 @@ def _render_pil(
                 ]
                 draw.rectangle(bg_rect, fill=(*label_bg_color, 220))
 
-                # Draw text
                 text_pos = (x + padding * 2, y + padding * 2)
                 draw.text(text_pos, label_text, fill=(255, 255, 255, 255), font=font)
     return canvas

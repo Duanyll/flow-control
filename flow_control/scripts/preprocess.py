@@ -33,21 +33,15 @@ from flow_control.utils.pipeline import (
 
 
 class TorchDatasetSource(DataSource):
-    def __init__(
-        self, dataset_args: dict | None = None, processing_limit: int | None = None
-    ):
+    def __init__(self, dataset_args: dict | None = None):
         if dataset_args is None:
             dataset_args = {}
         self.dataset = parse_dataset(dataset_args)
         self.total = len(self.dataset)
-        self.processing_limit = processing_limit
 
     def scan(self) -> Iterator[tuple[Any, int | None]]:
-        limit = len(self.dataset)
-        if self.processing_limit is not None:
-            limit = min(limit, self.processing_limit)
-        for idx in range(limit):
-            yield idx, limit
+        for idx in range(self.total):
+            yield idx, self.total
 
 
 class TorchDatasetLoaderStage(PipelineStage):
@@ -144,7 +138,6 @@ class PreprocessConfig(BaseModel):
     processor_concurrency: int = 1  # Max concurrent async calls per processor worker
     num_threads_per_worker: int = 8
     queue_size: int = 16
-    processing_limit: int | None = None  # Limit number of items to process
 
     processing_mode: Literal["inference", "training"]
     save_extra: bool = False
@@ -162,10 +155,7 @@ def run(config_path: str) -> None:
             source=TorchDatasetSource,
             name="Scanning",
             queue_size=config.queue_size,
-            init_kwargs={
-                "dataset_args": config.dataset,
-                "processing_limit": config.processing_limit,
-            },
+            init_kwargs={"dataset_args": config.dataset},
         ),
         stages=[
             StageConfig(

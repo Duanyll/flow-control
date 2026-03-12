@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Literal, NotRequired, TypedDict
 
 import torch
@@ -20,30 +21,19 @@ class EulerSampler(BaseSampler):
     steps: int = 50
     noise_level: float = 0.0  # 0.0 = pure ODE (default), >0 = SDE
     sde_type: Literal["sde", "cps"] = "sde"
-    timestep_selection: Literal["all_except_last", "random_contiguous"] = (
-        "all_except_last"
-    )
-    timestep_window_size: int | None = None
+    sde_window_size: int | None = None
+    sde_window_range: tuple[int, int] | None = None
 
     def _select_training_window(self, num_timesteps: int) -> tuple[int, int]:
-        if num_timesteps <= 1:
-            return 0, 1
-
-        max_train_timesteps = num_timesteps - 1
-        if self.timestep_selection == "all_except_last":
-            return 0, max_train_timesteps
-
-        if self.timestep_selection == "random_contiguous":
-            if self.timestep_window_size is None:
-                return 0, max_train_timesteps
-            if self.timestep_window_size <= 0:
-                raise ValueError("timestep_window_size must be > 0.")
-            window_size = min(self.timestep_window_size, max_train_timesteps)
-            max_start = max_train_timesteps - window_size
-            start = int(torch.randint(0, max_start + 1, (1,)).item())
-            return start, start + window_size
-
-        raise ValueError(f"Unknown timestep_selection: {self.timestep_selection}")
+        if self.sde_window_size:
+            range_start, range_end = self.sde_window_range or (0, num_timesteps - 1)
+            assert 0 <= range_start < range_end < num_timesteps, (
+                "Invalid sde_window_range"
+            )
+            window_start = random.randint(range_start, range_end - self.sde_window_size)
+            return window_start, window_start + self.sde_window_size
+        else:
+            return 0, num_timesteps - 1
 
     def _sample(
         self,

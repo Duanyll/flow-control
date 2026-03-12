@@ -52,8 +52,8 @@ steps = 6
 cfg_scale = 1.0
 noise_level = 0.8
 sde_type = "cps"
-timestep_selection = "random_contiguous"
-timestep_window_size = 3
+sde_window_size = 3
+sde_window_range = [0, 3]
 
 [ema]
 decay = 0.9

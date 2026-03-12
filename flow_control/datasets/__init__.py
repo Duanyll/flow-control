@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any, TypeGuard
+from typing import TYPE_CHECKING, Annotated, Any, TypeGuard, cast
 
 from datasets import load_dataset
 from pydantic import WithJsonSchema
@@ -17,6 +17,23 @@ from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 
+
+class LimitedDataset(Dataset):
+    """Wrapper dataset that limits the length of an underlying dataset."""
+
+    def __init__(self, dataset: "MapDataset", limit: int):
+        self.dataset = dataset
+        self.limit = limit
+
+    def __len__(self) -> int:
+        return min(len(self.dataset), self.limit)
+
+    def __getitem__(self, index: int):
+        if index >= len(self):
+            raise IndexError("Index out of range")
+        return self.dataset[index]
+
+
 DatasetConfig = Annotated[
     dict[str, Any],
     WithJsonSchema(
@@ -26,6 +43,10 @@ DatasetConfig = Annotated[
                 "type": {
                     "type": "string",
                     "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, jsonl, parquet, inline, huggingface, multi)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Optional maximum length of the dataset. If specified, the dataset will be limited to this number of samples.",
                 },
             },
             "required": ["type"],
@@ -68,12 +89,12 @@ def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
         raise ValueError("dataset_config must contain a 'type' key.")
     dataset_config = dataset_config.copy()
     dataset_type = dataset_config.pop("type")
+    limit = dataset_config.pop("limit", None)
 
+    dataset: Dataset
     if dataset_type == "huggingface":
         dataset = load_dataset(**dataset_config)
-        if is_map_dataset(dataset):
-            return dataset
-        else:
+        if not is_map_dataset(dataset):
             raise ValueError(
                 "The loaded dataset is not of type MapDataset. Make sure you have passed the correct parameters."
             )
@@ -83,16 +104,20 @@ def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
             datasets.append(parse_dataset(value))
         dataset = ConcatDataset(datasets)
         assert is_map_dataset(dataset), "Concatenated dataset is not a MapDataset."
-        return dataset
     elif dataset_type in DATASET_REGISTRY:
         dataset_class = DATASET_REGISTRY[dataset_type]
         dataset = dataset_class(**dataset_config)
         assert is_map_dataset(dataset), (
             f"Loaded dataset of type {dataset_type} is not a MapDataset."
         )
-        return dataset
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
+
+    if limit is not None and limit > 0:
+        limited = LimitedDataset(dataset, limit)
+        return cast(MapDataset, limited)
+
+    return cast(MapDataset, dataset)
 
 
 DatasinkConfig = Annotated[
