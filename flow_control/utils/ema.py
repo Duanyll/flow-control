@@ -66,14 +66,14 @@ class EMAOptimizer(Optimizer):
     def __init__(
         self,
         params,
-        config: EMAConfig,
+        ema_config: EMAConfig,
         enable_init_backup: bool = False,
         **kwargs,
     ):
         super().__init__(params, **kwargs)
-        self.ema_decay = config.decay
-        self.ema_warmup = config.warmup
-        self.ema_interval = config.interval
+        self.ema_decay = ema_config.decay
+        self.ema_warmup = ema_config.warmup
+        self.ema_interval = ema_config.interval
 
         self.enable_init_backup = enable_init_backup
         self.ema_applied = False
@@ -199,7 +199,7 @@ class EMAOptimizer(Optimizer):
         loss = super().step(closure)
         self.ema_step_count += 1
         decay = self.get_current_decay()
-        if decay < 1.0:
+        if decay < 1.0 and self.ema_step_count % self.ema_interval == 0:
             self.update_ema(decay)
 
         return loss

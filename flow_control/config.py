@@ -27,4 +27,8 @@ class HsdpEngineConfig(BaseModel):
     seed: int = 42
     hsdp_shard_dim: int = 1
     gradient_checkpointing: bool = True
-    async_save: bool = True
+    async_save: bool = False
+    """
+    Whether to use `dcp.async_save` to save checkpoints. This is still experimental and
+    may cause race conditions when using collectives. Use with caution.
+    """

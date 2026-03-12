@@ -70,11 +70,6 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
-    timestep_selection: Literal[
-        "all_except_last", "random_contiguous", "random_fraction"
-    ] = "all_except_last"
-    timestep_fraction: float = 1.0
-    timestep_window_size: int | None = None
     advantage: Advantage = PerPromptAdvantage()
 
     # Optimization / training loop
@@ -263,42 +258,6 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         metrics["train/loss"] = loss.detach()
         return loss, metrics
 
-    def _num_train_timesteps(self, num_timesteps: int) -> int:
-        if num_timesteps <= 1:
-            return 1
-
-        max_train_timesteps = num_timesteps - 1  # Skip the last step by default.
-        if self.conf.timestep_selection == "all_except_last":
-            return max_train_timesteps
-        if self.conf.timestep_selection == "random_contiguous":
-            if self.conf.timestep_window_size is None:
-                return max_train_timesteps
-            if self.conf.timestep_window_size <= 0:
-                raise ValueError("timestep_window_size must be > 0.")
-            return min(self.conf.timestep_window_size, max_train_timesteps)
-        if self.conf.timestep_selection == "random_fraction":
-            if not (0.0 < self.conf.timestep_fraction <= 1.0):
-                raise ValueError("timestep_fraction must be in (0, 1].")
-            return max(1, int(max_train_timesteps * self.conf.timestep_fraction))
-        raise ValueError(f"Unknown timestep_selection: {self.conf.timestep_selection}")
-
-    def _select_train_timesteps(self, num_timesteps: int) -> list[int]:
-        if num_timesteps <= 1:
-            return [0]
-
-        trainable = list(range(num_timesteps - 1))
-        if self.conf.timestep_selection == "all_except_last":
-            return trainable
-
-        num_train_timesteps = self._num_train_timesteps(num_timesteps)
-        if self.conf.timestep_selection == "random_contiguous":
-            max_start = len(trainable) - num_train_timesteps
-            start = torch.randint(0, max_start + 1, (1,)).item()
-            return trainable[start : start + num_train_timesteps]
-
-        perm = torch.randperm(len(trainable))[:num_train_timesteps].tolist()
-        return sorted(trainable[i] for i in perm)
-
     def _gather_mean_scalar(self, value: float) -> float:
         values: list[Any] = [None] * self.world_size
         dist.all_gather_object(values, value)
@@ -381,8 +340,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
     ) -> list[tuple[int, int]]:
         train_items: list[tuple[int, int]] = []
         for rollout_idx in range(num_rollouts):
-            step_indices = self._select_train_timesteps(num_timesteps)
-            train_items.extend((rollout_idx, j) for j in step_indices)
+            train_items.extend((rollout_idx, j) for j in range(num_timesteps))
         return train_items
 
     def _warn_if_non_divisible(self, num_train_items: int) -> None:
@@ -466,7 +424,9 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     trajectory: SdeTrajectory = rollout_out
 
                     # Decode final latents to images and merge into batch
-                    final_latents = trajectory["latents"][:, -1]
+                    final_latents = trajectory.get("final_latents")
+                    if final_latents is None:
+                        raise RuntimeError("GRPO rollout is missing final latents.")
                     with torch.no_grad():
                         decoded = self.processor.decode_output(final_latents, batch)
                     batch.update(decoded)
@@ -596,8 +556,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         self.transformer.train()
 
         num_timesteps = rollouts[0]["trajectory"]["log_probs"].shape[1]
-        num_train_timesteps = self._num_train_timesteps(num_timesteps)
-        total_items = self.conf.num_inner_epochs * len(rollouts) * num_train_timesteps
+        total_items = self.conf.num_inner_epochs * len(rollouts) * num_timesteps
 
         train_progress = Progress(
             SpinnerColumn(),

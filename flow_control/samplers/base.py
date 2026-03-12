@@ -44,6 +44,11 @@ class BaseSampler(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     cfg_scale: float = 7.5
+    """
+    TRUE classifier-free guidance scale. For guidance distilled models like FLUX, true
+    CFG should not be applied and this should be set to 1.0. Set their guidance embeddings
+    value in ModelAdapter instead.
+    """
     seed: int = 42
     enable_cfg_renorm: bool = False
     cfg_renorm_eps: float = 1e-8

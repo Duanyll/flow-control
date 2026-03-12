@@ -106,7 +106,7 @@ def parse_optimizer(
         ctor = make_ema_optimizer(ctor)
         return ctor(
             parameters,
-            config=ema_config or EMAConfig(),
+            ema_config=ema_config or EMAConfig(),
             enable_init_backup=enable_init_backup,
             **conf,
         )

@@ -1,5 +1,5 @@
 import math
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 import torch
 
@@ -9,9 +9,10 @@ from .base import BaseSampler, make_sample_progress
 
 
 class SdeTrajectory(TypedDict):
-    latents: torch.Tensor  # [B, T+1, N, D] all timestep latents
+    latents: torch.Tensor  # [B, T+1, N, D] selected training-window latents
     log_probs: torch.Tensor  # [B, T] per-step log probabilities
-    timesteps: torch.Tensor  # [T+1] sigma sequence
+    timesteps: torch.Tensor  # [T+1] sigma sequence for selected training window
+    final_latents: NotRequired[torch.Tensor]  # [B, N, D] final latents for decoding
 
 
 class EulerSampler(BaseSampler):
@@ -19,6 +20,30 @@ class EulerSampler(BaseSampler):
     steps: int = 50
     noise_level: float = 0.0  # 0.0 = pure ODE (default), >0 = SDE
     sde_type: Literal["sde", "cps"] = "sde"
+    timestep_selection: Literal["all_except_last", "random_contiguous"] = (
+        "all_except_last"
+    )
+    timestep_window_size: int | None = None
+
+    def _select_training_window(self, num_timesteps: int) -> tuple[int, int]:
+        if num_timesteps <= 1:
+            return 0, 1
+
+        max_train_timesteps = num_timesteps - 1
+        if self.timestep_selection == "all_except_last":
+            return 0, max_train_timesteps
+
+        if self.timestep_selection == "random_contiguous":
+            if self.timestep_window_size is None:
+                return 0, max_train_timesteps
+            if self.timestep_window_size <= 0:
+                raise ValueError("timestep_window_size must be > 0.")
+            window_size = min(self.timestep_window_size, max_train_timesteps)
+            max_start = max_train_timesteps - window_size
+            start = int(torch.randint(0, max_start + 1, (1,)).item())
+            return start, start + window_size
+
+        raise ValueError(f"Unknown timestep_selection: {self.timestep_selection}")
 
     def _sample(
         self,
@@ -52,7 +77,8 @@ class EulerSampler(BaseSampler):
         sigmas = sigmas.to(device=device, dtype=torch.float32)
         latents = batch["noisy_latents"].float()
 
-        all_latents = [latents] if return_trajectory else None
+        train_start, train_end = self._select_training_window(self.steps)
+        selected_latents: list[torch.Tensor] | None = [] if return_trajectory else None
         all_log_probs: list[torch.Tensor] = []
 
         with make_sample_progress() as progress:
@@ -64,13 +90,23 @@ class EulerSampler(BaseSampler):
                 velocity = self.get_guided_velocity(
                     model, latents, t_cur, batch, negative_batch
                 )
+                step_noise_level = (
+                    self.noise_level if train_start <= i < train_end else 0.0
+                )
+                if return_trajectory and i == train_start:
+                    assert selected_latents is not None
+                    selected_latents.append(latents)
                 latents, log_prob, mean, std_dev = self.sde_step(
-                    velocity, latents, t_cur, t_next
+                    velocity,
+                    latents,
+                    t_cur,
+                    t_next,
+                    noise_level=step_noise_level,
                 )
 
-                if return_trajectory:
-                    assert all_latents is not None
-                    all_latents.append(latents)
+                if return_trajectory and train_start <= i < train_end:
+                    assert selected_latents is not None
+                    selected_latents.append(latents)
                     all_log_probs.append(log_prob)
 
                 progress.advance(task)
@@ -78,13 +114,15 @@ class EulerSampler(BaseSampler):
         if not return_trajectory:
             return latents.to(dtype)
 
-        stacked_latents = torch.stack(all_latents, dim=1)
+        assert selected_latents is not None
+        stacked_latents = torch.stack(selected_latents, dim=1)
         stacked_log_probs = torch.stack(all_log_probs, dim=1)
 
         return SdeTrajectory(
             latents=stacked_latents,
             log_probs=stacked_log_probs,
-            timesteps=sigmas,
+            timesteps=sigmas[train_start : train_end + 1],
+            final_latents=latents.to(dtype),
         )
 
     def sde_step(
@@ -94,6 +132,7 @@ class EulerSampler(BaseSampler):
         sigma: torch.Tensor,
         sigma_next: torch.Tensor,
         prev_sample: torch.Tensor | None = None,
+        noise_level: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single SDE step. Returns (next_latent, log_prob, mean, std_dev).
 
@@ -104,10 +143,11 @@ class EulerSampler(BaseSampler):
         latent = latent
         if prev_sample is not None:
             prev_sample = prev_sample
+        step_noise_level = self.noise_level if noise_level is None else noise_level
 
         dt = sigma_next - sigma  # negative (sigma decreases over time)
 
-        if self.noise_level == 0.0:
+        if step_noise_level == 0.0:
             # Pure ODE step
             next_latent = latent + velocity * dt
             log_prob = torch.zeros(latent.shape[0], device=latent.device)
@@ -122,7 +162,7 @@ class EulerSampler(BaseSampler):
                 sigma_next,
                 sigma,
             )
-            std_dev_t = torch.sqrt(sigma / (1 - sigma_denom)) * self.noise_level
+            std_dev_t = torch.sqrt(sigma / (1 - sigma_denom)) * step_noise_level
 
             # SDE mean update
             mean = (
@@ -145,7 +185,7 @@ class EulerSampler(BaseSampler):
             )
 
         elif self.sde_type == "cps":
-            std_dev_t = sigma_next * math.sin(self.noise_level * math.pi / 2)
+            std_dev_t = sigma_next * math.sin(step_noise_level * math.pi / 2)
             pred_original_sample = latent - sigma * velocity
             noise_estimate = latent + velocity * (1 - sigma)
             mean = pred_original_sample * (
