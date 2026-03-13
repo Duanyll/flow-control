@@ -13,12 +13,14 @@ type = "pickle_directory"
 path = "./demo/preprocess_qwen_t2i"
 
 [sampler]
-type = "linear_shift"
 steps = 28
-max_image_seq_len = 8192
-max_shift = 0.9
 cfg_scale = 4.0
 enable_cfg_renorm = true
+
+[sampler.shift]
+type = "linear"
+max_image_seq_len = 8192
+max_shift = 0.9
 
 [processor]
 task = "t2i"

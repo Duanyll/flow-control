@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -21,7 +21,7 @@ from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.logging import console, get_logger, warn_once
 
 if TYPE_CHECKING:
-    from .euler import SdeTrajectory
+    from .sampler import SampleOutput
 
 logger = get_logger(__name__)
 
@@ -40,7 +40,6 @@ def make_sample_progress() -> Progress:
 
 
 class BaseSampler(BaseModel, ABC):
-    type: Literal["base"] = "base"
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     cfg_scale: float = 7.5
@@ -72,7 +71,7 @@ class BaseSampler(BaseModel, ABC):
         t_start=1.0,
         t_end=0.0,
         return_trajectory: bool = False,
-    ) -> torch.Tensor | SdeTrajectory:
+    ) -> SampleOutput:
         if self.cfg_scale > 1.0 and negative_batch is None:
             warn_once(
                 logger,
@@ -99,7 +98,7 @@ class BaseSampler(BaseModel, ABC):
         t_start=1.0,
         t_end=0.0,
         return_trajectory: bool = False,
-    ) -> torch.Tensor | SdeTrajectory:
+    ) -> SampleOutput:
         raise NotImplementedError()
 
     def get_guided_velocity(

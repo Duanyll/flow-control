@@ -21,9 +21,11 @@ type = "pickle_directory"
 path = "./demo/preprocess_flux2_klein_9b_t2i"
 
 [sampler]
-type = "flux2_shift"
 steps = 50
 cfg_scale = 3.5
+
+[sampler.shift]
+type = "flux2"
 
 [processor]
 task = "t2i"

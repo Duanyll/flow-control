@@ -1,77 +1,68 @@
 import math
-from typing import Literal
+from abc import ABC, abstractmethod
+from typing import Annotated, Literal
 
 import torch
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
-
-from .euler import EulerSampler, SdeTrajectory
+from flow_control.adapters.base import Batch
 
 
-class ShiftedEulerSampler(EulerSampler):
+class BaseShift(BaseModel, ABC):
+    type: Literal["base"] = "base"
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
     latent_length_from: Literal["actual", "image_size"] = "actual"
     shift_terminal: float | None = None
 
-    def _calculate_shift_factor(self, seq_len: int) -> float:
-        raise NotImplementedError("Subclasses must implement _calculate_shift_factor")
-
-    def _make_shifted_sigmas(
-        self, seq_len: int, t_start: float, t_end: float
-    ) -> torch.Tensor:
-        t = torch.linspace(t_start, t_end, self.steps + 1)
-
-        shift_factor = self._calculate_shift_factor(seq_len)
+    def apply(self, sigmas: torch.Tensor, batch: Batch, num_steps: int) -> torch.Tensor:
+        seq_len = self._get_seq_len(batch)
+        shift_factor = self._calculate_shift_factor(seq_len, num_steps)
         if shift_factor != 1.0:
-            t = (shift_factor * t) / (1 + (shift_factor - 1) * t)
+            sigmas = (shift_factor * sigmas) / (1 + (shift_factor - 1) * sigmas)
 
         if self.shift_terminal is not None:
-            one_minus_z = 1 - t
+            one_minus_z = 1 - sigmas
             scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
-            t = 1 - (one_minus_z / scale_factor)
+            sigmas = 1 - (one_minus_z / scale_factor)
 
-        return t
+        return sigmas
 
-    def _sample(
-        self,
-        model: BaseModelAdapter,
-        batch: Batch,
-        negative_batch: Batch | None = None,
-        t_start: float = 1.0,
-        t_end: float = 0.0,
-        return_trajectory: bool = False,
-    ) -> torch.Tensor | SdeTrajectory:
+    def _get_seq_len(self, batch: Batch) -> int:
         if self.latent_length_from == "actual":
-            seq_len = batch["noisy_latents"].shape[1]
-        else:
-            h, w = batch["image_size"]
-            seq_len = h * w // 256  # assuming patch size 16x16
+            return batch["noisy_latents"].shape[1]
 
-        sigmas = self._make_shifted_sigmas(seq_len, t_start, t_end)
-        return self._euler_sample(
-            model,
-            batch,
-            sigmas,
-            negative_batch,
-            return_trajectory=return_trajectory,
-        )
+        h, w = batch["image_size"]
+        return h * w // 256  # assuming patch size 16x16
+
+    @abstractmethod
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+        raise NotImplementedError()
 
 
-class ConstantShiftSampler(ShiftedEulerSampler):
-    type: Literal["constant_shift"] = "constant_shift"
+class NoShift(BaseShift):
+    type: Literal["none"] = "none"
+
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+        return 1.0
+
+
+class ConstantShift(BaseShift):
+    type: Literal["constant"] = "constant"
     shift_value: float = 1.0
 
-    def _calculate_shift_factor(self, seq_len: int) -> float:
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
         return self.shift_value
 
 
-class LinearShiftSampler(ShiftedEulerSampler):
-    type: Literal["linear_shift"] = "linear_shift"
+class LinearShift(BaseShift):
+    type: Literal["linear"] = "linear"
     base_image_seq_len: int = 256
     max_image_seq_len: int = 4096
     base_shift: float = 0.5
     max_shift: float = 1.15
 
-    def _calculate_shift_factor(self, seq_len: int) -> float:
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
         m = (self.max_shift - self.base_shift) / (
             self.max_image_seq_len - self.base_image_seq_len
         )
@@ -80,17 +71,16 @@ class LinearShiftSampler(ShiftedEulerSampler):
         return math.exp(mu)
 
 
-class SquaredShiftSampler(ShiftedEulerSampler):
-    type: Literal["squared_shift"] = "squared_shift"
+class SquaredShift(BaseShift):
+    type: Literal["squared"] = "squared"
     base_image_seq_len: int = 256
 
-    def _calculate_shift_factor(self, seq_len: int) -> float:
-        mu = (seq_len / self.base_image_seq_len) ** 0.5
-        return mu
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+        return (seq_len / self.base_image_seq_len) ** 0.5
 
 
-class Flux2ShiftSampler(ShiftedEulerSampler):
-    type: Literal["flux2_shift"] = "flux2_shift"
+class Flux2Shift(BaseShift):
+    type: Literal["flux2"] = "flux2"
     a1: float = 8.73809524e-05
     b1: float = 1.89833333
     a2: float = 0.00016927
@@ -99,7 +89,7 @@ class Flux2ShiftSampler(ShiftedEulerSampler):
     c: float = 190.0
     d: float = 200.0
 
-    def _calculate_shift_factor(self, seq_len: int) -> float:
+    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
         if seq_len > self.image_seq_len_threshold:
             return self.a2 * seq_len + self.b2
 
@@ -107,5 +97,14 @@ class Flux2ShiftSampler(ShiftedEulerSampler):
         m_10 = self.a1 * seq_len + self.b1
         a = (m_200 - m_10) / self.c
         b = m_200 - self.d * a
-        mu = a * self.steps + b
-        return mu
+        return a * num_steps + b
+
+
+Shift = Annotated[
+    Annotated[NoShift, Tag("none")]
+    | Annotated[ConstantShift, Tag("constant")]
+    | Annotated[LinearShift, Tag("linear")]
+    | Annotated[SquaredShift, Tag("squared")]
+    | Annotated[Flux2Shift, Tag("flux2")],
+    Discriminator("type"),
+]

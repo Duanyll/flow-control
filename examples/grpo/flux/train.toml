@@ -47,13 +47,17 @@ type = "pickle_directory"
 path = "./data/geneval_flux/train"
 
 [train_sampler]
-type = "linear_shift"
 steps = 6
 cfg_scale = 1.0
-noise_level = 0.8
-sde_type = "cps"
-sde_window_size = 3
-sde_window_range = [0, 3]
+trajectory_window_size = 3
+trajectory_window_range = [0, 3]
+
+[train_sampler.shift]
+type = "linear"
+
+[train_sampler.solver]
+type = "cps"
+eta = 0.8
 
 [ema]
 decay = 0.9
@@ -84,9 +88,11 @@ type = "pickle_directory"
 path = "./data/geneval_flux/validation"
 
 [sampler]
-type = "linear_shift"
 steps = 28
 cfg_scale = 1.0
+
+[sampler.shift]
+type = "linear"
 
 [processor]
 task = "t2i"

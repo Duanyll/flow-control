@@ -174,15 +174,13 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
                         device=self.device,
                         dtype=self.model.dtype,
                     )
-                    clean_latents = self.sampler.sample(
+                    sample_output = self.sampler.sample(
                         self.model, batch, negative_batch=negative_batch
                     )
-                    if not isinstance(clean_latents, torch.Tensor):
-                        raise RuntimeError(
-                            "Inference expects sampler.sample(..., return_trajectory=False) "
-                            "to return a tensor."
-                        )
-                    result = self.processor.decode_output(clean_latents, batch)
+                    result = self.processor.decode_output(
+                        sample_output.final_latents,
+                        batch,
+                    )
                     result = deep_move_to_device(result, torch.device("cpu"))
                     image = tensor_to_pil(result["clean_image"])
                     key = batch.get("__key__", None)

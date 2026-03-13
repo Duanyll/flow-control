@@ -14,9 +14,11 @@ type = "pickle_directory"
 path = "./demo/preprocess_flux2_tie"
 
 [sampler]
-type = "flux2_shift"
 steps = 28
 cfg_scale = 1.0
+
+[sampler.shift]
+type = "flux2"
 
 [processor]
 task = "tie"

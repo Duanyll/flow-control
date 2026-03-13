@@ -13,10 +13,12 @@ type = "pickle_directory"
 path = "./demo/preprocess_zimage_t2i"
 
 [sampler]
-type = "linear_shift"
 steps = 30
 cfg_scale = 4.0
 enable_cfg_renorm = true
+
+[sampler.shift]
+type = "linear"
 
 [processor]
 task = "t2i"

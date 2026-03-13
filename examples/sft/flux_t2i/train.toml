@@ -22,9 +22,11 @@ type = "base"
 peft_lora_rank = 16
 
 [sampler]
-type = "linear_shift"
 steps = 20
 cfg_scale = 1.0
+
+[sampler.shift]
+type = "linear"
 
 [processor]
 task = "t2i"

@@ -13,10 +13,12 @@ type = "pickle_directory"
 path = "./demo/preprocess_longcat_tie"
 
 [sampler]
-type = "linear_shift"
 steps = 50
 cfg_scale = 4.5
 enable_cfg_renorm = true
+
+[sampler.shift]
+type = "linear"
 
 [processor]
 task = "tie"

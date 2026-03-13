@@ -333,15 +333,13 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
                         device=self.device,
                         dtype=self.model.dtype,
                     )
-                    clean_latents = self.sampler.sample(
+                    sample_output = self.sampler.sample(
                         self.model, batch, negative_batch=negative_batch
                     )
-                    if not isinstance(clean_latents, torch.Tensor):
-                        raise RuntimeError(
-                            "validate_and_log expects sampler.sample(..., return_trajectory=False) "
-                            "to return a tensor."
-                        )
-                    decoded = self.processor.decode_output(clean_latents, batch)
+                    decoded = self.processor.decode_output(
+                        sample_output.final_latents,
+                        batch,
+                    )
                     batch.update(decoded)
                     on_sample(batch)
                     progress.advance(task)

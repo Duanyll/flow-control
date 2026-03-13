@@ -4,7 +4,8 @@ import os
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Literal, TypedDict
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -22,8 +23,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters.base import Batch
 from flow_control.datasets import parse_dataset
 from flow_control.rewards import Reward
-from flow_control.samplers import Sampler
-from flow_control.samplers.euler import EulerSampler, SdeTrajectory
+from flow_control.samplers import SampleOutput, Sampler
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -94,8 +94,9 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     num_dataloader_workers: int = 0
 
 
-class Rollout(TypedDict):
-    trajectory: SdeTrajectory
+@dataclass
+class Rollout:
+    trajectory: SampleOutput
     reward: torch.Tensor
     key: str
     batch: Batch
@@ -162,11 +163,11 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         super().__init__(**kwargs)
 
     @property
-    def grpo_sampler(self) -> EulerSampler:
+    def grpo_sampler(self) -> Sampler:
         sampler = self.conf.train_sampler if self.conf.train_sampler else self.sampler
-        if not isinstance(sampler, EulerSampler):
+        if not sampler.solver.supports_step_log_prob:
             raise TypeError(
-                "GRPO training requires an EulerSampler-compatible train_sampler."
+                "GRPO training requires a stochastic solver with replayable step log-prob."
             )
         return sampler
 
@@ -298,18 +299,26 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         rollout_advantages: torch.Tensor,
         timestep_idx: int,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        trajectory = rollout["trajectory"]
-        batch = deep_move_to_device(rollout["batch"], self.device)
+        trajectory = rollout.trajectory
+        batch = deep_move_to_device(rollout.batch, self.device)
         negative_batch = (
-            deep_move_to_device(rollout["negative_batch"], self.device)
-            if rollout["negative_batch"] is not None
+            deep_move_to_device(rollout.negative_batch, self.device)
+            if rollout.negative_batch is not None
             else None
         )
-        old_log_probs = trajectory["log_probs"][0].to(device=self.device)  # [T]
-        sigmas = trajectory["timesteps"].to(device=self.device)  # [T+1]
+        if trajectory.log_probs is None or trajectory.timesteps is None:
+            raise RuntimeError("Rollout is missing log-prob trajectory data.")
+        if trajectory.latents is None:
+            raise RuntimeError("Rollout is missing latent trajectory data.")
+        solver_state = None
+        if trajectory.solver_states is not None:
+            solver_state = trajectory.solver_states[timestep_idx]
 
-        latent_t = trajectory["latents"][:, timestep_idx].to(device=self.device)
-        latent_next = trajectory["latents"][:, timestep_idx + 1].to(device=self.device)
+        old_log_probs = trajectory.log_probs[0].to(device=self.device)  # [T]
+        sigmas = trajectory.timesteps.to(device=self.device)  # [T+1]
+
+        latent_t = trajectory.latents[:, timestep_idx].to(device=self.device)
+        latent_next = trajectory.latents[:, timestep_idx + 1].to(device=self.device)
         sigma = sigmas[timestep_idx : timestep_idx + 1]
         sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
         advantage_slice = rollout_advantages[timestep_idx : timestep_idx + 1].to(
@@ -324,6 +333,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             sigma,
             sigma_next,
             negative_batch=negative_batch,
+            solver_state=solver_state,
         )
 
         ref_mean = None
@@ -337,6 +347,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                     sigma,
                     sigma_next,
                     negative_batch=negative_batch,
+                    solver_state=solver_state,
                 )
 
         loss, metrics = self.grpo_loss(
@@ -436,28 +447,33 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                             negative_batch=negative_batch,
                             return_trajectory=True,
                         )
-                    if not isinstance(rollout_out, dict):
-                        raise RuntimeError("GRPO rollout expected trajectory output.")
-                    trajectory: SdeTrajectory = rollout_out
+                    if (
+                        rollout_out.latents is None
+                        or rollout_out.log_probs is None
+                        or rollout_out.timesteps is None
+                    ):
+                        raise RuntimeError("GRPO rollout is missing trajectory data.")
 
                     # Decode final latents to images and merge into batch
-                    final_latents = trajectory.get("final_latents")
-                    if final_latents is None:
-                        raise RuntimeError("GRPO rollout is missing final latents.")
                     with torch.no_grad():
-                        decoded = self.processor.decode_output(final_latents, batch)
+                        decoded = self.processor.decode_output(
+                            rollout_out.final_latents,
+                            batch,
+                        )
                     batch.update(decoded)
 
-                    rollout: Rollout = {
-                        "trajectory": {
-                            "latents": trajectory["latents"].cpu(),
-                            "log_probs": trajectory["log_probs"].cpu(),
-                            "timesteps": trajectory["timesteps"].cpu(),
-                        },
-                        "reward": torch.tensor(0.0),  # placeholder, filled below
-                        "key": batch.get("__key__", "unknown"),
-                        "batch": deep_move_to_device(batch, torch.device("cpu")),
-                        "negative_batch": (
+                    rollout = Rollout(
+                        trajectory=SampleOutput(
+                            final_latents=rollout_out.final_latents.cpu(),
+                            latents=rollout_out.latents.cpu(),
+                            log_probs=rollout_out.log_probs.cpu(),
+                            timesteps=rollout_out.timesteps.cpu(),
+                            solver_states=rollout_out.solver_states,
+                        ),
+                        reward=torch.tensor(0.0),  # placeholder, filled below
+                        key=batch.get("__key__", "unknown"),
+                        batch=deep_move_to_device(batch, torch.device("cpu")),
+                        negative_batch=(
                             deep_move_to_device(
                                 negative_batch,
                                 torch.device("cpu"),
@@ -465,7 +481,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                             if negative_batch is not None
                             else None
                         ),
-                    }
+                    )
                     rollouts.append(rollout)
 
                     if reward_loop is not None:
@@ -477,17 +493,16 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                         )
                     else:
                         reward = self._score_reward_blocking(batch)
-                        rollout["reward"] = (
+                        rollout.reward = (
                             reward.view(1) if reward.ndim == 0 else reward
-                        )
-                        rollout["reward"] = rollout["reward"].cpu()
+                        ).cpu()
 
                     rollout_progress.advance(rollout_task)
 
             if reward_loop is not None:
                 rewards = [future.result() for future in reward_futures]
                 for rollout, reward in zip(rollouts, rewards, strict=True):
-                    rollout["reward"] = (
+                    rollout.reward = (
                         reward.view(1) if reward.ndim == 0 else reward
                     ).cpu()
         finally:
@@ -509,9 +524,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             reward_mean: Mean reward across all rollouts
             reward_std: Standard deviation of rewards across all rollouts
         """
-        local_rewards = torch.cat([s["reward"] for s in rollouts], dim=0).to(
-            self.device
-        )
+        local_rewards = torch.cat([s.reward for s in rollouts], dim=0).to(self.device)
 
         # Gather rewards across all processes
         gathered_rewards_list: list[torch.Tensor] = [
@@ -521,7 +534,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         gathered_rewards = torch.cat(gathered_rewards_list, dim=0)
 
         # Gather keys across processes to identify prompt groups
-        local_keys = [s["key"] for s in rollouts]
+        local_keys = [s.key for s in rollouts]
         all_keys_nested: list[Any] = [None] * self.world_size
         dist.all_gather_object(all_keys_nested, local_keys)
         all_keys: list[str] = []
@@ -536,7 +549,10 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             device=gathered_rewards.device,
         )
 
-        num_timesteps = rollouts[0]["trajectory"]["log_probs"].shape[1]
+        first_log_probs = rollouts[0].trajectory.log_probs
+        if first_log_probs is None:
+            raise RuntimeError("Rollout is missing log-prob trajectory data.")
+        num_timesteps = first_log_probs.shape[1]
 
         # Compute advantages [global_B, T]
         advantages = self.conf.advantage.compute(
@@ -586,7 +602,10 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         """Training phase: update model using collected rollouts and advantages."""
         self.transformer.train()
 
-        num_timesteps = rollouts[0]["trajectory"]["log_probs"].shape[1]
+        first_log_probs = rollouts[0].trajectory.log_probs
+        if first_log_probs is None:
+            raise RuntimeError("Rollout is missing log-prob trajectory data.")
+        num_timesteps = first_log_probs.shape[1]
         total_items = self.conf.num_inner_epochs * len(rollouts) * num_timesteps
 
         train_progress = Progress(
