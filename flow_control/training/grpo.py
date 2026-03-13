@@ -28,11 +28,17 @@ from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
 )
-from flow_control.utils.ema import apply_ema_maybe, apply_init_maybe
 from flow_control.utils.logging import console, get_logger
 
 from .advantage import Advantage, PerPromptAdvantage
 from .data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn
+from .ema import (
+    EMAConfig,
+    EMAOptimizer,
+    InitBackupOptimizer,
+    apply_ema_maybe,
+    apply_init_maybe,
+)
 from .hsdp_engine import distributed_main
 from .trainer_base import HsdpTrainerBase, HsdpTrainerBaseConfig
 
@@ -71,6 +77,9 @@ class HsdpGrpoTrainerConfig(HsdpTrainerBaseConfig):
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
     advantage: Advantage = PerPromptAdvantage()
+
+    ema: EMAConfig | None = None
+    clip_grad_norm: float = 1.0
 
     # Optimization / training loop
     train_epochs: int = 100
@@ -161,10 +170,18 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             )
         return sampler
 
-    def make_optimizer_and_scheduler(self, enable_init_backup: bool = False):
+    init_backup_optimizer: InitBackupOptimizer | None = None
+
+    def make_optimizer_and_scheduler(self):
+        super().make_optimizer_and_scheduler()
+        params = [p for p in self.transformer.parameters() if p.requires_grad]
+        if self.conf.ema is not None:
+            self.ema_optimizer = EMAOptimizer(params, self.conf.ema)
+            self.extra_optimizers["ema"] = self.ema_optimizer
         need_init = self.conf.kl_beta > 0 and self.model.peft_lora_rank == 0
-        super().make_optimizer_and_scheduler(enable_init_backup=need_init)
         if need_init:
+            self.init_backup_optimizer = InitBackupOptimizer(params)
+            self.extra_optimizers["init_backup"] = self.init_backup_optimizer
             logger.info("Init backup enabled for reference model (kl_beta > 0).")
 
     def make_train_dataloader(self):
@@ -199,7 +216,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
             with self.transformer.disable_adapter():
                 yield
         else:
-            with apply_init_maybe(self.optimizer):
+            with apply_init_maybe(self.init_backup_optimizer):
                 yield
 
     # --- GRPO loss ---
@@ -547,6 +564,20 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
         end = start + local_b
         return advantages[start:end].cpu(), reward_mean, reward_std
 
+    def _optimizer_step(self):
+        """Clip gradients, step all optimizers, and zero gradients."""
+        if self.conf.clip_grad_norm > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                self.transformer.parameters(), self.conf.clip_grad_norm
+            )
+        self.optimizer.step()
+        if self.ema_optimizer is not None:
+            self.ema_optimizer.step()
+        if self.init_backup_optimizer is not None:
+            self.init_backup_optimizer.step()
+        self.scheduler.step()
+        self.optimizer.zero_grad()
+
     def _train_on_rollouts(
         self,
         rollouts: list[Rollout],
@@ -614,13 +645,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                             metrics_accum.setdefault(key, []).append(value.detach())
                         train_progress.advance(train_task)
 
-                    if self.conf.clip_grad_norm > 0.0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.transformer.parameters(), self.conf.clip_grad_norm
-                        )
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
+                    self._optimizer_step()
                     self.current_step += 1
                     self._log_step_metrics(metrics_accum)
                     if "train/loss" in metrics_accum:
@@ -785,7 +810,7 @@ class HsdpGrpoTrainer(HsdpTrainerBase[HsdpGrpoTrainerConfig]):
                 ):
                     self.validate_and_log()
 
-        with apply_ema_maybe(self.optimizer):
+        with apply_ema_maybe(self.ema_optimizer):
             self.save_dcp_checkpoint(
                 self.get_checkpoint_dir(self.current_step) + "_final"
             )

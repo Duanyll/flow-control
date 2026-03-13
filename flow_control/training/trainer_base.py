@@ -21,8 +21,10 @@ from rich.progress import (
 )
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_state_dict,
-    set_state_dict,
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    set_model_state_dict,
+    set_optimizer_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -36,7 +38,6 @@ from flow_control.utils.common import (
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.ema import EMAConfig, apply_ema_maybe
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -51,6 +52,7 @@ from flow_control.utils.types import (
 )
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from .ema import EMAOptimizer, apply_ema_maybe
 from .hsdp_engine import HsdpEngine, HsdpEngineConfig
 
 logger = get_logger(__name__)
@@ -77,9 +79,6 @@ class HsdpTrainerBaseConfig(HsdpEngineConfig):
     checkpoint_limit: int = 5
 
     num_dataloader_workers: int = 4
-
-    ema: EMAConfig | None = None
-    clip_grad_norm: float = 1.0
 
 
 class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], Stateful):
@@ -114,7 +113,9 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
     dataloader: StatefulDataLoader
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler._LRScheduler
+    extra_optimizers: dict[str, torch.optim.Optimizer]
     validation_dataloader: StatefulDataLoader | None = None
+    ema_optimizer: EMAOptimizer | None = None
     tracker: aim.Run
 
     current_step: int = 0
@@ -135,17 +136,13 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
             f"experiment={self.conf.experiment_name}."
         )
 
-    def make_optimizer_and_scheduler(self, enable_init_backup: bool = False):
+    def make_optimizer_and_scheduler(self):
         params = [p for p in self.transformer.parameters() if p.requires_grad]
         num_trainable_params = sum(p.numel() for p in params)
         if num_trainable_params == 0:
             raise RuntimeError("No trainable parameters found in the model.")
-        self.optimizer = parse_optimizer(
-            self.conf.optimizer,
-            params,
-            ema_config=self.conf.ema,
-            enable_init_backup=enable_init_backup,
-        )
+        self.optimizer = parse_optimizer(self.conf.optimizer, params)
+        self.extra_optimizers = {}
         logger.info(
             f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
         )
@@ -189,31 +186,39 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
         return os.path.join(self.conf.checkpoint_root, f"step_{step:07d}")
 
     def state_dict(self):
-        transformer_state_dict, optimizer_state_dict = get_state_dict(
-            self.transformer,
-            [self.optimizer],
-            options=StateDictOptions(strict=False, ignore_frozen_params=True),
-        )
-        if len(transformer_state_dict) == 0:
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        transformer_sd = get_model_state_dict(self.transformer, options=opts)
+        if len(transformer_sd) == 0:
             raise RuntimeError("Nothing to save in transformer state dict.")
-        state = {
-            "transformer": transformer_state_dict,
-            "optimizer": optimizer_state_dict,
+        state: dict[str, Any] = {
+            "transformer": transformer_sd,
+            "optimizer": get_optimizer_state_dict(
+                self.transformer, self.optimizer, options=opts
+            ),
             "dataloader": self.dataloader.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "current_step": self.current_step,
         }
+        for name, opt in self.extra_optimizers.items():
+            state[f"optim_{name}"] = get_optimizer_state_dict(
+                self.transformer, opt, options=opts
+            )
         self._save_extra_state(state)
         return state
 
     def load_state_dict(self, state_dict):
-        set_state_dict(
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
+        set_optimizer_state_dict(
             self.transformer,
-            [self.optimizer],
-            model_state_dict=state_dict["transformer"],
-            optim_state_dict=state_dict["optimizer"],
-            options=StateDictOptions(strict=False, ignore_frozen_params=True),
+            self.optimizer,
+            state_dict["optimizer"],
+            options=opts,
         )
+        for name, opt in self.extra_optimizers.items():
+            set_optimizer_state_dict(
+                self.transformer, opt, state_dict[f"optim_{name}"], options=opts
+            )
         self.dataloader.load_state_dict(state_dict["dataloader"])
         self.scheduler.load_state_dict(state_dict["scheduler"])
         self.current_step = state_dict["current_step"]
@@ -309,7 +314,7 @@ class HsdpTrainerBase[TConfig: HsdpTrainerBaseConfig](HsdpEngine[TConfig], State
         logger.info(f"Validating at step {self.current_step}...")
         progress, task = self.make_validation_progress_bar()
         self.transformer.eval()
-        with apply_ema_maybe(self.optimizer), progress:
+        with apply_ema_maybe(self.ema_optimizer), progress:
             for batch in self.validation_dataloader:
                 with dump_if_failed(logger, batch):
                     batch = deep_cast_float_dtype(batch, self.model.dtype)

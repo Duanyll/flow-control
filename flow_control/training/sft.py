@@ -21,7 +21,6 @@ from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
 )
-from flow_control.utils.ema import apply_ema_maybe
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -30,6 +29,7 @@ from flow_control.utils.logging import (
 )
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .hsdp_engine import distributed_main
 from .trainer_base import HsdpTrainerBase, HsdpTrainerBaseConfig
 from .weighting import (
@@ -50,6 +50,9 @@ class HsdpTrainerConfig(HsdpTrainerBaseConfig):
 
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     loss_weighting: LossWeighting = UniformLossWeighting()
+
+    ema: EMAConfig | None = None
+    clip_grad_norm: float = 1.0
 
     cfg_drop_prob: float = 0.0
     latent_length_test_mode: bool = False
@@ -75,6 +78,13 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
     def __init__(self, **kwargs):
         self.conf = HsdpTrainerConfig(**kwargs)
         super().__init__(**kwargs)
+
+    def make_optimizer_and_scheduler(self):
+        super().make_optimizer_and_scheduler()
+        if self.conf.ema is not None:
+            params = [p for p in self.transformer.parameters() if p.requires_grad]
+            self.ema_optimizer = EMAOptimizer(params, self.conf.ema)
+            self.extra_optimizers["ema"] = self.ema_optimizer
 
     def make_train_dataloader(self):
         dataset = PaddingAwareDatasetWrapper(self._parse_dataset(self.conf.dataset))
@@ -176,6 +186,8 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
             )
 
         self.optimizer.step()
+        if self.ema_optimizer is not None:
+            self.ema_optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad()
 
@@ -251,7 +263,7 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
                     if self.current_step >= self.conf.train_steps:
                         break
 
-        with apply_ema_maybe(self.optimizer):
+        with apply_ema_maybe(self.ema_optimizer):
             self.save_dcp_checkpoint(
                 self.get_checkpoint_dir(self.current_step) + "_final"
             )

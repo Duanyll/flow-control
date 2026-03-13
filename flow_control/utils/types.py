@@ -4,11 +4,6 @@ from typing import Annotated, Any
 import torch
 from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
 
-from .ema import EMAConfig, make_ema_optimizer
-from .logging import get_logger
-
-logger = get_logger(__name__)
-
 
 def validate_torch_dtype(v: Any) -> torch.dtype:
     if isinstance(v, torch.dtype):
@@ -80,9 +75,7 @@ OptimizerConfig = Annotated[
 def parse_optimizer(
     conf: OptimizerConfig,
     parameters,
-    ema_config: EMAConfig | None = None,
-    enable_init_backup: bool = False,
-):
+) -> torch.optim.Optimizer:
     conf = conf.copy()
     class_name = conf.pop("class_name")
     if class_name == "Prodigy":
@@ -99,19 +92,7 @@ def parse_optimizer(
         ctor = getattr(bnb.optim, class_name)
     else:
         ctor = getattr(torch.optim, class_name)
-    if ema_config is not None or enable_init_backup:
-        logger.info(
-            f"Patching optimizer {class_name} with EMA config {ema_config} and enable_init_backup={enable_init_backup}"
-        )
-        ctor = make_ema_optimizer(ctor)
-        return ctor(
-            parameters,
-            ema_config=ema_config or EMAConfig(),
-            enable_init_backup=enable_init_backup,
-            **conf,
-        )
-    else:
-        return ctor(parameters, **conf)
+    return ctor(parameters, **conf)
 
 
 SchedulerConfig = Annotated[
