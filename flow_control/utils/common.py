@@ -1,8 +1,9 @@
 import contextlib
+import dataclasses
 import functools
 import json
 import tomllib
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any, Literal
 
 import kornia
@@ -102,11 +103,11 @@ def parse_checkpoint_step(checkpoint_name: str) -> int:
         return -1
 
 
-def deep_apply_tensor_fn(data, fn) -> Any:
+def deep_apply_tensor_fn(data: Any, fn: Callable) -> Any:
     """
     Recursively apply a function to all tensors in a nested structure.
     Args:
-        data: A nested structure (dict, list, tuple) containing tensors.
+        data: A nested structure (dict, list, tuple, dataclass) containing tensors.
         fn: A function to apply to each tensor.
     Returns:
         The nested structure with the function applied to all tensors.
@@ -118,7 +119,14 @@ def deep_apply_tensor_fn(data, fn) -> Any:
     elif isinstance(data, list):
         return [deep_apply_tensor_fn(v, fn) for v in data]
     elif isinstance(data, tuple):
-        return tuple(deep_apply_tensor_fn(v, fn) for v in data)
+        return type(data)(*(deep_apply_tensor_fn(v, fn) for v in data))
+    elif dataclasses.is_dataclass(data) and not isinstance(data, type):
+        updated_fields = {
+            f.name: deep_apply_tensor_fn(getattr(data, f.name), fn)
+            for f in dataclasses.fields(data)
+            if f.init
+        }
+        return dataclasses.replace(data, **updated_fields)
     else:
         return data
 

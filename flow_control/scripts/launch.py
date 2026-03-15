@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rich import print
 
-from flow_control.config import LaunchConfig
+from flow_control.training.mixins import LaunchConfig
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:

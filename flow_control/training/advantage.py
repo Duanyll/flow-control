@@ -11,21 +11,15 @@ class AdvantageEstimator(BaseModel, ABC):
     model_config = ConfigDict(extra="forbid")
 
     @abstractmethod
-    def compute(
-        self,
-        rewards: torch.Tensor,
-        prompt_ids: torch.Tensor,
-        num_timesteps: int,
-    ) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, prompt_ids: torch.Tensor) -> torch.Tensor:
         """Compute advantage weights.
 
         Args:
             rewards: [B] per-sample rewards (gathered across all GPUs).
             prompt_ids: [B] integer IDs identifying which prompt each sample belongs to.
-            num_timesteps: T — the number of timesteps to expand the result to.
 
         Returns:
-            Tensor of shape [B, T] with per-sample, per-timestep advantages.
+            Tensor of shape [B] with per-sample, per-timestep advantages.
         """
         ...
 
@@ -37,12 +31,7 @@ class PerPromptAdvantage(AdvantageEstimator):
     use_global_std: bool = True
     eps: float = 1e-4
 
-    def compute(
-        self,
-        rewards: torch.Tensor,
-        prompt_ids: torch.Tensor,
-        num_timesteps: int,
-    ) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, prompt_ids: torch.Tensor) -> torch.Tensor:
         advantages = torch.zeros_like(rewards)
         unique_ids = prompt_ids.unique()
 
@@ -58,7 +47,7 @@ class PerPromptAdvantage(AdvantageEstimator):
                 group_std = group_rewards.std(correction=0) + self.eps
                 advantages[mask] = (group_rewards - group_mean) / group_std
 
-        return advantages.unsqueeze(1).expand(-1, num_timesteps)
+        return advantages
 
 
 class GlobalAdvantage(AdvantageEstimator):
@@ -67,16 +56,11 @@ class GlobalAdvantage(AdvantageEstimator):
     type: Literal["global"] = "global"
     eps: float = 1e-4
 
-    def compute(
-        self,
-        rewards: torch.Tensor,
-        prompt_ids: torch.Tensor,
-        num_timesteps: int,
-    ) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, prompt_ids: torch.Tensor) -> torch.Tensor:
         mean = rewards.mean()
         std = rewards.std(correction=0) + self.eps
         advantages = (rewards - mean) / std
-        return advantages.unsqueeze(1).expand(-1, num_timesteps)
+        return advantages
 
 
 def _passthrough_advantage(v: object) -> object:

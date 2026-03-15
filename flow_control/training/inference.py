@@ -2,15 +2,8 @@ import os
 from typing import Any
 
 import torch
-from pydantic import model_validator
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
+from pydantic import ConfigDict, model_validator
+from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -35,12 +28,14 @@ from flow_control.utils.common import (
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
-from .hsdp_engine import HsdpEngine, HsdpEngineConfig, distributed_main
+from .mixins import DcpMixin, HsdpMixin, LoggingMixin, distributed_main
 
 logger = get_logger(__name__)
 
 
-class HsdpInferenceConfig(HsdpEngineConfig):
+class HsdpInference(HsdpMixin, DcpMixin):
+    model_config = ConfigDict(extra="forbid")
+
     model: ModelAdapter
     sampler: Sampler
     processor: Processor
@@ -58,46 +53,37 @@ class HsdpInferenceConfig(HsdpEngineConfig):
             raise ValueError("Either datasink or save_preview_dir must be specified.")
         return self
 
-
-class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
-    @property
-    def model(self):
-        return self.conf.model
+    # ------------------------------- Lazy state --------------------------------- #
+    _dataloader: StatefulDataLoader | None = None
 
     @property
     def transformer(self):
-        return self.conf.model.transformer
+        return self.model.transformer
 
     @property
-    def sampler(self):
-        return self.conf.sampler
-
-    @property
-    def processor(self):
-        return self.conf.processor
-
-    def __init__(self, **kwargs):
-        self.conf = HsdpInferenceConfig(**kwargs)
-        super().__init__(**kwargs)
-
-    dataloader: StatefulDataLoader
+    def dataloader(self) -> StatefulDataLoader:
+        if self._dataloader is None:
+            raise RuntimeError("Dataloader not created yet.")
+        return self._dataloader
 
     def make_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.conf.dataset))
+        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=False,
-            seed=self.conf.seed,
+            seed=self.seed,
             grad_acc_steps=1,
         )
-        self.dataloader = StatefulDataLoader(
+        self._dataloader = StatefulDataLoader(
             dataset,
             batch_size=1,
             sampler=sampler,
             collate_fn=collate_fn,
         )
+
+    # ------------------------------- Checkpointing ------------------------------ #
 
     def state_dict(self):
         transformer_state_dict, optimizer_state_dict = get_state_dict(
@@ -110,7 +96,7 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
             "optimizer": optimizer_state_dict,
         }
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict: dict[str, Any]):
         set_state_dict(
             self.transformer,
             [],
@@ -119,42 +105,34 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
             options=StateDictOptions(strict=False),
         )
 
-    def make_progress_bar(self):
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description:<20}"),
-            BarColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            TextColumn("Batch: {task.completed}/{task.total}"),
-            console=console,
-        )
-        task = progress.add_task("Inference", total=len(self.dataloader))
-        return progress, task
+    # ------------------------------- Main loop ---------------------------------- #
 
     @torch.no_grad()
     @distributed_main
     def run(self):
         self.set_seed()
-        self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
+        self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.processor.load_models("decode", device=self.device)
         self.make_dataloader()
 
-        if self.conf.checkpoint_dir is not None:
-            self.load_dcp_checkpoint(self.conf.checkpoint_dir)
+        if self.checkpoint_dir is not None:
+            self.load_dcp_checkpoint(self.checkpoint_dir)
 
-        if self.conf.datasink is not None:
-            datasink = parse_datasink(self.conf.datasink)
-        else:
-            datasink = None
+        datasink = parse_datasink(self.datasink) if self.datasink is not None else None
 
-        if self.conf.save_preview_dir is not None:
-            os.makedirs(self.conf.save_preview_dir, exist_ok=True)
-            logger.info(f"Saving preview images to {self.conf.save_preview_dir}")
+        if self.save_preview_dir is not None:
+            os.makedirs(self.save_preview_dir, exist_ok=True)
+            logger.info(f"Saving preview images to {self.save_preview_dir}")
 
         self.transformer.eval()
         console.rule("[bold green]Starting Inference[/bold green]")
-        progress, task = self.make_progress_bar()
+
+        progress = Progress(
+            *LoggingMixin.get_progress_columns(),
+            console=console,
+        )
+        task = progress.add_task("Inference", total=len(self.dataloader))
+
         with progress:
             for batch in self.dataloader:
                 with dump_if_failed(logger, batch):
@@ -166,7 +144,7 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
                         else None
                     )
                     generator = torch.Generator(device=self.device).manual_seed(
-                        self.conf.seed
+                        self.seed
                     )
                     self.processor.initialize_latents(
                         batch,
@@ -187,14 +165,12 @@ class HsdpInference(HsdpEngine[HsdpInferenceConfig]):
                     if key == "__padding__":
                         continue
                     if datasink is not None:
-                        if self.conf.save_intermediate:
+                        if self.save_intermediate:
                             batch.update(result)
                             result = batch
                         datasink.write(result)
-                    if self.conf.save_preview_dir is not None:
-                        image.save(
-                            os.path.join(self.conf.save_preview_dir, f"{key}.png")
-                        )
+                    if self.save_preview_dir is not None:
+                        image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
                 progress.advance(task)
 
         console.rule("[bold green]Inference Completed[/bold green]")

@@ -5,18 +5,22 @@ from typing import Any
 
 import torch
 from einops import reduce
+from pydantic import ConfigDict
 from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
+from rich.progress import Progress
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    set_model_state_dict,
+    set_optimizer_state_dict,
 )
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from flow_control.adapters import ModelAdapter
+from flow_control.datasets import DatasetConfig, parse_dataset
+from flow_control.processors import Processor
+from flow_control.samplers import Sampler
 from flow_control.utils.common import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -27,11 +31,16 @@ from flow_control.utils.logging import (
     get_logger,
     warn_once,
 )
+from flow_control.utils.types import (
+    OptimizerConfig,
+    SchedulerConfig,
+    parse_optimizer,
+    parse_scheduler,
+)
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
-from .hsdp_engine import distributed_main
-from .trainer_base import HsdpTrainerBase, HsdpTrainerBaseConfig
+from .mixins import CheckpointingMixin, ValidationMixin, distributed_main
 from .weighting import (
     LogitNormalTimestepWeighting,
     LossWeighting,
@@ -42,7 +51,22 @@ from .weighting import (
 logger = get_logger(__name__)
 
 
-class HsdpTrainerConfig(HsdpTrainerBaseConfig):
+class HsdpSftTrainer(ValidationMixin, CheckpointingMixin):
+    model_config = ConfigDict(extra="forbid")
+
+    # ---------------------------------- Configs --------------------------------- #
+    model: ModelAdapter
+    sampler: Sampler
+    processor: Processor
+
+    dataset: DatasetConfig
+    seed_checkpoint_dir: str
+    resume_from_dir: str | None = None
+    num_dataloader_workers: int = 4
+
+    optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
+    scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
+
     global_batch_size: int = 16
     train_steps: int = 10000
     checkpoint_steps: int = 500
@@ -57,98 +81,156 @@ class HsdpTrainerConfig(HsdpTrainerBaseConfig):
     cfg_drop_prob: float = 0.0
     latent_length_test_mode: bool = False
 
+    # --------------------------------- Status bar ------------------------------- #
+    _status_fields: dict[str, str] = {
+        "train/loss": "Loss: {v:.4f}",
+        "train/lr": "LR: {v:.6f}",
+    }
 
-class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
-    conf: HsdpTrainerConfig
+    # ------------------------------- Lazy state --------------------------------- #
+    _dataloader: StatefulDataLoader | None = None
+    _optimizer: torch.optim.Optimizer | None = None
+    _scheduler: Any = None
+    _ema_optimizer: EMAOptimizer | None = None
+    _current_step: int = 0
+
+    @property
+    def validation_sampler(self) -> Sampler:
+        return self.sampler
+
+    @property
+    def transformer(self):
+        return self.model.transformer
+
+    @property
+    def dataloader(self) -> StatefulDataLoader:
+        if self._dataloader is None:
+            raise RuntimeError("Dataloader not created yet.")
+        return self._dataloader
+
+    @property
+    def optimizer(self) -> torch.optim.Optimizer:
+        if self._optimizer is None:
+            raise RuntimeError("Optimizer not created yet.")
+        return self._optimizer
+
+    @property
+    def scheduler(self):
+        if self._scheduler is None:
+            raise RuntimeError("Scheduler not created yet.")
+        return self._scheduler
+
+    @property
+    def current_step(self) -> int:
+        return self._current_step
+
+    @current_step.setter
+    def current_step(self, value: int):
+        self._current_step = value
 
     @property
     def grad_acc_steps(self):
-        return self.conf.global_batch_size // self.world_size
+        return self.global_batch_size // self.world_size
 
     @property
     def total_epochs(self):
         return math.ceil(
-            self.conf.train_steps / (len(self.dataloader) // self.grad_acc_steps)
+            self.train_steps / (len(self.dataloader) // self.grad_acc_steps)
         )
 
     @property
     def current_epoch(self):
         return self.current_step // (len(self.dataloader) // self.grad_acc_steps)
 
-    def __init__(self, **kwargs):
-        self.conf = HsdpTrainerConfig(**kwargs)
-        super().__init__(**kwargs)
+    # ------------------------------- Setup methods ------------------------------ #
 
     def make_optimizer_and_scheduler(self):
-        super().make_optimizer_and_scheduler()
-        if self.conf.ema is not None:
-            params = [p for p in self.transformer.parameters() if p.requires_grad]
-            self.ema_optimizer = EMAOptimizer(params, self.conf.ema)
-            self.extra_optimizers["ema"] = self.ema_optimizer
+        params = [p for p in self.transformer.parameters() if p.requires_grad]
+        num_trainable_params = sum(p.numel() for p in params)
+        if num_trainable_params == 0:
+            raise RuntimeError("No trainable parameters found in the model.")
+        self._optimizer = parse_optimizer(self.optimizer_config, params)
+        logger.info(
+            f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
+        )
+        self._scheduler = parse_scheduler(self.scheduler_config, self.optimizer)
+        if self.ema is not None:
+            self._ema_optimizer = EMAOptimizer(params, self.ema)
 
     def make_train_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(self._parse_dataset(self.conf.dataset))
+        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True,
-            seed=self.conf.seed,
+            seed=self.seed,
             grad_acc_steps=self.grad_acc_steps,
         )
-        self.dataloader = StatefulDataLoader(
+        self._dataloader = StatefulDataLoader(
             dataset,
             batch_size=1,
             sampler=sampler,
-            num_workers=self.conf.num_dataloader_workers,
+            num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
         )
 
-    @staticmethod
-    def _parse_dataset(config):
-        from flow_control.datasets import parse_dataset
+    # ------------------------------- Checkpointing ------------------------------ #
 
-        return parse_dataset(config)
+    def state_dict(self):
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        transformer_sd = get_model_state_dict(self.transformer, options=opts)
+        if len(transformer_sd) == 0:
+            raise RuntimeError("Nothing to save in transformer state dict.")
+        state: dict[str, Any] = {
+            "transformer": transformer_sd,
+            "optimizer": get_optimizer_state_dict(
+                self.transformer, self.optimizer, options=opts
+            ),
+            "dataloader": self.dataloader.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "current_step": self.current_step,
+        }
+        if self._ema_optimizer is not None:
+            state["optim_ema"] = get_optimizer_state_dict(
+                self.transformer, self._ema_optimizer, options=opts
+            )
+        return state
 
-    def make_train_progress_bar(self):
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description:<20}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            TextColumn("Epoch: {task.fields[epoch]}/{task.fields[total_epochs]}"),
-            TextColumn("Loss: {task.fields[loss]:.4f}"),
-            TextColumn("LR: {task.fields[lr]:.6f}"),
-            console=console,
+    def load_state_dict(self, state_dict: dict[str, Any]):
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
+        set_optimizer_state_dict(
+            self.transformer,
+            self.optimizer,
+            state_dict["optimizer"],
+            options=opts,
         )
-        task = progress.add_task(
-            "Training",
-            total=self.conf.train_steps,
-            completed=self.current_step,
-            epoch=self.current_epoch,
-            total_epochs=self.total_epochs,
-            loss=0.0,
-            lr=0.0,
-        )
-        return progress, task
+        if self._ema_optimizer is not None and "optim_ema" in state_dict:
+            set_optimizer_state_dict(
+                self.transformer,
+                self._ema_optimizer,
+                state_dict["optim_ema"],
+                options=opts,
+            )
+        self.dataloader.load_state_dict(state_dict["dataloader"])
+        self.scheduler.load_state_dict(state_dict["scheduler"])
+        self.current_step = state_dict["current_step"]
+
+    # ------------------------------- Training ----------------------------------- #
 
     def train_step(self, batch: Any):
-        if (
-            self.conf.cfg_drop_prob > 0.0
-            and torch.rand(1).item() < self.conf.cfg_drop_prob
-        ):
+        if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
             negative_batch = self.processor.get_negative_batch(batch)
             if negative_batch is not None:
                 batch = negative_batch
             else:
                 warn_once(
                     logger,
-                    f"CFG drop prob is set to {self.conf.cfg_drop_prob}, but no negative (unconditional) batch available.",
+                    f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) batch available.",
                 )
 
-        timesteps = self.conf.timestep_weighting.sample_timesteps(1)
+        timesteps = self.timestep_weighting.sample_timesteps(1)
         timesteps = timesteps.to(device=self.device, dtype=torch.float32)
         clean = batch["clean_latents"].float()
         noise = torch.randn_like(clean, dtype=torch.float32)
@@ -161,49 +243,41 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         loss = (model_pred - target) ** 2
         loss = reduce(loss, "b n d -> 1", reduction="mean")
 
-        weighting = self.conf.loss_weighting.get_weights(timesteps)
+        weighting = self.loss_weighting.get_weights(timesteps)
         weighting = weighting.to(device=loss.device, dtype=loss.dtype)
         weighted_loss = (loss * weighting).mean()
         return weighted_loss
 
-    def log_loss_lr(self, loss: float):
-        import torch.distributed as dist
-
-        lr = self.scheduler.get_last_lr()[0]
-        losses = [None] * self.world_size
-        dist.all_gather_object(losses, loss)
-        avg_loss = sum(losses) / len(losses)  # type: ignore
-        if self.is_main_process:
-            self.tracker.track(avg_loss, name="train/loss", step=self.current_step)
-            self.tracker.track(lr, name="train/lr", step=self.current_step)
-        return avg_loss, lr
-
-    def _after_sync_step(self, total_loss: float, progress, task):
+    def _after_sync_step(self, total_loss: float):
         """Handle optimizer step, logging, checkpointing after a gradient sync."""
-        if self.conf.clip_grad_norm > 0.0:
+        if self.clip_grad_norm > 0.0:
             torch.nn.utils.clip_grad_norm_(
-                self.transformer.parameters(), self.conf.clip_grad_norm
+                self.transformer.parameters(), self.clip_grad_norm
             )
 
         self.optimizer.step()
-        if self.ema_optimizer is not None:
-            self.ema_optimizer.step()
+        if self._ema_optimizer is not None:
+            self._ema_optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad()
 
-        avg_loss, lr = self.log_loss_lr(total_loss)
         self.current_step += 1
-        progress.update(task, loss=avg_loss, lr=lr)
-        progress.advance(task)
+        self.log_metrics(
+            {
+                "train/loss": total_loss,
+                "train/lr": float(self.scheduler.get_last_lr()[0]),
+            },
+            step=self.current_step,
+        )
 
-        if (self.current_step % self.conf.checkpoint_steps == 0) or (
-            self.current_step == self.conf.train_steps
+        if (self.current_step % self.checkpoint_steps == 0) or (
+            self.current_step == self.train_steps
         ):
-            self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step))
-            self.rotate_checkpoints_maybe()
+            self.save(self.current_step)
 
-        if self.current_step % self.conf.validation_steps == 0:
-            self.validate_and_log()
+        if self.current_step % self.validation_steps == 0:
+            with apply_ema_maybe(self._ema_optimizer):
+                self.validate_and_log(self.model, self.current_step)
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -212,36 +286,43 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
             )
             raise RuntimeError("Non-finite loss detected.")
 
+    # ------------------------------- Main loop ---------------------------------- #
+
     @distributed_main
     def run(self):
-        if self.conf.latent_length_test_mode:
+        if self.latent_length_test_mode:
             self.run_latent_length_test()
             return
 
         self.set_seed()
         self.init_tracker()
-        self.load_transformer(self.model, self.conf.seed_checkpoint_dir)
+        self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.make_train_dataloader()
-        self.make_validation_dataloader_maybe()
-        os.makedirs(self.conf.checkpoint_root, exist_ok=True)
+        self.make_validation_dataloader(self.processor)
+        os.makedirs(self.checkpoint_root, exist_ok=True)
 
-        if self.conf.resume_from_dir is not None:
-            self.load_dcp_checkpoint(self.conf.resume_from_dir)
+        if self.resume_from_dir is not None:
+            self.load_dcp_checkpoint(self.resume_from_dir)
 
-        self.validate_and_log()
+        with apply_ema_maybe(self._ema_optimizer):
+            self.validate_and_log(self.model, self.current_step)
 
-        console.rule("[bold blue]Starting training[/bold blue]")
+        progress = Progress(
+            *self.get_progress_columns(),
+            console=console,
+        )
+        task = progress.add_task(
+            "Training",
+            total=self.train_steps,
+            completed=self.current_step,
+        )
 
-        progress, task = self.make_train_progress_bar()
-
-        with progress:
+        with self.status_bar("SFT Training"), progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
-                total_loss = 0.0
-                progress.update(task, epoch=self.current_epoch + 1)
                 if hasattr(self.dataloader.sampler, "set_epoch"):
-                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore
+                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
                 for i, batch in enumerate(self.dataloader):
                     with dump_if_failed(logger, batch):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
@@ -252,18 +333,18 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
                         self.check_loss(loss)
                         loss.backward()
 
-                        total_loss += loss.item()
+                        total_loss = loss.item()
 
                     if not is_sync_step:
                         continue
 
-                    self._after_sync_step(total_loss, progress, task)
-                    total_loss = 0.0
+                    self._after_sync_step(total_loss)
+                    progress.advance(task)
 
-                    if self.current_step >= self.conf.train_steps:
+                    if self.current_step >= self.train_steps:
                         break
 
-        with apply_ema_maybe(self.ema_optimizer):
+        with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(
                 self.get_checkpoint_dir(self.current_step) + "_final"
             )
@@ -277,7 +358,7 @@ class HsdpSftTrainer(HsdpTrainerBase[HsdpTrainerConfig]):
         )
 
         self.set_seed()
-        self.load_transformer(self.model)
+        self.load_transformer_from_seed(self.model)
         self.make_optimizer_and_scheduler()
 
         console.rule("[bold blue]Starting latent length test[/bold blue]")

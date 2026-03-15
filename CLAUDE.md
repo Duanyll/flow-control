@@ -22,9 +22,8 @@ uv run ruff check --fix <path_to_check>
 Rules to follow:
 
 1. Always try to maintain type hints in the code. We use Python 3.12, so prefer using `dict`, `list`, `|`, etc. over `Dict`, `List`, `Union` from `typing`.
-2. Try to use `TypedDict` for dicts with fixed structure, instead of using `dict[str, Any]`.
-3. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
-4. The automated diagnostics from IDE after you edit the code may be stale or incorrect. Call above CLI commands to get accurate diagnostics.
+2. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
+3. The automated diagnostics from IDE after you edit the code may be stale or incorrect. Call above CLI commands to get accurate diagnostics.
 
 ## Code structure
 
@@ -38,7 +37,7 @@ Rules to follow:
 We prefer to: **Pass data through function arguments, and store configuration in Pydantic models.**
 
 1. We extend `pydantic.BaseModel` to define classes for configuration, avoid spread untyped kwargs and dicts in the code.
-2. Behaviours are preferred to be methods of the config class. This means we can override the behaviour by extending the super class, making the code more modular. 
+2. Behaviours are preferred to be methods of the config class. Composition and mixin patterns are preferred over inheritance.
 
 ### Logging and printing
 
@@ -67,3 +66,8 @@ Rules to follow:
 2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
 3. Make sure you fix all linting and type errors.
 4. You don't have to run tests that requires actual weights / datasets, unless the user instructs you to do so. 
+
+When planning for a new feature or refactoring, adopt the First Principles Thinking approach:
+
+1. Figure out what the core problem you are trying to solve is, and what the ideal solution would look like if there were no constraints.
+2. We only care about mathematical correctness and code quality, not about "backward compatibility" or "following existing patterns". It is totally fine to refactor existing code and break backward compatibility, as long as the new code is correct and clean.
