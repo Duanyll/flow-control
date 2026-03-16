@@ -10,7 +10,7 @@ from starlette.routing import Route
 
 from flow_control.rewards import Reward, parse_reward
 from flow_control.rewards.base import BaseReward
-from flow_control.utils.common import load_config_file
+from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_batch, serialize_tensor
 from flow_control.utils.types import TorchDevice

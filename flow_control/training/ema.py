@@ -1,13 +1,48 @@
 from contextlib import contextmanager
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Discriminator
+
+
+class NoWarmup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["none"] = "none"
+
+    def get_decay(self, step: int, base_decay: float) -> float:
+        return base_decay
+
+
+class StandardWarmup(BaseModel):
+    """Original ``(1 + step) / (10 + step)`` schedule."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["standard"] = "standard"
+
+    def get_decay(self, step: int, base_decay: float) -> float:
+        return min((1 + step) / (10 + step), base_decay)
+
+
+class LinearRampWarmup(BaseModel):
+    """NFT-style: 0 for *flat_steps*, then linear ramp up to ``EMAConfig.decay``."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["linear_ramp"] = "linear_ramp"
+    flat_steps: int = 0
+    ramp_rate: float = 0.001
+
+    def get_decay(self, step: int, base_decay: float) -> float:
+        if step < self.flat_steps:
+            return 0.0
+        return min((step - self.flat_steps) * self.ramp_rate, base_decay)
+
+
+Warmup = Annotated[NoWarmup | StandardWarmup | LinearRampWarmup, Discriminator("type")]
 
 
 class EMAConfig(BaseModel):
     decay: float = 1.0
-    warmup: bool = True
+    warmup: Warmup = StandardWarmup()
     interval: int = 1
 
 
@@ -35,35 +70,21 @@ class EMAOptimizer(torch.optim.Optimizer):
         self.ema_interval = ema_config.interval
         self.ema_step_count = 0
 
-    def get_current_decay(self) -> float:
-        if self.ema_warmup:
-            return min(
-                (1 + self.ema_step_count) / (10 + self.ema_step_count), self.ema_decay
-            )
-        else:
-            return self.ema_decay
+        # Eagerly initialize EMA buffers so that stepping without prior grad is safe
+        for group in self.param_groups:
+            for p in group["params"]:
+                self.state[p]["ema_buffer"] = p.clone().to(torch.float32)
 
     @torch.no_grad()
     def _update_ema(self, decay: float):
         """Update EMA buffers using foreach_lerp for batched computation."""
-        # Initialize EMA buffers for new parameters
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                param_state = self.state[p]
-                if "ema_buffer" not in param_state:
-                    param_state["ema_buffer"] = p.clone().to(torch.float32)
-
-        # Collect all EMA buffers and corresponding params for batched update
         ema_buffers: list[torch.Tensor] = []
         param_fp32: list[torch.Tensor] = []
         for group in self.param_groups:
             for p in group["params"]:
-                if p.grad is None:
-                    continue
-                ema_buffers.append(self.state[p]["ema_buffer"])
-                param_fp32.append(p.to(torch.float32))
+                if "ema_buffer" in self.state[p]:
+                    ema_buffers.append(self.state[p]["ema_buffer"])
+                    param_fp32.append(p.to(torch.float32))
 
         if ema_buffers:
             # ema = lerp(ema, param, 1 - decay) = decay * ema + (1 - decay) * param
@@ -76,7 +97,7 @@ class EMAOptimizer(torch.optim.Optimizer):
         self.ema_step_count += 1
         if self.ema_step_count % self.ema_interval != 0:
             return loss
-        decay = self.get_current_decay()
+        decay = self.ema_warmup.get_decay(self.ema_step_count, self.ema_decay)
         if decay >= 1.0:
             return loss
         self._update_ema(decay)
@@ -115,7 +136,7 @@ class EMAOptimizer(torch.optim.Optimizer):
 class InitBackupOptimizer(torch.optim.Optimizer):
     """Standalone optimizer that saves initial parameter values for reference model access.
 
-    Saves a copy of parameters on the first ``step()`` call. Does not modify parameters.
+    Saves a copy of parameters during initialization. Does not modify parameters.
     Use :meth:`apply_init_backup` / :meth:`restore_from_init_backup` or the
     :func:`apply_init_maybe` context manager to temporarily replace parameters
     with their initial (pre-training) values.
@@ -123,27 +144,19 @@ class InitBackupOptimizer(torch.optim.Optimizer):
 
     def __init__(self, params):
         super().__init__(params, defaults={})
-        self._initialized = False
+        for group in self.param_groups:
+            for p in group["params"]:
+                self.state[p]["init_backup"] = p.clone().to(torch.float32)
 
     @torch.no_grad()
     def step(self, closure: Any = None):
-        loss = super().step(closure)
-        if self._initialized:
-            return loss
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is not None:
-                    self.state[p]["init_backup"] = p.clone().to(torch.float32)
-        self._initialized = True
-        return loss
+        return super().step(closure)
 
     def state_dict(self):
-        sd = super().state_dict()
-        sd["_initialized"] = self._initialized
-        return sd
+        return super().state_dict()
 
     def load_state_dict(self, state_dict):
-        self._initialized = state_dict.pop("_initialized", False)
+        state_dict.pop("_initialized", None)
         super().load_state_dict(state_dict)
 
     @torch.no_grad()

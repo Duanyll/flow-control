@@ -33,7 +33,7 @@ from .mixins import DcpMixin, HsdpMixin, LoggingMixin, distributed_main
 logger = get_logger(__name__)
 
 
-class HsdpInference(HsdpMixin, DcpMixin):
+class Inference(HsdpMixin, DcpMixin):
     model_config = ConfigDict(extra="forbid")
 
     model: ModelAdapter

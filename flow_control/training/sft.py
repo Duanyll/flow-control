@@ -51,7 +51,7 @@ from .weighting import (
 logger = get_logger(__name__)
 
 
-class HsdpSftTrainer(ValidationMixin, CheckpointingMixin):
+class SftTrainer(ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
 
     # ---------------------------------- Configs --------------------------------- #
@@ -298,8 +298,9 @@ class HsdpSftTrainer(ValidationMixin, CheckpointingMixin):
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
+        self.processor.load_models("decode", device=self.device)
         self.make_train_dataloader()
-        self.make_validation_dataloader(self.processor)
+        self.make_validation_dataloader()
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
         if self.resume_from_dir is not None:

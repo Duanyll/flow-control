@@ -12,9 +12,10 @@ from pydantic import TypeAdapter
 from rich import print
 
 from flow_control.scripts.preprocess import PreprocessConfig
-from flow_control.training.grpo import HsdpGrpoTrainer
-from flow_control.training.inference import HsdpInference
-from flow_control.training.sft import HsdpSftTrainer
+from flow_control.training.grpo import GrpoTrainer
+from flow_control.training.inference import Inference
+from flow_control.training.nft import NftTrainer
+from flow_control.training.sft import SftTrainer
 
 DEFAULT_OUTPUT_DIR = "schema"
 
@@ -22,9 +23,10 @@ DEFAULT_OUTPUT_DIR = "schema"
 def generate_schemas() -> dict[str, dict]:
     """Return a mapping of config name -> JSON schema dict."""
     return {
-        "sft": TypeAdapter(HsdpSftTrainer).json_schema(),
-        "grpo": TypeAdapter(HsdpGrpoTrainer).json_schema(),
-        "inference": TypeAdapter(HsdpInference).json_schema(),
+        "sft": TypeAdapter(SftTrainer).json_schema(),
+        "grpo": TypeAdapter(GrpoTrainer).json_schema(),
+        "nft": TypeAdapter(NftTrainer).json_schema(),
+        "inference": TypeAdapter(Inference).json_schema(),
         "preprocess": TypeAdapter(PreprocessConfig).json_schema(),
     }
 

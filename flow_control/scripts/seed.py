@@ -4,7 +4,7 @@ import torch
 
 from flow_control.adapters import parse_model_adapter
 from flow_control.training.mixins import HsdpMixin
-from flow_control.utils.common import load_config_file
+from flow_control.utils.config import load_config_file
 
 
 def run(config_path: str) -> None:

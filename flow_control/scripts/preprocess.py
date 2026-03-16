@@ -20,7 +20,8 @@ from flow_control.utils.coercion import (
     coerce_record,
     get_input_typeddict,
 )
-from flow_control.utils.common import deep_move_to_device, load_config_file
+from flow_control.utils.common import deep_move_to_device
+from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
     DataSource,

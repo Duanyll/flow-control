@@ -1,11 +1,8 @@
 import os
-from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import torch
-import torch.distributed as dist
 from pydantic import ConfigDict
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
@@ -18,14 +15,10 @@ from torch.distributed.checkpoint.state_dict import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.adapters.base import Batch
-from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor
-from flow_control.rewards import Reward, execute_reward
-from flow_control.rewards.base import BaseReward
-from flow_control.samplers import SampleOutput, Sampler
+from flow_control.rewards import Reward
+from flow_control.samplers import Sampler
 from flow_control.utils.common import (
-    deep_cast_float_dtype,
     deep_move_to_device,
 )
 from flow_control.utils.logging import console, get_logger
@@ -36,8 +29,6 @@ from flow_control.utils.types import (
     parse_scheduler,
 )
 
-from .advantage import Advantage, PerPromptAdvantage
-from .data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn
 from .ema import (
     EMAConfig,
     EMAOptimizer,
@@ -45,54 +36,31 @@ from .ema import (
     apply_ema_maybe,
     apply_init_maybe,
 )
-from .mixins import CheckpointingMixin, ValidationMixin, distributed_main
+from .mixins import (
+    CheckpointingMixin,
+    Rollout,
+    RolloutMixin,
+    ValidationMixin,
+    distributed_main,
+)
 
 logger = get_logger(__name__)
 
 
-@dataclass
-class Rollout:
-    trajectory: SampleOutput
-    reward: torch.Tensor
-    key: str
-    batch: Batch
-    negative_batch: Batch | None
-
-
-class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
+class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
-    sampler: Sampler
+    rollout_sampler: Sampler
     processor: Processor
     reward: Reward
-    rollout_sampler: Sampler | None = None
 
-    dataset: DatasetConfig
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
-    num_dataloader_workers: int = 0
 
     optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 3e-4}
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
-
-    # GRPO hyperparameters
-    num_batches_per_epoch: int = 2
-    """
-    Number of "batches" to generate per epoch. The actual micro batch size on GPU is
-    always 1. This means in each epoch, we will select `num_prompts_per_batch` unique
-    prompts for `num_batches_per_epoch` times, that is `num_batches_per_epoch *
-    num_prompts_per_batch` prompts in total (may have duplicates across batches).
-    """
-    num_prompts_per_batch: int = 4
-    """
-    Number of unique prompts to select for each batch. See `num_batches_per_epoch` for details.
-    """
-    num_rollouts_per_prompt: int = 4
-    """
-    Number of rollouts to generate for each prompt.
-    """
 
     num_inner_epochs: int = 1
     train_batch_size: int = 4
@@ -104,7 +72,6 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
-    advantage: Advantage = PerPromptAdvantage()
 
     ema: EMAConfig | None = None
     clip_grad_norm: float = 1.0
@@ -114,9 +81,6 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
     checkpoint_epochs: int = 5
     validation_epochs: int = 20
 
-    # Validation mode: what to log during validation
-    validation_mode: Literal["images", "reward", "both"] = "both"
-
     # --------------------------------- Status bar ------------------------------- #
     _status_fields: dict[str, str] = {
         "reward/mean": "R̄: {v:.3f}",
@@ -125,17 +89,12 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
     }
 
     # ------------------------------- Lazy state --------------------------------- #
-    _dataloader: StatefulDataLoader | None = None
     _optimizer: torch.optim.Optimizer | None = None
     _scheduler: Any = None
     _ema_optimizer: EMAOptimizer | None = None
     _init_backup_optimizer: InitBackupOptimizer | None = None
     _current_step: int = 0
     _current_epoch: int = 0
-
-    @property
-    def validation_sampler(self) -> Sampler:
-        return self.sampler
 
     @property
     def transformer(self):
@@ -176,32 +135,14 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         self._current_epoch = value
 
     @property
-    def rollout_batch_per_rank(self) -> int:
-        """Number of rollouts per rank per batch (derived from global settings)."""
-        total = self.num_prompts_per_batch * self.num_rollouts_per_prompt
-        if total % self.world_size != 0:
-            raise ValueError(
-                f"num_prompts_per_batch * num_rollouts_per_prompt ({total}) "
-                f"must be divisible by world_size ({self.world_size})."
-            )
-        return total // self.world_size
-
-    @property
     def grad_acc_steps(self) -> int:
-        if self.train_batch_size % self.world_size != 0:
+        world_size: int = getattr(self, "world_size", 1)
+        if self.train_batch_size % world_size != 0:
             raise ValueError(
-                f"global_batch_size ({self.train_batch_size}) must be divisible by world_size ({self.world_size})."
+                f"global_batch_size ({self.train_batch_size}) must be divisible "
+                f"by world_size ({world_size})."
             )
-        return self.train_batch_size // self.world_size
-
-    @property
-    def grpo_sampler(self) -> Sampler:
-        sampler = self.rollout_sampler if self.rollout_sampler else self.sampler
-        if not sampler.solver.supports_step_log_prob:
-            raise TypeError(
-                "GRPO training requires a stochastic solver with replayable step log-prob."
-            )
-        return sampler
+        return self.train_batch_size // world_size
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -221,25 +162,6 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         if need_init:
             self._init_backup_optimizer = InitBackupOptimizer(params)
             logger.info("Init backup enabled for reference model (kl_beta > 0).")
-
-    def make_train_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
-        sampler = DistributedKRepeatSampler(
-            dataset=dataset,
-            num_batches_per_epoch=self.num_batches_per_epoch,
-            num_prompts_per_batch=self.num_prompts_per_batch,
-            num_rollouts_per_prompt=self.num_rollouts_per_prompt,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            seed=self.seed,
-        )
-        self._dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=1,
-            sampler=sampler,
-            num_workers=self.num_dataloader_workers,
-            collate_fn=collate_fn,
-        )
 
     # ------------------------------- Checkpointing ------------------------------ #
 
@@ -399,7 +321,7 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
         advantage = rollout_advantages.to(device=self.device)
 
-        log_prob, mean, std_dev = self.grpo_sampler.compute_logprob_at_step(
+        log_prob, mean, std_dev = self.rollout_sampler.compute_logprob_at_step(
             self.model,
             batch,
             latent_t,
@@ -413,7 +335,7 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         ref_mean = None
         if self.kl_beta > 0:
             with torch.no_grad(), self.reference_model():
-                _, ref_mean, _ = self.grpo_sampler.compute_logprob_at_step(
+                _, ref_mean, _ = self.rollout_sampler.compute_logprob_at_step(
                     self.model,
                     batch,
                     latent_t,
@@ -456,135 +378,6 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
             )
 
     # --- Core training phases ---
-
-    def _collect_rollouts(self) -> list[Rollout]:
-        """Rollout phase: generate images, decode, then score rewards concurrently."""
-        rollouts: list[Rollout] = []
-        self.transformer.eval()
-
-        total_rollouts = self.num_batches_per_epoch * self.rollout_batch_per_rank
-
-        progress = Progress(
-            *self.get_progress_columns(),
-            console=console,
-            transient=True,
-        )
-        rollout_task = progress.add_task("Rollout", total=total_rollouts)
-
-        def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
-            with progress:
-                for batch_idx, batch in enumerate(self.dataloader):
-                    batch = deep_move_to_device(batch, self.device)
-                    batch = deep_cast_float_dtype(batch, self.model.dtype)
-
-                    generator = torch.Generator(device=self.device).manual_seed(
-                        self.seed
-                        + self.current_epoch * 10000
-                        + batch_idx * self.world_size
-                        + self.rank
-                    )
-                    self.processor.initialize_latents(
-                        batch,
-                        generator=generator,
-                        device=self.device,
-                    )
-
-                    negative_batch: Any = (
-                        self.processor.get_negative_batch(batch)
-                        if self.grpo_sampler.cfg_scale > 1.0
-                        else None
-                    )
-
-                    with torch.no_grad():
-                        rollout_out = self.grpo_sampler.sample(
-                            self.model,
-                            batch,
-                            negative_batch=negative_batch,
-                            return_trajectory=True,
-                        )
-
-                    with torch.no_grad():
-                        decoded = self.processor.decode_output(
-                            rollout_out.final_latents,
-                            batch,
-                        )
-                    batch.update(decoded)
-
-                    rollouts.append(
-                        Rollout(
-                            trajectory=deep_move_to_device(
-                                rollout_out, torch.device("cpu")
-                            ),
-                            reward=torch.tensor(0.0),  # placeholder
-                            key=batch.get("__key__", "unknown"),
-                            batch=deep_move_to_device(batch, torch.device("cpu")),
-                            negative_batch=(
-                                deep_move_to_device(
-                                    negative_batch,
-                                    torch.device("cpu"),
-                                )
-                                if negative_batch is not None
-                                else None
-                            ),
-                        )
-                    )
-
-                    progress.advance(rollout_task)
-                    yield batch, len(rollouts) - 1
-
-        def reward_handler(idx: int, reward_tensor: torch.Tensor) -> None:
-            rollouts[idx].reward = (
-                reward_tensor.view(1) if reward_tensor.ndim == 0 else reward_tensor
-            ).cpu()
-
-        execute_reward(self.reward, rollout_submitter(), reward_handler)
-        return rollouts
-
-    def _compute_advantages(self, rollouts: list[Rollout]) -> torch.Tensor:
-        """Compute advantages using gathered rewards across all GPUs."""
-        local_rewards = torch.cat([s.reward for s in rollouts], dim=0).to(self.device)
-
-        gathered_rewards_list: list[torch.Tensor] = [
-            torch.zeros_like(local_rewards) for _ in range(self.world_size)
-        ]
-        dist.all_gather(gathered_rewards_list, local_rewards)
-        gathered_rewards = torch.cat(gathered_rewards_list, dim=0)
-
-        local_keys = [s.key for s in rollouts]
-        all_keys_nested: list[Any] = [None] * self.world_size
-        dist.all_gather_object(all_keys_nested, local_keys)
-        all_keys: list[str] = []
-        for key_list in all_keys_nested:
-            all_keys.extend(key_list)
-
-        unique_keys = list(dict.fromkeys(all_keys))
-        key_to_id = {k: i for i, k in enumerate(unique_keys)}
-        prompt_ids = torch.tensor(
-            [key_to_id[k] for k in all_keys],
-            device=gathered_rewards.device,
-        )
-
-        advantages = self.advantage.compute(gathered_rewards, prompt_ids)
-
-        reward_mean = gathered_rewards.mean().item()
-        reward_std = gathered_rewards.std().item()
-        self.log_metrics(
-            {
-                "reward/mean": reward_mean,
-                "reward/std": reward_std,
-                "reward/adv_abs_mean": advantages.abs().mean().item(),
-            },
-            step=self.current_step,
-        )
-        logger.debug(
-            f"Epoch {self.current_epoch}: reward_mean={reward_mean:.4f}, "
-            f"reward_std={reward_std:.4f}"
-        )
-
-        local_b = local_rewards.shape[0]
-        start = self.rank * local_b
-        end = start + local_b
-        return advantages[start:end].cpu()
 
     def _optimizer_step(self):
         """Clip gradients, step all optimizers, and zero gradients."""
@@ -665,22 +458,6 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
                     self.current_step += 1
                     self.flush_aggregated_metrics(self.current_step)
 
-    # --- Validation ---
-
-    def _grpo_validate(self):
-        """Run validation with mode-specific behavior."""
-        mode = self.validation_mode
-        should_log_reward = mode in ("reward", "both")
-        reward_for_val: BaseReward | None = self.reward if should_log_reward else None
-
-        if mode == "reward":
-            # reward-only: skip image logging by not calling validate_and_log
-            # (ValidationMixin always logs images; instead just score reward directly)
-            pass
-
-        with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self.current_step, reward=reward_for_val)
-
     # --- Main loop ---
 
     @distributed_main
@@ -689,8 +466,9 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
-        self.make_train_dataloader()
-        self.make_validation_dataloader(self.processor)
+        self.processor.load_models("decode", device=self.device)
+        self.make_rollout_dataloader()
+        self.make_validation_dataloader()
 
         self.reward.load_model(self.device)
 
@@ -698,7 +476,8 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
         if self.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.resume_from_dir)
 
-        self._grpo_validate()
+        with apply_ema_maybe(self._ema_optimizer):
+            self.validate_and_log(self.model, self.current_step, reward=self.reward)
         logger.info(
             f"GRPO rollouts in each epoch will randomly select {self.num_prompts_per_batch}"
             f" unique prompts for {self.num_batches_per_epoch} times, and generate"
@@ -715,13 +494,10 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
 
         with self.status_bar("GRPO Training"):
             while self.current_epoch < self.train_epochs:
-                if hasattr(self.dataloader.sampler, "set_epoch"):
-                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
-
                 logger.debug(f"Epoch {self.current_epoch}: starting rollout phase...")
-                rollouts = self._collect_rollouts()
+                rollouts = self._collect_rollouts(self.current_epoch)
 
-                advantages = self._compute_advantages(rollouts)
+                advantages = self._compute_advantages(rollouts, step=self.current_step)
 
                 logger.debug(f"Epoch {self.current_epoch}: starting training phase...")
                 self._train_on_rollouts(rollouts, advantages)
@@ -741,7 +517,10 @@ class HsdpGrpoTrainer(ValidationMixin, CheckpointingMixin):
                     self.validation_epochs > 0
                     and self.current_epoch % self.validation_epochs == 0
                 ):
-                    self._grpo_validate()
+                    with apply_ema_maybe(self._ema_optimizer):
+                        self.validate_and_log(
+                            self.model, self.current_step, reward=self.reward
+                        )
 
         with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(

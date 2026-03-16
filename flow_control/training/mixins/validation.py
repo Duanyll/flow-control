@@ -41,8 +41,10 @@ class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
 
     # ---------------------------------- Configs --------------------------------- #
     validation_dataset: DatasetConfig | None = None
-    validation_num_workers: int = 4
+    validation_num_workers: int = 1
     validation_same_seed: bool = True
+    validation_log_images: bool = True
+    validation_log_rewards: bool = True
     seed: int = 42
 
     processor: Processor  # Shared property
@@ -62,14 +64,11 @@ class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
 
     def make_validation_dataloader(
         self,
-        processor: Processor,
     ) -> None:
         """Create the validation dataloader, loading decode models on the processor."""
         if self.validation_dataset is None:
             logger.info("No validation dataset configured, skipping.")
             return
-
-        processor.load_models("decode", device=self.device)
 
         dataset = PaddingAwareDatasetWrapper(parse_dataset(self.validation_dataset))
         sampler = DistributedBucketSampler(
@@ -153,15 +152,16 @@ class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
                     batch.update(decoded)
 
                     # Log image
-                    image = tensor_to_pil(batch["clean_image"])
                     key = batch.get("__key__", "unknown")
-                    self.log_image(image, key, step=step)
+                    if self.validation_log_images:
+                        image = tensor_to_pil(batch["clean_image"])
+                        self.log_image(image, key, step=step)
 
                     progress.advance(task)
 
                     yield batch, key
 
-        if reward is not None:
+        if reward is not None and self.validation_log_rewards:
             # Use execute_reward to score all samples (with async overlap if supported)
             reward_values: list[torch.Tensor] = execute_reward(
                 reward,

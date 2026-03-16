@@ -123,7 +123,10 @@ class Sampler(BaseSampler):
 
                 progress.advance(task)
 
-        output = SampleOutput(final_latents=latents.to(dtype))
+        output = SampleOutput(
+            final_latents=latents.to(dtype),
+            timesteps=sigmas[:-1].clone(),
+        )
         if not return_trajectory:
             return output
 

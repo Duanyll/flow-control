@@ -1,13 +1,12 @@
 import os
 import random
 from functools import wraps
-from typing import Literal
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -17,17 +16,9 @@ from torch.distributed.fsdp import fully_shard
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.utils.logging import get_logger
 
+from ..launch_config import LaunchConfig
+
 logger = get_logger(__name__)
-
-
-class LaunchConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["sft", "grpo", "inference"]
-    devices: int | list[int]
-    generate_dcp_seed: bool = False
-    preprocess_config: str | None = None
-    env: dict[str, str] = {}
 
 
 class HsdpMixin(BaseModel):

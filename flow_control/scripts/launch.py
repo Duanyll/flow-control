@@ -3,17 +3,16 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 from rich import print
 
-from flow_control.training.mixins import LaunchConfig
+from flow_control.training.launch_config import LaunchConfig
+from flow_control.utils.config import load_config_file
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
-    with open(config_path, "rb") as f:
-        config_data = tomllib.load(f)
+    config_data = load_config_file(config_path)
     if "launch" not in config_data:
         raise ValueError("Launch configuration section is missing in the config file.")
     launch_config = LaunchConfig(**config_data["launch"])
@@ -23,19 +22,24 @@ def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
 def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
     """Run the child process (invoked by torchrun)."""
     if launch_config.type == "sft":
-        from flow_control.training.sft import HsdpSftTrainer
+        from flow_control.training.sft import SftTrainer
 
-        trainer = HsdpSftTrainer(**config_data)
+        trainer = SftTrainer(**config_data)
         trainer.run()
     elif launch_config.type == "grpo":
-        from flow_control.training.grpo import HsdpGrpoTrainer
+        from flow_control.training.grpo import GrpoTrainer
 
-        trainer = HsdpGrpoTrainer(**config_data)
+        trainer = GrpoTrainer(**config_data)
+        trainer.run()
+    elif launch_config.type == "nft":
+        from flow_control.training.nft import NftTrainer
+
+        trainer = NftTrainer(**config_data)
         trainer.run()
     elif launch_config.type == "inference":
-        from flow_control.training.inference import HsdpInference
+        from flow_control.training.inference import Inference
 
-        trainer = HsdpInference(**config_data)
+        trainer = Inference(**config_data)
         trainer.run()
     else:
         raise ValueError(f"Unknown launch type: {launch_config.type}")
