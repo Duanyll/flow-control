@@ -91,17 +91,16 @@ class EMAOptimizer(torch.optim.Optimizer):
             torch._foreach_lerp_(ema_buffers, param_fp32, 1 - decay)
 
     @torch.no_grad()
-    def step(self, closure: Any = None):
+    def step(self, closure: Any = None) -> Any:
         """Read current params, update EMA buffers. Call AFTER base optimizer.step()."""
-        loss = super().step(closure)
         self.ema_step_count += 1
         if self.ema_step_count % self.ema_interval != 0:
-            return loss
+            return 0.0
         decay = self.ema_warmup.get_decay(self.ema_step_count, self.ema_decay)
         if decay >= 1.0:
-            return loss
+            return 0.0
         self._update_ema(decay)
-        return loss
+        return 0.0
 
     def state_dict(self):
         sd = super().state_dict()
@@ -149,15 +148,8 @@ class InitBackupOptimizer(torch.optim.Optimizer):
                 self.state[p]["init_backup"] = p.clone().to(torch.float32)
 
     @torch.no_grad()
-    def step(self, closure: Any = None):
-        return super().step(closure)
-
-    def state_dict(self):
-        return super().state_dict()
-
-    def load_state_dict(self, state_dict):
-        state_dict.pop("_initialized", None)
-        super().load_state_dict(state_dict)
+    def step(self, closure: Any = None) -> Any:
+        return
 
     @torch.no_grad()
     def apply_init_backup(self):

@@ -86,6 +86,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         "reward/mean": "R̄: {v:.3f}",
         "reward/std": "σ: {v:.3f}",
         "train/loss": "Loss: {v:.4f}",
+        "val/reward_mean": "Val R̄: {v:.3f}",
     }
 
     # ------------------------------- Lazy state --------------------------------- #
@@ -492,7 +493,15 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             self.grad_acc_steps,
         )
 
-        with self.status_bar("GRPO Training"):
+        progress = Progress(
+            *self.get_progress_columns(),
+            console=console,
+        )
+        task = progress.add_task(
+            "GRPO Training", total=self.train_epochs, completed=self.current_epoch
+        )
+
+        with self.status_bar("GRPO Training"), progress:
             while self.current_epoch < self.train_epochs:
                 logger.debug(f"Epoch {self.current_epoch}: starting rollout phase...")
                 rollouts = self._collect_rollouts(self.current_epoch)
@@ -503,6 +512,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 self._train_on_rollouts(rollouts, advantages)
 
                 self.current_epoch += 1
+                progress.update(task, advance=1)
 
                 del rollouts, advantages
                 torch.cuda.empty_cache()

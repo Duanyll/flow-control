@@ -66,7 +66,7 @@ def deep_apply_tensor_fn(data: Any, fn: Callable) -> Any:
     elif isinstance(data, list):
         return [deep_apply_tensor_fn(v, fn) for v in data]
     elif isinstance(data, tuple):
-        return type(data)(*(deep_apply_tensor_fn(v, fn) for v in data))
+        return type(data)(deep_apply_tensor_fn(v, fn) for v in data)
     elif dataclasses.is_dataclass(data) and not isinstance(data, type):
         updated_fields = {
             f.name: deep_apply_tensor_fn(getattr(data, f.name), fn)

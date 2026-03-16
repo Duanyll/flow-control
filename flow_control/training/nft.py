@@ -118,6 +118,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         "reward/mean": "R̄: {v:.3f}",
         "reward/std": "σ: {v:.3f}",
         "train/loss": "Loss: {v:.4f}",
+        "val/reward_mean": "Val R̄: {v:.3f}",
     }
     _rollout_needs_trajectory: bool = False
 
@@ -613,7 +614,15 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             self.grad_acc_steps,
         )
 
-        with self.status_bar("NFT Training"):
+        progress = Progress(
+            *self.get_progress_columns(),
+            console=console,
+        )
+        task = progress.add_task(
+            "NFT Training", total=self.train_epochs, completed=self.current_epoch
+        )
+
+        with self.status_bar("NFT Training"), progress:
             while self.current_epoch < self.train_epochs:
                 logger.debug(f"Epoch {self.current_epoch}: starting rollout phase...")
                 with apply_ema_maybe(self.old_ema):
@@ -627,6 +636,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 self.old_ema.step()
 
                 self.current_epoch += 1
+                progress.update(task, completed=self.current_epoch)
 
                 del rollouts, advantages
                 torch.cuda.empty_cache()

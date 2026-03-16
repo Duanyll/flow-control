@@ -106,6 +106,6 @@
   "launch": {
     "type": "grpo",
     "devices": 4,
-    "generate_dcp_seed": true
+    // "generate_dcp_seed": true
   }
 }

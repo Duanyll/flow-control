@@ -178,10 +178,12 @@ log_level: int = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), loggin
 global_log_level: int = getattr(
     logging, os.getenv("GLOBAL_LOG_LEVEL", "WARNING").upper(), logging.WARNING
 )
+enable_rich_tracebacks = os.getenv("ENABLE_RICH_TRACEBACKS", "1") == "1"
 rich_handler = RichHandler(
     console=console, rich_tracebacks=True, enable_link_path=False
 )
-rich.traceback.install(console=console)
+if enable_rich_tracebacks:
+    rich.traceback.install(console=console)
 
 transformers.utils.logging.disable_default_handler()
 transformers.utils.logging.disable_progress_bar()

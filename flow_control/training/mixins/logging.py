@@ -116,7 +116,7 @@ class LoggingMixin(BaseModel):
 
     def flush_aggregated_metrics(self, step: int):
         avg_metrics = {k: sum(v) / len(v) for k, v in self._aggregated_metrics.items()}
-        self.tracker.track(avg_metrics, step=step)
+        self.log_metrics(avg_metrics, step)
         self._aggregated_metrics = {}
 
     @contextmanager
