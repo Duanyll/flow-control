@@ -337,7 +337,7 @@ class CPSSolver(BaseSolver):
         )
 
 
-class DPMSolver(DDIMSolver):
+class DPMSolver(BaseSolver):
     type: Literal["dpm"] = "dpm"
     order: Literal[1, 2]
 
@@ -381,7 +381,7 @@ class DPMSolver(DDIMSolver):
 
         if self.order == 1 or state.lower_order_nums < 1 or lower_order_final:
             if state.step_index == 0 or lower_order_final:
-                next_latents, mean, _ = self._ddim_update(
+                next_latents, mean, _ = DDIMSolver._ddim_update(
                     pred_original_sample=model_output,
                     sample=latents,
                     sigma=sigma,

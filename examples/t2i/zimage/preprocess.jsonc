@@ -1,0 +1,26 @@
+{
+  "$schema": "../../../schema/preprocess.schema.json",
+  "num_loader_workers": 1,
+  "processor_devices": [
+    0
+  ],
+  "num_threads_per_worker": 8,
+  "queue_size": 16,
+  "num_sink_workers": 1,
+  "processing_mode": "inference",
+  "dataset": {
+    "type": "csv",
+    "path": "./examples/t2i.csv",
+    "column_types": {
+      "prompt": "str"
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "zimage"
+  },
+  "output": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_zimage_t2i"
+  }
+}

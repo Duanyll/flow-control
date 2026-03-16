@@ -1,0 +1,37 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "seed_checkpoint_dir": "./demo/seed/flux2_klein_base_9b",
+  "save_preview_dir": "./demo/inference_flux2_klein_base_9b_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "flux2",
+    "type": "base",
+    "hf_model": {
+      "library": "diffusers",
+      "class_name": "Flux2Transformer2DModel",
+      "pretrained_model_id": "black-forest-labs/FLUX.2-klein-base-9B",
+      "subfolder": "transformer",
+      "dtype": "bfloat16"
+    }
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_flux2_klein_9b_t2i"
+  },
+  "sampler": {
+    "steps": 50,
+    "cfg_scale": 3.5,
+    "shift": {
+      "type": "flux2"
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "flux2_klein_9b"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 4,
+    "preprocess_config": "examples/t2i/flux2/klein_9b.preprocess.jsonc"
+  }
+}

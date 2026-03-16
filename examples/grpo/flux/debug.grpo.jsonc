@@ -1,0 +1,111 @@
+{
+  "$schema": "../../../schema/grpo.schema.json",
+
+  "checkpoint_root": "./runs/geneval_flux_debug/",
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
+  "aim_repo": "aim://192.168.5.62:53800",
+  "experiment_name": "flux_grpo_demo_debug",
+
+  "num_batches_per_epoch": 2,
+  "num_prompts_per_batch": 2,
+  "num_rollouts_per_prompt": 4,
+  "num_inner_epochs": 1,
+  "train_batch_size": 8,
+
+  "clip_grad_norm": 1.0,
+  "clip_range": 1e-5,
+  "kl_beta": 0.0,
+
+  "train_epochs": 20,
+  "checkpoint_epochs": 5,
+  "validation_epochs": 5,
+
+  "model": {
+    "arch": "flux1",
+    "type": "base",
+    "peft_lora_rank": 64,
+    "peft_lora_config": {
+      "lora_alpha": 128,
+      "init_lora_weights": "gaussian",
+      "target_modules": [
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2"
+      ]
+    }
+  },
+
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./data/geneval_flux/train"
+  },
+
+  "rollout_sampler": {
+    "steps": 6,
+    "cfg_scale": 1.0,
+    "trajectory_window_size": 3,
+    "trajectory_window_range": [0, 3],
+    "shift": { "type": "linear" },
+    "solver": { "type": "cps", "eta": 0.8 }
+  },
+
+  "ema": {
+    "decay": 0.9,
+    "warmup": { "type": "standard" },
+    "interval": 1
+  },
+
+  "reward": {
+    "type": "geneval",
+    "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
+    "scoring_mode": "reward_server"
+  },
+
+  "advantage": {
+    "type": "per_prompt"
+  },
+
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 3e-4,
+    "weight_decay": 1e-4
+  },
+
+  "scheduler_config": {
+    "class_name": "ConstantLR",
+    "factor": 1.0
+  },
+
+  "validation_dataset": {
+    "type": "pickle_directory",
+    "path": "./data/geneval_flux/validation",
+    "limit": 8
+  },
+
+  "validation_sampler": {
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" }
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1",
+    "default_resolution": [512, 512]
+  },
+
+  "launch": {
+    "type": "grpo",
+    "devices": 4,
+    "generate_dcp_seed": true
+  }
+}

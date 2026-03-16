@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_qwen_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "qwen",
+    "type": "base"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_qwen_t2i"
+  },
+  "sampler": {
+    "steps": 28,
+    "cfg_scale": 4.0,
+    "enable_cfg_renorm": true,
+    "shift": {
+      "type": "linear",
+      "max_image_seq_len": 8192,
+      "max_shift": 0.9
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "qwen_image"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 4,
+    "preprocess_config": "examples/t2i/qwen/preprocess.jsonc"
+  }
+}

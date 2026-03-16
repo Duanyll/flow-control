@@ -20,15 +20,30 @@ from flow_control.training.sft import SftTrainer
 DEFAULT_OUTPUT_DIR = "schema"
 
 
+def _inject_schema_field(schema_dict: dict) -> dict:
+    if "properties" not in schema_dict:
+        schema_dict["properties"] = {}
+
+    schema_dict["properties"]["$schema"] = {
+        "title": "JSON Schema",
+        "description": "VS Code schema declaration.",
+        "type": "string",
+    }
+    # VSCode exclusive field to allow trailing commas in JSON files
+    schema_dict["allowTrailingCommas"] = True
+    return schema_dict
+
+
 def generate_schemas() -> dict[str, dict]:
     """Return a mapping of config name -> JSON schema dict."""
-    return {
+    schemas = {
         "sft": TypeAdapter(SftTrainer).json_schema(),
         "grpo": TypeAdapter(GrpoTrainer).json_schema(),
         "nft": TypeAdapter(NftTrainer).json_schema(),
         "inference": TypeAdapter(Inference).json_schema(),
         "preprocess": TypeAdapter(PreprocessConfig).json_schema(),
     }
+    return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 
 
 def run(output_dir: str = DEFAULT_OUTPUT_DIR) -> None:

@@ -7,5 +7,27 @@
         "**/Thumbs.db": true,
         "**/__pycache__": true,
         "data": true, // This is very large and we don't want to accidentally open it in VS Code
-    }
+    },
+    "json.schemas": [
+        {
+            "fileMatch": ["*.grpo.jsonc"],
+            "url": "./schema/grpo.schema.json"
+        },
+        {
+            "fileMatch": ["*.sft.jsonc"],
+            "url": "./schema/sft.schema.json"
+        },
+        {
+            "fileMatch": ["*.nft.jsonc"],
+            "url": "./schema/nft.schema.json"
+        },
+        {
+            "fileMatch": ["*.inference.jsonc", "inference.jsonc"],
+            "url": "./schema/inference.schema.json"
+        },
+        {
+            "fileMatch": ["*.preprocess.jsonc", "preprocess.jsonc"],
+            "url": "./schema/preprocess.schema.json"
+        }
+    ]
 }

@@ -1,0 +1,30 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_longcat_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "longcat",
+    "type": "base"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_longcat_t2i"
+  },
+  "sampler": {
+    "steps": 50,
+    "cfg_scale": 4.0,
+    "enable_cfg_renorm": true,
+    "shift": {
+      "type": "linear"
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "longcat_image"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 4,
+    "preprocess_config": "examples/t2i/longcat/preprocess.jsonc"
+  }
+}
