@@ -4,8 +4,8 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from flow_control.utils.common import pil_to_tensor
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import pil_to_tensor
 
 logger = get_logger(__name__)
 

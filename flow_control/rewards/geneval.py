@@ -16,8 +16,8 @@ import torch.utils.data
 from PIL import Image, ImageOps
 from pydantic import ConfigDict, PrivateAttr
 
-from flow_control.utils.common import tensor_to_pil
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import tensor_to_pil
 
 from .base import BaseReward
 
@@ -96,7 +96,7 @@ class GenevalReward(BaseReward):
     nms_threshold: float = 1.0
     position_threshold: float = 0.1
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     _detector: Any = PrivateAttr(default=None)
     _clip_model: Any = PrivateAttr(default=None)
@@ -572,8 +572,8 @@ if __name__ == "__main__":
         COCO_THING_CLASSES,
         load_mask2former_swin_s,
     )
-    from flow_control.utils.common import pil_to_tensor, tensor_to_pil
     from flow_control.utils.draw import draw_bbox_on_image
+    from flow_control.utils.tensor import pil_to_tensor, tensor_to_pil
 
     data_dir = Path("./data")
     data_dir.mkdir(exist_ok=True)

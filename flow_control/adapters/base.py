@@ -7,9 +7,9 @@ from einops import rearrange
 from peft import LoraConfig
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.utils.common import deep_cast_float_dtype, deep_move_to_device
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
 from flow_control.utils.types import TorchDType
 from flow_control.utils.upcasting import (
     apply_layerwise_upcasting,
@@ -36,7 +36,7 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
     arch: str
     type: str
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     @property
     def transformer(self) -> TModel:

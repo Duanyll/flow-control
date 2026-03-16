@@ -18,7 +18,7 @@ class CompositeReward(BaseReward):
     type: Literal["composite"] = "composite"
     rewards: list[Any]  # (weight, reward_config_dict)
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     _reward_instances: list[BaseReward] = PrivateAttr(default_factory=list)
 

@@ -3,7 +3,7 @@ from typing import Any, Literal
 import torch
 from pydantic import ConfigDict, PrivateAttr
 
-from flow_control.utils.common import deep_cast_float_dtype, deep_move_to_device
+from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
 
 from .base import BaseReward
 
@@ -15,7 +15,7 @@ class PickScoreReward(BaseReward):
     processor_name: str = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
     model_name: str = "yuvalkirstain/PickScore_v1"
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     _model: Any = PrivateAttr(default=None)
     _processor: Any = PrivateAttr(default=None)
@@ -42,7 +42,7 @@ class PickScoreReward(BaseReward):
         Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
         ``batch["prompt"]`` (str).
         """
-        from flow_control.utils.common import tensor_to_pil
+        from flow_control.utils.tensor import tensor_to_pil
 
         image = batch["clean_image"]  # [1, C, H, W]
         prompt = batch["prompt"]

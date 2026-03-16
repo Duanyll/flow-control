@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.attention.flex_attention as flex_attention
 from einops import rearrange, repeat
 
-from flow_control.utils.common import ensure_compiled_flex_attention
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import ensure_compiled_flex_attention
 
 from ..base import BaseModelAdapter
 from .base import QwenImageAdapter, QwenImageBatch

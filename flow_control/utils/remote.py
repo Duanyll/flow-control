@@ -4,10 +4,10 @@ from typing import Any
 
 import httpx
 import torch
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, PrivateAttr
 
-from .common import deep_cast_float_dtype, deep_move_to_device
 from .logging import get_logger
+from .tensor import deep_cast_float_dtype, deep_move_to_device
 
 logger = get_logger(__name__)
 
@@ -115,8 +115,6 @@ class RemoteOffloadable(BaseModel):
     ``load_model`` path to establish the connection and send their pydantic config
     to the server's ``/load`` endpoint.
     """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     endpoint: str | None = None
 

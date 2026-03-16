@@ -20,12 +20,12 @@ from flow_control.datasets import (
 )
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
-from flow_control.utils.common import (
+from flow_control.utils.logging import console, dump_if_failed, get_logger
+from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.logging import console, dump_if_failed, get_logger
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .mixins import DcpMixin, HsdpMixin, LoggingMixin, distributed_main

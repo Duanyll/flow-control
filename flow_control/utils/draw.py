@@ -6,8 +6,8 @@ from typing import Literal
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from .common import pil_to_tensor, tensor_to_pil
 from .logging import get_logger, warn_once
+from .tensor import pil_to_tensor, tensor_to_pil
 
 logger = get_logger(__name__)
 

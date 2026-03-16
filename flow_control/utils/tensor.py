@@ -50,30 +50,6 @@ def make_grid(h, w, device: torch.device) -> torch.Tensor:
     return grid
 
 
-def ensure_trainable(module):
-    """
-    Ensure that all parameters of the module are trainable.
-    """
-    # Check if LoRA is installed
-    for name, _param in module.named_parameters():
-        if "lora" in name:
-            break
-    else:
-        module.requires_grad_(True)
-
-
-def parse_checkpoint_step(checkpoint_name: str) -> int:
-    """
-    Parse the checkpoint step from the checkpoint directory name.
-    Assumes the checkpoint name is in the format 'checkpoint-{step}'.
-    """
-    try:
-        step_str = checkpoint_name.split("-")[-1]
-        return int(step_str)
-    except (IndexError, ValueError):
-        return -1
-
-
 def deep_apply_tensor_fn(data: Any, fn: Callable) -> Any:
     """
     Recursively apply a function to all tensors in a nested structure.

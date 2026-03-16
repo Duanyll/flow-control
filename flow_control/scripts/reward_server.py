@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 class RewardServerConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     host: str = "0.0.0.0"
     port: int = 8001

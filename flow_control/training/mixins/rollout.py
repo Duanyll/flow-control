@@ -20,11 +20,11 @@ from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.samplers import SampleOutput, Sampler
-from flow_control.utils.common import (
+from flow_control.utils.logging import console, get_logger
+from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
 )
-from flow_control.utils.logging import console, get_logger
 
 from ..advantage import Advantage, PerPromptAdvantage
 from ..data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn

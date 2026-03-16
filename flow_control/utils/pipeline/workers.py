@@ -15,8 +15,8 @@ from typing import Any
 import torch
 import torch.multiprocessing as mp
 
-from ..common import deep_apply_tensor_fn
 from ..logging import get_logger, setup_global_handler
+from ..tensor import deep_apply_tensor_fn
 from .base import DataSink, DataSource, PipelineStage
 
 

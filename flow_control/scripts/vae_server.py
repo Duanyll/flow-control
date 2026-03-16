@@ -10,9 +10,9 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from flow_control.processors.components.vae import VAE, BaseVAE
-from flow_control.utils.common import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_tensor, serialize_tensor
+from flow_control.utils.tensor import load_config_file
 from flow_control.utils.types import TorchDevice
 
 logger = get_logger(__name__)
@@ -21,7 +21,7 @@ _vae_ta = TypeAdapter(VAE)
 
 
 class VAEServerConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     host: str = "0.0.0.0"
     port: int = 8000

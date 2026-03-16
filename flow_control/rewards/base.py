@@ -4,8 +4,8 @@ from typing import Any
 import torch
 from pydantic import ConfigDict
 
-from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.remote import RemoteOffloadable
+from flow_control.utils.tensor import deep_move_to_device
 
 
 class BaseReward(RemoteOffloadable, ABC):
@@ -23,7 +23,7 @@ class BaseReward(RemoteOffloadable, ABC):
 
     type: str
     weight: float = 1.0
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     @property
     @abstractmethod

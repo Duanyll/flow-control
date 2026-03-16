@@ -8,9 +8,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from flow_control.utils.common import pil_to_tensor, tensor_to_pil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
+from flow_control.utils.tensor import pil_to_tensor, tensor_to_pil
 
 logger = get_logger(__name__)
 

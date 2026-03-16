@@ -4,8 +4,8 @@ from typing import Any, overload
 import torch
 from PIL import Image, ImageDraw
 
-from .common import pil_to_tensor, tensor_to_pil
 from .draw import generate_color, load_font
+from .tensor import pil_to_tensor, tensor_to_pil
 
 
 class BinPacker:

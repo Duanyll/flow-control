@@ -18,10 +18,10 @@ from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
-from flow_control.utils.common import (
+from flow_control.utils.logging import console, get_logger
+from flow_control.utils.tensor import (
     deep_move_to_device,
 )
-from flow_control.utils.logging import console, get_logger
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,

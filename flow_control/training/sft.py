@@ -21,15 +21,15 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
-from flow_control.utils.common import (
-    deep_cast_float_dtype,
-    deep_move_to_device,
-)
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
     get_logger,
     warn_once,
+)
+from flow_control.utils.tensor import (
+    deep_cast_float_dtype,
+    deep_move_to_device,
 )
 from flow_control.utils.types import (
     OptimizerConfig,

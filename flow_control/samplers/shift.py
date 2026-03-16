@@ -10,7 +10,7 @@ from flow_control.adapters.base import Batch
 
 class BaseShift(BaseModel, ABC):
     type: Literal["base"] = "base"
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     latent_length_from: Literal["actual", "image_size"] = "actual"
     shift_terminal: float | None = None

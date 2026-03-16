@@ -58,7 +58,7 @@ class BaseProcessor[
 ](BaseModel, ABC):
     task: str
     preset: str = ""
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     # ---------------------------------- Loading --------------------------------- #
 

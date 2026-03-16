@@ -32,7 +32,7 @@ class DPMSolverState(SolverState):
 
 class BaseSolver(BaseModel, ABC):
     type: Literal["base"] = "base"
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     eta: float = 0.0
 

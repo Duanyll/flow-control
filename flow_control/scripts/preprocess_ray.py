@@ -6,9 +6,9 @@ from rich.progress import Progress
 
 from flow_control.datasets import DATASINK_REGISTRY, parse_dataset
 from flow_control.processors import parse_processor
-from flow_control.utils.common import deep_move_to_device
 from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import console, dump_if_failed, get_logger
+from flow_control.utils.tensor import deep_move_to_device
 
 logger = get_logger(__name__)
 

@@ -20,12 +20,12 @@ from flow_control.processors import Processor
 from flow_control.rewards import execute_reward
 from flow_control.rewards.base import BaseReward
 from flow_control.samplers import Sampler
-from flow_control.utils.common import (
+from flow_control.utils.logging import console, get_logger
+from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
     tensor_to_pil,
 )
-from flow_control.utils.logging import console, get_logger
 
 from ..data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp import HsdpMixin

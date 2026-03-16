@@ -327,8 +327,8 @@ if __name__ == "__main__":
 
     from PIL import Image
 
-    from flow_control.utils.common import pil_to_tensor, tensor_to_pil
     from flow_control.utils.draw import draw_bbox_on_image
+    from flow_control.utils.tensor import pil_to_tensor, tensor_to_pil
 
     rprint(f"[bold]Loading model from[/] {checkpoint_path}")
     model = load_mask2former_swin_s(checkpoint_path, device="cuda")

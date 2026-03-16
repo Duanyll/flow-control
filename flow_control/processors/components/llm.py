@@ -10,9 +10,9 @@ import json5
 import torch
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
-from flow_control.utils.common import tensor_to_pil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.resize import resize_to_multiple_of
+from flow_control.utils.tensor import tensor_to_pil
 
 logger = get_logger(__name__)
 

@@ -54,7 +54,7 @@ class UnifiedReward(BaseReward):
         ScoreTag(name="Style Score"),
     ]
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     @property
     def _batch_fields(self) -> set[str]:

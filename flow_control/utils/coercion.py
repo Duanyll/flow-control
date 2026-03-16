@@ -15,8 +15,8 @@ from einops import rearrange
 from PIL import Image
 from pydantic import BeforeValidator, TypeAdapter, ValidationInfo
 
-from flow_control.utils.common import pil_to_tensor
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import pil_to_tensor
 
 logger = get_logger(__name__)
 

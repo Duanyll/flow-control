@@ -2,55 +2,109 @@ import sys
 from typing import Annotated, Any
 
 import torch
-from pydantic import BeforeValidator, PlainSerializer, WithJsonSchema
+from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler, WithJsonSchema
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import core_schema
 
 
-def validate_torch_dtype(v: Any) -> torch.dtype:
-    if isinstance(v, torch.dtype):
-        return v
-    if isinstance(v, str):
-        try:
-            dtype_obj = getattr(torch, v)
-            if isinstance(dtype_obj, torch.dtype):
-                return dtype_obj
-        except AttributeError:
-            pass
-    raise ValueError(f"Invalid torch dtype: {v}")
+class _TorchDTypePydanticAnnotation:
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        def validate_from_str(value: str) -> torch.dtype:
+            try:
+                dtype_obj = getattr(torch, value)
+                if isinstance(dtype_obj, torch.dtype):
+                    return dtype_obj
+            except AttributeError:
+                pass
+            raise ValueError(f"Invalid torch dtype: {value}")
+
+        from_str_schema = core_schema.chain_schema(
+            [
+                core_schema.str_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_str),
+            ]
+        )
+
+        return core_schema.json_or_python_schema(
+            json_schema=from_str_schema,
+            python_schema=core_schema.union_schema(
+                [
+                    core_schema.is_instance_schema(torch.dtype),
+                    from_str_schema,
+                ]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: str(v).split(".")[-1]
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, _core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return {
+            "type": "string",
+            "description": "PyTorch dtype (e.g. float32, bfloat16)",
+        }
 
 
-def serialize_torch_dtype(v: torch.dtype) -> str:
-    return str(v).split(".")[-1]  # 将 torch.float32 转为 "float32"
+class _TorchDevicePydanticAnnotation:
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        def validate_from_str(value: str) -> torch.device:
+            return torch.device(value)
+
+        def validate_from_int(value: int) -> torch.device:
+            return torch.device(value)
+
+        from_str_schema = core_schema.chain_schema(
+            [
+                core_schema.str_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_str),
+            ]
+        )
+        from_int_schema = core_schema.chain_schema(
+            [
+                core_schema.int_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_int),
+            ]
+        )
+
+        return core_schema.json_or_python_schema(
+            json_schema=from_str_schema,
+            python_schema=core_schema.union_schema(
+                [
+                    core_schema.is_instance_schema(torch.device),
+                    from_str_schema,
+                    from_int_schema,
+                ]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: str(v)
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, _core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return {
+            "type": "string",
+            "description": "PyTorch device (e.g. cuda:0, cpu)",
+        }
 
 
-def validate_torch_device(v: Any) -> torch.device:
-    if isinstance(v, torch.device):
-        return v
-    if isinstance(v, (str, int)):
-        return torch.device(v)
-    raise ValueError(f"Invalid torch device: {v}")
-
-
-def serialize_torch_device(v: torch.device) -> str:
-    return str(v)
-
-
-TorchDType = Annotated[
-    torch.dtype,
-    BeforeValidator(validate_torch_dtype),
-    PlainSerializer(serialize_torch_dtype, return_type=str),
-    WithJsonSchema(
-        {"type": "string", "description": "PyTorch dtype (e.g. float32, bfloat16)"}
-    ),
-]
-
-TorchDevice = Annotated[
-    torch.device,
-    BeforeValidator(validate_torch_device),
-    PlainSerializer(serialize_torch_device, return_type=str),
-    WithJsonSchema(
-        {"type": "string", "description": "PyTorch device (e.g. cuda:0, cpu)"}
-    ),
-]
+TorchDType = Annotated[torch.dtype, _TorchDTypePydanticAnnotation]
+TorchDevice = Annotated[torch.device, _TorchDevicePydanticAnnotation]
 
 
 OptimizerConfig = Annotated[

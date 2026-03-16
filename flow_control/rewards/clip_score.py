@@ -13,7 +13,7 @@ class CLIPScoreReward(BaseReward):
     type: Literal["clip_score"] = "clip_score"
     model_name: str = "openai/clip-vit-large-patch14"
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     _model: Any = PrivateAttr(default=None)
     _processor: Any = PrivateAttr(default=None)
