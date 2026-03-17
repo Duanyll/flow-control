@@ -6,7 +6,7 @@ rollout / reward / advantage pipeline.
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -71,6 +71,12 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
     """
     Number of rollouts to generate for each prompt.
     """
+    rollout_storage_device: Literal["cpu", "device"] = "cpu"
+    """
+    Where to store collected rollout results between the rollout and training phases.
+    ``"cpu"`` reduces accelerator memory pressure. ``"device"`` keeps rollout
+    tensors on the current training device to avoid host-device transfers.
+    """
     advantage: Advantage = PerPromptAdvantage()
 
     dataset: DatasetConfig
@@ -129,6 +135,9 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
         processor = self.processor
         reward: Reward = self.reward
         device = self.device
+        rollout_storage = (
+            device if self.rollout_storage_device == "device" else torch.device("cpu")
+        )
         seed: int = self.seed
         rank: int = self.rank
         world_size: int = self.world_size
@@ -186,15 +195,15 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
                     rollouts.append(
                         Rollout(
                             trajectory=deep_move_to_device(
-                                rollout_out, torch.device("cpu")
+                                rollout_out, rollout_storage
                             ),
                             reward=torch.tensor(0.0),  # placeholder
                             key=batch.get("__key__", "unknown"),
-                            batch=deep_move_to_device(batch, torch.device("cpu")),
+                            batch=deep_move_to_device(batch, rollout_storage),
                             negative_batch=(
                                 deep_move_to_device(
                                     negative_batch,
-                                    torch.device("cpu"),
+                                    rollout_storage,
                                 )
                                 if negative_batch is not None
                                 else None

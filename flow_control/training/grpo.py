@@ -74,6 +74,12 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     kl_beta: float = 0.0
 
     ema: EMAConfig | None = None
+    precompute_aux_model_outputs: bool = False
+    """
+    Precompute reference-model replay outputs once per outer epoch and reuse
+    them during optimization. This reduces repeated model switching at the cost
+    of extra accelerator memory for cached per-item tensors.
+    """
     clip_grad_norm: float = 1.0
 
     # Optimization / training loop
@@ -297,6 +303,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         rollout: Rollout,
         rollout_advantages: torch.Tensor,
         timestep_idx: int,
+        cached_ref_mean: torch.Tensor | None = None,
     ) -> torch.Tensor:
         trajectory = rollout.trajectory
         batch = deep_move_to_device(rollout.batch, self.device)
@@ -334,7 +341,9 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         )
 
         ref_mean = None
-        if self.kl_beta > 0:
+        if cached_ref_mean is not None:
+            ref_mean = cached_ref_mean.to(device=self.device)
+        elif self.kl_beta > 0:
             with torch.no_grad(), self.reference_model():
                 _, ref_mean, _ = self.rollout_sampler.compute_logprob_at_step(
                     self.model,
@@ -356,6 +365,83 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             std_dev=std_dev,
         )
         return loss
+
+    def _precompute_reference_means(
+        self,
+        rollouts: list[Rollout],
+    ) -> list[list[torch.Tensor]] | None:
+        if not self.precompute_aux_model_outputs or self.kl_beta <= 0:
+            return None
+
+        logger.info(
+            "Precomputing GRPO reference-model replay outputs for %d rollouts.",
+            len(rollouts),
+        )
+        was_training = self.transformer.training
+        self.transformer.eval()
+
+        total_items = 0
+        for rollout in rollouts:
+            log_probs = rollout.trajectory.log_probs
+            if log_probs is None:
+                raise RuntimeError("Rollout is missing log-prob trajectory data.")
+            total_items += log_probs.shape[1]
+
+        progress = Progress(
+            *self.get_progress_columns(),
+            console=console,
+            transient=True,
+        )
+        precompute_task = progress.add_task("Precompute ref", total=total_items)
+        ref_means: list[list[torch.Tensor]] = []
+
+        with progress, torch.no_grad(), self.reference_model():
+            for rollout in rollouts:
+                trajectory = rollout.trajectory
+                batch = deep_move_to_device(rollout.batch, self.device)
+                negative_batch = (
+                    deep_move_to_device(rollout.negative_batch, self.device)
+                    if rollout.negative_batch is not None
+                    else None
+                )
+                if trajectory.timesteps is None or trajectory.latents is None:
+                    raise RuntimeError("Rollout is missing trajectory data.")
+                solver_states = trajectory.solver_states
+                sigmas = trajectory.timesteps.to(device=self.device)
+                rollout_ref_means: list[torch.Tensor] = []
+                num_timesteps = trajectory.latents.shape[1] - 1
+
+                for timestep_idx in range(num_timesteps):
+                    solver_state = (
+                        solver_states[timestep_idx]
+                        if solver_states is not None
+                        else None
+                    )
+                    latent_t = trajectory.latents[:, timestep_idx].to(
+                        device=self.device
+                    )
+                    latent_next = trajectory.latents[:, timestep_idx + 1].to(
+                        device=self.device
+                    )
+                    sigma = sigmas[timestep_idx : timestep_idx + 1]
+                    sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
+                    _, ref_mean, _ = self.rollout_sampler.compute_logprob_at_step(
+                        self.model,
+                        batch,
+                        latent_t,
+                        latent_next,
+                        sigma,
+                        sigma_next,
+                        negative_batch=negative_batch,
+                        solver_state=solver_state,
+                    )
+                    rollout_ref_means.append(ref_mean.detach())
+                    progress.advance(precompute_task)
+                ref_means.append(rollout_ref_means)
+
+        if was_training:
+            self.transformer.train()
+        return ref_means
 
     def _build_train_items(
         self, num_rollouts: int, num_timesteps: int
@@ -402,6 +488,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         """Training phase: update model using collected rollouts and advantages."""
         self.transformer.train()
 
+        ref_means = self._precompute_reference_means(rollouts)
         first_log_probs = rollouts[0].trajectory.log_probs
         if first_log_probs is None:
             raise RuntimeError("Rollout is missing log-prob trajectory data.")
@@ -420,6 +507,11 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 perm = torch.randperm(len(rollouts))
                 shuffled_rollouts = [rollouts[perm[i]] for i in range(len(rollouts))]
                 shuffled_advantages = advantages[perm]
+                shuffled_ref_means = (
+                    [ref_means[perm[i]] for i in range(len(rollouts))]
+                    if ref_means is not None
+                    else None
+                )
 
                 train_items = self._build_train_items(
                     len(shuffled_rollouts), num_timesteps
@@ -444,6 +536,11 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                             rollout=shuffled_rollouts[rollout_idx],
                             rollout_advantages=shuffled_advantages[rollout_idx],
                             timestep_idx=j,
+                            cached_ref_mean=(
+                                shuffled_ref_means[rollout_idx][j]
+                                if shuffled_ref_means is not None
+                                else None
+                            ),
                         )
 
                         if not torch.isfinite(loss):
