@@ -16,6 +16,7 @@ class InlineDataset(Dataset):
 
     def __init__(self, data: list[dict[str, Any]]):
         self.data = data
+        logger.info(f"InlineDataset: loaded {len(self.data)} rows")
 
     def __len__(self):
         return len(self.data)

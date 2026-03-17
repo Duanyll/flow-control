@@ -88,7 +88,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     kl_beta: float = 0.01
     """KL (MSE) loss coefficient for reference model regularisation."""
     adv_clip_max: float = 5.0
-    adv_mode: Literal["all", "positive_only", "negative_only", "binary"] | None = None
+    adv_mode: Literal["all", "positive_only", "negative_only", "binary"] = "all"
     """Optional advantage clipping mode."""
 
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()

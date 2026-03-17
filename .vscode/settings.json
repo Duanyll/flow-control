@@ -10,15 +10,15 @@
     },
     "json.schemas": [
         {
-            "fileMatch": ["*.grpo.jsonc"],
+            "fileMatch": ["*.grpo.jsonc", "grpo.jsonc"],
             "url": "./schema/grpo.schema.json"
         },
         {
-            "fileMatch": ["*.sft.jsonc"],
+            "fileMatch": ["*.sft.jsonc", "sft.jsonc"],
             "url": "./schema/sft.schema.json"
         },
         {
-            "fileMatch": ["*.nft.jsonc"],
+            "fileMatch": ["*.nft.jsonc", "nft.jsonc"],
             "url": "./schema/nft.schema.json"
         },
         {

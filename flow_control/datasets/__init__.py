@@ -10,6 +10,7 @@ from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
 from .csv import CsvDataset
 from .inline import InlineDataset
 from .jsonl import JsonlDataset
+from .lines import LinesDataset
 from .lmdb import LMDBDataset, LMDBDataSink
 from .parquet import ParquetDataset
 from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
@@ -66,6 +67,7 @@ DATASET_REGISTRY = {
     "inline": InlineDataset,
     "jsonl": JsonlDataset,
     "parquet": ParquetDataset,
+    "lines": LinesDataset,
 }
 
 if TYPE_CHECKING:

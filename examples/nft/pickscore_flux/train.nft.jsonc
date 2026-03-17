@@ -1,0 +1,120 @@
+{
+  "$schema": "../../../schema/nft.schema.json",
+
+  "checkpoint_root": "./runs/pickscore_flux/",
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
+  "aim_repo": "aim://192.168.5.62:53800",
+  "experiment_name": "flux_nft_demo",
+
+  "num_batches_per_epoch": 1,
+  "num_prompts_per_batch": 48,
+  "num_rollouts_per_prompt": 16,
+  "num_inner_epochs": 1,
+  "train_batch_size": 1536,
+  
+  "num_train_timesteps": 2,
+  "timestep_fraction": 0.7,
+  "beta": 1.0,
+  "clip_grad_norm": 1.0,
+  "adv_clip_max": 5.0,
+  "kl_beta": 0.0,
+
+  "train_epochs": 1000,
+  "checkpoint_epochs": 10,
+  "validation_epochs": 10,
+  "max_checkpoints": 10,
+
+  "model": {
+    "arch": "flux1",
+    "type": "base",
+    "peft_lora_rank": 64,
+    "peft_lora_config": {
+      "lora_alpha": 128,
+      "init_lora_weights": "gaussian",
+      "target_modules": [
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2",
+      ],
+    },
+  },
+
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./data/pickscore_flux/train",
+  },
+
+  "rollout_sampler": {
+    "steps": 8,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+  },
+
+  "ema_old": {
+    "decay": 0.5,
+    "warmup": {
+        "flat_steps": 0,
+        "ramp_rate": 0.001,
+        "type": "linear_ramp"
+    },
+    "interval": 1
+  },
+
+  "ema": {
+    "decay": 0.9,
+    "warmup": { "type": "standard" },
+    "interval": 1,
+  },
+
+  "reward": {
+    "type": "pickscore"
+  },
+
+  "advantage": {
+    "type": "per_prompt",
+    "use_global_std": false
+  },
+
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+  },
+
+  "scheduler_config": {
+    "class_name": "ConstantLR",
+    "factor": 1,
+  },
+
+  "validation_dataset": {
+    "type": "pickle_directory",
+    "path": "./data/pickscore_flux/validation",
+  },
+
+  "validation_sampler": {
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1",
+    "default_resolution": [384, 384],
+  },
+
+  "launch": {
+    "type": "nft",
+    "devices": 4,
+    "generate_dcp_seed": true,
+  },
+}

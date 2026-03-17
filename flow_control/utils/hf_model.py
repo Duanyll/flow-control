@@ -64,10 +64,12 @@ class HfModelLoader[T](BaseModel):
 
     def _load_with_from_pretrained(self, model_cls, device: torch.device) -> T:
         kwargs = {
-            "revision": self.revision,
-            "subfolder": self.subfolder,
             **self.extra_from_pretrained_kwargs,
         }
+        if self.revision != "main":
+            kwargs["revision"] = self.revision
+        if self.subfolder is not None:
+            kwargs["subfolder"] = self.subfolder
 
         if self.library == "diffusers":
             kwargs["torch_dtype"] = self.dtype

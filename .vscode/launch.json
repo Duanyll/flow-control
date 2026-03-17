@@ -1,45 +1,40 @@
 {
-    "configurations": [
-        {
-            "name": "Python Debugger: Longcat Inference",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "./draft/longcat_inference.py",
-            "justMyCode": false,
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "Python Debugger: Preprocess",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "flow_control.scripts.preprocess",
-            "args": [
-                "workspace/civitai-283235-flux1-preprocess.toml"
-            ]
-        },
-        {
-            "name": "Python Debugger: Finetune",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "flow_control.scripts.launch",
-            "args": [
-                "data/civitai_1612085/train_qwen_ddp.toml"
-            ]
-        },
-        {
-            "name": "Python Debugger: Inference",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "torch.distributed.run",
-            "args": [
-                "--nproc_per_node",
-                "1",
-                "-m",
-                "flow_control.scripts.launch",
-                "data/qwen_layered_test/inference.toml",
-                "--type",
-                "inference"
-            ]
-        },
-    ]
+  "configurations": [
+    {
+      "name": "Python Debugger: pickscore",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "flow_control.rewards.pickscore"
+    },
+    {
+      "name": "Python Debugger: Longcat Inference",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "./draft/longcat_inference.py",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Python Debugger: Preprocess",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "flow_control.scripts.preprocess",
+      "args": ["workspace/civitai-283235-flux1-preprocess.toml"]
+    },
+    {
+      "name": "Python Debugger: Inference",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "torch.distributed.run",
+      "args": [
+        "--nproc_per_node",
+        "1",
+        "-m",
+        "flow_control.scripts.launch",
+        "data/qwen_layered_test/inference.toml",
+        "--type",
+        "inference"
+      ]
+    }
+  ]
 }

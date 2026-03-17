@@ -1,29 +1,24 @@
 {
   "$schema": "../../../schema/preprocess.schema.json",
   "num_loader_workers": 1,
-  "processor_devices": [
-    0
-  ],
+  "processor_devices": [0],
   "num_threads_per_worker": 8,
   "queue_size": 16,
   "num_sink_workers": 1,
   "processing_mode": "inference",
   "save_extra": true,
   "dataset": {
-    "type": "jsonl",
-    "path": "./data/geneval/test_metadata.jsonl",
+    "type": "lines",
+    "path": "./data/pickscore/test.txt",
     "limit": 64
   },
   "processor": {
     "task": "t2i",
     "preset": "flux1",
-    "default_resolution": [
-      512,
-      512
-    ]
+    "default_resolution": [1024, 1024],
   },
   "output": {
     "type": "pickle_directory",
-    "path": "./data/geneval_flux/validation"
-  }
+    "path": "./data/pickscore_flux/validation",
+  },
 }

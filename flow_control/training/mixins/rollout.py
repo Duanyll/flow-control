@@ -169,8 +169,7 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
                             negative_batch=negative_batch,
                             return_trajectory=self._rollout_needs_trajectory,
                         )
-
-                    with torch.no_grad():
+                        batch["clean_latents"] = rollout_out.final_latents
                         decoded = processor.decode_output(
                             rollout_out.final_latents,
                             batch,

@@ -40,14 +40,14 @@
         "ff.net.0.proj",
         "ff.net.2",
         "ff_context.net.0.proj",
-        "ff_context.net.2"
-      ]
-    }
+        "ff_context.net.2",
+      ],
+    },
   },
 
   "dataset": {
     "type": "pickle_directory",
-    "path": "./data/geneval_flux/train"
+    "path": "./data/geneval_flux/train",
   },
 
   "rollout_sampler": {
@@ -56,56 +56,56 @@
     "trajectory_window_size": 3,
     "trajectory_window_range": [0, 3],
     "shift": { "type": "linear" },
-    "solver": { "type": "cps", "eta": 0.8 }
+    "solver": { "type": "cps", "eta": 0.8 },
   },
 
   "ema": {
     "decay": 0.9,
     "warmup": { "type": "standard" },
-    "interval": 1
+    "interval": 1,
   },
 
   "reward": {
     "type": "geneval",
     "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
-    "scoring_mode": "reward_server"
+    "scoring_mode": "reward_server",
   },
 
   "advantage": {
-    "type": "per_prompt"
+    "type": "per_prompt",
   },
 
   "optimizer_config": {
     "class_name": "AdamW",
     "lr": 3e-4,
-    "weight_decay": 1e-4
+    "weight_decay": 1e-4,
   },
 
   "scheduler_config": {
     "class_name": "ConstantLR",
-    "factor": 1
+    "factor": 1,
   },
 
   "validation_dataset": {
     "type": "pickle_directory",
-    "path": "./data/geneval_flux/validation"
+    "path": "./data/geneval_flux/validation",
   },
 
   "validation_sampler": {
     "steps": 28,
     "cfg_scale": 1.0,
-    "shift": { "type": "linear" }
+    "shift": { "type": "linear" },
   },
 
   "processor": {
     "task": "t2i",
     "preset": "flux1",
-    "default_resolution": [512, 512]
+    "default_resolution": [512, 512],
   },
 
   "launch": {
     "type": "grpo",
     "devices": 4,
-    "generate_dcp_seed": true
-  }
+    "generate_dcp_seed": true,
+  },
 }

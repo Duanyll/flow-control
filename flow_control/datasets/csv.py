@@ -21,6 +21,7 @@ class CsvDataset(Dataset):
             reader = csv.DictReader(f)
             for row in reader:
                 self.data.append(row)
+        logger.info(f"CsvDataset: loaded {len(self.data)} rows from {path}")
 
     def __len__(self):
         return len(self.data)

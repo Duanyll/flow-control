@@ -30,6 +30,8 @@ class ParquetDataset(Dataset):
         table = pq.read_table(path)
         self.data: list[dict[str, Any]] = table.to_pylist()
 
+        logger.info(f"ParquetDataset: loaded {len(self.data)} rows from {path}")
+
     def __len__(self):
         return len(self.data)
 
