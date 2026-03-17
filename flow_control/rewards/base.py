@@ -26,6 +26,11 @@ class BaseReward(RemoteOffloadable, ABC):
     model_config = ConfigDict(extra="forbid")
 
     @property
+    def component_weights(self) -> list[float]:
+        """Internal component weights. Default: single component, unit weight."""
+        return [1.0]
+
+    @property
     @abstractmethod
     def _batch_fields(self) -> set[str]:
         """Set of expected batch keys for this reward."""
@@ -47,7 +52,8 @@ class BaseReward(RemoteOffloadable, ABC):
                 Other keys depend on the processor / task.
 
         Returns:
-            Scalar float tensor (shape ``[]`` or ``[1]``).
+            Float tensor of shape ``[C]`` where C = len(component_weights).
+            Single-component rewards return ``[1]``.
         """
         ...
 
@@ -64,8 +70,11 @@ class BaseReward(RemoteOffloadable, ABC):
             self._load_model(device)
 
     def score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Compute reward score. If remote, filters batch by ``_batch_fields``
-        and sends only the needed keys to save bandwidth."""
+        """Compute reward score, returning ``[C]`` component scores.
+
+        If remote, filters batch by ``_batch_fields`` and sends only the
+        needed keys to save bandwidth.
+        """
         if self.is_remote:
             return self._remote_batch_call("/score", batch, fields=self._batch_fields)
         return self._score(batch).float()

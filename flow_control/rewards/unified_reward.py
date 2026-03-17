@@ -57,6 +57,10 @@ class UnifiedReward(BaseReward):
     model_config = ConfigDict(extra="forbid")
 
     @property
+    def component_weights(self) -> list[float]:
+        return [tag.weight for tag in self.score_tags]
+
+    @property
     def _batch_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
@@ -86,7 +90,11 @@ class UnifiedReward(BaseReward):
         return scores
 
     async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Score an image using the LLM judge."""
+        """Score an image using the LLM judge.
+
+        Returns:
+            Tensor of shape ``[C]`` with per-tag scores normalized to ~[0, 1].
+        """
         prompt_text: str = batch["prompt"]
         image: torch.Tensor = batch["clean_image"]
 
@@ -95,12 +103,9 @@ class UnifiedReward(BaseReward):
 
         scores = self._parse_scores(llm_output)
 
-        total_weight = sum(tag.weight for tag in self.score_tags)
-        weighted_sum = sum(scores[tag.name] * tag.weight for tag in self.score_tags)
-        # Normalize to ~[0, 1] range (scores are 1-5, divide by 5)
-        reward = weighted_sum / (total_weight * 5.0) if total_weight > 0 else 0.0
-
-        return torch.tensor(reward, dtype=torch.float32)
+        # Return per-tag scores normalized to [0, 1] (raw scores are 1-5)
+        per_tag = [scores[tag.name] / 5.0 for tag in self.score_tags]
+        return torch.tensor(per_tag, dtype=torch.float32)
 
     def supports_rollout_overlap(self) -> bool:
         return True

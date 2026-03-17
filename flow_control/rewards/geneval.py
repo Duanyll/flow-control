@@ -448,10 +448,10 @@ class GenevalReward(BaseReward):
         # Evaluate
         _, score, _ = self._evaluate_reward(image_pil, detected, batch)  # type: ignore
 
-        # Clamp score to [0, 1]
+        # Clamp score to [0, 1], return [1] tensor
         score = max(0.0, min(1.0, score))
 
-        return torch.tensor(score, device=image.device, dtype=image.dtype)
+        return torch.tensor([score], device=image.device, dtype=image.dtype)
 
     def _unload_model(self) -> None:
         import gc

@@ -43,6 +43,15 @@ class CompositeReward(BaseReward):
             )
 
     @property
+    def component_weights(self) -> list[float]:
+        """Flatten children's component weights, scaled by each child's weight."""
+        weights: list[float] = []
+        for reward in self._reward_instances:
+            for w in reward.component_weights:
+                weights.append(reward.weight * w)
+        return weights
+
+    @property
     def _batch_fields(self) -> set[str]:
         fields = set()
         for reward in self._reward_instances:
@@ -54,39 +63,14 @@ class CompositeReward(BaseReward):
             reward.load_model(device)
 
     def _score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Compute weighted sum of reward scores for a single sample."""
-        total: torch.Tensor | None = None
+        """Concatenate children's per-component scores into ``[total_C]``."""
+        parts: list[torch.Tensor] = []
         for reward in self._reward_instances:
-            reward_score = reward.score(batch)
-            weighted = reward.weight * reward_score
-            if total is None:
-                total = weighted
-            else:
-                total = total + weighted.to(device=total.device, dtype=total.dtype)
-        if total is None:
-            raise RuntimeError("CompositeReward requires at least one child reward.")
-        return total
-
-    def score_detailed(
-        self, batch: dict[str, Any]
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute weighted sum with per-reward breakdown."""
-        total: torch.Tensor | None = None
-        details: dict[str, torch.Tensor] = {}
-        for reward in self._reward_instances:
-            reward_score = reward.score(batch)
-            details[reward.type] = reward_score
-            weighted = reward.weight * reward_score
-            if total is None:
-                total = weighted
-            else:
-                total = total + weighted.to(device=total.device, dtype=total.dtype)
-        if total is None:
-            raise RuntimeError("CompositeReward requires at least one child reward.")
-        return total, details
+            parts.append(reward.score(batch))
+        return torch.cat(parts, dim=0)
 
     async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Async version that scores children concurrently."""
+        """Async version that scores children concurrently, returns ``[total_C]``."""
         if self.is_remote:
             return await self._async_remote_batch_call(
                 "/score", batch, fields=self._batch_fields
@@ -94,16 +78,7 @@ class CompositeReward(BaseReward):
         scores = await asyncio.gather(
             *(r.async_score(batch) for r in self._reward_instances)
         )
-        total: torch.Tensor | None = None
-        for reward, score in zip(self._reward_instances, scores, strict=True):
-            weighted = reward.weight * score
-            if total is None:
-                total = weighted
-            else:
-                total = total + weighted.to(device=total.device, dtype=total.dtype)
-        if total is None:
-            raise RuntimeError("CompositeReward requires at least one child reward.")
-        return total
+        return torch.cat(list(scores), dim=0)
 
     def supports_rollout_overlap(self) -> bool:
         return all(

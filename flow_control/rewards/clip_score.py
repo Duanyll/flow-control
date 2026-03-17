@@ -83,8 +83,8 @@ class CLIPScoreReward(BaseReward):
         )
         text_inputs = {k: v.to(device=self._device) for k, v in text_inputs.items()}
         outputs = self._model(pixel_values=pixels, **text_inputs)
-        # Normalize score to ~[0, 1] range
-        return outputs.logits_per_image.diagonal() / 30.0
+        # Normalize score to ~[0, 1] range, return [1] tensor
+        return (outputs.logits_per_image.diagonal() / 30.0).unsqueeze(0)
 
     def _unload_model(self) -> None:
         import gc

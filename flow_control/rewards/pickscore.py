@@ -83,8 +83,8 @@ class PickScoreReward(BaseReward):
         logit_scale = model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
         scores = scores.diag()
-        # Normalize to ~[0, 1] range
-        return scores / 26.0
+        # Normalize to ~[0, 1] range, return [1] tensor
+        return (scores / 26.0).unsqueeze(0)
 
 
 if __name__ == "__main__":

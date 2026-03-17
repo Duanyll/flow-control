@@ -209,6 +209,7 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         num_replicas: int | None = None,
         rank: int | None = None,
         seed: int = 0,
+        keep_prompt_local: bool = False,
     ):
         super().__init__(None)  # type: ignore[arg-type]
         if num_replicas is None:
@@ -223,6 +224,7 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
+        self.keep_prompt_local = keep_prompt_local
 
         self.total_samples = self.num_prompts_per_batch * self.num_rollouts_per_prompt
         if self.total_samples % self.num_replicas != 0:
@@ -232,6 +234,12 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
                 f"Got num_prompts_per_batch={num_prompts_per_batch}, num_rollouts_per_prompt={num_rollouts_per_prompt}."
             )
         self.per_rank = self.total_samples // self.num_replicas
+
+        if keep_prompt_local and self.num_prompts_per_batch % self.num_replicas != 0:
+            raise ValueError(
+                f"keep_prompt_local requires num_prompts_per_batch ({num_prompts_per_batch}) "
+                f"to be divisible by num_replicas ({num_replicas})."
+            )
 
         self.epoch = 0
         self.batch_counter = 0
@@ -250,19 +258,32 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
                 : self.num_prompts_per_batch
             ].tolist()
 
-            # Repeat each K times
-            repeated = [
-                idx for idx in indices for _ in range(self.num_rollouts_per_prompt)
-            ]
+            if self.keep_prompt_local:
+                # Assign prompts to ranks round-robin, yield contiguously
+                # per prompt (K rollouts grouped together)
+                prompts_per_rank = self.num_prompts_per_batch // self.num_replicas
+                rank_prompts = indices[
+                    self.rank * prompts_per_rank : (self.rank + 1) * prompts_per_rank
+                ]
+                rank_indices = [
+                    idx
+                    for idx in rank_prompts
+                    for _ in range(self.num_rollouts_per_prompt)
+                ]
+            else:
+                # Repeat each K times
+                repeated = [
+                    idx for idx in indices for _ in range(self.num_rollouts_per_prompt)
+                ]
 
-            # Shuffle
-            perm = torch.randperm(len(repeated), generator=g).tolist()
-            shuffled = [repeated[i] for i in perm]
+                # Shuffle
+                perm = torch.randperm(len(repeated), generator=g).tolist()
+                shuffled = [repeated[i] for i in perm]
 
-            # Split to ranks
-            rank_indices = shuffled[
-                self.rank * self.per_rank : (self.rank + 1) * self.per_rank
-            ]
+                # Split to ranks
+                rank_indices = shuffled[
+                    self.rank * self.per_rank : (self.rank + 1) * self.per_rank
+                ]
 
             # Yield one at a time, resuming from within_batch_counter
             start = self.within_batch_counter if batch_idx == self.batch_counter else 0

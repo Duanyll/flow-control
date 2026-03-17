@@ -18,7 +18,12 @@ from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor
-from flow_control.rewards import Reward, execute_reward
+from flow_control.rewards import (
+    Reward,
+    _has_pairwise_child,
+    execute_pairwise_reward,
+    execute_reward,
+)
 from flow_control.samplers import SampleOutput, Sampler
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -97,6 +102,7 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
 
     def make_rollout_dataloader(self):
         dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
+        use_pairwise = _has_pairwise_child(self.reward)
         sampler = DistributedKRepeatSampler(
             dataset=dataset,
             num_batches_per_epoch=self.num_batches_per_epoch,
@@ -105,6 +111,7 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
             num_replicas=self.world_size,
             rank=self.rank,
             seed=self.seed,
+            keep_prompt_local=use_pairwise,
         )
         self._dataloader = StatefulDataLoader(
             dataset,
@@ -199,11 +206,18 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
                     yield batch, len(rollouts) - 1
 
         def reward_handler(idx: int, reward_tensor: torch.Tensor) -> None:
-            rollouts[idx].reward = (
-                reward_tensor.view(1) if reward_tensor.ndim == 0 else reward_tensor
-            ).cpu()
+            # reward_tensor is [C] from multi-component rewards
+            rollouts[idx].reward = reward_tensor.detach().cpu()
 
-        execute_reward(reward, rollout_submitter(), reward_handler)
+        if _has_pairwise_child(reward):
+            execute_pairwise_reward(
+                reward,
+                rollout_submitter(),
+                reward_handler,
+                num_rollouts_per_prompt=self.num_rollouts_per_prompt,
+            )
+        else:
+            execute_reward(reward, rollout_submitter(), reward_handler)
 
         return rollouts
 
@@ -216,13 +230,14 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
         world_size: int = self.world_size
         log_metrics = self.log_metrics
 
-        local_rewards = torch.cat([s.reward for s in rollouts], dim=0).to(device)
+        # Stack per-sample [C] rewards into [B_local, C]
+        local_rewards = torch.stack([s.reward for s in rollouts], dim=0).to(device)
 
         gathered_rewards_list: list[torch.Tensor] = [
             torch.zeros_like(local_rewards) for _ in range(world_size)
         ]
         dist.all_gather(gathered_rewards_list, local_rewards)
-        gathered_rewards = torch.cat(gathered_rewards_list, dim=0)
+        gathered_rewards = torch.cat(gathered_rewards_list, dim=0)  # [B_global, C]
 
         local_keys = [s.key for s in rollouts]
         all_keys_nested: list[Any] = [None] * world_size
@@ -238,18 +253,32 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
             device=gathered_rewards.device,
         )
 
-        advantages = self.advantage.compute(gathered_rewards, prompt_ids)
-
-        reward_mean = gathered_rewards.mean().item()
-        reward_std = gathered_rewards.std().item()
-        log_metrics(
-            {
-                "reward/mean": reward_mean,
-                "reward/std": reward_std,
-                "reward/adv_abs_mean": advantages.abs().mean().item(),
-            },
-            step=step,
+        component_weights = torch.tensor(
+            self.reward.component_weights,
+            device=gathered_rewards.device,
+            dtype=gathered_rewards.dtype,
         )
+        advantages = self.advantage.compute(
+            gathered_rewards, prompt_ids, component_weights
+        )
+
+        # Log per-component reward stats when multi-component
+        C = gathered_rewards.shape[-1]
+        combined = (gathered_rewards * component_weights).sum(dim=-1)
+        metrics: dict[str, float] = {
+            "reward/mean": combined.mean().item(),
+            "reward/std": combined.std().item(),
+            "reward/adv_abs_mean": advantages.abs().mean().item(),
+        }
+        if C > 1:
+            for i in range(C):
+                metrics[f"reward/component_{i}_mean"] = (
+                    gathered_rewards[:, i].mean().item()
+                )
+                metrics[f"reward/component_{i}_std"] = (
+                    gathered_rewards[:, i].std().item()
+                )
+        log_metrics(metrics, step=step)
 
         local_b = local_rewards.shape[0]
         start = rank * local_b
