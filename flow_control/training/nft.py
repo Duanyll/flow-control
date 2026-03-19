@@ -562,61 +562,32 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             )
             progress.advance(task_id)
 
-    def _precompute_old_predictions(
+    def _precompute_predictions(
         self,
         rollouts: list[Rollout],
         flat_items: list[NftTrainItem],
         progress: Progress,
         task_id: TaskID,
     ) -> None:
-        with apply_ema_maybe(self.old_ema):
-            for item in flat_items:
-                rollout = rollouts[item.rollout_idx]
-                batch = deep_move_to_device(rollout.batch, self.device)
-                negative_batch = (
-                    deep_move_to_device(rollout.negative_batch, self.device)
-                    if rollout.negative_batch is not None
-                    else None
-                )
-                cached_targets = item.cached_targets
-                if cached_targets is None:
-                    raise RuntimeError("Missing cached NFT targets.")
-                batch["noisy_latents"] = cached_targets.noisy_latents
-                neg_for_cfg = negative_batch if negative_batch is not None else None
-                cached_targets.old_prediction = self._predict(
-                    batch,
-                    cached_targets.timestep,
-                    neg_for_cfg,
-                ).detach()
-                progress.advance(task_id)
-
-    def _precompute_reference_predictions(
-        self,
-        rollouts: list[Rollout],
-        flat_items: list[NftTrainItem],
-        progress: Progress,
-        task_id: TaskID,
-    ) -> None:
-        with self.reference_model():
-            for item in flat_items:
-                rollout = rollouts[item.rollout_idx]
-                batch = deep_move_to_device(rollout.batch, self.device)
-                negative_batch = (
-                    deep_move_to_device(rollout.negative_batch, self.device)
-                    if rollout.negative_batch is not None
-                    else None
-                )
-                cached_targets = item.cached_targets
-                if cached_targets is None:
-                    raise RuntimeError("Missing cached NFT targets.")
-                batch["noisy_latents"] = cached_targets.noisy_latents
-                neg_for_cfg = negative_batch if negative_batch is not None else None
-                cached_targets.ref_prediction = self._predict(
-                    batch,
-                    cached_targets.timestep,
-                    neg_for_cfg,
-                ).detach()
-                progress.advance(task_id)
+        for item in flat_items:
+            rollout = rollouts[item.rollout_idx]
+            batch = deep_move_to_device(rollout.batch, self.device)
+            negative_batch = (
+                deep_move_to_device(rollout.negative_batch, self.device)
+                if rollout.negative_batch is not None
+                else None
+            )
+            cached_targets = item.cached_targets
+            if cached_targets is None:
+                raise RuntimeError("Missing cached NFT targets.")
+            batch["noisy_latents"] = cached_targets.noisy_latents
+            neg_for_cfg = negative_batch if negative_batch is not None else None
+            cached_targets.old_prediction = self._predict(
+                batch,
+                cached_targets.timestep,
+                neg_for_cfg,
+            ).detach()
+            progress.advance(task_id)
 
     def _precompute_aux_model_outputs_for_plan(
         self,
@@ -627,10 +598,6 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         if len(flat_items) == 0:
             return
 
-        logger.info(
-            "Precomputing NFT old/reference model outputs for %d train items.",
-            len(flat_items),
-        )
         was_training = self.transformer.training
         self.transformer.eval()
         progress = Progress(
@@ -640,23 +607,21 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         )
         prepare_task = progress.add_task("Prepare cache", total=len(flat_items))
         old_task = progress.add_task("Precompute old", total=len(flat_items))
-        ref_task = None
-        if self.kl_beta > 0:
-            ref_task = progress.add_task("Precompute ref", total=len(flat_items))
 
         with progress, torch.no_grad():
             self._prepare_cached_targets(rollouts, flat_items, progress, prepare_task)
-            self._precompute_old_predictions(rollouts, flat_items, progress, old_task)
+            with apply_ema_maybe(self.old_ema):
+                self._precompute_predictions(rollouts, flat_items, progress, old_task)
 
             if self.kl_beta > 0:
-                if ref_task is None:
-                    raise RuntimeError("Missing NFT reference precompute task.")
-                self._precompute_reference_predictions(
-                    rollouts,
-                    flat_items,
-                    progress,
-                    ref_task,
-                )
+                ref_task = progress.add_task("Precompute ref", total=len(flat_items))
+                with self.reference_model():
+                    self._precompute_predictions(
+                        rollouts,
+                        flat_items,
+                        progress,
+                        ref_task,
+                    )
 
         if was_training:
             self.transformer.train()

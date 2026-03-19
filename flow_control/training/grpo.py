@@ -373,10 +373,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         if not self.precompute_aux_model_outputs or self.kl_beta <= 0:
             return None
 
-        logger.info(
-            "Precomputing GRPO reference-model replay outputs for %d rollouts.",
-            len(rollouts),
-        )
         was_training = self.transformer.training
         self.transformer.eval()
 

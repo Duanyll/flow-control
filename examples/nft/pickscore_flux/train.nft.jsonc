@@ -6,11 +6,15 @@
   "aim_repo": "aim://192.168.5.62:53800",
   "experiment_name": "flux_nft_demo",
 
+  "gradient_checkpointing": true,
+  "rollout_storage_device": "device",
+  "precompute_aux_model_outputs": true,
+
   "num_batches_per_epoch": 1,
   "num_prompts_per_batch": 48,
   "num_rollouts_per_prompt": 16,
   "num_inner_epochs": 1,
-  "train_batch_size": 1536, // Only one optimizer step is taken per epoch -> Always on-policy training
+  "train_batch_size": 1536, // Only one optimizer step is taken per epoch -> Always on-policy updating
   
   "num_train_timesteps": 2,
   "timestep_fraction": 0.7,
@@ -19,7 +23,7 @@
   "adv_clip_max": 5.0,
   "kl_beta": 0.0,
 
-  "train_epochs": 1000,
+  "train_epochs": 500,
   "checkpoint_epochs": 10,
   "validation_epochs": 10,
   "max_checkpoints": 10,

@@ -32,7 +32,6 @@ class LoggingMixin(BaseModel):
     _aggregated_metrics: dict[str, list[float]] = {}
 
     _status_fields: dict[str, str] = {}  # Should be overridden by subclasses
-    _status_title: str = ""
     _status_values: dict[str, float] = {}
     _rich_status: Status | None = None
 
@@ -124,9 +123,8 @@ class LoggingMixin(BaseModel):
         try:
             console.rule(f"[bold green]{title} Started[/bold green]")
             if self._status_fields:
-                self._status_title = title
                 self._rich_status = Status(
-                    f"{title} ...",
+                    "Initializing ...",
                     console=console,
                 )
                 self._rich_status.start()
@@ -146,7 +144,7 @@ class LoggingMixin(BaseModel):
                 self._status_fields[k].format(v=self._status_values[k])
                 for k in self._status_values
             )
-            self._rich_status.update(f"{self._status_title}: {status_str}")
+            self._rich_status.update(f"{status_str}")
 
     @classmethod
     def get_progress_columns(cls):

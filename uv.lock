@@ -30,7 +30,7 @@ wheels = [
 
 [[package]]
 name = "aim"
-version = "3.29.1"
+version = "3.28.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 dependencies = [
     { name = "aim-ui" },
@@ -56,21 +56,20 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "tqdm" },
     { name = "uvicorn" },
-    { name = "watchdog" },
     { name = "websockets" },
 ]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/da/25/c825c73ec2f48c93324f631dba6e4cdac3bb60a7fde36e0b916820ae62a5/aim-3.29.1.tar.gz", hash = "sha256:30fb70f983844eebd270049206c839e6dc09ce9de500048dc97a7a8b22ed83fb" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/06/64/fdec8b53d064874fd6625b5d507571de9d604d3bcc9e8c5205309ebee020/aim-3.28.0.tar.gz", hash = "sha256:412d542d41427771b122e9ff3b7667ff58b4cf4462b52f6d4f3ebc335bf7512f" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/70/07/4b6c4bda0469fad31a902ff1205ed010b3459be9565a8ffa2bfdcbb1e2bd/aim-3.29.1-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:301afdf3e80b3ccac4cdc786a73f81656bd3b1ec73836de19a67a77a0b3d3379" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/a1/a5/da5e0de60a8d32ab8b2d725eec2ade3303117697cd714fb1b00134d01a64/aim-3.29.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8fbb9a7f441721cd4999174d0d6fa1e18470c01dddf2f193e7c3d054543a4ca6" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/bc/05/a55a86258f3505e0ab53ee81afcc0057d805a1de8d5a66390f75e32aa777/aim-3.29.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:15cea0c63d9a61812229d7140cec04f02117626d1724e10bebe410554f3f7561" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/42/ef/e90191a5514e32137df962aebe347297b8f1a3b80c14fe63b4e2589ecb9d/aim-3.28.0-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:9f2ff109f6ee61807a945bd9616e2b6beb8ccf497d021ee2bf31d9f519b78ae6" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/73/ef/5a303da506dbb74d0e61f3c60f5b2bbaaec863cfe5d68624ffc81fd351fa/aim-3.28.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:64ba1a2bfeb1c7def42706e7a9e20f5daeb4355ce597041bab1185e3da174f30" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/2c/6c/0fb9d9ea0f34b6a282132a069bcd355aabdfe968d6537ec66336ecea2ae4/aim-3.28.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:efadd025c8ddbe00ca58733ff05d939cdea8365a38d501fdd87738ebafde734d" },
 ]
 
 [[package]]
 name = "aim-ui"
-version = "3.29.1"
+version = "3.28.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/0c/fe/723615593ee1bffbf89c1cb8028b72893120b3d4e737712d91041a5f0382/aim-ui-3.29.1.tar.gz", hash = "sha256:bc30278acad048a087f84e3f6e2565f53f75e87d8c29748c90420ec06b820113" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ef/a6/73be7c95aeba0e22e596a7f2206eebcc631516dfbb6d6d7057719d475d28/aim-ui-3.28.0.tar.gz", hash = "sha256:77945a2a92295d4e82923cc0e722b0663a46e7e6bdafbef3b1ce9b0626f01f01" }
 
 [[package]]
 name = "aimrecords"
@@ -674,7 +673,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.12.0" },
-    { name = "aim", specifier = ">=3.29.1" },
+    { name = "aim", specifier = "==3.28.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=0.48.2" },
     { name = "clip-benchmark", specifier = ">=1.6.2" },
     { name = "datasets", specifier = ">=4.4.1" },
@@ -2404,9 +2403,9 @@ dependencies = [
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:08b56d10d1cd8536d40e18caceedc5567a30f5eb24381cde1dfa620724187c92" },
-    { url = "https://download.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d26b91a173cee6db9abff68b48d64236950ffc5628d06448ecdd7ac56841e10a" },
-    { url = "https://download.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:9a890dfbc7a3301f5ce7930f3ce452841f0c34e51686609628e99ed52c5cc775" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:08b56d10d1cd8536d40e18caceedc5567a30f5eb24381cde1dfa620724187c92" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d26b91a173cee6db9abff68b48d64236950ffc5628d06448ecdd7ac56841e10a" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.10.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:9a890dfbc7a3301f5ce7930f3ce452841f0c34e51686609628e99ed52c5cc775" },
 ]
 
 [[package]]
@@ -2452,9 +2451,9 @@ dependencies = [
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:8623e534ef6a815bd6407d4b52dd70c7154e2eda626ad4b9cb895d36c5a3305b" },
-    { url = "https://download.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1255a0ca2bf987acf9f103b96c5c4cfe3415fc4a1eef17fa08af527a04a4f573" },
-    { url = "https://download.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:068e519838b4a8b32a09521244b170edd8c2ac9eeb6538b7bf492cd70e57ebf5" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:8623e534ef6a815bd6407d4b52dd70c7154e2eda626ad4b9cb895d36c5a3305b" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1255a0ca2bf987acf9f103b96c5c4cfe3415fc4a1eef17fa08af527a04a4f573" },
+    { url = "https://download-r2.pytorch.org/whl/cu128/torchvision-0.25.0%2Bcu128-cp312-cp312-win_amd64.whl", hash = "sha256:068e519838b4a8b32a09521244b170edd8c2ac9eeb6538b7bf492cd70e57ebf5" },
 ]
 
 [[package]]
@@ -2603,27 +2602,6 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187" },
-]
-
-[[package]]
-name = "watchdog"
-version = "6.0.0"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/db/7d/7f3d619e951c88ed75c6037b246ddcf2d322812ee8ea189be89511721d54/watchdog-6.0.0.tar.gz", hash = "sha256:9ddf7c82fda3ae8e24decda1338ede66e1c99883db93711d8fb941eaa2d8c282" }
-wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/39/ea/3930d07dafc9e286ed356a679aa02d777c06e9bfd1164fa7c19c288a5483/watchdog-6.0.0-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:bdd4e6f14b8b18c334febb9c4425a878a2ac20efd1e0b231978e7b150f92a948" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/12/87/48361531f70b1f87928b045df868a9fd4e253d9ae087fa4cf3f7113be363/watchdog-6.0.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:c7c15dda13c4eb00d6fb6fc508b3c0ed88b9d5d374056b239c4ad1611125c860" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/5b/7e/8f322f5e600812e6f9a31b75d242631068ca8f4ef0582dd3ae6e72daecc8/watchdog-6.0.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:6f10cb2d5902447c7d0da897e2c6768bca89174d0c6e1e30abec5421af97a5b0" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/a9/c7/ca4bf3e518cb57a686b2feb4f55a1892fd9a3dd13f470fca14e00f80ea36/watchdog-6.0.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:7607498efa04a3542ae3e05e64da8202e58159aa1fa4acddf7678d34a35d4f13" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/5c/51/d46dc9332f9a647593c947b4b88e2381c8dfc0942d15b8edc0310fa4abb1/watchdog-6.0.0-py3-none-manylinux2014_armv7l.whl", hash = "sha256:9041567ee8953024c83343288ccc458fd0a2d811d6a0fd68c4c22609e3490379" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/d4/57/04edbf5e169cd318d5f07b4766fee38e825d64b6913ca157ca32d1a42267/watchdog-6.0.0-py3-none-manylinux2014_i686.whl", hash = "sha256:82dc3e3143c7e38ec49d61af98d6558288c415eac98486a5c581726e0737c00e" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/ab/cc/da8422b300e13cb187d2203f20b9253e91058aaf7db65b74142013478e66/watchdog-6.0.0-py3-none-manylinux2014_ppc64.whl", hash = "sha256:212ac9b8bf1161dc91bd09c048048a95ca3a4c4f5e5d4a7d1b1a7d5752a7f96f" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/2c/3b/b8964e04ae1a025c44ba8e4291f86e97fac443bca31de8bd98d3263d2fcf/watchdog-6.0.0-py3-none-manylinux2014_ppc64le.whl", hash = "sha256:e3df4cbb9a450c6d49318f6d14f4bbc80d763fa587ba46ec86f99f9e6876bb26" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/62/ae/a696eb424bedff7407801c257d4b1afda455fe40821a2be430e173660e81/watchdog-6.0.0-py3-none-manylinux2014_s390x.whl", hash = "sha256:2cce7cfc2008eb51feb6aab51251fd79b85d9894e98ba847408f662b3395ca3c" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/b5/e8/dbf020b4d98251a9860752a094d09a65e1b436ad181faf929983f697048f/watchdog-6.0.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:20ffe5b202af80ab4266dcd3e91aae72bf2da48c0d33bdb15c66658e685e94e2" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/07/f6/d0e5b343768e8bcb4cda79f0f2f55051bf26177ecd5651f84c07567461cf/watchdog-6.0.0-py3-none-win32.whl", hash = "sha256:07df1fdd701c5d4c8e55ef6cf55b8f0120fe1aef7ef39a1c6fc6bc2e606d517a" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/db/d9/c495884c6e548fce18a8f40568ff120bc3a4b7b99813081c8ac0c936fa64/watchdog-6.0.0-py3-none-win_amd64.whl", hash = "sha256:cbafb470cf848d93b5d013e2ecb245d4aa1c8fd0504e863ccefa32445359d680" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/33/e8/e40370e6d74ddba47f002a32919d91310d6074130fe4e17dabcafc15cbf1/watchdog-6.0.0-py3-none-win_ia64.whl", hash = "sha256:a1914259fa9e1454315171103c6a30961236f508b9b623eae470268bbcc6a22f" },
 ]
 
 [[package]]

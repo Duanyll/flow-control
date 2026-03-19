@@ -16,7 +16,7 @@
   "clip_range": 1e-5,
   "kl_beta": 0.0,
 
-  "train_epochs": 1000,
+  "train_epochs": 500,
   "checkpoint_epochs": 10,
   "validation_epochs": 10,
   "max_checkpoints": 10,
