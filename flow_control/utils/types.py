@@ -157,7 +157,7 @@ SchedulerConfig = Annotated[
             "properties": {
                 "class_name": {
                     "type": "string",
-                    "description": "LR scheduler class name (e.g. ConstantLR, CosineAnnealingLR)",
+                    "description": "LR scheduler class name (e.g. ConstantLR, CosineAnnealingLR), or 'diffusers' for Diffusers schedulers",
                 },
             },
             "required": ["class_name"],
@@ -170,5 +170,15 @@ SchedulerConfig = Annotated[
 def parse_scheduler(conf: SchedulerConfig, optimizer: torch.optim.Optimizer):
     conf = conf.copy()
     class_name = conf.pop("class_name")
-    ctor = getattr(torch.optim.lr_scheduler, class_name)
-    return ctor(optimizer, **conf)
+    if class_name == "diffusers":
+        from diffusers.optimization import get_scheduler
+
+        name = conf.pop("name", None)
+        return get_scheduler(
+            name=name,
+            optimizer=optimizer,
+            **conf,
+        )
+    else:
+        ctor = getattr(torch.optim.lr_scheduler, class_name)
+        return ctor(optimizer, **conf)

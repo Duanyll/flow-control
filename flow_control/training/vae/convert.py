@@ -35,19 +35,23 @@ def convert_to_rgba[T: ModelMixin](model: T) -> T:
             "Encoder conv_in already has 4 input channels, skipping conversion."
         )
     else:
+        is_meta = conv_in.weight.is_meta
         conv_in_new = nn.Conv2d(
             4,
             conv_in.out_channels,
             kernel_size=conv_in.kernel_size,  # type: ignore[arg-type]
             stride=conv_in.stride,  # type: ignore[arg-type]
             padding=conv_in.padding,  # type: ignore[arg-type]
+            device=conv_in.weight.device,
+            dtype=conv_in.weight.dtype,
         )
-        with torch.no_grad():
-            conv_in_new.weight[:, :3] = conv_in.weight
-            conv_in_new.weight[:, 3:] = 0
-            assert conv_in.bias is not None
-            assert conv_in_new.bias is not None
-            conv_in_new.bias.copy_(conv_in.bias)
+        if not is_meta:
+            with torch.no_grad():
+                conv_in_new.weight[:, :3] = conv_in.weight
+                conv_in_new.weight[:, 3:] = 0
+                assert conv_in.bias is not None
+                assert conv_in_new.bias is not None
+                conv_in_new.bias.copy_(conv_in.bias)
         m.encoder.conv_in = conv_in_new
         logger.info("Converted encoder conv_in from 3ch to 4ch input.")
 
@@ -58,20 +62,24 @@ def convert_to_rgba[T: ModelMixin](model: T) -> T:
             "Decoder conv_out already has 4 output channels, skipping conversion."
         )
     else:
+        is_meta = conv_out.weight.is_meta
         conv_out_new = nn.Conv2d(
             conv_out.in_channels,
             4,
             kernel_size=conv_out.kernel_size,  # type: ignore[arg-type]
             stride=conv_out.stride,  # type: ignore[arg-type]
             padding=conv_out.padding,  # type: ignore[arg-type]
+            device=conv_out.weight.device,
+            dtype=conv_out.weight.dtype,
         )
-        with torch.no_grad():
-            assert conv_out.bias is not None
-            assert conv_out_new.bias is not None
-            conv_out_new.weight[:3] = conv_out.weight
-            conv_out_new.weight[3:] = 0
-            conv_out_new.bias[:3] = conv_out.bias
-            conv_out_new.bias[3] = 1  # opaque default
+        if not is_meta:
+            with torch.no_grad():
+                assert conv_out.bias is not None
+                assert conv_out_new.bias is not None
+                conv_out_new.weight[:3] = conv_out.weight
+                conv_out_new.weight[3:] = 0
+                conv_out_new.bias[:3] = conv_out.bias
+                conv_out_new.bias[3] = 1  # opaque default
         m.decoder.conv_out = conv_out_new
         logger.info("Converted decoder conv_out from 3ch to 4ch output.")
 

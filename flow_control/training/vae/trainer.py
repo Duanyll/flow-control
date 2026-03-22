@@ -9,6 +9,7 @@ import os
 from typing import Any
 
 import torch
+import torch.distributed.checkpoint as dcp
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from pydantic import ConfigDict
 from rich.progress import Progress
@@ -16,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
     get_optimizer_state_dict,
+    get_state_dict,
     set_model_state_dict,
     set_optimizer_state_dict,
 )
@@ -26,7 +28,11 @@ from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors.components.vae import VAE, BaseVAE
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.resize import resize_to_multiple_of
-from flow_control.utils.tensor import deep_move_to_device, tensor_to_pil
+from flow_control.utils.tensor import (
+    deep_move_to_device,
+    remove_alpha_channel,
+    tensor_to_pil,
+)
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -65,6 +71,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     checkpoint_steps: int = 5000
     validation_steps: int = 5000
     resume_from_dir: str | None = None
+    seed_checkpoint_dir: str | None = None
 
     # ------------------------------ Optimizers ------------------------------ #
     optimizer_config: OptimizerConfig = {
@@ -95,6 +102,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     generator_loss_weight: float = 1.0
     discriminator_loss_weight: float = 1.0
     use_naive_mse: bool = False
+    blend_prob: float = 0.0
 
     # Weight file paths for LPIPS (required when lpips_scale is not None).
     # Download from:
@@ -193,35 +201,94 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
     # ------------------------------- Setup ---------------------------------- #
 
-    def load_vae(self) -> None:
-        """Load VAE, optionally convert to RGBA, and apply FSDP2."""
-        # Load trainable VAE
-        vae_loader: BaseVAE[Any] = self.vae
-        model: Any = vae_loader.load_model(self.device, frozen=False)
+    def _shard_vae(self, model: Any) -> None:
+        """Apply FSDP2 sharding to a VAE model.
 
-        if self.do_convert_to_rgba:
-            model = convert_to_rgba(model)
-            vae_loader.model = model
-
-        # Enable gradient checkpointing if supported
-        if self.gradient_checkpointing and hasattr(
-            model, "enable_gradient_checkpointing"
-        ):
-            model.enable_gradient_checkpointing()
-            logger.info("Enabled gradient checkpointing on VAE.")
-
-        # Apply FSDP2: shard encoder and decoder separately, then the whole model
+        Shards encoder, decoder, and any top-level conv modules (quant_conv,
+        post_quant_conv) individually so their FSDP forward hooks fire when
+        called from ``encode()``/``decode()`` (which bypass ``forward()``).
+        """
         fully_shard(model.encoder, mesh=self.mesh)
         fully_shard(model.decoder, mesh=self.mesh)
+        # Flux2 VAE has quant_conv / post_quant_conv called inside _encode / _decode
+        # (outside of forward), so they need their own FSDP groups.
+        for name in ("quant_conv", "post_quant_conv"):
+            submodule = getattr(model, name, None)
+            if submodule is not None:
+                fully_shard(submodule, mesh=self.mesh)
         fully_shard(model, mesh=self.mesh)
-        logger.info("Applied FSDP2 sharding to VAE (encoder + decoder + top-level).")
+        logger.info("Applied FSDP2 sharding to VAE.")
 
+    def load_vae(self) -> None:
+        """Load VAE, optionally convert to RGBA, and apply FSDP2.
+
+        When ``seed_checkpoint_dir`` is set, uses the seed checkpoint pattern:
+        load on meta → convert architecture → fully_shard → materialize → DCP load.
+        This avoids the issue where ``fully_shard`` on a model with loaded weights
+        causes some layers to lose their pretrained values.
+        """
+        vae_loader: BaseVAE[Any] = self.vae
+
+        if self.seed_checkpoint_dir is not None:
+            # Seed checkpoint pattern
+            model: Any = vae_loader.load_model(torch.device("meta"), frozen=False)
+
+            if self.do_convert_to_rgba:
+                model = convert_to_rgba(model)
+                vae_loader.model = model
+
+            if self.gradient_checkpointing and hasattr(
+                model, "enable_gradient_checkpointing"
+            ):
+                model.enable_gradient_checkpointing()
+                logger.info("Enabled gradient checkpointing on VAE.")
+
+            self._shard_vae(model)
+
+            # Materialize on GPU and load seed checkpoint
+            model.to_empty(device=self.device)
+            logger.info("VAE materialized on GPU.")
+
+            if not os.path.exists(os.path.join(self.seed_checkpoint_dir, ".metadata")):
+                raise ValueError(
+                    f"Seed checkpoint directory {self.seed_checkpoint_dir} does not "
+                    "exist or is not a valid DCP checkpoint. Set "
+                    "launch.generate_dcp_seed = true to auto-generate."
+                )
+            model_sd, _ = get_state_dict(
+                model, [], options=StateDictOptions(strict=False)
+            )
+            dcp.load(
+                model_sd,
+                checkpoint_id=self.seed_checkpoint_dir,
+                planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
+            )
+            logger.info(f"Loaded VAE seed checkpoint from {self.seed_checkpoint_dir}.")
+        else:
+            # Fallback: load directly on device, then shard
+            model = vae_loader.load_model(self.device, frozen=False)
+
+            if self.do_convert_to_rgba:
+                model = convert_to_rgba(model)
+                vae_loader.model = model
+
+            if self.gradient_checkpointing and hasattr(
+                model, "enable_gradient_checkpointing"
+            ):
+                model.enable_gradient_checkpointing()
+                logger.info("Enabled gradient checkpointing on VAE.")
+
+            self._shard_vae(model)
+
+        # Train in float32 for stability (model loads as bfloat16 by default)
+        model.float()
         self._vae_model = model
 
         # Load reference VAE (frozen, no FSDP) if needed
         if self.ref_kl_scale is not None and self.ref_vae is not None:
             ref_loader: BaseVAE[Any] = self.ref_vae
             ref_model: Any = ref_loader.load_model(self.device, frozen=True)
+            ref_model.float()
             ref_model.eval()
             self._ref_vae_model = ref_model
             logger.info("Loaded frozen reference VAE for KL regularization.")
@@ -364,12 +431,31 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
     # ------------------------------ Training -------------------------------- #
 
+    def _maybe_blend_to_bg(self, target: torch.Tensor) -> torch.Tensor:
+        """With ``blend_prob``, composite RGBA over a random solid background.
+
+        Matches AlphaVAE: each RGB channel of the background is independently
+        sampled from {0.0, 0.5, 1.0}, and the result becomes fully opaque.
+        """
+        if torch.rand(1).item() >= self.blend_prob:
+            return target
+        rgb = target[:, :3]
+        alpha = target[:, 3:4]
+        bg = (
+            torch.randint(0, 3, (1, 3, 1, 1), device=target.device).to(target.dtype)
+            / 2.0
+        )
+        blended_rgb = rgb * alpha + bg * (1 - alpha)
+        return torch.cat([blended_rgb, torch.ones_like(alpha)], dim=1)
+
     def _prepare_target(self, batch: dict) -> torch.Tensor:
         """Extract clean_image, resize, and normalize to [-1, 1]."""
         target = batch["clean_image"].float()
         target = resize_to_multiple_of(
             target, self.resize_multiple, pixels=self.resize_pixels
         )
+        if self.blend_prob > 0:
+            target = self._maybe_blend_to_bg(target)
         return target * 2 - 1  # [0,1] -> [-1,1]
 
     def train_step(
@@ -381,9 +467,12 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             (gen_loss, target, pred_detached, metrics_dict)
         """
         metrics: dict[str, torch.Tensor] = {}
+        use_ref_kl = self.ref_kl_scale is not None and self._ref_vae_model is not None
 
         # -- Compose targets for ref KL --
-        if self.ref_kl_scale is not None and self._ref_vae_model is not None:
+        target_black: torch.Tensor | None = None
+        target_white: torch.Tensor | None = None
+        if use_ref_kl:
             fg_alpha = (1 + target[:, 3:]) / 2  # [-1,1] -> [0,1]
             bg_alpha = (1 - target[:, 3:]) / 2
             target_black = target * fg_alpha - bg_alpha
@@ -399,7 +488,6 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             composed
         ).latent_dist
 
-        use_ref_kl = self.ref_kl_scale is not None and self._ref_vae_model is not None
         posterior_black: DiagonalGaussianDistribution | None = None
         posterior_white: DiagonalGaussianDistribution | None = None
         ref_posterior_black: DiagonalGaussianDistribution | None = None
@@ -412,12 +500,19 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             )
             with torch.no_grad():
                 assert self._ref_vae_model is not None
-                ref_posterior_all: DiagonalGaussianDistribution = (
-                    self._ref_vae_model.encode(composed).latent_dist
+                assert target_black is not None and target_white is not None
+                # ref_vae is the original 3ch VAE — feed only RGB channels
+                # of black/white composites (which have alpha=1, so RGB is
+                # the fully-composited image).
+                ref_composed = torch.cat(
+                    (target_black[:, :3], target_white[:, :3]), dim=0
                 )
-                _, ref_posterior_black, ref_posterior_white = map(
+                ref_posterior_all: DiagonalGaussianDistribution = (
+                    self._ref_vae_model.encode(ref_composed).latent_dist
+                )
+                ref_posterior_black, ref_posterior_white = map(
                     DiagonalGaussianDistribution,
-                    torch.chunk(ref_posterior_all.parameters, 3, dim=0),
+                    torch.chunk(ref_posterior_all.parameters, 2, dim=0),
                 )
         else:
             posterior = posterior_all
@@ -553,13 +648,9 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             target_01 = (target + 1) / 2
             pred_01 = (pred + 1) / 2
 
-            # Composite over white background for visualization
-            if target_01.shape[1] == 4:
-                t_rgb = target_01[:, :3] * target_01[:, 3:] + (1 - target_01[:, 3:])
-                p_rgb = pred_01[:, :3] * pred_01[:, 3:] + (1 - pred_01[:, 3:])
-            else:
-                t_rgb = target_01[:, :3]
-                p_rgb = pred_01[:, :3]
+            # Composite over checkerboard for RGBA visualization
+            t_rgb = remove_alpha_channel(target_01, "checkerboard")
+            p_rgb = remove_alpha_channel(pred_01, "checkerboard")
 
             # Side by side: input | output
             combined = torch.cat([t_rgb, p_rgb], dim=-1).clamp(0, 1)

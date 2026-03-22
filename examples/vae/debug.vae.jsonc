@@ -9,16 +9,17 @@
   "checkpoint_root": "./runs/vae_rgba/",
   "aim_repo": "./runs",
   "experiment_name": "vae_rgba_debug",
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 
   // ---- Model ----
   // The trainable VAE (will be converted to 4-channel RGBA).
   "vae": {
-    "type": "flux1"
+    "type": "flux2"
   },
   // Reference VAE for ref_kl regularization — the ORIGINAL 3-channel VAE
   // (before RGBA conversion). Keeps RGBA latent space aligned with original.
   "ref_vae": {
-    "type": "flux1"
+    "type": "flux2"
   },
   "do_convert_to_rgba": true,
 
@@ -76,6 +77,7 @@
   "generator_loss_weight": 1.0,
   "discriminator_loss_weight": 1.0,
   "use_naive_mse": false,
+  "blend_prob": 0.3,
 
   // ---- LPIPS weight files (download manually) ----
   // VGG16:  https://download.pytorch.org/models/vgg16-397923af.pth
@@ -86,6 +88,7 @@
   // ---- Launch ----
   "launch": {
     "type": "vae",
-    "devices": 4
+    "devices": 4,
+    "generate_dcp_seed": true
   }
 }

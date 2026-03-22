@@ -141,15 +141,32 @@ def ensure_alpha_channel(image: torch.Tensor) -> torch.Tensor:
     return image
 
 
+def _make_checkerboard(
+    h: int,
+    w: int,
+    cell_size: int = 16,
+    color_a: float = 0.8,
+    color_b: float = 0.6,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Create a gray checkerboard pattern of shape ``(1, 1, H, W)``."""
+    rows = torch.arange(h, device=device) // cell_size
+    cols = torch.arange(w, device=device) // cell_size
+    board = (rows[:, None] + cols[None, :]) % 2  # 0 or 1
+    return rearrange(board.float() * (color_a - color_b) + color_b, "h w -> 1 1 h w")
+
+
 def remove_alpha_channel(
     image: torch.Tensor,
-    background_color: tuple[float, float, float] | Literal["auto"] = "auto",
+    background_color: tuple[float, float, float]
+    | Literal["auto", "checkerboard"] = "auto",
 ) -> torch.Tensor:
     """
     Remove the alpha channel from the input image tensor by compositing it over a background color.
     Args:
         image: Tensor of shape (B, 4, H, W) or (B, 3, H, W)
-        background_color: Tuple of (R, G, B) values in [0, 1] or "auto" to use content-aware background
+        background_color: Tuple of (R, G, B) values in [0, 1], "auto" to use
+            content-aware background, or "checkerboard" for a gray checkerboard
     Returns:
         Tensor of shape (B, 3, H, W)
     """
@@ -157,6 +174,12 @@ def remove_alpha_channel(
         return image  # No alpha channel to remove
     rgb = image[:, :3, :, :]
     alpha = image[:, 3:4, :, :]
+    if background_color == "checkerboard":
+        bg = _make_checkerboard(
+            image.shape[2], image.shape[3], device=image.device
+        ).expand(-1, 3, -1, -1)
+        composited = rgb * alpha + bg * (1 - alpha)
+        return composited
     if background_color == "auto":
         # Get average brightness of non-transparent pixels
         mask = alpha > 0.01
