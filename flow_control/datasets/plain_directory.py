@@ -23,9 +23,10 @@ class PlainDirectoryDataset(Dataset):
     - ...
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, is_rgba: bool = False):
         self.path = path
         self.image_files = []
+        self.is_rgba = is_rgba
         with os.scandir(path) as it:
             for entry in it:
                 if entry.is_file() and entry.name.lower().endswith(
@@ -47,7 +48,7 @@ class PlainDirectoryDataset(Dataset):
 
         # Load image
         image_path = os.path.join(self.path, image_file)
-        image = Image.open(image_path).convert("RGB")
+        image = Image.open(image_path).convert("RGBA" if self.is_rgba else "RGB")
         image = pil_to_tensor(image).to(torch.bfloat16)
 
         data = {"__key__": image_file, "clean_image": image}

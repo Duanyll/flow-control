@@ -36,6 +36,11 @@ def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
 
         trainer = NftTrainer(**config_data)
         trainer.run()
+    elif launch_config.type == "vae":
+        from flow_control.training.vae import VaeTrainer
+
+        trainer = VaeTrainer(**config_data)
+        trainer.run()
     elif launch_config.type == "inference":
         from flow_control.training.inference import Inference
 

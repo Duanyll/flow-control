@@ -66,8 +66,4 @@ Rules to follow:
 2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
 3. Make sure you fix all linting and type errors.
 4. You don't have to run tests that requires actual weights / datasets, unless the user instructs you to do so. 
-
-When planning for a new feature or refactoring, adopt the First Principles Thinking approach:
-
-1. Figure out what the core problem you are trying to solve is, and what the ideal solution would look like if there were no constraints.
-2. We only care about mathematical correctness and code quality, not about "backward compatibility" or "following existing patterns". It is totally fine to refactor existing code and break backward compatibility, as long as the new code is correct and clean.
+5. If you want to run the full processing / training pipeline, use `tmux` to avoid Bash session timeout, and check all logs and error tracebacks in `/tmp/flow-control` (will be overridden in next run). DO NOT redirect stderr and stdout to a file, since there are progress bars. 

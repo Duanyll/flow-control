@@ -16,6 +16,7 @@ from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.inference import Inference
 from flow_control.training.nft import NftTrainer
 from flow_control.training.sft import SftTrainer
+from flow_control.training.vae import VaeTrainer
 
 DEFAULT_OUTPUT_DIR = "schema"
 
@@ -42,6 +43,7 @@ def generate_schemas() -> dict[str, dict]:
         "nft": TypeAdapter(NftTrainer).json_schema(),
         "inference": TypeAdapter(Inference).json_schema(),
         "preprocess": TypeAdapter(PreprocessConfig).json_schema(),
+        "vae": TypeAdapter(VaeTrainer).json_schema(),
     }
     return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 

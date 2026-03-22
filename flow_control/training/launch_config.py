@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 class LaunchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["sft", "grpo", "nft", "inference"]
+    type: Literal["sft", "grpo", "nft", "vae", "inference"]
     devices: int | list[int]
     generate_dcp_seed: bool = False
     preprocess_config: str | None = None

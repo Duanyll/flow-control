@@ -22,6 +22,10 @@
             "url": "./schema/nft.schema.json"
         },
         {
+            "fileMatch": ["*.vae.jsonc", "vae.jsonc"],
+            "url": "./schema/vae.schema.json"
+        },
+        {
             "fileMatch": ["*.inference.jsonc", "inference.jsonc"],
             "url": "./schema/inference.schema.json"
         },

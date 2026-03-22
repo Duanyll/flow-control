@@ -2,6 +2,7 @@
 Main Pipeline class for multi-stage data processing.
 """
 
+import logging
 import queue
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from ..logging import console, get_logger, rich_handler
+from ..logging import console, get_logger, queue_listener_handlers
 from .config import (
     PipelineResult,
     SinkConfig,
@@ -356,8 +357,13 @@ class Pipeline:
         shutdown_event = ctx.Event()
 
         # Start log listener
+        listener_handlers = list(queue_listener_handlers)
+        if not listener_handlers:
+            listener_handlers = [logging.NullHandler()]
         log_listener = QueueListener(
-            log_queue, rich_handler, respect_handler_level=True
+            log_queue,
+            *listener_handlers,
+            respect_handler_level=True,
         )
         log_listener.start()
 

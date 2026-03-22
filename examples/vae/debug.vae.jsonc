@@ -1,0 +1,91 @@
+{
+  // VAE RGBA Training Configuration
+  // Matches AlphaVAE reference: https://arxiv.org/abs/2507.09308
+  //
+  // Reference setup: 8 GPUs, batch_size=1/device, no gradient accumulation
+  // → effective global_batch_size = 8
+
+  // ---- Checkpoint & Logging ----
+  "checkpoint_root": "./runs/vae_rgba/",
+  "aim_repo": "./runs",
+  "experiment_name": "vae_rgba_debug",
+
+  // ---- Model ----
+  // The trainable VAE (will be converted to 4-channel RGBA).
+  "vae": {
+    "type": "flux1"
+  },
+  // Reference VAE for ref_kl regularization — the ORIGINAL 3-channel VAE
+  // (before RGBA conversion). Keeps RGBA latent space aligned with original.
+  "ref_vae": {
+    "type": "flux1"
+  },
+  "do_convert_to_rgba": true,
+
+  // ---- Dataset ----
+  "dataset": {
+    "type": "plain_directory",
+    "path": "/gdata/cold2/duanyule/datasets/rgba_images/PhotoMatte85/",
+    "is_rgba": true
+  },
+  "validation_dataset": {
+    "type": "plain_directory",
+    "path": "/gdata/cold2/duanyule/datasets/rgba_images/PhotoMatte85/",
+    "is_rgba": true,
+    "limit": 8
+  },
+  // Reference resizes to max 1024x1024 area, snapped to multiple of 16.
+  "resize_multiple": 16,
+  "resize_pixels": 1048576,
+
+  // ---- Training ----
+  // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = global_batch_size 8
+  "global_batch_size": 8,
+  "train_steps": 100,
+  "checkpoint_steps": 20,
+  "validation_steps": 20,
+
+  // ---- Optimizer ----
+  // Reference: AdamW, lr=1e-5, betas=(0.5, 0.9), cosine schedule, 100 warmup steps
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 1e-5,
+    "betas": [0.5, 0.9]
+  },
+  "scheduler_config": {
+    "class_name": "CosineAnnealingLR",
+    "T_max": 100000
+  },
+  "disc_optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 1e-5,
+    "betas": [0.5, 0.9]
+  },
+  "disc_scheduler_config": {
+    "class_name": "CosineAnnealingLR",
+    "T_max": 96000
+  },
+  "clip_grad_norm": 1.0,
+
+  // ---- Loss ----
+  // Reference: vae_main.yaml
+  "kl_scale": 1e-6,
+  "ref_kl_scale": 1e-16,
+  "lpips_scale": 0.5,
+  "gan_start_step": 50,
+  "generator_loss_weight": 1.0,
+  "discriminator_loss_weight": 1.0,
+  "use_naive_mse": false,
+
+  // ---- LPIPS weight files (download manually) ----
+  // VGG16:  https://download.pytorch.org/models/vgg16-397923af.pth
+  // LPIPS:  https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1
+  "vgg16_weights_path": "data/vgg16-397923af.pth",
+  "lpips_weights_path": "data/vgg_lpips.pth",
+
+  // ---- Launch ----
+  "launch": {
+    "type": "vae",
+    "devices": 4
+  }
+}
