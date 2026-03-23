@@ -7,8 +7,9 @@
 
   // ---- Checkpoint & Logging ----
   "checkpoint_root": "./runs/vae_rgba/",
-  "aim_repo": "aim://localhost:53800",
-  "experiment_name": "vae_rgba_training",
+  "aim_repo": "./runs",
+  "experiment_name": "flux1_vae_rgba",
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 
   // ---- Model ----
   // The trainable VAE (will be converted to 4-channel RGBA).
@@ -24,9 +25,53 @@
 
   // ---- Dataset ----
   "dataset": {
-    "type": "plain_directory",
-    "path": "/gdata/cold2/duanyule/datasets/rgba_images/PhotoMatte85/",
-    "is_rgba": true
+    "type": "concat",
+    "AM-2k": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/AM-2k",
+      "is_rgba": true,
+    },
+    "HHM2K": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/HHM2K",
+      "is_rgba": true,
+    },
+    "P3M-500-NP": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/P3M-500-NP",
+      "is_rgba": true,
+    },
+    "SIMD": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/SIMD",
+      "is_rgba": true,
+    },
+    "Distinctions-646": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Distinctions-646",
+      "is_rgba": true,
+    },
+    "Human2K": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Human2K",
+      "is_rgba": true,
+    },
+    "RealWorldPortrait-636": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/RealWorldPortrait-636",
+      "is_rgba": true,
+    },
+    "Transparent-460": {
+      "type": "plain_directory",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Transparent-460",
+      "is_rgba": true,
+    },
+    "MAGICK": {
+      "type": "csv",
+      "path": "/gdata/cold2/duanyule/datasets/rgba_images/magick_handpicked.csv",
+      "attachment_dir": "/gdata/cold2/duanyule/datasets/MAGICK/images/",
+      "limit": 2000
+    }
   },
   "validation_dataset": {
     "type": "plain_directory",
@@ -34,14 +79,15 @@
     "is_rgba": true,
     "limit": 8
   },
-  // Reference resizes to max 1024x1024 area, snapped to multiple of 16.
+  // Match AlphaVAE preprocessing: resize shorter side to 1024, then random crop 1024x1024.
   "resize_multiple": 16,
-  "resize_pixels": 1048576,
+  "random_crop_size": 1024,
+  "resize_pixels": 0,
 
   // ---- Training ----
   // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = global_batch_size 8
   "global_batch_size": 8,
-  "train_steps": 100000,
+  "train_steps": 30000,
   "checkpoint_steps": 5000,
   "validation_steps": 2000,
 
@@ -53,8 +99,10 @@
     "betas": [0.5, 0.9]
   },
   "scheduler_config": {
-    "class_name": "CosineAnnealingLR",
-    "T_max": 100000
+    "class_name": "diffusers",
+    "name": "cosine",
+    "num_warmup_steps": 100,
+    "num_training_steps": 30000
   },
   "disc_optimizer_config": {
     "class_name": "AdamW",
@@ -62,8 +110,10 @@
     "betas": [0.5, 0.9]
   },
   "disc_scheduler_config": {
-    "class_name": "CosineAnnealingLR",
-    "T_max": 96000
+    "class_name": "diffusers",
+    "name": "cosine",
+    "num_warmup_steps": 100,
+    "num_training_steps": 26000
   },
   "clip_grad_norm": 1.0,
 
@@ -86,6 +136,7 @@
   // ---- Launch ----
   "launch": {
     "type": "vae",
-    "devices": 4
+    "devices": 4,
+    // "generate_dcp_seed": true
   }
 }

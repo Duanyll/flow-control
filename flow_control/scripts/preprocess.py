@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict
 
 from flow_control.datasets import (
     DATASINK_REGISTRY,
@@ -15,11 +15,7 @@ from flow_control.processors import (
     ProcessorConfig,
     parse_processor,
 )
-from flow_control.utils.coercion import (
-    build_type_adapter,
-    coerce_record,
-    get_input_typeddict,
-)
+from flow_control.utils.coercion import get_input_typeddict
 from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
@@ -53,34 +49,29 @@ class TorchDatasetLoaderStage(PipelineStage):
         dataset_args: dict | None = None,
         processor_args: dict | None = None,
         processing_mode: Literal["inference", "training"] = "training",
-        attachment_dir: str | None = None,
         enable_coercion: bool = True,
     ):
         if dataset_args is None:
             dataset_args = {}
         self.worker_id = worker_id
         self.logger = get_logger(f"TorchDatasetLoaderStage-{worker_id}")
-        self.dataset = parse_dataset(dataset_args)
-        self.attachment_dir = attachment_dir or ""
-        self.type_adapter: TypeAdapter | None = None
 
+        coerce_to: type | None = None
         if enable_coercion and processor_args:
             task_name = processor_args.get("task")
             if task_name and task_name in PROCESSOR_TASK_REGISTRY:
                 processor_class = PROCESSOR_TASK_REGISTRY[task_name]
                 mode: Literal["training", "inference"] = processing_mode
-                typed_dict_class = get_input_typeddict(processor_class, mode)
-                if typed_dict_class is not None:
-                    self.type_adapter = build_type_adapter(typed_dict_class)
+                coerce_to = get_input_typeddict(processor_class, mode)
+                if coerce_to is not None:
                     self.logger.info(
-                        f"Coercion enabled for {task_name}/{mode}: {typed_dict_class.__name__}"
+                        f"Coercion enabled for {task_name}/{mode}: {coerce_to.__name__}"
                     )
 
+        self.dataset = parse_dataset(dataset_args, coerce_to=coerce_to)
+
     def process(self, item: Any) -> Any:
-        data = self.dataset[item]
-        if self.type_adapter is not None:
-            data = coerce_record(data, self.type_adapter, self.attachment_dir)
-        return [data]
+        return [self.dataset[item]]
 
 
 class ProcessorStage(PipelineStage):
@@ -142,7 +133,6 @@ class PreprocessConfig(BaseModel):
 
     processing_mode: Literal["inference", "training"]
     save_extra: bool = False
-    attachment_dir: str | None = None
     enable_coercion: bool = True
 
 
@@ -169,7 +159,6 @@ def run(config_path: str) -> None:
                     "dataset_args": config.dataset,
                     "processor_args": config.processor,
                     "processing_mode": config.processing_mode,
-                    "attachment_dir": config.attachment_dir,
                     "enable_coercion": config.enable_coercion,
                 },
             ),

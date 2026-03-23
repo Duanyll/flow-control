@@ -181,3 +181,52 @@ def resize_to_multiple_of(
     return resize_to_resolution(
         image, target_resolution=(target_height, target_width), crop=crop
     )
+
+
+def resize_short_side_and_random_crop(
+    image: torch.Tensor,
+    crop_size: int,
+    multiple: int = 1,
+) -> torch.Tensor:
+    """
+    Resize the shorter side to ``crop_size``, then take a random square crop.
+
+    Matches the AlphaVAE preprocessing path used for VAE training.
+    """
+    if image.dim() != 4:
+        raise ValueError("Image tensor must have 4 dimensions (B, C, H, W).")
+    if crop_size <= 0:
+        raise ValueError(f"crop_size must be positive, got {crop_size}.")
+    if crop_size % multiple != 0:
+        raise ValueError(
+            f"crop_size must be divisible by multiple, got {crop_size} and {multiple}."
+        )
+
+    _, _, height, width = image.shape
+    short_side = min(height, width)
+    if short_side <= 0:
+        raise ValueError(f"Invalid image shape {image.shape}.")
+
+    scale = crop_size / short_side
+    resized_height = max(crop_size, int(round(height * scale)))
+    resized_width = max(crop_size, int(round(width * scale)))
+    image = F.interpolate(
+        image,
+        size=(resized_height, resized_width),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    max_top = resized_height - crop_size
+    max_left = resized_width - crop_size
+    top = (
+        0
+        if max_top == 0
+        else int(torch.randint(0, max_top + 1, (1,), device=image.device).item())
+    )
+    left = (
+        0
+        if max_left == 0
+        else int(torch.randint(0, max_left + 1, (1,), device=image.device).item())
+    )
+    return image[:, :, top : top + crop_size, left : left + crop_size]

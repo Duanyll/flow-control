@@ -6,7 +6,7 @@ training, gradient accumulation, and optional PatchGAN discriminator.
 
 import math
 import os
-from typing import Any
+from typing import Any, TypedDict
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -26,8 +26,12 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors.components.vae import VAE, BaseVAE
+from flow_control.utils.coercion import ImageTensor
 from flow_control.utils.logging import console, dump_if_failed, get_logger
-from flow_control.utils.resize import resize_to_multiple_of
+from flow_control.utils.resize import (
+    resize_short_side_and_random_crop,
+    resize_to_multiple_of,
+)
 from flow_control.utils.tensor import (
     deep_move_to_device,
     remove_alpha_channel,
@@ -49,6 +53,11 @@ from .loss import RGBAVAELoss
 logger = get_logger(__name__)
 
 
+class VaeTrainInput(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
+    clean_image: ImageTensor
+
+
 class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
 
@@ -64,6 +73,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     validation_num_workers: int = 1
     resize_multiple: int = 16
     resize_pixels: int = 0
+    random_crop_size: int | None = None
 
     # ------------------------------- Training ------------------------------- #
     global_batch_size: int = 8
@@ -289,7 +299,9 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             logger.info("Created discriminator optimizer.")
 
     def make_train_dataloader(self) -> None:
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
+        dataset = PaddingAwareDatasetWrapper(
+            parse_dataset(self.dataset, coerce_to=VaeTrainInput)
+        )
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -311,7 +323,9 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self.validation_dataset is None:
             logger.info("No validation dataset configured, skipping.")
             return
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.validation_dataset))
+        dataset = PaddingAwareDatasetWrapper(
+            parse_dataset(self.validation_dataset, coerce_to=VaeTrainInput)
+        )
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -401,9 +415,16 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     def _prepare_target(self, batch: dict) -> torch.Tensor:
         """Extract clean_image, resize, and normalize to [-1, 1]."""
         target = batch["clean_image"].float()
-        target = resize_to_multiple_of(
-            target, self.resize_multiple, pixels=self.resize_pixels
-        )
+        if self.random_crop_size is not None:
+            target = resize_short_side_and_random_crop(
+                target,
+                crop_size=self.random_crop_size,
+                multiple=self.resize_multiple,
+            )
+        else:
+            target = resize_to_multiple_of(
+                target, self.resize_multiple, pixels=self.resize_pixels
+            )
         if self.blend_prob > 0:
             target = self._maybe_blend_to_bg(target)
         return target * 2 - 1  # [0,1] -> [-1,1]

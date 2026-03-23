@@ -4,6 +4,7 @@ from datasets import load_dataset
 from pydantic import WithJsonSchema
 from torch.utils.data import ConcatDataset, Dataset
 
+from flow_control.utils.coercion import build_type_adapter, coerce_record
 from flow_control.utils.pipeline import DataSink
 
 from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
@@ -35,6 +36,32 @@ class LimitedDataset(Dataset):
         return self.dataset[index]
 
 
+class CoercedDataset(Dataset):
+    """Wrapper that applies pydantic coercion to each sample via a TypedDict type.
+
+    Pickle-safe: only stores the TypedDict class (not the TypeAdapter), and
+    rebuilds the adapter lazily via the lru-cached ``build_type_adapter``.
+    """
+
+    def __init__(
+        self,
+        dataset: "MapDataset",
+        coerce_to: type,
+        attachment_dir: str = "",
+    ):
+        self.dataset = dataset
+        self.coerce_to = coerce_to
+        self.attachment_dir = attachment_dir
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        item = self.dataset[index]
+        adapter = build_type_adapter(self.coerce_to)
+        return coerce_record(item, adapter, self.attachment_dir)
+
+
 DatasetConfig = Annotated[
     dict[str, Any],
     WithJsonSchema(
@@ -43,7 +70,7 @@ DatasetConfig = Annotated[
             "properties": {
                 "type": {
                     "type": "string",
-                    "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, jsonl, parquet, inline, huggingface, multi)",
+                    "description": "Dataset type (e.g. lmdb, plain_directory, pickle_directory, raw_directory, bucket_directory, csv, jsonl, parquet, inline, huggingface, concat)",
                 },
                 "limit": {
                     "type": "integer",
@@ -86,12 +113,16 @@ def is_map_dataset(dataset: Dataset) -> TypeGuard[MapDataset]:
     )
 
 
-def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
+def parse_dataset(
+    dataset_config: DatasetConfig,
+    coerce_to: type | None = None,
+) -> MapDataset:
     if "type" not in dataset_config:
         raise ValueError("dataset_config must contain a 'type' key.")
     dataset_config = dataset_config.copy()
     dataset_type = dataset_config.pop("type")
     limit = dataset_config.pop("limit", None)
+    attachment_dir: str = dataset_config.pop("attachment_dir", ".")
 
     dataset: Dataset
     if dataset_type == "huggingface":
@@ -100,10 +131,10 @@ def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
             raise ValueError(
                 "The loaded dataset is not of type MapDataset. Make sure you have passed the correct parameters."
             )
-    elif dataset_type == "multi":
+    elif dataset_type == "concat":
         datasets = []
         for _, value in dataset_config.items():
-            datasets.append(parse_dataset(value))
+            datasets.append(parse_dataset(value, coerce_to=coerce_to))
         dataset = ConcatDataset(datasets)
         assert is_map_dataset(dataset), "Concatenated dataset is not a MapDataset."
     elif dataset_type in DATASET_REGISTRY:
@@ -115,8 +146,12 @@ def parse_dataset(dataset_config: DatasetConfig) -> MapDataset:
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
+    # Wrap with coercion (skipped for concat — sub-datasets are already wrapped).
+    if coerce_to is not None and dataset_type != "concat":
+        dataset = CoercedDataset(dataset, coerce_to, attachment_dir)
+
     if limit is not None and limit > 0:
-        limited = LimitedDataset(dataset, limit)
+        limited = LimitedDataset(cast(MapDataset, dataset), limit)
         return cast(MapDataset, limited)
 
     return cast(MapDataset, dataset)

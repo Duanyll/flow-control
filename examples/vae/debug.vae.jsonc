@@ -35,9 +35,10 @@
     "is_rgba": true,
     "limit": 8
   },
-  // Reference resizes to max 1024x1024 area, snapped to multiple of 16.
+  // Match AlphaVAE preprocessing: resize shorter side to 1024, then random crop 1024x1024.
   "resize_multiple": 16,
-  "resize_pixels": 1048576,
+  "random_crop_size": 1024,
+  "resize_pixels": 0,
 
   // ---- Training ----
   // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = global_batch_size 8

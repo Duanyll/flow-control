@@ -21,10 +21,12 @@ from .components.vae import VAE, Flux1VAE
 
 
 class InputBatch(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
-class TrainInputBatch(InputBatch):
+class TrainInputBatch(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
