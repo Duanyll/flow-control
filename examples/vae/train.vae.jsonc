@@ -8,22 +8,23 @@
   // ---- Checkpoint & Logging ----
   "checkpoint_root": "./runs/vae_rgba/",
   "aim_repo": "./runs",
-  "experiment_name": "flux1_vae_rgba",
+  "experiment_name": "flux2_vae_rgba",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 
   // ---- Model ----
   // The trainable VAE (will be converted to 4-channel RGBA).
   "vae": {
-    "type": "flux1"
+    "type": "flux2"
   },
   // Reference VAE for ref_kl regularization — the ORIGINAL 3-channel VAE
   // (before RGBA conversion). Keeps RGBA latent space aligned with original.
   "ref_vae": {
-    "type": "flux1"
+    "type": "flux2"
   },
   "do_convert_to_rgba": true,
 
   // ---- Dataset ----
+  "num_dataloader_workers": 1,
   "dataset": {
     "type": "concat",
     "AM-2k": {

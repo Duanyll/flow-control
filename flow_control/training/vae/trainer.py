@@ -6,6 +6,7 @@ training, gradient accumulation, and optional PatchGAN discriminator.
 
 import math
 import os
+from contextlib import nullcontext
 from typing import Any, TypedDict
 
 import torch
@@ -28,23 +29,25 @@ from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors.components.vae import VAE, BaseVAE
 from flow_control.utils.coercion import ImageTensor
 from flow_control.utils.logging import console, dump_if_failed, get_logger
-from flow_control.utils.resize import (
-    resize_short_side_and_random_crop,
-    resize_to_multiple_of,
-)
 from flow_control.utils.tensor import (
-    deep_move_to_device,
     remove_alpha_channel,
     tensor_to_pil,
 )
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
+    TorchDType,
     parse_optimizer,
     parse_scheduler,
 )
 
-from ..data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from ..data import (
+    DistributedBucketSampler,
+    PaddingAwareDatasetWrapper,
+    VaeTargetDatasetWrapper,
+    collate_fn,
+    prepare_vae_target_image,
+)
 from ..mixins import CheckpointingMixin, HsdpMixin, distributed_main
 from ..mixins.logging import LoggingMixin
 from .convert import convert_to_rgba
@@ -105,6 +108,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     clip_grad_norm: float = 1.0
 
     # -------------------------------- Losses -------------------------------- #
+    autocast_dtype: TorchDType | None = None
     kl_scale: float | None = 1e-6
     ref_kl_scale: float | None = None
     lpips_scale: float | None = 0.5
@@ -158,6 +162,19 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if steps_per_epoch == 0:
             return 0
         return self._current_step // steps_per_epoch
+
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        return self.autocast_dtype or self.vae.dtype
+
+    @property
+    def use_autocast(self) -> bool:
+        return self.compute_dtype in {torch.bfloat16, torch.float16}
+
+    def _autocast_context(self):
+        if not self.use_autocast:
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self.compute_dtype)
 
     # ------------------------------- Setup ---------------------------------- #
 
@@ -240,15 +257,14 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
             self._shard_vae(model)
 
-        # Train in float32 for stability (model loads as bfloat16 by default)
+        # Keep trainable VAE parameters in float32 while running forward under AMP.
         model.float()
         self._vae_model = model
 
-        # Load reference VAE (frozen, no FSDP) if needed
+        # Load reference VAE (frozen, no FSDP) if needed; keep loader dtype.
         if self.ref_kl_scale is not None and self.ref_vae is not None:
             ref_loader: BaseVAE[Any] = self.ref_vae
             ref_model: Any = ref_loader.load_model(self.device, frozen=True)
-            ref_model.float()
             ref_model.eval()
             self._ref_vae_model = ref_model
             logger.info("Loaded frozen reference VAE for KL regularization.")
@@ -262,8 +278,12 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             vgg16_weights_path=self.vgg16_weights_path,
             lpips_weights_path=self.lpips_weights_path,
         )
-        # Move frozen parts (LPIPS, buffers) to device
+        # Keep scalar loss math in float32, but frozen neural nets can use compute dtype.
         self._loss_module.to(device=self.device)
+        if self.lpips_scale is not None:
+            self._loss_module.lpips.to(device=self.device, dtype=self.compute_dtype)
+        if self.gan_start_step is not None:
+            self._loss_module.discriminator.to(device=self.device, dtype=torch.float32)
 
         # Wrap discriminator with FSDP2 for gradient sync
         if self.gan_start_step is not None:
@@ -299,8 +319,14 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             logger.info("Created discriminator optimizer.")
 
     def make_train_dataloader(self) -> None:
-        dataset = PaddingAwareDatasetWrapper(
-            parse_dataset(self.dataset, coerce_to=VaeTrainInput)
+        dataset = VaeTargetDatasetWrapper(
+            PaddingAwareDatasetWrapper(
+                parse_dataset(self.dataset, coerce_to=VaeTrainInput)
+            ),
+            random_crop_size=self.random_crop_size,
+            resize_multiple=self.resize_multiple,
+            resize_pixels=self.resize_pixels,
+            blend_prob=self.blend_prob,
         )
         sampler = DistributedBucketSampler(
             dataset=dataset,
@@ -315,6 +341,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             batch_size=1,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
+            pin_memory=torch.cuda.is_available(),
             collate_fn=collate_fn,
         )
         logger.info(f"Training dataloader created with {len(dataset)} samples.")
@@ -323,8 +350,14 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self.validation_dataset is None:
             logger.info("No validation dataset configured, skipping.")
             return
-        dataset = PaddingAwareDatasetWrapper(
-            parse_dataset(self.validation_dataset, coerce_to=VaeTrainInput)
+        dataset = VaeTargetDatasetWrapper(
+            PaddingAwareDatasetWrapper(
+                parse_dataset(self.validation_dataset, coerce_to=VaeTrainInput)
+            ),
+            random_crop_size=self.random_crop_size,
+            resize_multiple=self.resize_multiple,
+            resize_pixels=self.resize_pixels,
+            blend_prob=self.blend_prob,
         )
         sampler = DistributedBucketSampler(
             dataset=dataset,
@@ -339,6 +372,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             batch_size=1,
             sampler=sampler,
             num_workers=self.validation_num_workers,
+            pin_memory=torch.cuda.is_available(),
             collate_fn=collate_fn,
         )
         logger.info(f"Validation dataloader created with {len(dataset)} samples.")
@@ -414,20 +448,24 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
     def _prepare_target(self, batch: dict) -> torch.Tensor:
         """Extract clean_image, resize, and normalize to [-1, 1]."""
+        if "target_image" in batch:
+            return batch["target_image"].float()
+
         target = batch["clean_image"].float()
-        if self.random_crop_size is not None:
-            target = resize_short_side_and_random_crop(
-                target,
-                crop_size=self.random_crop_size,
-                multiple=self.resize_multiple,
+        if target.shape[1] not in {3, 4}:
+            key = batch.get("__key__", "unknown")
+            raise ValueError(
+                f"Expected clean_image to have 3 or 4 channels, got shape {tuple(target.shape)} "
+                f"for sample {key!r}."
             )
-        else:
-            target = resize_to_multiple_of(
-                target, self.resize_multiple, pixels=self.resize_pixels
-            )
-        if self.blend_prob > 0:
-            target = self._maybe_blend_to_bg(target)
-        return target * 2 - 1  # [0,1] -> [-1,1]
+        return prepare_vae_target_image(
+            target,
+            key=batch.get("__key__", "unknown"),
+            random_crop_size=self.random_crop_size,
+            resize_multiple=self.resize_multiple,
+            resize_pixels=self.resize_pixels,
+            blend_prob=self.blend_prob,
+        )
 
     def train_step(
         self, target: torch.Tensor
@@ -454,85 +492,111 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         else:
             composed = target
 
-        # -- Encode --
-        posterior_all: DiagonalGaussianDistribution = self._vae_model.encode(
-            composed
-        ).latent_dist
+        posterior_kl: DiagonalGaussianDistribution
+        posterior_black_kl: DiagonalGaussianDistribution | None = None
+        posterior_white_kl: DiagonalGaussianDistribution | None = None
+        ref_posterior_black_kl: DiagonalGaussianDistribution | None = None
+        ref_posterior_white_kl: DiagonalGaussianDistribution | None = None
 
-        posterior_black: DiagonalGaussianDistribution | None = None
-        posterior_white: DiagonalGaussianDistribution | None = None
-        ref_posterior_black: DiagonalGaussianDistribution | None = None
-        ref_posterior_white: DiagonalGaussianDistribution | None = None
+        with self._autocast_context():
+            posterior_all: DiagonalGaussianDistribution = self._vae_model.encode(
+                composed
+            ).latent_dist
 
-        if use_ref_kl:
-            posterior, posterior_black, posterior_white = map(
-                DiagonalGaussianDistribution,
-                torch.chunk(posterior_all.parameters, 3, dim=0),
-            )
-            with torch.no_grad():
-                assert self._ref_vae_model is not None
-                assert target_black is not None and target_white is not None
-                # ref_vae is the original 3ch VAE — feed only RGB channels
-                # of black/white composites (which have alpha=1, so RGB is
-                # the fully-composited image).
-                ref_composed = torch.cat(
-                    (target_black[:, :3], target_white[:, :3]), dim=0
+            if use_ref_kl:
+                posterior_params, posterior_black_params, posterior_white_params = (
+                    torch.chunk(posterior_all.parameters, 3, dim=0)
                 )
-                ref_posterior_all: DiagonalGaussianDistribution = (
-                    self._ref_vae_model.encode(ref_composed).latent_dist
+                posterior = DiagonalGaussianDistribution(posterior_params)
+                posterior_kl = DiagonalGaussianDistribution(posterior_params.float())
+                posterior_black_kl = DiagonalGaussianDistribution(
+                    posterior_black_params.float()
                 )
-                ref_posterior_black, ref_posterior_white = map(
-                    DiagonalGaussianDistribution,
-                    torch.chunk(ref_posterior_all.parameters, 2, dim=0),
+                posterior_white_kl = DiagonalGaussianDistribution(
+                    posterior_white_params.float()
                 )
-        else:
-            posterior = posterior_all
+                with torch.no_grad():
+                    assert self._ref_vae_model is not None
+                    assert target_black is not None and target_white is not None
+                    # ref_vae is the original 3ch VAE — feed only RGB channels
+                    # of black/white composites (which have alpha=1, so RGB is
+                    # the fully-composited image).
+                    ref_composed = torch.cat(
+                        (target_black[:, :3], target_white[:, :3]), dim=0
+                    )
+                    ref_posterior_all: DiagonalGaussianDistribution = (
+                        self._ref_vae_model.encode(ref_composed).latent_dist
+                    )
+                    ref_black_params, ref_white_params = torch.chunk(
+                        ref_posterior_all.parameters, 2, dim=0
+                    )
+                    ref_posterior_black_kl = DiagonalGaussianDistribution(
+                        ref_black_params.float()
+                    )
+                    ref_posterior_white_kl = DiagonalGaussianDistribution(
+                        ref_white_params.float()
+                    )
+            else:
+                posterior = posterior_all
+                posterior_kl = DiagonalGaussianDistribution(
+                    posterior_all.parameters.float()
+                )
 
-        # -- Sample and decode --
-        vae: Any = self._vae_model  # escape for dynamic attr access
-        z = posterior.sample()
-        pred = vae.decode(z).sample
+            # -- Sample and decode --
+            vae: Any = self._vae_model  # escape for dynamic attr access
+            z = posterior.sample()
+            pred = vae.decode(z).sample
+
+            if self.lpips_scale is not None:
+                p_loss = self._loss_module.perceptual_loss(pred, target).float()
+            else:
+                p_loss = None
+
+            if (
+                self.gan_start_step is not None
+                and self._current_step >= self.gan_start_step
+            ):
+                self._loss_module.requires_grad_(False)
+                g_loss = self._loss_module.generator_loss(
+                    self._loss_module.reconstruction_loss(pred.float(), target),
+                    pred,
+                    vae.decoder.conv_out.weight,
+                ).float()
+            else:
+                g_loss = None
 
         # -- Losses --
-        l2_loss = self._loss_module.reconstruction_loss(pred, target)
+        pred_fp32 = pred.float()
+        l2_loss = self._loss_module.reconstruction_loss(pred_fp32, target).float()
         loss = l2_loss
         metrics["train/l2_loss"] = l2_loss.detach()
 
-        if self.lpips_scale is not None:
-            p_loss = self._loss_module.perceptual_loss(pred, target)
+        if p_loss is not None:
+            assert self.lpips_scale is not None
             loss = loss + self.lpips_scale * p_loss
             metrics["train/p_loss"] = p_loss.detach()
 
         if self.kl_scale is not None:
-            kl_norm = self._loss_module.kl_loss(posterior)
+            kl_norm = self._loss_module.kl_loss(posterior_kl).float()
             loss = loss + self.kl_scale * kl_norm
             metrics["train/kl_norm"] = kl_norm.detach()
 
         if use_ref_kl:
-            assert posterior_black is not None and ref_posterior_black is not None
-            assert posterior_white is not None and ref_posterior_white is not None
+            assert posterior_black_kl is not None and ref_posterior_black_kl is not None
+            assert posterior_white_kl is not None and ref_posterior_white_kl is not None
             kl_ref_black = self._loss_module.kl_loss(
-                posterior_black, ref_posterior_black
-            )
+                posterior_black_kl, ref_posterior_black_kl
+            ).float()
             kl_ref_white = self._loss_module.kl_loss(
-                posterior_white, ref_posterior_white
-            )
+                posterior_white_kl, ref_posterior_white_kl
+            ).float()
             kl_ref = (kl_ref_black + kl_ref_white) / 2
             assert self.ref_kl_scale is not None
             loss = loss + self.ref_kl_scale * kl_ref
             metrics["train/kl_ref"] = kl_ref.detach()
 
         # -- Generator adversarial loss (after gan_start_step) --
-        if (
-            self.gan_start_step is not None
-            and self._current_step >= self.gan_start_step
-        ):
-            self._loss_module.requires_grad_(False)
-            g_loss = self._loss_module.generator_loss(
-                l2_loss,
-                pred,
-                vae.decoder.conv_out.weight,
-            )
+        if g_loss is not None:
             loss = loss + g_loss * self.generator_loss_weight
             metrics["train/g_loss"] = g_loss.detach()
 
@@ -550,7 +614,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self.gan_start_step is None or self._current_step < self.gan_start_step:
             return
         self._loss_module.discriminator.set_requires_gradient_sync(is_sync_step)  # type: ignore[union-attr]
-        d_loss = self._loss_module.discriminator_loss(target, pred)
+        with self._autocast_context():
+            d_loss = self._loss_module.discriminator_loss(target, pred)
         d_loss = d_loss * self.discriminator_loss_weight
         d_loss_scaled = d_loss / self.grad_acc_steps
         d_loss_scaled.backward()
@@ -609,16 +674,17 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         self._vae_model.eval()
 
         for batch in self._validation_dataloader:
-            batch = deep_move_to_device(batch, self.device)
             target = self._prepare_target(batch)
+            target = target.to(self.device, non_blocking=True)
 
-            pred = self._vae_model.decode(
-                self._vae_model.encode(target).latent_dist.sample()
-            ).sample
+            with self._autocast_context():
+                pred = self._vae_model.decode(
+                    self._vae_model.encode(target).latent_dist.sample()
+                ).sample
 
             # Convert back to [0, 1]
             target_01 = (target + 1) / 2
-            pred_01 = (pred + 1) / 2
+            pred_01 = (pred.float() + 1) / 2
 
             # Composite over checkerboard for RGBA visualization
             t_rgb = remove_alpha_channel(target_01, "checkerboard")
@@ -639,6 +705,11 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     def run(self) -> None:
         self.set_seed()
         self.init_tracker()
+        if self.compute_dtype == torch.float16:
+            logger.warning(
+                "float16 autocast is enabled without GradScaler support. Prefer "
+                "bfloat16 for VAE training unless you explicitly want fp16."
+            )
         self.load_vae()
         self.load_loss_module()
         self.make_optimizer_and_scheduler()
@@ -670,8 +741,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
                 for i, batch in enumerate(self._dataloader):
                     with dump_if_failed(logger, batch):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
-                        batch = deep_move_to_device(batch, self.device)
                         target = self._prepare_target(batch)
+                        target = target.to(self.device, non_blocking=True)
 
                         # Generator forward + backward
                         self._vae_model.set_requires_gradient_sync(is_sync_step)

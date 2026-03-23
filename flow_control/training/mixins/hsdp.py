@@ -179,10 +179,20 @@ class HsdpMixin(BaseModel):
         dcp.save(model_sd, checkpoint_id=seed_checkpoint_dir, no_dist=True)
         logger.info(f"Saved DCP seed checkpoint to {seed_checkpoint_dir}.")
 
-    def cleanup(self):
-        if self.mesh is not None:
-            dist.barrier()
+    def cleanup(self) -> None:
+        if self.mesh is None or not dist.is_available() or not dist.is_initialized():
+            logger.info(
+                "Distributed resources were not initialized or already cleaned up."
+            )
+            return
+
+        try:
             dist.destroy_process_group()
+        except Exception:
+            logger.exception("dist.destroy_process_group() failed during cleanup.")
+        finally:
+            self._mesh = None
+
         logger.info("Cleaned up distributed resources.")
 
 

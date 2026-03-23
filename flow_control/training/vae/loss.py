@@ -166,8 +166,10 @@ class RGBAVAELoss(nn.Module):
 
         Uses ``torch.autograd.grad`` with ``retain_graph=True``.
         """
-        nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
-        g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+        nll_grads = torch.autograd.grad(
+            nll_loss.float(), last_layer, retain_graph=True
+        )[0]
+        g_grads = torch.autograd.grad(g_loss.float(), last_layer, retain_graph=True)[0]
         d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
         d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
         return d_weight
@@ -184,11 +186,11 @@ class RGBAVAELoss(nn.Module):
         """
         self.discriminator.requires_grad_(False)
         logits_fake = self.discriminator(reconstructions)
-        g_loss = -torch.mean(logits_fake)
+        g_loss = -torch.mean(logits_fake).float()
         d_weight = self.calculate_adaptive_weight(
             rec_loss, g_loss, last_layer=last_layer
         )
-        return g_loss * d_weight
+        return (g_loss * d_weight).float()
 
     def discriminator_loss(
         self,
@@ -199,4 +201,4 @@ class RGBAVAELoss(nn.Module):
         self.discriminator.requires_grad_(True)
         logits_real = self.discriminator(inputs.contiguous().detach())
         logits_fake = self.discriminator(reconstructions.contiguous().detach())
-        return hinge_d_loss(logits_real, logits_fake)
+        return hinge_d_loss(logits_real, logits_fake).float()

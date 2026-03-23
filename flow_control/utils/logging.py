@@ -23,8 +23,10 @@ Logging behavior:
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -303,6 +305,32 @@ def _install_exception_hooks() -> None:
     threading.excepthook = thread_hook
 
 
+_faulthandler_file: Any = None  # kept alive so faulthandler can write to it
+
+
+def _install_faulthandler() -> None:
+    """Register faulthandler to dump all-thread tracebacks on SIGQUIT.
+
+    When a training process is stuck in a C-level call (NCCL, CUDA, etc.),
+    SIGINT cannot interrupt it.  ``torchrun`` forwards SIGQUIT to workers,
+    so ``kill -QUIT <pid>`` (or ``kill -3``) will dump every thread's Python
+    stack into the traceback log file.  The process keeps running so you can
+    send the signal repeatedly.
+    """
+    global _faulthandler_file
+    if traceback_file_path is None:
+        return
+    if not hasattr(faulthandler, "register"):  # Unix only
+        return
+    _faulthandler_file = traceback_file_path.open("a")
+    faulthandler.register(
+        signal.SIGQUIT,
+        file=_faulthandler_file,
+        all_threads=False,
+        chain=False,  # don't core-dump / terminate after dumping
+    )
+
+
 def setup_global_handler(handler: logging.Handler, include_name: bool = True) -> None:
     configured_handler = _apply_handler_formatter(handler, include_name=include_name)
     _configure_logging([configured_handler])
@@ -428,6 +456,7 @@ else:
         _configure_logging(default_handlers)
 
     _install_exception_hooks()
+    _install_faulthandler()
 
 __all__ = [
     "console",

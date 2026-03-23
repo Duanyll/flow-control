@@ -1,4 +1,5 @@
 import math
+from typing import Any, Protocol, cast
 
 import torch
 import torch.distributed as dist
@@ -9,8 +10,19 @@ from torch.utils.data import Sampler as TorchSampler
 from flow_control.datasets import MapDataset
 from flow_control.datasets.bucket_directory import BucketDataset
 from flow_control.utils.logging import get_logger
+from flow_control.utils.resize import (
+    resize_short_side_and_random_crop,
+    resize_to_multiple_of,
+)
+from flow_control.utils.tensor import ensure_alpha_channel
 
 logger = get_logger(__name__)
+
+
+class SizedMapDataset(Protocol):
+    def __len__(self) -> int: ...
+
+    def __getitem__(self, item: Any, /) -> Any: ...
 
 
 class PaddingAwareDatasetWrapper(Dataset):
@@ -36,6 +48,87 @@ class PaddingAwareDatasetWrapper(Dataset):
         return data
 
 
+def _maybe_blend_rgba_to_bg(target: torch.Tensor, blend_prob: float) -> torch.Tensor:
+    if blend_prob <= 0 or torch.rand(1).item() >= blend_prob:
+        return target
+
+    rgb = target[:, :3]
+    alpha = target[:, 3:4]
+    bg = torch.randint(0, 3, (1, 3, 1, 1), device=target.device).to(target.dtype) / 2.0
+    blended_rgb = rgb * alpha + bg * (1 - alpha)
+    return torch.cat([blended_rgb, torch.ones_like(alpha)], dim=1)
+
+
+def prepare_vae_target_image(
+    clean_image: torch.Tensor,
+    *,
+    key: str = "unknown",
+    random_crop_size: int | None,
+    resize_multiple: int,
+    resize_pixels: int,
+    blend_prob: float,
+) -> torch.Tensor:
+    target = clean_image.float()
+    if target.shape[1] not in {3, 4}:
+        raise ValueError(
+            f"Expected clean_image to have 3 or 4 channels, got shape {tuple(target.shape)} "
+            f"for sample {key!r}."
+        )
+
+    target = ensure_alpha_channel(target)
+
+    if random_crop_size is not None:
+        target = resize_short_side_and_random_crop(
+            target,
+            crop_size=random_crop_size,
+            multiple=resize_multiple,
+        )
+    else:
+        target = resize_to_multiple_of(target, resize_multiple, pixels=resize_pixels)
+
+    target = _maybe_blend_rgba_to_bg(target, blend_prob)
+    return target * 2 - 1  # [0, 1] -> [-1, 1]
+
+
+class VaeTargetDatasetWrapper(Dataset):
+    def __init__(
+        self,
+        dataset: SizedMapDataset,
+        *,
+        random_crop_size: int | None,
+        resize_multiple: int,
+        resize_pixels: int,
+        blend_prob: float,
+    ):
+        self.dataset = dataset
+        self.random_crop_size = random_crop_size
+        self.resize_multiple = resize_multiple
+        self.resize_pixels = resize_pixels
+        self.blend_prob = blend_prob
+        if hasattr(dataset, "bucket_lengths"):
+            self.bucket_lengths = cast(Any, dataset).bucket_lengths
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, item):
+        data = self.dataset[item]
+        if not isinstance(data, dict):
+            return data
+
+        target = prepare_vae_target_image(
+            data["clean_image"],
+            key=data.get("__key__", "unknown"),
+            random_crop_size=self.random_crop_size,
+            resize_multiple=self.resize_multiple,
+            resize_pixels=self.resize_pixels,
+            blend_prob=self.blend_prob,
+        )
+        data = data.copy()
+        data["target_image"] = target
+        return data
+
+
 def _repeat_as_padding(
     indices: list[tuple[int, bool]], count: int
 ) -> list[tuple[int, bool]]:
@@ -50,7 +143,7 @@ def _repeat_as_padding(
 class DistributedBucketSampler(TorchSampler, Stateful):
     def __init__(
         self,
-        dataset: PaddingAwareDatasetWrapper,
+        dataset: SizedMapDataset,
         num_replicas=None,
         rank=None,
         shuffle=True,
@@ -71,7 +164,7 @@ class DistributedBucketSampler(TorchSampler, Stateful):
             )
 
         if hasattr(dataset, "bucket_lengths"):
-            self.lengths = dataset.bucket_lengths
+            self.lengths = cast(Any, dataset).bucket_lengths
         else:
             self.lengths = [len(dataset)]
 
