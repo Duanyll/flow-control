@@ -88,9 +88,9 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     }
 
     # ------------------------------- Lazy state --------------------------------- #
-    _dataloader: StatefulDataLoader | None = None
-    _optimizer: torch.optim.Optimizer | None = None
-    _scheduler: Any = None
+    _dataloader: StatefulDataLoader
+    _optimizer: torch.optim.Optimizer
+    _scheduler: Any
     _ema_optimizer: EMAOptimizer | None = None
     _current_step: int = 0
 
@@ -103,44 +103,18 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         return self.model.transformer
 
     @property
-    def dataloader(self) -> StatefulDataLoader:
-        if self._dataloader is None:
-            raise RuntimeError("Dataloader not created yet.")
-        return self._dataloader
-
-    @property
-    def optimizer(self) -> torch.optim.Optimizer:
-        if self._optimizer is None:
-            raise RuntimeError("Optimizer not created yet.")
-        return self._optimizer
-
-    @property
-    def scheduler(self):
-        if self._scheduler is None:
-            raise RuntimeError("Scheduler not created yet.")
-        return self._scheduler
-
-    @property
-    def current_step(self) -> int:
-        return self._current_step
-
-    @current_step.setter
-    def current_step(self, value: int):
-        self._current_step = value
-
-    @property
     def grad_acc_steps(self):
         return self.global_batch_size // self.world_size
 
     @property
     def total_epochs(self):
         return math.ceil(
-            self.train_steps / (len(self.dataloader) // self.grad_acc_steps)
+            self.train_steps / (len(self._dataloader) // self.grad_acc_steps)
         )
 
     @property
     def current_epoch(self):
-        return self.current_step // (len(self.dataloader) // self.grad_acc_steps)
+        return self._current_step // (len(self._dataloader) // self.grad_acc_steps)
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -153,7 +127,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         logger.info(
             f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
         )
-        self._scheduler = parse_scheduler(self.scheduler_config, self.optimizer)
+        self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
         if self.ema is not None:
             self._ema_optimizer = EMAOptimizer(params, self.ema)
 
@@ -185,11 +159,11 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         state: dict[str, Any] = {
             "transformer": transformer_sd,
             "optimizer": get_optimizer_state_dict(
-                self.transformer, self.optimizer, options=opts
+                self.transformer, self._optimizer, options=opts
             ),
-            "dataloader": self.dataloader.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "current_step": self.current_step,
+            "dataloader": self._dataloader.state_dict(),
+            "scheduler": self._scheduler.state_dict(),
+            "current_step": self._current_step,
         }
         if self._ema_optimizer is not None:
             state["optim_ema"] = get_optimizer_state_dict(
@@ -202,7 +176,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
         set_optimizer_state_dict(
             self.transformer,
-            self.optimizer,
+            self._optimizer,
             state_dict["optimizer"],
             options=opts,
         )
@@ -213,9 +187,9 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                 state_dict["optim_ema"],
                 options=opts,
             )
-        self.dataloader.load_state_dict(state_dict["dataloader"])
-        self.scheduler.load_state_dict(state_dict["scheduler"])
-        self.current_step = state_dict["current_step"]
+        self._dataloader.load_state_dict(state_dict["dataloader"])
+        self._scheduler.load_state_dict(state_dict["scheduler"])
+        self._current_step = state_dict["current_step"]
 
     # ------------------------------- Training ----------------------------------- #
 
@@ -255,29 +229,29 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                 self.transformer.parameters(), self.clip_grad_norm
             )
 
-        self.optimizer.step()
+        self._optimizer.step()
         if self._ema_optimizer is not None:
             self._ema_optimizer.step()
-        self.scheduler.step()
-        self.optimizer.zero_grad()
+        self._scheduler.step()
+        self._optimizer.zero_grad()
 
-        self.current_step += 1
+        self._current_step += 1
         self.log_metrics(
             {
                 "train/loss": total_loss,
-                "train/lr": float(self.scheduler.get_last_lr()[0]),
+                "train/lr": float(self._scheduler.get_last_lr()[0]),
             },
-            step=self.current_step,
+            step=self._current_step,
         )
 
-        if (self.current_step % self.checkpoint_steps == 0) or (
-            self.current_step == self.train_steps
+        if (self._current_step % self.checkpoint_steps == 0) or (
+            self._current_step == self.train_steps
         ):
-            self.save(self.current_step)
+            self.save(self._current_step)
 
-        if self.current_step % self.validation_steps == 0:
+        if self._current_step % self.validation_steps == 0:
             with apply_ema_maybe(self._ema_optimizer):
-                self.validate_and_log(self.model, self.current_step)
+                self.validate_and_log(self.model, self._current_step)
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -307,7 +281,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             self.load_dcp_checkpoint(self.resume_from_dir)
 
         with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self.current_step)
+            self.validate_and_log(self.model, self._current_step)
 
         progress = Progress(
             *self.get_progress_columns(),
@@ -316,15 +290,15 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         task = progress.add_task(
             "Training",
             total=self.train_steps,
-            completed=self.current_step,
+            completed=self._current_step,
         )
 
         with self.status_bar("SFT Training"), progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
-                if hasattr(self.dataloader.sampler, "set_epoch"):
-                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
-                for i, batch in enumerate(self.dataloader):
+                if hasattr(self._dataloader.sampler, "set_epoch"):
+                    self._dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
+                for i, batch in enumerate(self._dataloader):
                     with dump_if_failed(logger, batch):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
                         self.transformer.set_requires_gradient_sync(is_sync_step)
@@ -342,12 +316,12 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                     self._after_sync_step(total_loss)
                     progress.advance(task)
 
-                    if self.current_step >= self.train_steps:
+                    if self._current_step >= self.train_steps:
                         break
 
         with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(
-                self.get_checkpoint_dir(self.current_step) + "_final"
+                self.get_checkpoint_dir(self._current_step) + "_final"
             )
 
         console.rule("[bold green]Training completed[/bold green]")
@@ -375,8 +349,8 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                 batch = deep_move_to_device(batch, self.device)
                 loss = self.train_step(batch)
                 loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                self._optimizer.step()
+                self._optimizer.zero_grad()
                 elapsed_time = time.time() - start_time
                 logger.info(
                     f"Successfully trained with latent length {current_len} in {elapsed_time:.2f} seconds."

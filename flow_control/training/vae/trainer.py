@@ -118,68 +118,18 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     }
 
     # ------------------------------ Lazy state ------------------------------ #
-    _vae_model: Any = None
+    _vae_model: Any
     _ref_vae_model: Any = None
-    _loss_module: RGBAVAELoss | None = None
-    _dataloader: StatefulDataLoader | None = None
+    _loss_module: RGBAVAELoss
+    _dataloader: StatefulDataLoader
     _validation_dataloader: StatefulDataLoader | None = None
-    _optimizer_gen: torch.optim.Optimizer | None = None
+    _optimizer_gen: torch.optim.Optimizer
     _optimizer_disc: torch.optim.Optimizer | None = None
-    _scheduler_gen: Any = None
+    _scheduler_gen: Any
     _scheduler_disc: Any = None
     _current_step: int = 0
 
     # ------------------------------ Properties ------------------------------ #
-
-    @property
-    def vae_model(self) -> Any:
-        if self._vae_model is None:
-            raise RuntimeError("VAE model not loaded yet.")
-        return self._vae_model
-
-    @property
-    def loss_module(self) -> RGBAVAELoss:
-        if self._loss_module is None:
-            raise RuntimeError("Loss module not loaded yet.")
-        return self._loss_module
-
-    @property
-    def dataloader(self) -> StatefulDataLoader:
-        if self._dataloader is None:
-            raise RuntimeError("Dataloader not created yet.")
-        return self._dataloader
-
-    @property
-    def optimizer_gen(self) -> torch.optim.Optimizer:
-        if self._optimizer_gen is None:
-            raise RuntimeError("Generator optimizer not created yet.")
-        return self._optimizer_gen
-
-    @property
-    def optimizer_disc(self) -> torch.optim.Optimizer:
-        if self._optimizer_disc is None:
-            raise RuntimeError("Discriminator optimizer not created yet.")
-        return self._optimizer_disc
-
-    @property
-    def scheduler_gen(self):
-        if self._scheduler_gen is None:
-            raise RuntimeError("Generator scheduler not created yet.")
-        return self._scheduler_gen
-
-    @property
-    def scheduler_disc(self):
-        if self._scheduler_disc is None:
-            raise RuntimeError("Discriminator scheduler not created yet.")
-        return self._scheduler_disc
-
-    @property
-    def current_step(self) -> int:
-        return self._current_step
-
-    @current_step.setter
-    def current_step(self, value: int):
-        self._current_step = value
 
     @property
     def grad_acc_steps(self) -> int:
@@ -187,17 +137,17 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
     @property
     def total_epochs(self) -> int:
-        steps_per_epoch = len(self.dataloader) // self.grad_acc_steps
+        steps_per_epoch = len(self._dataloader) // self.grad_acc_steps
         if steps_per_epoch == 0:
             return 1
         return math.ceil(self.train_steps / steps_per_epoch)
 
     @property
     def current_epoch(self) -> int:
-        steps_per_epoch = len(self.dataloader) // self.grad_acc_steps
+        steps_per_epoch = len(self._dataloader) // self.grad_acc_steps
         if steps_per_epoch == 0:
             return 0
-        return self.current_step // steps_per_epoch
+        return self._current_step // steps_per_epoch
 
     # ------------------------------- Setup ---------------------------------- #
 
@@ -312,7 +262,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
     def make_optimizer_and_scheduler(self) -> None:
         """Create optimizers for generator (VAE) and discriminator."""
-        gen_params = [p for p in self.vae_model.parameters() if p.requires_grad]
+        gen_params = [p for p in self._vae_model.parameters() if p.requires_grad]
         num_gen_params = sum(p.numel() for p in gen_params)
         if num_gen_params == 0:
             raise RuntimeError("No trainable parameters in VAE.")
@@ -327,7 +277,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self.gan_start_step is not None:
             disc_params = [
                 p
-                for p in self.loss_module.discriminator.parameters()
+                for p in self._loss_module.discriminator.parameters()
                 if p.requires_grad
             ]
             self._optimizer_disc = parse_optimizer(
@@ -384,50 +334,50 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     def state_dict(self) -> dict[str, Any]:
         opts = StateDictOptions(strict=False, ignore_frozen_params=True)
         state: dict[str, Any] = {
-            "vae": get_model_state_dict(self.vae_model, options=opts),
+            "vae": get_model_state_dict(self._vae_model, options=opts),
             "optimizer_gen": get_optimizer_state_dict(
-                self.vae_model, self.optimizer_gen, options=opts
+                self._vae_model, self._optimizer_gen, options=opts
             ),
-            "scheduler_gen": self.scheduler_gen.state_dict(),
-            "dataloader": self.dataloader.state_dict(),
-            "current_step": self.current_step,
+            "scheduler_gen": self._scheduler_gen.state_dict(),
+            "dataloader": self._dataloader.state_dict(),
+            "current_step": self._current_step,
         }
         if self._optimizer_disc is not None:
             state["discriminator"] = get_model_state_dict(
-                self.loss_module.discriminator, options=opts
+                self._loss_module.discriminator, options=opts
             )
             state["optimizer_disc"] = get_optimizer_state_dict(
-                self.loss_module.discriminator, self.optimizer_disc, options=opts
+                self._loss_module.discriminator, self._optimizer_disc, options=opts
             )
-            state["scheduler_disc"] = self.scheduler_disc.state_dict()
+            state["scheduler_disc"] = self._scheduler_disc.state_dict()
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        set_model_state_dict(self.vae_model, state_dict["vae"], options=opts)
+        set_model_state_dict(self._vae_model, state_dict["vae"], options=opts)
         set_optimizer_state_dict(
-            self.vae_model,
-            self.optimizer_gen,
+            self._vae_model,
+            self._optimizer_gen,
             state_dict["optimizer_gen"],
             options=opts,
         )
-        self.scheduler_gen.load_state_dict(state_dict["scheduler_gen"])
-        self.dataloader.load_state_dict(state_dict["dataloader"])
-        self.current_step = state_dict["current_step"]
+        self._scheduler_gen.load_state_dict(state_dict["scheduler_gen"])
+        self._dataloader.load_state_dict(state_dict["dataloader"])
+        self._current_step = state_dict["current_step"]
 
         if self._optimizer_disc is not None and "discriminator" in state_dict:
             set_model_state_dict(
-                self.loss_module.discriminator,
+                self._loss_module.discriminator,
                 state_dict["discriminator"],
                 options=opts,
             )
             set_optimizer_state_dict(
-                self.loss_module.discriminator,
-                self.optimizer_disc,
+                self._loss_module.discriminator,
+                self._optimizer_disc,
                 state_dict["optimizer_disc"],
                 options=opts,
             )
-            self.scheduler_disc.load_state_dict(state_dict["scheduler_disc"])
+            self._scheduler_disc.load_state_dict(state_dict["scheduler_disc"])
 
     # ------------------------------ Training -------------------------------- #
 
@@ -484,7 +434,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             composed = target
 
         # -- Encode --
-        posterior_all: DiagonalGaussianDistribution = self.vae_model.encode(
+        posterior_all: DiagonalGaussianDistribution = self._vae_model.encode(
             composed
         ).latent_dist
 
@@ -518,32 +468,32 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             posterior = posterior_all
 
         # -- Sample and decode --
-        vae: Any = self.vae_model  # escape for dynamic attr access
+        vae: Any = self._vae_model  # escape for dynamic attr access
         z = posterior.sample()
         pred = vae.decode(z).sample
 
         # -- Losses --
-        l2_loss = self.loss_module.reconstruction_loss(pred, target)
+        l2_loss = self._loss_module.reconstruction_loss(pred, target)
         loss = l2_loss
         metrics["train/l2_loss"] = l2_loss.detach()
 
         if self.lpips_scale is not None:
-            p_loss = self.loss_module.perceptual_loss(pred, target)
+            p_loss = self._loss_module.perceptual_loss(pred, target)
             loss = loss + self.lpips_scale * p_loss
             metrics["train/p_loss"] = p_loss.detach()
 
         if self.kl_scale is not None:
-            kl_norm = self.loss_module.kl_loss(posterior)
+            kl_norm = self._loss_module.kl_loss(posterior)
             loss = loss + self.kl_scale * kl_norm
             metrics["train/kl_norm"] = kl_norm.detach()
 
         if use_ref_kl:
             assert posterior_black is not None and ref_posterior_black is not None
             assert posterior_white is not None and ref_posterior_white is not None
-            kl_ref_black = self.loss_module.kl_loss(
+            kl_ref_black = self._loss_module.kl_loss(
                 posterior_black, ref_posterior_black
             )
-            kl_ref_white = self.loss_module.kl_loss(
+            kl_ref_white = self._loss_module.kl_loss(
                 posterior_white, ref_posterior_white
             )
             kl_ref = (kl_ref_black + kl_ref_white) / 2
@@ -552,9 +502,12 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             metrics["train/kl_ref"] = kl_ref.detach()
 
         # -- Generator adversarial loss (after gan_start_step) --
-        if self.gan_start_step is not None and self.current_step >= self.gan_start_step:
-            self.loss_module.requires_grad_(False)
-            g_loss = self.loss_module.generator_loss(
+        if (
+            self.gan_start_step is not None
+            and self._current_step >= self.gan_start_step
+        ):
+            self._loss_module.requires_grad_(False)
+            g_loss = self._loss_module.generator_loss(
                 l2_loss,
                 pred,
                 vae.decoder.conv_out.weight,
@@ -573,10 +526,10 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         metrics: dict[str, torch.Tensor],
     ) -> None:
         """Run discriminator forward+backward for one micro-batch (if active)."""
-        if self.gan_start_step is None or self.current_step < self.gan_start_step:
+        if self.gan_start_step is None or self._current_step < self.gan_start_step:
             return
-        self.loss_module.discriminator.set_requires_gradient_sync(is_sync_step)  # type: ignore[union-attr]
-        d_loss = self.loss_module.discriminator_loss(target, pred)
+        self._loss_module.discriminator.set_requires_gradient_sync(is_sync_step)  # type: ignore[union-attr]
+        d_loss = self._loss_module.discriminator_loss(target, pred)
         d_loss = d_loss * self.discriminator_loss_weight
         d_loss_scaled = d_loss / self.grad_acc_steps
         d_loss_scaled.backward()
@@ -586,37 +539,35 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         """Optimizer steps, logging, checkpointing after a gradient sync."""
         if self.clip_grad_norm > 0.0:
             torch.nn.utils.clip_grad_norm_(
-                self.vae_model.parameters(), self.clip_grad_norm
+                self._vae_model.parameters(), self.clip_grad_norm
             )
 
-        self.optimizer_gen.step()
-        self.scheduler_gen.step()
-        self.optimizer_gen.zero_grad()
+        self._optimizer_gen.step()
+        self._scheduler_gen.step()
+        self._optimizer_gen.zero_grad()
 
-        if self.gan_start_step is not None and self.current_step >= self.gan_start_step:
-            self.optimizer_disc.step()
-            self.scheduler_disc.step()
-            self.optimizer_disc.zero_grad()
-
-        self.current_step += 1
-        metrics["train/lr_gen"] = torch.tensor(
-            float(self.scheduler_gen.get_last_lr()[0])
-        )
-        self.log_metrics(
-            {
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in metrics.items()
-            },
-            step=self.current_step,
-        )
-
-        if (self.current_step % self.checkpoint_steps == 0) or (
-            self.current_step == self.train_steps
+        if (
+            self._optimizer_disc is not None
+            and self.gan_start_step is not None
+            and self._current_step >= self.gan_start_step
         ):
-            self.save(self.current_step)
+            self._optimizer_disc.step()
+            self._scheduler_disc.step()
+            self._optimizer_disc.zero_grad()
 
-        if self.current_step % self.validation_steps == 0:
-            self.validate_vae(self.current_step)
+        self._current_step += 1
+        metrics["train/lr_gen"] = torch.tensor(
+            float(self._scheduler_gen.get_last_lr()[0])
+        )
+        self.log_metrics(metrics=metrics, step=self._current_step)
+
+        if (self._current_step % self.checkpoint_steps == 0) or (
+            self._current_step == self.train_steps
+        ):
+            self.save(self._current_step)
+
+        if self._current_step % self.validation_steps == 0:
+            self.validate_vae(self._current_step)
 
     def check_loss(self, loss: torch.Tensor) -> None:
         if not torch.isfinite(loss):
@@ -634,14 +585,14 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             return
 
         logger.info(f"Validating at step {step}...")
-        self.vae_model.eval()
+        self._vae_model.eval()
 
         for batch in self._validation_dataloader:
             batch = deep_move_to_device(batch, self.device)
             target = self._prepare_target(batch)
 
-            pred = self.vae_model.decode(
-                self.vae_model.encode(target).latent_dist.sample()
+            pred = self._vae_model.decode(
+                self._vae_model.encode(target).latent_dist.sample()
             ).sample
 
             # Convert back to [0, 1]
@@ -658,7 +609,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             key = batch.get("__key__", "unknown")
             self.log_image(image, key, step=step, name="vae_validation")
 
-        self.vae_model.train()
+        self._vae_model.train()
         logger.info(f"Completed validation at step {step}.")
 
     # ------------------------------- Main loop ------------------------------ #
@@ -677,7 +628,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self.resume_from_dir is not None:
             self.load_dcp_checkpoint(self.resume_from_dir)
 
-        self.validate_vae(self.current_step)
+        self.validate_vae(self._current_step)
 
         progress = Progress(
             *self.get_progress_columns(),
@@ -686,23 +637,23 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         task = progress.add_task(
             "Training",
             total=self.train_steps,
-            completed=self.current_step,
+            completed=self._current_step,
         )
 
         with self.status_bar("VAE Training"), progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
-                if hasattr(self.dataloader.sampler, "set_epoch"):
-                    self.dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
+                if hasattr(self._dataloader.sampler, "set_epoch"):
+                    self._dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
 
-                for i, batch in enumerate(self.dataloader):
+                for i, batch in enumerate(self._dataloader):
                     with dump_if_failed(logger, batch):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
                         batch = deep_move_to_device(batch, self.device)
                         target = self._prepare_target(batch)
 
                         # Generator forward + backward
-                        self.vae_model.set_requires_gradient_sync(is_sync_step)
+                        self._vae_model.set_requires_gradient_sync(is_sync_step)
                         gen_loss, target_d, pred_d, metrics = self.train_step(target)
                         self.check_loss(gen_loss)
                         (gen_loss / self.grad_acc_steps).backward()
@@ -716,7 +667,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
                     self._after_sync_step(metrics)
                     progress.advance(task)
 
-                    if self.current_step >= self.train_steps:
+                    if self._current_step >= self.train_steps:
                         break
 
-        self.save_dcp_checkpoint(self.get_checkpoint_dir(self.current_step) + "_final")
+        self.save_dcp_checkpoint(self.get_checkpoint_dir(self._current_step) + "_final")

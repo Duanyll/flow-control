@@ -26,7 +26,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
@@ -145,10 +144,10 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     _rollout_needs_trajectory: bool = False
 
     # ------------------------------- Lazy state --------------------------------- #
-    _optimizer: torch.optim.Optimizer | None = None
-    _scheduler: Any = None
+    _optimizer: torch.optim.Optimizer
+    _scheduler: Any
     _ema_optimizer: EMAOptimizer | None = None
-    _old_ema: EMAOptimizer | None = None
+    _old_ema: EMAOptimizer
     _init_backup_optimizer: InitBackupOptimizer | None = None
     _current_step: int = 0
     _current_epoch: int = 0
@@ -158,46 +157,6 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     @property
     def transformer(self):
         return self.model.transformer
-
-    @property
-    def dataloader(self) -> StatefulDataLoader:
-        if self._dataloader is None:
-            raise RuntimeError("Dataloader not created yet.")
-        return self._dataloader
-
-    @property
-    def optimizer(self) -> torch.optim.Optimizer:
-        if self._optimizer is None:
-            raise RuntimeError("Optimizer not created yet.")
-        return self._optimizer
-
-    @property
-    def scheduler(self):
-        if self._scheduler is None:
-            raise RuntimeError("Scheduler not created yet.")
-        return self._scheduler
-
-    @property
-    def current_step(self) -> int:
-        return self._current_step
-
-    @current_step.setter
-    def current_step(self, value: int):
-        self._current_step = value
-
-    @property
-    def current_epoch(self) -> int:
-        return self._current_epoch
-
-    @current_epoch.setter
-    def current_epoch(self, value: int):
-        self._current_epoch = value
-
-    @property
-    def old_ema(self) -> EMAOptimizer:
-        if self._old_ema is None:
-            raise RuntimeError("Old EMA optimizer not created yet.")
-        return self._old_ema
 
     @property
     def grad_acc_steps(self) -> int:
@@ -221,7 +180,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable "
             "parameters."
         )
-        self._scheduler = parse_scheduler(self.scheduler_config, self.optimizer)
+        self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
 
         # Old-teacher EMA (stepped once per epoch)
         self._old_ema = EMAOptimizer(params, self.ema_old)
@@ -250,15 +209,15 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         state: dict[str, Any] = {
             "transformer": transformer_sd,
             "optimizer": get_optimizer_state_dict(
-                self.transformer, self.optimizer, options=opts
+                self.transformer, self._optimizer, options=opts
             ),
-            "dataloader": self.dataloader.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "current_step": self.current_step,
-            "current_epoch": self.current_epoch,
+            "dataloader": self._dataloader.state_dict(),
+            "scheduler": self._scheduler.state_dict(),
+            "current_step": self._current_step,
+            "current_epoch": self._current_epoch,
         }
         state["optim_ema_old"] = get_optimizer_state_dict(
-            self.transformer, self.old_ema, options=opts
+            self.transformer, self._old_ema, options=opts
         )
         if self._ema_optimizer is not None:
             state["optim_ema"] = get_optimizer_state_dict(
@@ -275,14 +234,14 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
         set_optimizer_state_dict(
             self.transformer,
-            self.optimizer,
+            self._optimizer,
             state_dict["optimizer"],
             options=opts,
         )
         if "optim_ema_old" in state_dict:
             set_optimizer_state_dict(
                 self.transformer,
-                self.old_ema,
+                self._old_ema,
                 state_dict["optim_ema_old"],
                 options=opts,
             )
@@ -303,10 +262,10 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 state_dict["optim_init_backup"],
                 options=opts,
             )
-        self.dataloader.load_state_dict(state_dict["dataloader"])
-        self.scheduler.load_state_dict(state_dict["scheduler"])
-        self.current_step = state_dict["current_step"]
-        self.current_epoch = state_dict.get("current_epoch", 0)
+        self._dataloader.load_state_dict(state_dict["dataloader"])
+        self._scheduler.load_state_dict(state_dict["scheduler"])
+        self._current_step = state_dict["current_step"]
+        self._current_epoch = state_dict.get("current_epoch", 0)
 
     # ------------------------------- Reference model ---------------------------- #
 
@@ -384,7 +343,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             batch["noisy_latents"] = xt
 
             # Old-teacher prediction (no grad)
-            with torch.no_grad(), apply_ema_maybe(self.old_ema):
+            with torch.no_grad(), apply_ema_maybe(self._old_ema):
                 old_prediction = self._predict(batch, t, neg_for_cfg).detach()
 
             # Reference model prediction (no grad)
@@ -610,7 +569,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
         with progress, torch.no_grad():
             self._prepare_cached_targets(rollouts, flat_items, progress, prepare_task)
-            with apply_ema_maybe(self.old_ema):
+            with apply_ema_maybe(self._old_ema):
                 self._precompute_predictions(rollouts, flat_items, progress, old_task)
 
             if self.kl_beta > 0:
@@ -632,13 +591,13 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             torch.nn.utils.clip_grad_norm_(
                 self.transformer.parameters(), self.clip_grad_norm
             )
-        self.optimizer.step()
+        self._optimizer.step()
         if self._ema_optimizer is not None:
             self._ema_optimizer.step()
         if self._init_backup_optimizer is not None:
             self._init_backup_optimizer.step()
-        self.scheduler.step()
-        self.optimizer.zero_grad()
+        self._scheduler.step()
+        self._optimizer.zero_grad()
 
     def _train_on_rollouts(
         self,
@@ -670,7 +629,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 if (
                     len(train_items) % self.grad_acc_steps != 0
                     and self.is_main_process
-                    and self.current_epoch == 0
+                    and self._current_epoch == 0
                 ):
                     logger.warning(
                         "Local loss count (%d) is not divisible by "
@@ -705,8 +664,8 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                         progress.advance(train_task)
 
                     self._optimizer_step()
-                    self.current_step += 1
-                    self.flush_aggregated_metrics(self.current_step)
+                    self._current_step += 1
+                    self.flush_aggregated_metrics(self._current_step)
 
     # -------------------------------- Main loop --------------------------------- #
 
@@ -727,7 +686,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             self.load_dcp_checkpoint(self.resume_from_dir)
 
         with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self.current_step, reward=self.reward)
+            self.validate_and_log(self.model, self._current_step, reward=self.reward)
 
         logger.info(
             "NFT rollouts in each epoch will randomly select %d unique prompts "
@@ -753,44 +712,44 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             console=console,
         )
         task = progress.add_task(
-            "NFT Training", total=self.train_epochs, completed=self.current_epoch
+            "NFT Training", total=self.train_epochs, completed=self._current_epoch
         )
 
         with self.status_bar("NFT Training"), progress:
-            while self.current_epoch < self.train_epochs:
-                logger.debug(f"Epoch {self.current_epoch}: starting rollout phase...")
-                with apply_ema_maybe(self.old_ema):
-                    rollouts = self._collect_rollouts(self.current_epoch)
-                advantages = self._compute_advantages(rollouts, step=self.current_step)
+            while self._current_epoch < self.train_epochs:
+                logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
+                with apply_ema_maybe(self._old_ema):
+                    rollouts = self._collect_rollouts(self._current_epoch)
+                advantages = self._compute_advantages(rollouts, step=self._current_step)
 
-                logger.debug(f"Epoch {self.current_epoch}: starting training phase...")
+                logger.debug(f"Epoch {self._current_epoch}: starting training phase...")
                 self._train_on_rollouts(rollouts, advantages)
 
                 # Step old-teacher EMA once per epoch
-                self.old_ema.step()
+                self._old_ema.step()
 
-                self.current_epoch += 1
-                progress.update(task, completed=self.current_epoch)
+                self._current_epoch += 1
+                progress.update(task, completed=self._current_epoch)
 
                 del rollouts, advantages
                 torch.cuda.empty_cache()
 
                 if self.checkpoint_epochs > 0 and (
-                    self.current_epoch % self.checkpoint_epochs == 0
-                    or self.current_epoch == self.train_epochs
+                    self._current_epoch % self.checkpoint_epochs == 0
+                    or self._current_epoch == self.train_epochs
                 ):
-                    self.save(self.current_step)
+                    self.save(self._current_step)
 
                 if (
                     self.validation_epochs > 0
-                    and self.current_epoch % self.validation_epochs == 0
+                    and self._current_epoch % self.validation_epochs == 0
                 ):
                     with apply_ema_maybe(self._ema_optimizer):
                         self.validate_and_log(
-                            self.model, self.current_step, reward=self.reward
+                            self.model, self._current_step, reward=self.reward
                         )
 
         with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(
-                self.get_checkpoint_dir(self.current_step) + "_final"
+                self.get_checkpoint_dir(self._current_step) + "_final"
             )
