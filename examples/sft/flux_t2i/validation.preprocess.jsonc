@@ -10,10 +10,7 @@
   "processing_mode": "inference",
   "dataset": {
     "type": "csv",
-    "path": "examples/sft/flux_t2i/validation.csv",
-    "column_types": {
-      "prompt": "str"
-    }
+    "path": "examples/sft/flux_t2i/validation.csv"
   },
   "processor": {
     "task": "t2i",

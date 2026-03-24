@@ -1,6 +1,7 @@
 from typing import Literal
 
 import torch
+from diffusers import LongCatImageTransformer2DModel
 
 from flow_control.utils.hf_model import HfModelLoader
 
@@ -16,7 +17,7 @@ class LongCatEditBatch(LongCatBatch):
 
 class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
     type: Literal["edit"] = "edit"
-    hf_model: HfModelLoader = HfModelLoader(
+    hf_model: HfModelLoader[LongCatImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="LongCatImageTransformer2DModel",
         pretrained_model_id="meituan-longcat/LongCat-Image-Edit",

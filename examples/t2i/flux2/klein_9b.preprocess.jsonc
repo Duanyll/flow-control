@@ -10,10 +10,7 @@
   "processing_mode": "inference",
   "dataset": {
     "type": "csv",
-    "path": "./examples/t2i_en.csv",
-    "column_types": {
-      "prompt": "str"
-    }
+    "path": "./examples/t2i_en.csv"
   },
   "processor": {
     "task": "t2i",

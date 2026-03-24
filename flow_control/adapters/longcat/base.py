@@ -75,7 +75,7 @@ class LongCatAdapter[TBatch: LongCatBatch](
         txt_ids = torch.zeros((length, 3))
         txt_ids[:, 0] = index
         txt_ids[:, 1] = txt_ids[:, 1] + torch.arange(length) + h_offset
-        txt_ids[:, 2] = txt_ids[:, 1] + torch.arange(length) + w_offset
+        txt_ids[:, 2] = txt_ids[:, 2] + torch.arange(length) + w_offset
         return txt_ids.to(device=self.device)
 
     def _make_img_ids(

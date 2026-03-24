@@ -11,11 +11,7 @@
   "dataset": {
     "type": "csv",
     "path": "./examples/tie_en.csv",
-    "attachment_dir": "./examples/assets",
-    "column_types": {
-      "prompt": "str",
-      "reference_images": "attachment_list"
-    }
+    "attachment_dir": "./examples/assets"
   },
   "processor": {
     "task": "tie",
