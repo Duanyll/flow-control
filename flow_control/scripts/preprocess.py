@@ -186,7 +186,11 @@ def run(config_path: str) -> None:
         ),
     )
 
-    pipeline.run()
+    result = pipeline.run()
+    if result.sink_success == 0:
+        raise RuntimeError(
+            "Pipeline failed: No items were successfully processed and saved."
+        )
 
 
 def main():

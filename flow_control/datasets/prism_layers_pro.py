@@ -46,9 +46,9 @@ class PrismLayersProDataset(Dataset):
         row_data = table.slice(row, 1).to_pylist()[0]
         for k, v in row_data.items():
             if isinstance(v, dict) and "bytes" in v:
-                row_data[k] = pil_to_tensor(
-                    Image.open(io.BytesIO(v["bytes"])).convert("RGBA")
-                ).to(torch.bfloat16)
+                row_data[k] = pil_to_tensor(Image.open(io.BytesIO(v["bytes"]))).to(
+                    torch.bfloat16
+                )
 
         h, w = row_data["whole_image"].shape[1:3]
         output = {

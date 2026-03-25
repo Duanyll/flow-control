@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from flow_control.utils.logging import get_logger
 from flow_control.utils.resize import resize_to_multiple_of
-from flow_control.utils.tensor import tensor_to_pil
+from flow_control.utils.tensor import remove_alpha_channel, tensor_to_pil
 
 logger = get_logger(__name__)
 
@@ -118,6 +118,7 @@ class LLMClient(BaseModel):
                 return model_name
 
     def _tensor_to_base64url(self, tensor: torch.Tensor) -> str:
+        tensor = remove_alpha_channel(tensor)
         tensor = resize_to_multiple_of(
             tensor,
             self.image_multiple_of,

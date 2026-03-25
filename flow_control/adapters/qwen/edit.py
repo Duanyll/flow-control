@@ -23,7 +23,7 @@ class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",
-        pretrained_model_id="Qwen/Qwen-Image-Edit-2509",
+        pretrained_model_id="Qwen/Qwen-Image-Edit",
         subfolder="transformer",
         dtype=torch.bfloat16,
     )

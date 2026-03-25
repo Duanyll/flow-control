@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, TypeVar
 
 import torch
-from einops import rearrange, repeat
+from einops import rearrange
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.utils.coercion import JsonBeforeValidator
@@ -13,6 +13,7 @@ from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
 )
+from flow_control.utils.tensor import ensure_alpha_channel, remove_alpha_channel
 from flow_control.utils.types import TorchDevice
 
 from .components.encoder import Encoder, GenerativeEncoder, T5TextEncoder
@@ -206,10 +207,21 @@ class BaseProcessor[
         noisy_latents = batch["noisy_latents"] = self._pack_latents(latents)
         return noisy_latents
 
+    def _adapt_image_channels(self, image: torch.Tensor) -> torch.Tensor:
+        """Adapt image channels to match the VAE's expected input channels."""
+        expected = self.vae.in_channels
+        actual = image.shape[1]
+        if actual == expected:
+            return image
+        if expected == 3 and actual == 4:
+            return remove_alpha_channel(image)
+        if expected == 4 and actual == 3:
+            return ensure_alpha_channel(image)
+        return image
+
     @torch.no_grad()
     def encode_latents(self, image: torch.Tensor) -> torch.Tensor:
-        if image.ndim == 3:
-            image = repeat(image, "b h w -> b c h w", c=3)
+        image = self._adapt_image_channels(image)
         latents = self.vae.encode(image)
         latents = self._pack_latents(latents)
         return latents

@@ -19,6 +19,7 @@ from transformers import (
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.resize import resize_to_multiple_of, resize_to_resolution
+from flow_control.utils.tensor import remove_alpha_channel
 from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
@@ -281,7 +282,9 @@ class Qwen25VLEncoder(
 
         max_length = self.tokenizer_max_length
         if images:
-            images = [self._resize_image(image) for image in images]
+            images = [
+                remove_alpha_channel(self._resize_image(image)) for image in images
+            ]
 
             # FIXME: There is something wrong with LongCat-Image-Edit when caculating
             # the required number of image padding tokens. The behavior is strange in
@@ -358,6 +361,8 @@ class Qwen25VLEncoder(
         vl_processor = self.vl_processor.model
         model = self.model
 
+        if images:
+            images = [remove_alpha_channel(image) for image in images]
         text_input = self._format_prompt(prompt, images, system_prompt)
         model_inputs = vl_processor(
             text=text_input,
@@ -469,6 +474,8 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
         system_prompt: str | None = None,
     ) -> Any:
         cleaned_prompt = prompt.replace("[IMG]", "")
+        if images:
+            images = [remove_alpha_channel(image) for image in images]
         messages = [
             {
                 "role": "system",

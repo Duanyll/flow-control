@@ -23,6 +23,10 @@ logger = get_logger(__name__)
 class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     endpoint: str | None = None
 
+    @property
+    def in_channels(self) -> int:
+        return self.model.config["in_channels"]
+
     def load_model(self, device: torch.device, frozen: bool = True):
         if self.endpoint is not None:
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")

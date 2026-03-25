@@ -145,11 +145,34 @@ def run(config_path: str) -> None:
     if launch_config.preprocess_config:
         try_preprocess_data(launch_config.preprocess_config)
 
-    num_processes = (
-        launch_config.devices
-        if isinstance(launch_config.devices, int)
-        else len(launch_config.devices)
-    )
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        num_gpus = len(result.stdout.strip().splitlines())
+    except Exception as e:
+        print(f"[red]Error detecting GPUs with nvidia-smi: {e}[/red]")
+        sys.exit(1)
+    print(f"[blue]Detected {num_gpus} GPUs with nvidia-smi.[/blue]")
+
+    if launch_config.devices == "all":
+        num_processes = num_gpus
+    elif isinstance(launch_config.devices, int):
+        if launch_config.devices > num_gpus:
+            print(
+                f"[red]Error: 'devices' is set to {launch_config.devices} but only {num_gpus} GPUs are available.[/red]"
+            )
+            sys.exit(1)
+        num_processes = launch_config.devices
+    elif isinstance(launch_config.devices, list):
+        num_processes = len(launch_config.devices)
+    else:
+        print(f"[red]Invalid 'devices' configuration: {launch_config.devices}[/red]")
+        sys.exit(1)
+
     cmd = [
         "torchrun",
         "--nproc_per_node",

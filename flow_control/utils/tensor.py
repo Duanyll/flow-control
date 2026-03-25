@@ -92,17 +92,23 @@ def deep_cast_float_dtype(data, dtype: torch.dtype):
     )
 
 
-def pil_to_tensor(image) -> torch.Tensor:
+def pil_to_tensor(image: Image.Image) -> torch.Tensor:
     """
     Convert a PIL Image to a normalized torch Tensor.
     Args:
-        image: PIL Image
+        image: PIL Image (any mode — non-RGB/RGBA modes are auto-converted)
     Returns:
         Tensor of shape (1, C, H, W) with values in [0, 1]
     """
-    image = torch.from_numpy(np.array(image)) / 255.0  # Normalize to [0, 1]
-    image = rearrange(image, "h w c -> 1 c h w")
-    return image
+    if image.mode in ("RGBA", "RGB"):
+        pass  # keep as-is
+    elif image.mode in ("LA", "PA"):
+        image = image.convert("RGBA")
+    else:
+        image = image.convert("RGB")
+    image_np = torch.from_numpy(np.array(image)) / 255.0  # Normalize to [0, 1]
+    image_tensor = rearrange(image_np, "h w c -> 1 c h w")
+    return image_tensor
 
 
 def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
