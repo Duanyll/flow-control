@@ -162,16 +162,18 @@ def _make_checkerboard(
     return rearrange(board.float() * (color_a - color_b) + color_b, "h w -> 1 1 h w")
 
 
+BlendBackground = Literal["auto", "checkerboard"] | tuple[float, float, float]
+
+
 def remove_alpha_channel(
     image: torch.Tensor,
-    background_color: tuple[float, float, float]
-    | Literal["auto", "checkerboard"] = "auto",
+    blend_background: BlendBackground = "auto",
 ) -> torch.Tensor:
     """
     Remove the alpha channel from the input image tensor by compositing it over a background color.
     Args:
         image: Tensor of shape (B, 4, H, W) or (B, 3, H, W)
-        background_color: Tuple of (R, G, B) values in [0, 1], "auto" to use
+        blend_background: Tuple of (R, G, B) values in [0, 1], "auto" to use
             content-aware background, or "checkerboard" for a gray checkerboard
     Returns:
         Tensor of shape (B, 3, H, W)
@@ -180,24 +182,24 @@ def remove_alpha_channel(
         return image  # No alpha channel to remove
     rgb = image[:, :3, :, :]
     alpha = image[:, 3:4, :, :]
-    if background_color == "checkerboard":
+    if blend_background == "checkerboard":
         bg = _make_checkerboard(
             image.shape[2], image.shape[3], device=image.device
         ).expand(-1, 3, -1, -1)
         composited = rgb * alpha + bg * (1 - alpha)
         return composited
-    if background_color == "auto":
+    if blend_background == "auto":
         # Get average brightness of non-transparent pixels
         mask = alpha > 0.01
         if mask.sum() == 0:
-            background_color = (1.0, 1.0, 1.0)  # Default to white if fully transparent
+            blend_background = (1.0, 1.0, 1.0)  # Default to white if fully transparent
         else:
             avg_brightness = (rgb * mask).sum(dim=(0, 2, 3)) / mask.sum()
             # Use black or white based on brightness
-            background_color = (
+            blend_background = (
                 (0.0, 0.0, 0.0) if avg_brightness.mean() > 0.5 else (1.0, 1.0, 1.0)
             )
-    background = torch.tensor(background_color, device=image.device)
+    background = torch.tensor(blend_background, device=image.device)
     background = repeat(
         background, "c -> b c h w", b=image.shape[0], h=image.shape[2], w=image.shape[3]
     )

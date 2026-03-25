@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from flow_control.utils.logging import get_logger
 from flow_control.utils.resize import resize_to_multiple_of
-from flow_control.utils.tensor import remove_alpha_channel, tensor_to_pil
+from flow_control.utils.tensor import (
+    BlendBackground,
+    remove_alpha_channel,
+    tensor_to_pil,
+)
 
 logger = get_logger(__name__)
 
@@ -47,9 +51,11 @@ class LLMClient(BaseModel):
     timeout: int = 120
     model: str = "auto"
     max_tokens: int = 2048
-    temperature: float = 0.7
+    temperature: float | None = None
     max_concurrency: int = 0  # 0 means no limit
+    enable_thinking: bool | None = None
     extra_generate_kwargs: dict[str, Any] = {}
+    blend_background: BlendBackground = "auto"
 
     image_multiple_of: int = 16
     image_max_pixels: int = 1024 * 1024
@@ -118,7 +124,7 @@ class LLMClient(BaseModel):
                 return model_name
 
     def _tensor_to_base64url(self, tensor: torch.Tensor) -> str:
-        tensor = remove_alpha_channel(tensor)
+        tensor = remove_alpha_channel(tensor, blend_background=self.blend_background)
         tensor = resize_to_multiple_of(
             tensor,
             self.image_multiple_of,
@@ -131,6 +137,36 @@ class LLMClient(BaseModel):
         img_bytes = buffered.getvalue()
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
         return f"data:image/png;base64,{img_b64}"
+
+    def _build_payload(
+        self, model_name: str, messages: list[Message]
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+        }
+
+        if self.enable_thinking is not None:
+            chat_template_kwargs = self.extra_generate_kwargs.get(
+                "chat_template_kwargs"
+            )
+            if chat_template_kwargs is None:
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": self.enable_thinking
+                }
+            elif "enable_thinking" not in chat_template_kwargs:
+                payload["chat_template_kwargs"] = {
+                    **chat_template_kwargs,
+                    "enable_thinking": self.enable_thinking,
+                }
+
+        payload.update(self.extra_generate_kwargs)
+
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        return payload
 
     async def generate(
         self,
@@ -169,13 +205,7 @@ class LLMClient(BaseModel):
             else:
                 messages.append({"role": "user", "content": user_prompt})
 
-            payload = {
-                "model": model_name,
-                "messages": messages,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
-                **self.extra_generate_kwargs,
-            }
+            payload = self._build_payload(model_name, messages)
 
             async with session.post(url, json=payload) as resp:
                 resp.raise_for_status()
