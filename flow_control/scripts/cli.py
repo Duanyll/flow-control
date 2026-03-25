@@ -22,6 +22,22 @@ def main():
             "config_path", type=str, help="Path to the configuration file."
         )
 
+    export_sub = subparsers.add_parser(
+        "export", help="Export DCP checkpoints to HuggingFace format."
+    )
+    export_sub.add_argument(
+        "config_path", type=str, help="Path to the training configuration file."
+    )
+    export_sub.add_argument(
+        "--output-dir", type=str, required=True, help="Output directory."
+    )
+    export_sub.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="DCP checkpoint directory. Defaults to latest step.",
+    )
+
     schema_sub = subparsers.add_parser(
         "schema", help="Generate JSON schemas for config types."
     )
@@ -46,6 +62,12 @@ def _dispatch(command: str, args: argparse.Namespace) -> None:
         from flow_control.scripts.schema import run as run_schema
 
         run_schema(**({"output_dir": args.output_dir} if args.output_dir else {}))
+        return
+
+    if command == "export":
+        from flow_control.scripts.export import run as run_export
+
+        run_export(args.config_path, args.output_dir, args.checkpoint_dir)
         return
 
     if command == "preprocess":
