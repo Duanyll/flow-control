@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Discriminator, GetCoreSchemaHandler, Tag
 from pydantic_core import CoreSchema, core_schema
@@ -129,6 +129,36 @@ class _ProcessorConfigAnnotation:
             parse_processor(value)  # validate, discard the instance
             return value
         raise ValueError(f"Expected dict, got {type(value)}")
+
+
+def get_processor_input_typeddict(
+    processor_class: type, mode: Literal["training", "inference"]
+) -> type | None:
+    """Extract the TypedDict type from a processor class's generic parameters.
+
+    Returns the InputBatch (mode="inference") or TrainInputBatch (mode="training")
+    TypedDict class, or None if it cannot be determined.
+    """
+    from flow_control.processors.base import BaseProcessor
+
+    # Pydantic stores resolved generic args in __pydantic_generic_metadata__
+    # on the parameterized BaseProcessor[...] class in the MRO.
+    for base in processor_class.__mro__:
+        meta = getattr(base, "__pydantic_generic_metadata__", None)
+        if meta is None:
+            continue
+        origin = meta.get("origin")
+        args = meta.get("args", ())
+        if (
+            origin is not None
+            and (origin is BaseProcessor or issubclass(origin, BaseProcessor))
+            and len(args) >= 2
+        ):
+            if mode == "inference":
+                return args[0]
+            else:
+                return args[1]
+    return None
 
 
 ProcessorConfig = Annotated[dict[str, Any], _ProcessorConfigAnnotation]

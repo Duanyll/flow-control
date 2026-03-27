@@ -2,7 +2,7 @@ from typing import Literal, NotRequired
 
 import torch
 
-from flow_control.utils.coercion import ImageTensor
+from flow_control.datasets.coercion import ImageTensor
 from flow_control.utils.resize import resize_to_resolution
 
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch

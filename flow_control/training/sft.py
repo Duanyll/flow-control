@@ -56,7 +56,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
-    sampler: Sampler
+    validation_sampler: Sampler
     processor: Processor
 
     dataset: DatasetConfig
@@ -93,10 +93,6 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     _scheduler: Any
     _ema_optimizer: EMAOptimizer | None = None
     _current_step: int = 0
-
-    @property
-    def validation_sampler(self) -> Sampler:
-        return self.sampler
 
     @property
     def transformer(self):

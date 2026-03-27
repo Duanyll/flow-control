@@ -5,7 +5,7 @@ from typing import Annotated, Literal, NotRequired
 import torch
 from einops import repeat
 
-from flow_control.utils.coercion import (
+from flow_control.datasets.coercion import (
     ImageTensor,
     ImageTensorList,
     JsonBeforeValidator,
@@ -19,7 +19,7 @@ from flow_control.utils.resize import (
     resize_to_multiple_of,
     resize_to_resolution,
 )
-from flow_control.utils.tensor import ensure_alpha_channel, remove_alpha_channel
+from flow_control.utils.tensor import ensure_alpha_channel
 
 from ..base import (
     BaseProcessor,
@@ -146,9 +146,7 @@ class EfficientLayeredProcessor(
         self, image: torch.Tensor
     ) -> tuple[list[tuple[int, int, int, int]], list[str]]:
         h, w = image.shape[2], image.shape[3]
-        result_text = await self.chat_completion(
-            self.detection_prompt, [remove_alpha_channel(image)]
-        )
+        result_text = await self.chat_completion(self.detection_prompt, [image])
         try:
             result_json = parse_llm_json_output(result_text)
             layer_boxes: list[tuple[int, int, int, int]] = [(0, h, 0, w)]
@@ -252,13 +250,11 @@ class EfficientLayeredProcessor(
                     [
                         self.chat_completion(
                             self.bg_caption_prompt,
-                            [remove_alpha_channel(batch["layer_images"][0])],
+                            [batch["layer_images"][0]],
                         )
                     ]
                     + [
-                        self.chat_completion(
-                            self.fg_caption_prompt, [remove_alpha_channel(img)]
-                        )
+                        self.chat_completion(self.fg_caption_prompt, [img])
                         for img in batch["layer_images"][1:]
                     ]
                 )

@@ -7,7 +7,7 @@ convert raw string data (e.g. from CSV) into the expected Python/Torch types.
 import json
 import os
 from functools import lru_cache
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import numpy as np
 import torch
@@ -141,36 +141,6 @@ JsonBeforeValidator = BeforeValidator(_validate_json)
 # ----------------------------- Utility Functions -------------------------- #
 
 
-def get_input_typeddict(
-    processor_class: type, mode: Literal["training", "inference"]
-) -> type | None:
-    """Extract the TypedDict type from a processor class's generic parameters.
-
-    Returns the InputBatch (mode="inference") or TrainInputBatch (mode="training")
-    TypedDict class, or None if it cannot be determined.
-    """
-    from flow_control.processors.base import BaseProcessor
-
-    # Pydantic stores resolved generic args in __pydantic_generic_metadata__
-    # on the parameterized BaseProcessor[...] class in the MRO.
-    for base in processor_class.__mro__:
-        meta = getattr(base, "__pydantic_generic_metadata__", None)
-        if meta is None:
-            continue
-        origin = meta.get("origin")
-        args = meta.get("args", ())
-        if (
-            origin is not None
-            and (origin is BaseProcessor or issubclass(origin, BaseProcessor))
-            and len(args) >= 2
-        ):
-            if mode == "inference":
-                return args[0]
-            else:
-                return args[1]
-    return None
-
-
 @lru_cache
 def build_type_adapter(typed_dict_class: type) -> TypeAdapter:
     """Create and cache a TypeAdapter for the given TypedDict class."""
@@ -189,41 +159,3 @@ def coerce_record(
     return adapter.validate_python(
         raw, context={"attachment_dir": attachment_dir}, extra="allow"
     )
-
-
-if __name__ == "__main__":
-    # Test basic coercion types
-    from pydantic import TypeAdapter as TA
-    from rich import print
-
-    # Test JsonStrList
-    adapter = TA(JsonStrList)
-    assert adapter.validate_python(["a", "b"]) == ["a", "b"]
-    assert adapter.validate_python('["a","b"]') == ["a", "b"]
-    assert adapter.validate_python("a;b") == ["a", "b"]
-    print("[green]JsonStrList: OK[/green]")
-
-    # Test get_input_typeddict
-    from flow_control.processors.tasks.t2i import T2IProcessor
-
-    td = get_input_typeddict(T2IProcessor, "training")
-    print(f"T2IProcessor training TypedDict: {td}")
-    assert td is not None
-
-    td = get_input_typeddict(T2IProcessor, "inference")
-    print(f"T2IProcessor inference TypedDict: {td}")
-    assert td is not None
-
-    # Test build_type_adapter with a simple TypedDict
-    from typing import TypedDict
-
-    class TestBatch(TypedDict):
-        x: Annotated[int, JsonBeforeValidator]
-        y: Annotated[float, JsonBeforeValidator]
-
-    ta = build_type_adapter(TestBatch)
-    result = ta.validate_python({"x": "10", "y": "3.14"})
-    assert result == {"x": 10, "y": 3.14}
-    print(f"[green]TypeAdapter coercion: {result}[/green]")
-
-    print("[bold green]All tests passed![/bold green]")

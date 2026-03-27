@@ -6,7 +6,7 @@ import torch
 from einops import rearrange
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.utils.coercion import JsonBeforeValidator
+from flow_control.datasets.coercion import JsonBeforeValidator
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     ResolutionList,

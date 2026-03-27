@@ -35,7 +35,11 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
             # Cast to T so don't have to force downstream checks for model usage
             return cast(T, None)
         else:
-            return super().load_model(device, frozen)
+            res = super().load_model(device, frozen)
+            logger.info(
+                f"{self.__class__.__name__} requires {self.in_channels} input channels"
+            )
+            return res
 
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         return self.model.encode(images).latent_dist.sample()

@@ -2,7 +2,7 @@ from typing import Literal, NotRequired, TypedDict
 
 import torch
 
-from flow_control.utils.coercion import ImageTensor, ImageTensorList
+from flow_control.datasets.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.resize import (
     resize_to_closest_resolution,

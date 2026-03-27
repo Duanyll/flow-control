@@ -13,9 +13,9 @@ from flow_control.datasets import (
 from flow_control.processors import (
     PROCESSOR_TASK_REGISTRY,
     ProcessorConfig,
+    get_processor_input_typeddict,
     parse_processor,
 )
-from flow_control.utils.coercion import get_input_typeddict
 from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
@@ -50,6 +50,7 @@ class TorchDatasetLoaderStage(PipelineStage):
         processor_args: dict | None = None,
         processing_mode: Literal["inference", "training"] = "training",
         enable_coercion: bool = True,
+        reassign_keys: bool = False,
     ):
         if dataset_args is None:
             dataset_args = {}
@@ -62,16 +63,20 @@ class TorchDatasetLoaderStage(PipelineStage):
             if task_name and task_name in PROCESSOR_TASK_REGISTRY:
                 processor_class = PROCESSOR_TASK_REGISTRY[task_name]
                 mode: Literal["training", "inference"] = processing_mode
-                coerce_to = get_input_typeddict(processor_class, mode)
+                coerce_to = get_processor_input_typeddict(processor_class, mode)
                 if coerce_to is not None:
                     self.logger.info(
                         f"Coercion enabled for {task_name}/{mode}: {coerce_to.__name__}"
                     )
 
         self.dataset = parse_dataset(dataset_args, coerce_to=coerce_to)
+        self.reassign_keys = reassign_keys
 
     def process(self, item: Any) -> Any:
-        return [self.dataset[item]]
+        batch = self.dataset[item]
+        if self.reassign_keys:
+            batch["__key__"] = str(item)
+        return [batch]
 
 
 class ProcessorStage(PipelineStage):
@@ -134,6 +139,7 @@ class PreprocessConfig(BaseModel):
     processing_mode: Literal["inference", "training"]
     save_extra: bool = False
     enable_coercion: bool = True
+    reassign_keys: bool = False
 
 
 def run(config_path: str) -> None:
@@ -160,6 +166,7 @@ def run(config_path: str) -> None:
                     "processor_args": config.processor,
                     "processing_mode": config.processing_mode,
                     "enable_coercion": config.enable_coercion,
+                    "reassign_keys": config.reassign_keys,
                 },
             ),
             StageConfig(

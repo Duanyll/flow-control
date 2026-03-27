@@ -26,8 +26,8 @@ from torch.distributed.fsdp import fully_shard
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.datasets import DatasetConfig, parse_dataset
+from flow_control.datasets.coercion import ImageTensor
 from flow_control.processors.components.vae import VAE, BaseVAE
-from flow_control.utils.coercion import ImageTensor
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
     remove_alpha_channel,

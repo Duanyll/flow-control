@@ -2,7 +2,7 @@ from typing import Literal, NotRequired
 
 import torch
 
-from flow_control.utils.coercion import ImageTensor
+from flow_control.datasets.coercion import ImageTensor
 
 from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
 from ..components.prompts import PromptStr, parse_prompt

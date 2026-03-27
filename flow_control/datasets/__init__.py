@@ -4,7 +4,7 @@ from datasets import load_dataset
 from pydantic import WithJsonSchema
 from torch.utils.data import ConcatDataset, Dataset
 
-from flow_control.utils.coercion import build_type_adapter, coerce_record
+from flow_control.datasets.coercion import build_type_adapter, coerce_record
 from flow_control.utils.pipeline import DataSink
 
 from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
