@@ -5,6 +5,7 @@ from pydantic import WithJsonSchema
 from torch.utils.data import ConcatDataset, Dataset
 
 from flow_control.datasets.coercion import build_type_adapter, coerce_record
+from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
 
 from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
@@ -18,6 +19,8 @@ from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
+
+logger = get_logger("flow_control.datasets")
 
 
 class LimitedDataset(Dataset):
@@ -52,6 +55,9 @@ class CoercedDataset(Dataset):
         self.dataset = dataset
         self.coerce_to = coerce_to
         self.attachment_dir = attachment_dir
+        logger.info(
+            f"{dataset.__class__.__name__} wrapped with coercion to {coerce_to.__name__}"
+        )
 
     def __len__(self) -> int:
         return len(self.dataset)

@@ -15,7 +15,7 @@ from rich.progress import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import DatasetConfig, parse_dataset
+from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.rewards import execute_reward
 from flow_control.rewards.base import BaseReward
@@ -30,11 +30,12 @@ from flow_control.utils.tensor import (
 from ..data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp import HsdpMixin
 from .logging import LoggingMixin
+from .preprocess import PreprocessMixin
 
 logger = get_logger(__name__)
 
 
-class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
+class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
     """
     Mixin that provides validation: sampling images and optionally scoring rewards.
     """
@@ -70,7 +71,9 @@ class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
             logger.info("No validation dataset configured, skipping.")
             return
 
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.validation_dataset))
+        dataset = PaddingAwareDatasetWrapper(
+            self.parse_inference_dataset(self.validation_dataset)
+        )
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -128,8 +131,9 @@ class ValidationMixin(LoggingMixin, HsdpMixin, BaseModel):
             )
             with progress:
                 for batch in self.validation_dataloader:
-                    batch = deep_cast_float_dtype(batch, model.dtype)
                     batch = deep_move_to_device(batch, self.device)
+                    batch: Any = self.preprocess_for_inference(batch)
+                    batch = deep_cast_float_dtype(batch, model.dtype)
                     negative_batch: Any = (
                         self.processor.get_negative_batch(batch)
                         if self.validation_sampler.cfg_scale > 1.0

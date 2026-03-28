@@ -16,7 +16,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.datasets import DatasetConfig, parse_dataset
+from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.rewards import (
     Reward,
@@ -35,6 +35,7 @@ from ..advantage import Advantage, PerPromptAdvantage
 from ..data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn
 from .hsdp import HsdpMixin
 from .logging import LoggingMixin
+from .preprocess import PreprocessMixin
 
 logger = get_logger(__name__)
 
@@ -48,7 +49,7 @@ class Rollout:
     negative_batch: Batch | None
 
 
-class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
+class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
     """Mixin providing rollout collection and advantage computation.
 
     Subclasses must implement :pyattr:`rollout_sampler_instance` and provide the
@@ -107,7 +108,7 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
     # ----------------------------- Rollout phase ----------------------------- #
 
     def make_rollout_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
+        dataset = PaddingAwareDatasetWrapper(self.parse_inference_dataset(self.dataset))
         use_pairwise = _has_pairwise_child(self.reward)
         sampler = DistributedKRepeatSampler(
             dataset=dataset,
@@ -161,6 +162,7 @@ class RolloutMixin(LoggingMixin, HsdpMixin, BaseModel):
             with progress:
                 for batch_idx, batch in enumerate(dataloader):
                     batch = deep_move_to_device(batch, device)
+                    batch: Any = self.preprocess_for_inference(batch, save_extra=True)
                     batch = deep_cast_float_dtype(batch, model.dtype)
 
                     generator = torch.Generator(device=device).manual_seed(

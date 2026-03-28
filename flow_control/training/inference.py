@@ -12,12 +12,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import (
-    DatasetConfig,
-    DatasinkConfig,
-    parse_dataset,
-    parse_datasink,
-)
+from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
 from flow_control.utils.logging import console, dump_if_failed, get_logger
@@ -28,12 +23,12 @@ from flow_control.utils.tensor import (
 )
 
 from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
-from .mixins import DcpMixin, HsdpMixin, LoggingMixin, distributed_main
+from .mixins import DcpMixin, HsdpMixin, LoggingMixin, PreprocessMixin, distributed_main
 
 logger = get_logger(__name__)
 
 
-class Inference(HsdpMixin, DcpMixin):
+class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
     model_config = ConfigDict(extra="forbid")
 
     model: ModelAdapter
@@ -67,7 +62,7 @@ class Inference(HsdpMixin, DcpMixin):
         return self._dataloader
 
     def make_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
+        dataset = PaddingAwareDatasetWrapper(self.parse_inference_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -112,7 +107,7 @@ class Inference(HsdpMixin, DcpMixin):
     def run(self):
         self.set_seed()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
-        self.processor.load_models("decode", device=self.device)
+        self.load_processor()
         self.make_dataloader()
 
         if self.checkpoint_dir is not None:
@@ -136,8 +131,9 @@ class Inference(HsdpMixin, DcpMixin):
         with progress:
             for batch in self.dataloader:
                 with dump_if_failed(logger, batch):
-                    batch = deep_cast_float_dtype(batch, self.model.dtype)
                     batch = deep_move_to_device(batch, self.device)
+                    batch: Any = self.preprocess_for_inference(batch, save_extra=True)
+                    batch = deep_cast_float_dtype(batch, self.model.dtype)
                     negative_batch: Any = (
                         self.processor.get_negative_batch(batch)
                         if self.sampler.cfg_scale > 1.0

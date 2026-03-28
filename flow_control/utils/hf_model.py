@@ -142,7 +142,10 @@ class HfModelLoader[T](BaseModel):
         self._model = model
         return model
 
-    def load_model(self, device: torch.device, frozen: bool = True) -> T:
+    def load_model(self, device: torch.device, frozen: bool = True) -> None:
+        if self._model is not None:
+            return
+
         if self.library == "diffusers":
             import diffusers
 
@@ -163,5 +166,3 @@ class HfModelLoader[T](BaseModel):
 
         if hasattr(self.model, "requires_grad_"):
             self.model.requires_grad_(not frozen)  # type: ignore
-
-        return self.model

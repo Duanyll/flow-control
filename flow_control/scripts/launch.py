@@ -83,21 +83,27 @@ def is_on_ram_disk(path):
     return False
 
 
-def try_preprocess_data(preprocess_config: str) -> None:
-    command = [
-        sys.executable,
-        "-m",
-        "flow_control.scripts.preprocess",
-        preprocess_config,
-    ]
-    print(f"[blue]Executing data preprocessing command:[/blue] {' '.join(command)}")
-    try:
-        subprocess.run(command, check=True)
-        print("[green]Data preprocessing completed successfully.[/green]")
-    except subprocess.CalledProcessError as e:
-        code = e.returncode
-        print(f"[red]Error during data preprocessing (exit code {code})[/red]")
-        sys.exit(code)
+def try_preprocess_data(preprocess_config: str | list[str]) -> None:
+    if isinstance(preprocess_config, str):
+        configs = [preprocess_config]
+    else:
+        configs = preprocess_config
+
+    for config in configs:
+        command = [
+            sys.executable,
+            "-m",
+            "flow_control.scripts.preprocess",
+            config,
+        ]
+        print(f"[blue]Executing data preprocessing command:[/blue] {' '.join(command)}")
+        try:
+            subprocess.run(command, check=True)
+            print("[green]Data preprocessing completed successfully.[/green]")
+        except subprocess.CalledProcessError as e:
+            code = e.returncode
+            print(f"[red]Error during data preprocessing (exit code {code})[/red]")
+            sys.exit(code)
 
 
 def try_generate_dcp_seed(

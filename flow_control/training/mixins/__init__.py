@@ -7,6 +7,7 @@ from .hsdp import (
     main_process_only,
 )
 from .logging import LoggingMixin
+from .preprocess import PreprocessMixin
 from .rollout import Rollout, RolloutMixin
 from .validation import ValidationMixin
 
@@ -19,6 +20,7 @@ __all__ = [
     "Rollout",
     "RolloutMixin",
     "ValidationMixin",
+    "PreprocessMixin",
     "distributed_main",
     "main_process_first",
     "main_process_only",

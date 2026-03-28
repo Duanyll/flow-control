@@ -18,7 +18,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import DatasetConfig, parse_dataset
+from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
 from flow_control.utils.logging import (
@@ -128,7 +128,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             self._ema_optimizer = EMAOptimizer(params, self.ema)
 
     def make_train_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(parse_dataset(self.dataset))
+        dataset = PaddingAwareDatasetWrapper(self.parse_training_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
             num_replicas=self.world_size,
@@ -268,7 +268,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
-        self.processor.load_models("decode", device=self.device)
+        self.load_processor()
         self.make_train_dataloader()
         self.make_validation_dataloader()
         os.makedirs(self.checkpoint_root, exist_ok=True)
@@ -300,6 +300,9 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
                         batch = deep_move_to_device(batch, self.device)
+                        batch: Any = self.preprocess_for_training(batch)
+                        batch = deep_cast_float_dtype(batch, self.model.dtype)
+
                         loss = self.train_step(batch) / self.grad_acc_steps
                         self.check_loss(loss)
                         loss.backward()
@@ -331,6 +334,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         self.set_seed()
         self.load_transformer_from_seed(self.model)
         self.make_optimizer_and_scheduler()
+        self.load_processor()
 
         console.rule("[bold blue]Starting latent length test[/bold blue]")
 

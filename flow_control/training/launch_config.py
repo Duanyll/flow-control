@@ -15,5 +15,5 @@ class LaunchConfig(BaseModel):
     type: Literal["sft", "grpo", "nft", "vae", "inference"]
     devices: int | list[int] | Literal["all"] = "all"
     generate_dcp_seed: bool = False
-    preprocess_config: str | None = None
+    preprocess_config: str | list[str] | None = None
     env: dict[str, str] = {}

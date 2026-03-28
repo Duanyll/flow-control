@@ -525,7 +525,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
-        self.processor.load_models("decode", device=self.device)
+        self.load_processor()
         self.make_rollout_dataloader()
         self.make_validation_dataloader()
 

@@ -52,11 +52,6 @@ dev = [
 flow-control = "flow_control.scripts.cli:main"
 describe = "flow_control.scripts.describe:main"
 
-[project.optional-dependencies]
-ray = [
-    "ray[data]>=2.53.0",
-]
-
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"

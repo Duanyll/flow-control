@@ -64,10 +64,6 @@ class TorchDatasetLoaderStage(PipelineStage):
                 processor_class = PROCESSOR_TASK_REGISTRY[task_name]
                 mode: Literal["training", "inference"] = processing_mode
                 coerce_to = get_processor_input_typeddict(processor_class, mode)
-                if coerce_to is not None:
-                    self.logger.info(
-                        f"Coercion enabled for {task_name}/{mode}: {coerce_to.__name__}"
-                    )
 
         self.dataset = parse_dataset(dataset_args, coerce_to=coerce_to)
         self.reassign_keys = reassign_keys
