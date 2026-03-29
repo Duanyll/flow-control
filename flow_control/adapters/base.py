@@ -72,9 +72,7 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
         )
 
     def load_transformer(self, device: torch.device) -> None:
-        self.transformer = self.hf_model.load_model(
-            device=device, frozen=not self.all_trainable
-        )
+        self.hf_model.load_model(device=device, frozen=not self.all_trainable)
 
         self._install_modules()
 

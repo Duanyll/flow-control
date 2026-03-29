@@ -1,0 +1,30 @@
+{
+  // Example config for interactive Gradio serving with FLUX.1 text-to-image.
+  // Usage: flow-control serve examples/serve.jsonc
+
+  "host": "0.0.0.0",
+  "port": 7860,
+  "device": "cuda:0",
+  // "processor_device": "cuda:1",  // Optional: put VAE/encoder on a separate GPU
+  "share": false,
+
+  // Uncomment to load DCP checkpoints:
+  // "seed_checkpoint_dir": "./checkpoints/seed",
+  // "checkpoint_dir": "./checkpoints/step_0001000",
+
+  "model": {
+    "arch": "flux1",
+    "type": "base"
+  },
+
+  "sampler": {
+    "steps": 20,
+    "cfg_scale": 1.0,
+    "seed": 42
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1"
+  }
+}

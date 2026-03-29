@@ -27,6 +27,42 @@ class HfModelLoader[T](BaseModel):
     _model: T | None = None
 
     @property
+    def config_key(self) -> tuple:
+        """Hashable key representing this loader's configuration.
+
+        Two loaders with the same config_key will load the same model, so loaded
+        weights can be transplanted between them.
+        """
+        return (
+            self.library,
+            self.class_name,
+            self.pretrained_model_id,
+            self.revision,
+            self.subfolder or "",
+            str(self.dtype),
+            tuple(self.device_memory_distribution or []),
+            tuple(sorted(self.extra_from_pretrained_kwargs.items()))
+            if self.extra_from_pretrained_kwargs
+            else (),
+        )
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    def unload_model(self) -> None:
+        if self._model is None:
+            return
+        model = self._model
+        self._model = None
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info(
+            f"Unloaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''}"
+        )
+
+    @property
     def model(self) -> T:
         if self._model is None:
             raise ValueError("Model not loaded yet. Call load_model() first.")

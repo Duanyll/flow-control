@@ -12,6 +12,7 @@ dependencies = [
     "datasets>=4.4.1",
     "diffusers>=0.37.0",
     "einops>=0.8.1",
+    "gradio>=6.10.0",
     "httpx>=0.28.1",
     "json5>=0.12.1",
     "kornia>=0.8.2",
