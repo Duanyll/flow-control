@@ -11,7 +11,6 @@ def main():
 
     for name in [
         "preprocess",
-        "preprocess-ray",
         "seed",
         "launch",
         "vae-server",
@@ -73,8 +72,6 @@ def _dispatch(command: str, args: argparse.Namespace) -> None:
 
     if command == "preprocess":
         from flow_control.scripts.preprocess import run
-    elif command == "preprocess-ray":
-        from flow_control.scripts.preprocess_ray import run
     elif command == "seed":
         from flow_control.scripts.seed import run
     elif command == "launch":

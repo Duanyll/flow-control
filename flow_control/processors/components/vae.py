@@ -19,8 +19,30 @@ from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
 
+PosteriorMode = Literal["mode", "sample", "distribution"]
+"""How to handle the VAE posterior distribution during encoding.
+
+- ``"mode"``: Return the distribution mean (deterministic).
+- ``"sample"``: Draw a single sample from the posterior.
+- ``"distribution"``: Return mean **and** std stacked along the batch dimension
+  (``[2*B, C, H, W]``), deferring the sampling to training time so that
+  each epoch sees a different latent for the same image.
+
+For Flux1 and Qwen VAEs the posterior variance is negligible in bf16, so all
+three modes fall back to ``"mode"`` internally.  Only Flux2VAE, whose VAE was
+trained differently and has significant variance, implements all three modes.
+"""
+
 
 class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
+    """Base class for VAE encode / decode.
+
+    Subclasses override ``_encode`` to apply model-specific normalization.
+    The ``posterior`` parameter selects the posterior handling strategy; see
+    :data:`PosteriorMode`.  The default implementation always returns the mode
+    (suitable for VAEs with negligible variance).
+    """
+
     endpoint: str | None = None
 
     @property
@@ -38,27 +60,36 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
                 f"{self.__class__.__name__} requires {self.in_channels} input channels"
             )
 
-    def _encode(self, images: torch.Tensor) -> torch.Tensor:
-        return self.model.encode(images).latent_dist.sample()
+    def _encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
+        # Default: always return mode (posterior variance negligible in bf16)
+        return self.model.encode(images).latent_dist.mode()
 
     def _decode(self, latents: torch.Tensor) -> torch.Tensor:
         return self.model.decode(latents).sample
 
-    def encode(self, images: torch.Tensor) -> torch.Tensor:
+    def encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
         if self.is_remote:
-            return self._remote_tensor_call("/encode", images)
-        return self._encode(images)
+            return self._remote_tensor_call(f"/encode?posterior={posterior}", images)
+        return self._encode(images, posterior=posterior)
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
         if self.is_remote:
             return self._remote_tensor_call("/decode", latents)
         return self._decode(latents)
 
-    async def async_encode(self, images: torch.Tensor) -> torch.Tensor:
+    async def async_encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
         """Async version of ``encode`` for use in async pipelines."""
         if self.is_remote:
-            return await self._async_remote_tensor_call("/encode", images)
-        return self._encode(images)
+            return await self._async_remote_tensor_call(
+                f"/encode?posterior={posterior}", images
+            )
+        return self._encode(images, posterior=posterior)
 
     async def async_decode(self, latents: torch.Tensor) -> torch.Tensor:
         """Async version of ``decode`` for use in async pipelines."""
@@ -76,12 +107,12 @@ class Flux1VAE(BaseVAE[AutoencoderKL]):
     subfolder: str | None = "vae"
     dtype: TorchDType = torch.bfloat16
 
-    def _encode(self, images: torch.Tensor) -> torch.Tensor:
+    def _encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
         images = images * 2 - 1
         images = images.to(self.dtype)
-        latent = cast(
-            AutoencoderKLOutput, self.model.encode(images)
-        ).latent_dist.sample()
+        latent = cast(AutoencoderKLOutput, self.model.encode(images)).latent_dist.mode()
         latent = (latent - self.model.config["shift_factor"]) * self.model.config[
             "scaling_factor"
         ]
@@ -112,7 +143,9 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
     def in_channels(self) -> int:
         return self.model.config["input_channels"]
 
-    def _encode(self, images: torch.Tensor) -> torch.Tensor:
+    def _encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
         has_frame_dim = images.ndim == 5  # b, c, f, h, w
         if not has_frame_dim:
             images = rearrange(images, "b c h w -> b c 1 h w")
@@ -187,24 +220,48 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
             p2=self.patch_size,
         )
 
-    def _encode(self, images: torch.Tensor):
+    def _encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
+        """Encode with Flux2-specific batch-norm normalization.
+
+        Unlike Flux1/Qwen, Flux2's posterior variance is significant, so all
+        three posterior modes are implemented here.
+
+        For ``"distribution"`` mode, the BN normalization ``f(x) = (x - μ) / σ``
+        is linear, so we can apply it to mean and std independently:
+        ``normalized_mean = (mean - μ) / σ``, ``normalized_std = std / σ``.
+        The result is ``[2*B, C, H, W]`` with means and stds stacked on dim 0.
+        """
         images = images * 2 - 1
         images = images.to(self.dtype)
-        latents = cast(
-            AutoencoderKLOutput, self.model.encode(images)
-        ).latent_dist.sample()
+        latent_dist = cast(AutoencoderKLOutput, self.model.encode(images)).latent_dist
 
+        # BN stats live in 2x2-packed channel space
         bn: Any = self.model.bn
-        latents_bn_mean = bn.running_mean.view(1, -1, 1, 1).to(
-            latents.device, latents.dtype
-        )
-        latents_bn_std = torch.sqrt(
+        bn_mean = bn.running_mean.view(1, -1, 1, 1).to(images.device, images.dtype)
+        bn_std = torch.sqrt(
             bn.running_var.view(1, -1, 1, 1) + self.model.config["batch_norm_eps"]
-        ).to(latents.device, latents.dtype)
+        ).to(images.device, images.dtype)
 
-        # bn is applied to the 2x2 packed latents
+        if posterior == "distribution":
+            mean = latent_dist.mean
+            std = latent_dist.std
+            packed_mean = self._pack_latents(mean)
+            packed_std = self._pack_latents(std)
+            normalized_mean = (packed_mean - bn_mean) / bn_std
+            normalized_std = packed_std / bn_std
+            return torch.cat(
+                [
+                    self._unpack_latents(normalized_mean),
+                    self._unpack_latents(normalized_std),
+                ],
+                dim=0,
+            )
+
+        latents = latent_dist.mode() if posterior == "mode" else latent_dist.sample()
         latents = self._pack_latents(latents)
-        latents = (latents - latents_bn_mean) / latents_bn_std
+        latents = (latents - bn_mean) / bn_std
         latents = self._unpack_latents(latents)
         return latents
 

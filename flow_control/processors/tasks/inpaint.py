@@ -46,7 +46,9 @@ class InpaintProcessor(
         inpaint_mask = batch["inpaint_mask"] = resize_to_resolution(
             batch["inpaint_mask"], image_size
         )
-        inpaint_latents = self.encode_latents(inpaint_image)
+        inpaint_latents = self.encode_latents(
+            inpaint_image, posterior=self.condition_posterior
+        )
         result = InpaintProcessedBatch(
             image_size=image_size,
             inpaint_latents=inpaint_latents,
@@ -71,7 +73,12 @@ class InpaintProcessor(
             batch["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
-        clean_latents = self.encode_latents(clean_image)
+        clean_latents = self.encode_latents(
+            clean_image, posterior=self.target_posterior
+        )
+        inpaint_latents = self.encode_latents(
+            clean_image, posterior=self.condition_posterior
+        )
         inpaint_mask = batch["inpaint_mask"] = resize_to_resolution(
             batch["inpaint_mask"], image_size
         )
@@ -79,7 +86,7 @@ class InpaintProcessor(
         result = InpaintProcessedBatch(
             image_size=image_size,
             clean_latents=clean_latents,
-            inpaint_latents=clean_latents,
+            inpaint_latents=inpaint_latents,
             inpaint_mask=inpaint_mask,
             **self.encode_prompt(prompt, system_prompt=self.encoder_prompt),
         )

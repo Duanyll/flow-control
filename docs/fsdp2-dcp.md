@@ -94,7 +94,7 @@ class DcpMixin(BaseModel):
         dcp.load(state_dict, checkpoint_id=checkpoint_path, ...)
 ```
 
-参见：[`dcp.py:14-34`](../flow_control/training/mixins/dcp.py)
+参见：[`dcp.py`](../flow_control/training/mixins/dcp.py)
 
 ### 2.4 `StateDictOptions` 常用选项
 
@@ -159,7 +159,7 @@ dcp.load(model_sd, checkpoint_id=seed_checkpoint_dir,
          planner=DefaultLoadPlanner(allow_partial_load=True))
 ```
 
-参见：[`hsdp.py:102-170`](../flow_control/training/mixins/hsdp.py)
+参见：[`hsdp.py`](../flow_control/training/mixins/hsdp.py)
 
 ### 3.4 Training Checkpoint（训练检查点）
 
@@ -189,7 +189,7 @@ if self.resume_from_dir is not None:
     self.load_dcp_checkpoint(self.resume_from_dir)  # 第二层
 ```
 
-参见：[`sft.py:150-188`](../flow_control/training/sft.py)、[`sft.py:261-278`](../flow_control/training/sft.py)
+参见：[`sft.py`](../flow_control/training/sft.py)、[`sft.py`](../flow_control/training/sft.py)
 
 ### 3.5 `shard_dim=1` 的退化情况
 

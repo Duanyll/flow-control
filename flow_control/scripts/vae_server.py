@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from flow_control.processors.components.vae import VAE, BaseVAE
+from flow_control.processors.components.vae import VAE, BaseVAE, PosteriorMode
 from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_tensor, serialize_tensor
@@ -67,12 +67,13 @@ def create_app(config: VAEServerConfig) -> Starlette:
 
     async def encode(request: Request) -> Response:
         vae = _get_vae()
+        posterior: PosteriorMode = request.query_params.get("posterior", "sample")  # type: ignore[assignment]
         body = await request.body()
         images = deserialize_tensor(body, config.device, torch.bfloat16)
-        logger.info(f"Encoding images with shape {images.shape}")
+        logger.info(f"Encoding images with shape {images.shape}, posterior={posterior}")
         async with gpu_lock:
             with torch.no_grad():
-                latents = vae._encode(images)
+                latents = vae._encode(images, posterior=posterior)
             result = serialize_tensor(latents)
         return Response(content=result, media_type="application/octet-stream")
 

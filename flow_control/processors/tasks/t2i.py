@@ -72,7 +72,9 @@ class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessed
             batch["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
-        clean_latents = self.encode_latents(clean_image)
+        clean_latents = self.encode_latents(
+            clean_image, posterior=self.target_posterior
+        )
 
         batch["prompt"] = prompt = await self.enhance_prompt(prompt)
 

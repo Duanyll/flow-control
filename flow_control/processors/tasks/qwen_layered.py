@@ -6,7 +6,6 @@ from einops import rearrange
 from flow_control.datasets.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
-from flow_control.utils.tensor import ensure_alpha_channel
 
 from ..base import (
     BaseProcessor,
@@ -16,6 +15,7 @@ from ..base import (
     TrainInputBatch,
 )
 from ..components.prompts import PromptStr, parse_prompt
+from ..components.vae import PosteriorMode
 
 
 class QwenLayeredInputBatch(InputBatch):
@@ -56,14 +56,14 @@ class QwenImageLayeredProcessor(
     save_negative: bool = False
 
     @torch.no_grad()
-    def encode_latents(self, image: torch.Tensor | list[torch.Tensor]):
-        if not isinstance(image, list):
-            image = [image]
-
-        all_images = torch.cat([ensure_alpha_channel(img) for img in image], dim=0)
-        latents = self.vae.encode(all_images)
-        latents = self._pack_latents_layered(latents)
-        return latents
+    def _encode_latents_layered(
+        self, images: list[torch.Tensor], posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
+        """Encode multiple images one-by-one and cat along the sequence dim."""
+        return torch.cat(
+            [self.encode_latents(img, posterior=posterior) for img in images],
+            dim=1,
+        )
 
     def _pack_latents_layered(self, latents: torch.Tensor) -> torch.Tensor:
         return rearrange(
@@ -107,7 +107,9 @@ class QwenImageLayeredProcessor(
             batch["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
-        image_latents = self.encode_latents(clean_image)
+        image_latents = self.encode_latents(
+            clean_image, posterior=self.condition_posterior
+        )
         num_layers = batch.get("num_layers", None) or self.default_num_layers
 
         result = QwenLayeredProcessedBatch(
@@ -134,14 +136,17 @@ class QwenImageLayeredProcessor(
             batch["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
-        image_latents = self.encode_latents(clean_image)
+        image_latents = self.encode_latents(
+            clean_image, posterior=self.condition_posterior
+        )
         num_layers = len(batch["layer_images"])
         for i in range(num_layers):
             batch["layer_images"][i] = resize_to_resolution(
                 batch["layer_images"][i], image_size
             )
-        clean_latents = self.encode_latents(
-            [batch["clean_image"], *batch["layer_images"]]
+        clean_latents = self._encode_latents_layered(
+            [batch["clean_image"], *batch["layer_images"]],
+            posterior=self.target_posterior,
         )
         result = QwenLayeredProcessedBatch(
             image_size=image_size,

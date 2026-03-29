@@ -18,7 +18,7 @@ from flow_control.utils.types import TorchDevice
 
 from .components.encoder import Encoder, GenerativeEncoder, T5TextEncoder
 from .components.llm import LLMClient
-from .components.vae import VAE, Flux1VAE
+from .components.vae import VAE, Flux1VAE, PosteriorMode
 
 
 class InputBatch(TypedDict):
@@ -160,6 +160,8 @@ class BaseProcessor[
     vae_scale_factor: int = 8
     patch_size: int = 2
     latent_channels: int = 16
+    target_posterior: PosteriorMode = "distribution"
+    condition_posterior: PosteriorMode = "mode"
 
     def _pack_latents(self, latents) -> torch.Tensor:
         return rearrange(
@@ -220,9 +222,11 @@ class BaseProcessor[
         return image
 
     @torch.no_grad()
-    def encode_latents(self, image: torch.Tensor) -> torch.Tensor:
+    def encode_latents(
+        self, image: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
         image = self._adapt_image_channels(image)
-        latents = self.vae.encode(image)
+        latents = self.vae.encode(image, posterior=posterior)
         latents = self._pack_latents(latents)
         return latents
 

@@ -87,7 +87,10 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
         self, reference_images: list[torch.Tensor]
     ) -> _EncodeRefenenceResult:
         return {
-            "reference_latents": [self.encode_latents(img) for img in reference_images],
+            "reference_latents": [
+                self.encode_latents(img, posterior=self.condition_posterior)
+                for img in reference_images
+            ],
             "reference_sizes": [
                 (img.shape[2], img.shape[3]) for img in reference_images
             ],
@@ -154,7 +157,9 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
 
         batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
-        clean_latents = self.encode_latents(clean_image)
+        clean_latents = self.encode_latents(
+            clean_image, posterior=self.target_posterior
+        )
 
         batch["reference_images"] = self.resize_reference_images(
             batch["reference_images"], image_size

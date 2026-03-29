@@ -45,7 +45,9 @@ class T2IControlProcessor(
             batch["control_image"]
         )
         image_size = (control_image.shape[2], control_image.shape[3])
-        control_latents = self.encode_latents(control_image)
+        control_latents = self.encode_latents(
+            control_image, posterior=self.condition_posterior
+        )
         result = T2IControlProcessedBatch(
             image_size=image_size,
             control_latents=control_latents,
@@ -72,13 +74,17 @@ class T2IControlProcessor(
             batch["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
-        clean_latents = self.encode_latents(clean_image)
+        clean_latents = self.encode_latents(
+            clean_image, posterior=self.target_posterior
+        )
         if (control_image := batch.get("control_image", None)) is None:
             batch["control_image"] = control_image = self.generate_control_image(
                 clean_image
             )
         control_image = resize_to_resolution(control_image, image_size)
-        control_latents = self.encode_latents(control_image)
+        control_latents = self.encode_latents(
+            control_image, posterior=self.condition_posterior
+        )
 
         result = T2IControlProcessedBatch(
             image_size=image_size,

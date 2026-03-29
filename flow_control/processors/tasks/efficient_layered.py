@@ -192,7 +192,9 @@ class EfficientLayeredProcessor(
             ensure_alpha_channel(batch["clean_image"])
         )
         image_size = clean_image.shape[2], clean_image.shape[3]
-        image_latents = self.encode_latents(clean_image)
+        image_latents = self.encode_latents(
+            clean_image, posterior=self.condition_posterior
+        )
 
         layer_boxes = batch.get("layer_boxes", None)
         layer_prompts = batch.get("layer_prompts", None)
@@ -266,7 +268,9 @@ class EfficientLayeredProcessor(
         resized_images = self.resize_image(stacked_images)
         new_size = resized_images.shape[2], resized_images.shape[3]
         batch["clean_image"] = clean_image = resized_images[0:1]
-        image_latents = self.encode_latents(clean_image)
+        image_latents = self.encode_latents(
+            clean_image, posterior=self.condition_posterior
+        )
         batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
             batch["layer_boxes"], orig_size, new_size
         )
@@ -274,7 +278,11 @@ class EfficientLayeredProcessor(
             resized_images, layer_boxes
         )
         clean_latents = torch.cat(
-            [self.encode_latents(img) for img in layer_images], dim=1
+            [
+                self.encode_latents(img, posterior=self.target_posterior)
+                for img in layer_images
+            ],
+            dim=1,
         )
         prompt_embeds_list = [
             self.encoder.encode(prompt, system_prompt=self.encoder_prompt)
