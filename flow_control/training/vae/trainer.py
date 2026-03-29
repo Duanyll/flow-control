@@ -47,6 +47,7 @@ from ..data import (
     VaeTargetDatasetWrapper,
     collate_fn,
     prepare_vae_target_image,
+    seed_worker,
 )
 from ..mixins import CheckpointingMixin, HsdpMixin, distributed_main
 from ..mixins.logging import LoggingMixin
@@ -343,6 +344,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             num_workers=self.num_dataloader_workers,
             pin_memory=torch.cuda.is_available(),
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
         logger.info(f"Training dataloader created with {len(dataset)} samples.")
 
@@ -374,6 +376,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             num_workers=self.validation_num_workers,
             pin_memory=torch.cuda.is_available(),
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
         logger.info(f"Validation dataloader created with {len(dataset)} samples.")
 

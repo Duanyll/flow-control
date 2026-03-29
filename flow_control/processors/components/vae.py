@@ -108,6 +108,10 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
     subfolder: str | None = "vae"
     dtype: TorchDType = torch.bfloat16
 
+    @property
+    def in_channels(self) -> int:
+        return self.model.config["input_channels"]
+
     def _encode(self, images: torch.Tensor) -> torch.Tensor:
         has_frame_dim = images.ndim == 5  # b, c, f, h, w
         if not has_frame_dim:

@@ -20,6 +20,7 @@ from flow_control.processors import Processor
 from flow_control.rewards import execute_reward
 from flow_control.rewards.base import BaseReward
 from flow_control.samplers import Sampler
+from flow_control.samplers.sampler import derive_seed
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -27,7 +28,12 @@ from flow_control.utils.tensor import (
     tensor_to_pil,
 )
 
-from ..data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from ..data import (
+    DistributedBucketSampler,
+    PaddingAwareDatasetWrapper,
+    collate_fn,
+    seed_worker,
+)
 from .hsdp import HsdpMixin
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
@@ -88,6 +94,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
             sampler=sampler,
             num_workers=self.validation_num_workers,
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
         logger.info(f"Validation dataloader created with {len(dataset)} samples.")
 
@@ -139,7 +146,11 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                         if self.validation_sampler.cfg_scale > 1.0
                         else None
                     )
-                    seed = self.seed if self.validation_same_seed else self.seed + step
+                    base_seed = (
+                        self.seed if self.validation_same_seed else self.seed + step
+                    )
+                    key = batch.get("__key__", "unknown")
+                    seed = derive_seed(base_seed, key)
                     generator = torch.Generator(device=self.device).manual_seed(seed)
                     self.processor.initialize_latents(
                         batch,
@@ -148,7 +159,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                         dtype=model.dtype,
                     )
                     sample_output = self.validation_sampler.sample(
-                        model, batch, negative_batch=negative_batch
+                        model, batch, negative_batch=negative_batch, generator=generator
                     )
                     decoded = self.processor.decode_output(
                         sample_output.final_latents, batch
@@ -156,7 +167,6 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                     batch.update(decoded)
 
                     # Log image
-                    key = batch.get("__key__", "unknown")
                     if self.validation_log_images:
                         image = tensor_to_pil(batch["clean_image"])
                         self.log_image(image, key, step=step)

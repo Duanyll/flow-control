@@ -72,6 +72,7 @@ class BaseSolver(BaseModel, ABC):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         raise NotImplementedError()
 
@@ -149,6 +150,7 @@ class FlowSolver(BaseSolver):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         step_eta = self.eta if eta is None else eta
         dt = sigma_next - sigma
@@ -165,7 +167,13 @@ class FlowSolver(BaseSolver):
 
         next_latents = prev_sample
         if next_latents is None:
-            next_latents = mean + noise_scale * torch.randn_like(latents)
+            noise = torch.randn(
+                latents.shape,
+                dtype=latents.dtype,
+                device=latents.device,
+                generator=generator,
+            )
+            next_latents = mean + noise_scale * noise
 
         return StepResult(
             next_latents=next_latents,
@@ -192,6 +200,7 @@ class DanceSolver(BaseSolver):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         step_eta = self.eta if eta is None else eta
         dsigma = sigma_next - sigma
@@ -205,7 +214,13 @@ class DanceSolver(BaseSolver):
             mean = mean - 0.5 * step_eta**2 * score_estimate * dsigma
             next_latents = prev_sample
             if next_latents is None:
-                next_latents = mean + std_dev_t * torch.randn_like(latents)
+                noise = torch.randn(
+                    latents.shape,
+                    dtype=latents.dtype,
+                    device=latents.device,
+                    generator=generator,
+                )
+                next_latents = mean + std_dev_t * noise
             log_prob = self._normal_log_prob(next_latents, mean, std_dev_t)
         else:
             std_dev_t = torch.tensor(0.0, device=latents.device, dtype=latents.dtype)
@@ -236,6 +251,7 @@ class DDIMSolver(BaseSolver):
         sigma_next: torch.Tensor,
         eta: float,
         prev_sample: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         std_dev_t = eta * sigma_next
         dt_sqrt = torch.sqrt(
@@ -253,7 +269,13 @@ class DDIMSolver(BaseSolver):
 
         next_latents = prev_sample
         if next_latents is None:
-            next_latents = mean + noise_scale * torch.randn_like(sample)
+            noise = torch.randn(
+                sample.shape,
+                dtype=sample.dtype,
+                device=sample.device,
+                generator=generator,
+            )
+            next_latents = mean + noise_scale * noise
 
         return next_latents, mean, noise_scale
 
@@ -266,6 +288,7 @@ class DDIMSolver(BaseSolver):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         step_eta = self.eta if eta is None else eta
         pred_original_sample = self._velocity_to_x0(velocity, latents, sigma)
@@ -276,6 +299,7 @@ class DDIMSolver(BaseSolver):
             sigma_next=sigma_next,
             eta=step_eta,
             prev_sample=prev_sample,
+            generator=generator,
         )
 
         if step_eta > 0.0:
@@ -308,6 +332,7 @@ class CPSSolver(BaseSolver):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         step_eta = self.eta if eta is None else eta
         dt = sigma_next - sigma
@@ -323,7 +348,13 @@ class CPSSolver(BaseSolver):
 
         next_latents = prev_sample
         if next_latents is None:
-            next_latents = mean + std_dev_t * torch.randn_like(latents)
+            noise = torch.randn(
+                latents.shape,
+                dtype=latents.dtype,
+                device=latents.device,
+                generator=generator,
+            )
+            next_latents = mean + std_dev_t * noise
 
         log_prob = -((next_latents.detach() - mean) ** 2)
         log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
@@ -362,6 +393,7 @@ class DPMSolver(BaseSolver):
         prev_sample: torch.Tensor | None = None,
         eta: float | None = None,
         state: SolverState | None = None,
+        generator: torch.Generator | None = None,
     ) -> StepResult:
         if prev_sample is not None:
             msg = f"{self.type} is deterministic and does not support replay log-prob."
@@ -387,6 +419,7 @@ class DPMSolver(BaseSolver):
                     sigma=sigma,
                     sigma_next=sigma_next,
                     eta=0.0,
+                    generator=generator,
                 )
             else:
                 next_latents = self._dpm_solver_first_order_update(

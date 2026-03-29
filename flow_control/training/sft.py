@@ -38,7 +38,12 @@ from flow_control.utils.types import (
     parse_scheduler,
 )
 
-from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from .data import (
+    DistributedBucketSampler,
+    PaddingAwareDatasetWrapper,
+    collate_fn,
+    seed_worker,
+)
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import CheckpointingMixin, ValidationMixin, distributed_main
 from .weighting import (
@@ -143,6 +148,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
 
     # ------------------------------- Checkpointing ------------------------------ #

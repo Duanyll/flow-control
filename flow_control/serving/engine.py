@@ -338,7 +338,7 @@ class ServingEngine:
             batch, generator=generator, device=self.model_device, dtype=self.model.dtype
         )
         sample_output = self.sampler.sample(
-            self.model, batch, negative_batch=negative_batch
+            self.model, batch, negative_batch=negative_batch, generator=generator
         )
 
         # --- decode on processor_device ---

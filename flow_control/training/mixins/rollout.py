@@ -32,7 +32,12 @@ from flow_control.utils.tensor import (
 )
 
 from ..advantage import Advantage, PerPromptAdvantage
-from ..data import DistributedKRepeatSampler, PaddingAwareDatasetWrapper, collate_fn
+from ..data import (
+    DistributedKRepeatSampler,
+    PaddingAwareDatasetWrapper,
+    collate_fn,
+    seed_worker,
+)
 from .hsdp import HsdpMixin
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
@@ -126,6 +131,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
 
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
@@ -186,6 +192,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                             batch,
                             negative_batch=negative_batch,
                             return_trajectory=self._rollout_needs_trajectory,
+                            generator=generator,
                         )
                         batch["clean_latents"] = rollout_out.final_latents
                         decoded = processor.decode_output(

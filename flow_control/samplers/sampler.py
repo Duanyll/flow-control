@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass
 
@@ -24,6 +25,12 @@ from .shift import NoShift, Shift
 from .solver import FlowSolver, Solver, SolverState
 
 logger = get_logger(__name__)
+
+
+def derive_seed(base_seed: int, key: str) -> int:
+    """Derive a deterministic per-sample seed from a base seed and a sample key."""
+    h = hashlib.sha256(f"{base_seed}:{key}".encode()).digest()
+    return int.from_bytes(h[:8], "little") % (2**63)
 
 
 def make_sample_progress() -> Progress:
@@ -86,6 +93,7 @@ class Sampler(BaseModel):
         t_start=1.0,
         t_end=0.0,
         return_trajectory: bool = False,
+        generator: torch.Generator | None = None,
     ) -> SampleOutput:
         if self.cfg_scale > 1.0 and negative_batch is None:
             warn_once(
@@ -104,6 +112,7 @@ class Sampler(BaseModel):
             sigmas=sigmas,
             negative_batch=negative_batch,
             return_trajectory=return_trajectory,
+            generator=generator,
         )
 
     def get_guided_velocity(
@@ -163,6 +172,7 @@ class Sampler(BaseModel):
         sigmas: torch.Tensor,
         negative_batch: Batch | None = None,
         return_trajectory: bool = False,
+        generator: torch.Generator | None = None,
     ) -> SampleOutput:
         device = model.device
         dtype = model.dtype
@@ -205,6 +215,7 @@ class Sampler(BaseModel):
                     sigma_next=sigma_next,
                     eta=step_eta,
                     state=solver_state,
+                    generator=generator,
                 )
                 latents = step_result.next_latents
                 solver_state = step_result.state

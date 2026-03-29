@@ -15,6 +15,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
+from flow_control.samplers.sampler import derive_seed
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -22,7 +23,12 @@ from flow_control.utils.tensor import (
     tensor_to_pil,
 )
 
-from .data import DistributedBucketSampler, PaddingAwareDatasetWrapper, collate_fn
+from .data import (
+    DistributedBucketSampler,
+    PaddingAwareDatasetWrapper,
+    collate_fn,
+    seed_worker,
+)
 from .mixins import DcpMixin, HsdpMixin, LoggingMixin, PreprocessMixin, distributed_main
 
 logger = get_logger(__name__)
@@ -76,6 +82,7 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             batch_size=1,
             sampler=sampler,
             collate_fn=collate_fn,
+            worker_init_fn=seed_worker,
         )
 
     # ------------------------------- Checkpointing ------------------------------ #
@@ -139,9 +146,9 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                         if self.sampler.cfg_scale > 1.0
                         else None
                     )
-                    generator = torch.Generator(device=self.device).manual_seed(
-                        self.seed
-                    )
+                    key = batch.get("__key__", "unknown")
+                    seed = derive_seed(self.seed, key)
+                    generator = torch.Generator(device=self.device).manual_seed(seed)
                     self.processor.initialize_latents(
                         batch,
                         generator=generator,
@@ -149,7 +156,10 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                         dtype=self.model.dtype,
                     )
                     sample_output = self.sampler.sample(
-                        self.model, batch, negative_batch=negative_batch
+                        self.model,
+                        batch,
+                        negative_batch=negative_batch,
+                        generator=generator,
                     )
                     result = self.processor.decode_output(
                         sample_output.final_latents,
@@ -157,7 +167,6 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                     )
                     result = deep_move_to_device(result, torch.device("cpu"))
                     image = tensor_to_pil(result["clean_image"])
-                    key = batch.get("__key__", None)
                     if key == "__padding__":
                         continue
                     if datasink is not None:

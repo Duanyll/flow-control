@@ -1,6 +1,8 @@
 import math
+import random
 from typing import Any, Protocol, cast
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
@@ -17,6 +19,15 @@ from flow_control.utils.resize import (
 from flow_control.utils.tensor import ensure_alpha_channel
 
 logger = get_logger(__name__)
+
+
+def seed_worker(worker_id: int) -> None:
+    """Seed each DataLoader worker for reproducible randomness across workers."""
+    worker_info = torch.utils.data.get_worker_info()
+    assert worker_info is not None
+    seed = worker_info.seed % (2**32)
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 class SizedMapDataset(Protocol):
