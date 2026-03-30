@@ -29,10 +29,6 @@ from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.datasets.coercion import ImageTensor
 from flow_control.processors.components.vae import VAE, BaseVAE
 from flow_control.utils.logging import console, dump_if_failed, get_logger
-from flow_control.utils.tensor import (
-    remove_alpha_channel,
-    tensor_to_pil,
-)
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -64,6 +60,7 @@ class VaeTrainInput(TypedDict):
 
 class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
+    training_type: str = "vae"
 
     # --------------------------------- Model -------------------------------- #
     vae: VAE
@@ -689,15 +686,10 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             target_01 = (target + 1) / 2
             pred_01 = (pred.float() + 1) / 2
 
-            # Composite over checkerboard for RGBA visualization
-            t_rgb = remove_alpha_channel(target_01, "checkerboard")
-            p_rgb = remove_alpha_channel(pred_01, "checkerboard")
-
             # Side by side: input | output
-            combined = torch.cat([t_rgb, p_rgb], dim=-1).clamp(0, 1)
-            image = tensor_to_pil(combined)
+            combined = torch.cat([target_01, pred_01], dim=-1).clamp(0, 1)
             key = batch.get("__key__", "unknown")
-            self.log_image(image, key, step=step, name="vae_validation")
+            self.log_image(combined, key, step=step, name="vae_validation")
 
         self._vae_model.train()
         logger.info(f"Completed validation at step {step}.")

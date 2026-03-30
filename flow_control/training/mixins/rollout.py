@@ -284,16 +284,16 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
         C = gathered_rewards.shape[-1]
         combined = (gathered_rewards * component_weights).sum(dim=-1)
         metrics: dict[str, float] = {
-            "reward/mean": combined.mean().item(),
-            "reward/std": combined.std().item(),
-            "reward/adv_abs_mean": advantages.abs().mean().item(),
+            "rollout/reward_mean": combined.mean().item(),
+            "rollout/reward_std": combined.std().item(),
+            "rollout/adv_abs_mean": advantages.abs().mean().item(),
         }
         if C > 1:
             for i in range(C):
-                metrics[f"reward/component_{i}_mean"] = (
+                metrics[f"rollout/component_{i}_mean"] = (
                     gathered_rewards[:, i].mean().item()
                 )
-                metrics[f"reward/component_{i}_std"] = (
+                metrics[f"rollout/component_{i}_std"] = (
                     gathered_rewards[:, i].std().item()
                 )
         log_metrics(metrics, step=step)

@@ -48,6 +48,7 @@ logger = get_logger(__name__)
 
 class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
+    training_type: str = "grpo"
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
@@ -88,8 +89,8 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # --------------------------------- Status bar ------------------------------- #
     _status_fields: dict[str, str] = {
-        "reward/mean": "R̄: {v:.3f}",
-        "reward/std": "σ: {v:.3f}",
+        "rollout/reward_mean": "R̄: {v:.3f}",
+        "rollout/reward_std": "σ: {v:.3f}",
         "train/loss": "Loss: {v:.4f}",
         "val/reward_mean": "Val R̄: {v:.3f}",
     }

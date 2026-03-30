@@ -25,7 +25,6 @@ from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
-    tensor_to_pil,
 )
 
 from ..data import (
@@ -168,8 +167,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
 
                     # Log image
                     if self.validation_log_images:
-                        image = tensor_to_pil(batch["clean_image"])
-                        self.log_image(image, key, step=step)
+                        self.log_image(batch["clean_image"], key, step=step)
 
                     progress.advance(task)
 

@@ -58,6 +58,7 @@ logger = get_logger(__name__)
 
 class SftTrainer(ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
+    training_type: str = "sft"
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
