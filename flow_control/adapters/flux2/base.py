@@ -40,6 +40,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
 
     patch_size: int = 2
     vae_scale_factor: int = 8
+    latent_channels: int = 32
 
     guidance: float = 4.0
     time_scale: int = 10

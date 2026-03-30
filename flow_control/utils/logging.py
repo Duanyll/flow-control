@@ -261,7 +261,7 @@ def _write_traceback_file(
         )
         handle.write(f"{TRACEBACK_SEPARATOR}\n")
         print(
-            f"[red]>>> An {exc_type.__name__} was caught and logged to {traceback_file_path} <<<[/red]"
+            f"[red]>>> Got {exc_type.__name__} and logged to {traceback_file_path} <<<[/red]"
         )
 
 

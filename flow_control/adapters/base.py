@@ -52,12 +52,20 @@ class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
 
     hf_model: HfModelLoader[TModel]
     storage_dtype: TorchDType | None = None
+    """Specify a storage dtype (e.g. float8_e4m3fn) to apply layerwise upcasting. """
     trainable_dtype: TorchDType = torch.bfloat16
+    """The dtype to cast trainable parameters to."""
+    # TODO: Add standard PyTorch AMP (torch.autocast) support (bf16 activation + fp32 trainable params)
 
     all_trainable: bool = False
     peft_lora_config: LoraConfig = LoraConfig()
     peft_lora_rank: int = 0
+    """If > 0, will apply PEFT LoRA adapters with the given rank. Overrides `r` in `peft_lora_config`."""
     extra_trainable_modules: list[str] = []
+    """
+    List of module name substrings to make trainable, in addition to any PEFT adapters. 
+    Matches if the substring is contained in the parameter's FQN.
+    """
 
     patch_size: int = 2
     latent_channels: int = 16

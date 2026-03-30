@@ -70,7 +70,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     # -------------------------------- Dataset -------------------------------- #
     dataset: DatasetConfig
     validation_dataset: DatasetConfig | None = None
-    num_dataloader_workers: int = 4
+    num_dataloader_workers: int = 1
     validation_num_workers: int = 1
     resize_multiple: int = 16
     resize_pixels: int = 0

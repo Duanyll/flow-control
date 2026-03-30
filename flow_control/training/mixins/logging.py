@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any, Literal
+from typing import Any
 
 import aim
 import numpy as np
@@ -33,8 +33,8 @@ class LoggingMixin(BaseModel):
     aim_repo: str
     experiment_name: str
     training_type: str = ""
-    aim_image_grouping: Literal["per_image", "per_step"] = "per_image"
     aim_image_background: None | BlendBackground = None
+    """Background to blend with alpha channel when logging images. If None, will keep alpha channel (if exists). """
 
     _tracker: aim.Run | None = None
     _aggregated_metrics: dict[str, list[float]] = {}
@@ -49,13 +49,20 @@ class LoggingMixin(BaseModel):
             raise RuntimeError("Aim tracker not initialized, or not on main process.")
         return self._tracker
 
-    def _build_context(self, subset: str | None = None) -> dict[str, Any] | None:
+    def _build_context(self, subset: str | None = None) -> Any:
         ctx: dict[str, Any] = {}
         if self.training_type:
             ctx["training_type"] = self.training_type
         if subset:
             ctx["subset"] = subset
         return ctx if ctx else None
+
+    def _get_current_epoch(self) -> Any:
+        if hasattr(self, "current_epoch"):
+            return getattr(self, "current_epoch", None)
+        elif hasattr(self, "_current_epoch"):
+            return getattr(self, "_current_epoch", None)
+        return None
 
     @main_process_only
     def init_tracker(self):
@@ -68,21 +75,6 @@ class LoggingMixin(BaseModel):
             f"experiment={self.experiment_name}."
         )
 
-    def _track_image(
-        self,
-        aim_image: aim.Image,
-        image_key: str,
-        name: str,
-        step: int,
-        context: Any,
-    ):
-        if self.aim_image_grouping == "per_step":
-            self.tracker.track(aim_image, name=name, step=step, context=context)
-        else:
-            self.tracker.track(
-                aim_image, name=f"{name}/{image_key}", step=step, context=context
-            )
-
     def log_image(
         self, image: torch.Tensor, image_key: str, step: int, name: str = "validation"
     ):
@@ -94,7 +86,9 @@ class LoggingMixin(BaseModel):
         image_np = np.array(tensor_to_pil(image))
 
         if world_size == 1:
-            self._track_image(aim.Image(image_np), image_key, name, step, ctx)
+            self.tracker.track(
+                aim.Image(image_np), name=f"{name}/{image_key}", step=step, context=ctx
+            )
             return
 
         if is_main:
@@ -105,7 +99,9 @@ class LoggingMixin(BaseModel):
             for k, img in zip(keys, images, strict=True):
                 if k == "__padding__":
                     continue
-                self._track_image(aim.Image(img), k, name, step, ctx)
+                self.tracker.track(
+                    aim.Image(img), name=f"{name}/{k}", step=step, context=ctx
+                )
         else:
             dist.gather_object(image_np, None, dst=0)
             dist.gather_object(image_key, None, dst=0)
@@ -122,7 +118,9 @@ class LoggingMixin(BaseModel):
 
         for prefix, group in grouped.items():
             ctx: Any = self._build_context(subset=prefix)
-            self.tracker.track(group, step=step, context=ctx)
+            self.tracker.track(
+                group, step=step, context=ctx, epoch=self._get_current_epoch()
+            )
 
     def log_metrics(self, metrics: Mapping[str, float | torch.Tensor], step: int):
         is_main: bool = getattr(self, "is_main_process", True)

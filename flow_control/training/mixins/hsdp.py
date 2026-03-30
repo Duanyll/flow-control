@@ -26,6 +26,11 @@ class HsdpMixin(BaseModel):
     launch: LaunchConfig
     seed: int = 42
     hsdp_shard_dim: int = 1
+    """
+    The dimension along which to shard the model parameters in FSDP2. If set to 1, this
+    means no sharding and equivalent to DDP. Usually you don't want to shard across 
+    NUMA nodes or NVLink domain because of the communication overhead.
+    """
     gradient_checkpointing: bool = True
 
     # -------------------------------- Properties -------------------------------- #

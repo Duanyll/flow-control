@@ -127,15 +127,27 @@ class PreprocessConfig(BaseModel):
 
     num_loader_workers: int = 1
     num_sink_workers: int = 1
-    processor_devices: list[int] = [0]
-    processor_concurrency: int = 1  # Max concurrent async calls per processor worker
+    processor_devices: list[int] | int = [0]
+    processor_concurrency: int = 1
+    """Max number of concurrent items per processor worker. """
     num_threads_per_worker: int = 8
+    """Number of OMP threads to use per worker. """
     queue_size: int = 16
+    """Max number of items to hold in the queue between stages. """
 
     processing_mode: Literal["inference", "training"]
     save_extra: bool = False
+    """
+    Whether to save the entire processor input (including original data and any extra fields) to the output. If False,
+    only save the processor output fields which is necessary for training/inference. Most RL training pipelines should
+    enable this since the reward model need access to the original prompts.
+    """
     enable_coercion: bool = True
     reassign_keys: bool = False
+    """
+    Whether to reassign keys to numeric indices in the loader stage. This can be useful when the original keys are not
+    unique or not suitable for tracking.
+    """
 
 
 def run(config_path: str) -> None:
@@ -167,8 +179,12 @@ def run(config_path: str) -> None:
             ),
             StageConfig(
                 stage=ProcessorStage,
-                num_workers=len(config.processor_devices),
-                gpu_ids=config.processor_devices,
+                num_workers=len(config.processor_devices)
+                if isinstance(config.processor_devices, list)
+                else config.processor_devices,
+                gpu_ids=config.processor_devices
+                if isinstance(config.processor_devices, list)
+                else list(range(config.processor_devices)),
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
                 max_concurrency=config.processor_concurrency,

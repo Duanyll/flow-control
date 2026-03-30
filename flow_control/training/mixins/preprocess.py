@@ -13,6 +13,13 @@ from .hsdp import HsdpMixin
 class PreprocessMixin(HsdpMixin):
     processor: Processor
     enable_preprocess: bool = False
+    """
+    Whether to enable online preprocessing using the processor. Will load processor models
+    on each rank which takes more GPU memory. Currently online preprocessing does not support
+    async calls, so it will block the training loop when calling external LLM endpoints.
+
+    If disabled, you should load a preprocessed dataset with `flow-control preprocess` command.
+    """
     enable_coercion: bool = True
     _processor_loop: asyncio.AbstractEventLoop
 
@@ -62,7 +69,7 @@ class PreprocessMixin(HsdpMixin):
             coerce_to=get_processor_input_typeddict(
                 self.processor.__class__, "training"
             )
-            if self.enable_coercion
+            if self.enable_preprocess and self.enable_coercion
             else None,
         )
 
@@ -72,7 +79,7 @@ class PreprocessMixin(HsdpMixin):
             coerce_to=get_processor_input_typeddict(
                 self.processor.__class__, "inference"
             )
-            if self.enable_coercion
+            if self.enable_preprocess and self.enable_coercion
             else None,
         )
 

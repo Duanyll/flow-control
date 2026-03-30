@@ -68,7 +68,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     dataset: DatasetConfig
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
-    num_dataloader_workers: int = 4
+    num_dataloader_workers: int = 1
 
     optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}

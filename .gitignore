@@ -15,5 +15,5 @@ workspace/
 outputs/
 demo/
 
-docker-compose.yml
+docker-compose.*
 .devcontainer/
