@@ -65,8 +65,7 @@ Rules to follow:
 1. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 
 2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
 3. Make sure you fix all linting and type errors.
-4. You don't have to run tests that requires actual weights / datasets, unless the user instructs you to do so. 
-5. If you want to run the full processing / training pipeline, use `tmux` to avoid Bash session timeout. **Never** pipe through `tee` or redirect stdout/stderr — it breaks the PTY, causing Rich to lose colors, progress bars, and terminal width detection. The logging module already writes logs to `/tmp/flow-control/rank*.log` and tracebacks to `/tmp/flow-control/rank*.traceback.log`, so `tee` is unnecessary.
+4. If you want to run the full processing / training pipeline, use `tmux` to avoid Bash session timeout. **Never** pipe through `tee` or redirect stdout/stderr — it breaks the PTY, causing Rich to lose colors, progress bars, and terminal width detection. The logging module already writes logs to `/tmp/flow-control/rank*.log` and tracebacks to `/tmp/flow-control/rank*.traceback.log`, so `tee` is unnecessary.
 
    Example workflow:
    ```bash

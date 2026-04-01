@@ -32,6 +32,10 @@
         {
             "fileMatch": ["*.preprocess.jsonc", "preprocess.jsonc"],
             "url": "./schema/preprocess.schema.json"
+        },
+        {
+            "fileMatch": ["*.serve.jsonc", "serve.jsonc"],
+            "url": "./schema/serve.schema.json"
         }
     ]
 }

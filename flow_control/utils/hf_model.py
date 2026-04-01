@@ -1,4 +1,9 @@
-from typing import Any, Literal
+from __future__ import annotations
+
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, ClassVar, Literal
 
 import torch
 from accelerate import infer_auto_device_map, init_empty_weights
@@ -10,8 +15,52 @@ from .types import TorchDType
 logger = get_logger(__name__)
 
 
+class LoadingScope:
+    """Tracks ``config_key``s loaded during a model reload cycle.
+
+    Created by :meth:`HfModelLoader.loading_scope`.  After the scope ends,
+    call :meth:`purge_stale` to free cached models that were not loaded.
+    """
+
+    def __init__(self) -> None:
+        self.active_keys: set[tuple] = set()
+
+    def purge_stale(self) -> list[str]:
+        """Remove cached models whose keys were not loaded in this scope."""
+        stale = set(HfModelLoader._model_cache) - self.active_keys
+        messages: list[str] = []
+        for key in stale:
+            del HfModelLoader._model_cache[key]
+            # key layout: (library, class_name, pretrained_id, ...)
+            messages.append(f"Purged cached model: {key[1]} ({key[2]})")
+        if stale and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return messages
+
+
 class HfModelLoader[T](BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    _model_cache: ClassVar[dict[tuple, Any]] = {}
+    _scope_var: ClassVar[ContextVar[LoadingScope | None]] = ContextVar(
+        "hf_model_loading_scope", default=None
+    )
+
+    @classmethod
+    @contextmanager
+    def loading_scope(cls) -> Generator[LoadingScope]:
+        """Track which models are loaded; call ``scope.purge_stale()`` after."""
+        scope = LoadingScope()
+        token = cls._scope_var.set(scope)
+        try:
+            yield scope
+        finally:
+            cls._scope_var.reset(token)
+
+    @classmethod
+    def invalidate_cache(cls, key: tuple) -> None:
+        """Remove a cache entry without touching any instance's ``_model``."""
+        cls._model_cache.pop(key, None)
 
     library: Literal["diffusers", "transformers"]
     class_name: str
@@ -53,6 +102,7 @@ class HfModelLoader[T](BaseModel):
     def unload_model(self) -> None:
         if self._model is None:
             return
+        self._model_cache.pop(self.config_key, None)
         model = self._model
         self._model = None
         del model
@@ -178,10 +228,34 @@ class HfModelLoader[T](BaseModel):
         self._model = model
         return model
 
-    def load_model(self, device: torch.device, frozen: bool = True) -> None:
-        if self._model is not None:
-            return
+    def load_model(self, device: torch.device, frozen: bool = True) -> bool:
+        """Load the model onto *device*.
 
+        Returns ``True`` if a fresh load from pretrained was performed (caller
+        should run post-load setup).  Returns ``False`` when the model was
+        already loaded on this instance or was reused from the class-level
+        cache.
+        """
+        key = self.config_key
+        scope = self._scope_var.get(None)
+        if scope is not None:
+            scope.active_keys.add(key)
+
+        # Already loaded on this instance
+        if self._model is not None:
+            return False
+
+        # Reuse from cache
+        if key in self._model_cache:
+            self._model = self._model_cache[key]
+            logger.info(
+                f"Reusing cached {self.class_name} ({self.pretrained_model_id})"
+            )
+            if hasattr(self._model, "requires_grad_"):
+                self._model.requires_grad_(not frozen)  # type: ignore
+            return False
+
+        # Fresh load from pretrained
         if self.library == "diffusers":
             import diffusers
 
@@ -202,3 +276,6 @@ class HfModelLoader[T](BaseModel):
 
         if hasattr(self.model, "requires_grad_"):
             self.model.requires_grad_(not frozen)  # type: ignore
+
+        self._model_cache[key] = self._model
+        return True

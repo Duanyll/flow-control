@@ -14,6 +14,7 @@ class ServeConfig(BaseModel):
     port: int = 7860
     device: TorchDevice = torch.device("cuda")
     processor_device: TorchDevice | None = None
+    offload_processor: bool = False
     share: bool = False
 
     model: ModelAdapter
@@ -22,3 +23,5 @@ class ServeConfig(BaseModel):
 
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
+    checkpoint_root: str | None = None
+    use_ema: bool = False

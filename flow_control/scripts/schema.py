@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from rich import print
 
 from flow_control.scripts.preprocess import PreprocessConfig
+from flow_control.serving.config import ServeConfig
 from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.inference import Inference
 from flow_control.training.nft import NftTrainer
@@ -44,6 +45,7 @@ def generate_schemas() -> dict[str, dict]:
         "inference": TypeAdapter(Inference).json_schema(),
         "preprocess": TypeAdapter(PreprocessConfig).json_schema(),
         "vae": TypeAdapter(VaeTrainer).json_schema(),
+        "serve": TypeAdapter(ServeConfig).json_schema(),
     }
     return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 

@@ -19,6 +19,7 @@ from rich.progress import (
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.utils.logging import console, get_logger, warn_once
+from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
 
 from .shift import NoShift, Shift
@@ -227,6 +228,10 @@ class Sampler(BaseModel):
                     all_log_probs.append(step_result.log_prob)
 
                 progress.advance(task)
+                report_progress(
+                    (i + 1) / self.steps,
+                    f"Sampling {i + 1}/{self.steps}",
+                )
 
         output = SampleOutput(
             final_latents=latents.to(dtype),

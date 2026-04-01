@@ -9,6 +9,7 @@ import json5
 from PIL import Image
 
 from flow_control.utils.logging import get_logger
+from flow_control.utils.progress import progress_var
 
 from .engine import ServingEngine
 from .tasks import get_task_template
@@ -16,10 +17,42 @@ from .tasks import get_task_template
 logger = get_logger(__name__)
 
 
+def _render_checkpoint_input(engine: ServingEngine) -> gr.Dropdown | gr.Textbox:
+    """Create the training checkpoint input — dropdown when root is set, textbox otherwise.
+
+    When ``checkpoint_root`` is configured, also renders a refresh button and
+    wires its click event.
+    """
+    if engine._checkpoint_root:
+        with gr.Row():
+            dropdown = gr.Dropdown(
+                label="Training Checkpoint Dir",
+                choices=[""] + engine.list_checkpoints(),
+                value=engine._checkpoint_dir or "",
+                allow_custom_value=True,
+            )
+            refresh_btn = gr.Button("🔄", scale=0, min_width=40)
+
+        def on_refresh() -> gr.update:  # type: ignore[type-arg]
+            return gr.update(choices=[""] + engine.list_checkpoints())
+
+        refresh_btn.click(fn=on_refresh, inputs=[], outputs=[dropdown])
+        return dropdown
+    return gr.Textbox(
+        label="Training Checkpoint Dir",
+        placeholder="Path to DCP training checkpoint (optional)",
+        value=engine._checkpoint_dir or "",
+    )
+
+
 def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
     """Build and return the Gradio Blocks UI wired to the given engine."""
     task_name: str = engine.processor.task
     template = get_task_template(task_name)
+
+    initial_config_jsonc = json5.dumps(
+        engine.config_dump(), indent=2, ensure_ascii=False
+    )
 
     with gr.Blocks(title=f"flow-control: {task_name}") as app:
         gr.Markdown(f"# flow-control Serving &mdash; `{task_name}`")
@@ -50,51 +83,44 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         precision=0,
                     )
 
-                with gr.Accordion("Checkpoints", open=False):
+                with gr.Accordion("Configuration", open=False):
+                    gr.Markdown(
+                        "修改 `processor.task` 不受支持。"
+                        "修改可能影响权重装载的模型配置后，请先点击 `Reload Models`。"
+                    )
+                    jsonc_box = gr.Code(
+                        label="Full Config (JSONC)",
+                        language="json",
+                        value=initial_config_jsonc,
+                    )
                     seed_ckpt_input = gr.Textbox(
                         label="Seed Checkpoint Dir",
                         placeholder="Path to DCP seed checkpoint (optional)",
                         value=engine._seed_checkpoint_dir or "",
                     )
-                    train_ckpt_input = gr.Textbox(
-                        label="Training Checkpoint Dir",
-                        placeholder="Path to DCP training checkpoint (optional)",
-                        value=engine._checkpoint_dir or "",
-                    )
-                    reload_btn = gr.Button("Reload Model")
-                    reload_status = gr.Textbox(
-                        label="Status", interactive=False, max_lines=3
+                    train_ckpt_input = _render_checkpoint_input(engine)
+                    use_ema_checkbox = gr.Checkbox(
+                        label="Use EMA weights",
+                        value=engine._use_ema,
                     )
 
-                with gr.Accordion("Config Editor (JSONC)", open=False):
-                    jsonc_box = gr.Code(
-                        label="Full Config",
-                        language="json",
-                        value=json5.dumps(
-                            engine.config_dump(), indent=2, ensure_ascii=False
-                        ),
-                    )
-                    apply_btn = gr.Button("Apply Config")
-                    override_status = gr.Textbox(
-                        label="Status",
-                        interactive=False,
-                        max_lines=5,
-                    )
-
-                generate_btn = gr.Button("Generate", variant="primary", size="lg")
+                with gr.Row():
+                    generate_btn = gr.Button("Generate", variant="primary", size="lg")
+                    reload_btn = gr.Button("Reload Models", variant="secondary")
 
             # ---- Right column: output ---- #
             with gr.Column(scale=1):
                 output_image = gr.Image(label="Output", type="pil")
                 status_text = gr.Textbox(label="Generation Info", interactive=False)
 
-        # ---- Event handlers ---- #
+        # ---- Event handler ---- #
 
         async def on_generate(
             *args: Any,
+            progress: gr.Progress = gr.Progress(),  # noqa: B008
         ) -> tuple[Image.Image | None, str]:
             # args = [*task_components, steps, cfg_scale, seed,
-            #         seed_ckpt, train_ckpt]
+            #         seed_ckpt, train_ckpt, config_jsonc, use_ema]
             n_task = len(task_components)
             task_args = args[:n_task]
             steps = int(args[n_task])
@@ -102,6 +128,8 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
             seed = int(args[n_task + 2])
             seed_ckpt = str(args[n_task + 3]).strip()
             train_ckpt = str(args[n_task + 4]).strip()
+            config_jsonc = str(args[n_task + 5])
+            use_ema = bool(args[n_task + 6])
 
             try:
                 input_batch = template.coerce(*task_args)
@@ -110,20 +138,51 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
             except Exception as e:
                 raise gr.Error(f"Input error: {e}") from e
 
-            # Auto-reload transformer if checkpoint paths changed
-            engine.update_checkpoints(seed_ckpt or None, train_ckpt or None)
+            def _report(frac: float, desc: str) -> None:
+                progress(frac, desc=desc)
 
-            # Apply sampler overrides for this run
-            engine.sampler.steps = steps
-            engine.sampler.cfg_scale = cfg_scale
-            engine.sampler.seed = seed
-
+            token = progress_var.set(_report)
             try:
-                image, status = await engine.generate(input_batch, seed=seed)
+                image, status = await engine.generate(
+                    input_batch,
+                    seed=seed,
+                    steps=steps,
+                    cfg_scale=cfg_scale,
+                    config_jsonc=config_jsonc,
+                    seed_checkpoint_dir=seed_ckpt or None,
+                    checkpoint_dir=train_ckpt or None,
+                    use_ema=use_ema,
+                )
                 return image, status
             except Exception as e:
                 logger.exception("Generation failed")
                 raise gr.Error(f"Generation failed: {e}") from e
+            finally:
+                progress_var.reset(token)
+
+        async def on_reload(
+            seed_ckpt: str,
+            train_ckpt: str,
+            config_jsonc: str,
+            use_ema: bool,
+            progress: gr.Progress = gr.Progress(),  # noqa: B008
+        ) -> str:
+            def _report(frac: float, desc: str) -> None:
+                progress(frac, desc=desc)
+
+            token = progress_var.set(_report)
+            try:
+                return await engine.reload(
+                    config_jsonc=config_jsonc,
+                    seed_checkpoint_dir=seed_ckpt.strip() or None,
+                    checkpoint_dir=train_ckpt.strip() or None,
+                    use_ema=use_ema,
+                )
+            except Exception as e:
+                logger.exception("Model reload failed")
+                raise gr.Error(f"Model reload failed: {e}") from e
+            finally:
+                progress_var.reset(token)
 
         generate_btn.click(
             fn=on_generate,
@@ -134,46 +193,20 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                 seed_input,
                 seed_ckpt_input,
                 train_ckpt_input,
+                jsonc_box,
+                use_ema_checkbox,
             ],
             outputs=[output_image, status_text],
         )
-
-        async def on_reload(seed_ckpt: str, train_ckpt: str) -> str:
-            try:
-                messages = engine.update_checkpoints(
-                    seed_ckpt.strip() or None,
-                    train_ckpt.strip() or None,
-                )
-                result = "\n".join(messages)
-                logger.info(f"Checkpoint reload: {result}")
-                return result
-            except Exception as e:
-                logger.exception("Failed to reload checkpoints")
-                raise gr.Error(f"Reload failed: {e}") from e
-
         reload_btn.click(
             fn=on_reload,
-            inputs=[seed_ckpt_input, train_ckpt_input],
-            outputs=[reload_status],
-        )
-
-        async def on_apply_config(jsonc_text: str) -> tuple[str, str]:
-            try:
-                messages = engine.apply_config(jsonc_text)
-                result = "\n".join(messages)
-                logger.info(f"Config applied: {result}")
-                new_dump = json5.dumps(
-                    engine.config_dump(), indent=2, ensure_ascii=False
-                )
-                return new_dump, result
-            except Exception as e:
-                logger.exception("Failed to apply config")
-                raise gr.Error(f"Failed to apply config: {e}") from e
-
-        apply_btn.click(
-            fn=on_apply_config,
-            inputs=[jsonc_box],
-            outputs=[jsonc_box, override_status],
+            inputs=[
+                seed_ckpt_input,
+                train_ckpt_input,
+                jsonc_box,
+                use_ema_checkbox,
+            ],
+            outputs=[status_text],
         )
 
     return app
