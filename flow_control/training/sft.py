@@ -45,7 +45,12 @@ from .data import (
     seed_worker,
 )
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
-from .mixins import CheckpointingMixin, ValidationMixin, distributed_main
+from .mixins import (
+    CheckpointingMixin,
+    PreemptionMixin,
+    ValidationMixin,
+    distributed_main,
+)
 from .weighting import (
     LogitNormalTimestepWeighting,
     LossWeighting,
@@ -56,7 +61,7 @@ from .weighting import (
 logger = get_logger(__name__)
 
 
-class SftTrainer(ValidationMixin, CheckpointingMixin):
+class SftTrainer(ValidationMixin, PreemptionMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"
 
@@ -167,6 +172,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             "dataloader": self._dataloader.state_dict(),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
+            "rng": self.get_rng_state_bytes(),
         }
         if self._ema_optimizer is not None:
             state["optim_ema"] = get_optimizer_state_dict(
@@ -190,9 +196,11 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                 state_dict["optim_ema"],
                 options=opts,
             )
+            self._ema_optimizer.coerce_buffer_dtype()
         self._dataloader.load_state_dict(state_dict["dataloader"])
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
+        self.load_rng_state_bytes(state_dict.get("rng"))
 
     # ------------------------------- Training ----------------------------------- #
 
@@ -256,6 +264,8 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             with apply_ema_maybe(self._ema_optimizer):
                 self.validate_and_log(self.model, self._current_step)
 
+        self.check_preempt_and_maybe_exit(self._current_step)
+
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
             logger.error(
@@ -280,8 +290,8 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         self.make_validation_dataloader()
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
-        if self.resume_from_dir is not None:
-            self.load_dcp_checkpoint(self.resume_from_dir)
+        self.maybe_auto_resume(self.resume_from_dir)
+        self.install_preempt_handler()
 
         with apply_ema_maybe(self._ema_optimizer):
             self.validate_and_log(self.model, self._current_step)

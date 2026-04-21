@@ -37,6 +37,7 @@ from .ema import (
 )
 from .mixins import (
     CheckpointingMixin,
+    PreemptionMixin,
     Rollout,
     RolloutMixin,
     ValidationMixin,
@@ -46,7 +47,7 @@ from .mixins import (
 logger = get_logger(__name__)
 
 
-class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
+class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "grpo"
 
@@ -152,6 +153,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
             "current_epoch": self._current_epoch,
+            "rng": self.get_rng_state_bytes(),
         }
         if self._ema_optimizer is not None:
             state["optim_ema"] = get_optimizer_state_dict(
@@ -179,6 +181,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 state_dict["optim_ema"],
                 options=opts,
             )
+            self._ema_optimizer.coerce_buffer_dtype()
         if (
             self._init_backup_optimizer is not None
             and "optim_init_backup" in state_dict
@@ -193,6 +196,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
         self._current_epoch = state_dict.get("current_epoch", 0)
+        self.load_rng_state_bytes(state_dict.get("rng"))
 
     # ------------------------------- Reference model ---------------------------- #
 
@@ -517,6 +521,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     self._optimizer_step()
                     self._current_step += 1
                     self.flush_aggregated_metrics(self._current_step)
+                    self.check_preempt_and_maybe_exit(self._current_step)
 
     # --- Main loop ---
 
@@ -533,8 +538,8 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         self.reward.load_model(self.device)
 
         os.makedirs(self.checkpoint_root, exist_ok=True)
-        if self.resume_from_dir is not None:
-            self.load_dcp_checkpoint(self.resume_from_dir)
+        self.maybe_auto_resume(self.resume_from_dir)
+        self.install_preempt_handler()
 
         with apply_ema_maybe(self._ema_optimizer):
             self.validate_and_log(self.model, self._current_step, reward=self.reward)

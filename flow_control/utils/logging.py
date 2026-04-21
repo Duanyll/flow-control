@@ -173,7 +173,7 @@ def _create_message_formatter(include_name: bool) -> logging.Formatter:
 
 
 def _create_file_handler(path: Path) -> logging.FileHandler:
-    handler = logging.FileHandler(path, mode="w", encoding="utf-8")
+    handler = logging.FileHandler(path, mode="a", encoding="utf-8")
     handler.setFormatter(
         logging.Formatter(
             (

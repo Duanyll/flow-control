@@ -1,4 +1,5 @@
 import os
+import pickle
 import random
 from functools import wraps
 
@@ -103,6 +104,32 @@ class HsdpMixin(BaseModel):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         logger.info(f"Random seed set to {seed} for rank {self.rank}.")
+
+    def get_rng_state_bytes(self) -> bytes:
+        """Serialize this rank's global RNG state (torch/cuda/numpy/random).
+
+        Packed as a single pickled blob so DCP treats it as a per-rank bytes
+        object (each rank saves/loads its own copy, not a broadcast of rank 0).
+        """
+        state: dict[str, object] = {
+            "torch": torch.get_rng_state(),
+            "numpy": np.random.get_state(),
+            "python": random.getstate(),
+        }
+        if torch.cuda.is_available():
+            state["cuda"] = torch.cuda.get_rng_state(self.device)
+        return pickle.dumps(state)
+
+    def load_rng_state_bytes(self, data: bytes | None) -> None:
+        if not data:
+            return
+        state = pickle.loads(data)
+        torch.set_rng_state(state["torch"])
+        np.random.set_state(state["numpy"])
+        random.setstate(state["python"])
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state(state["cuda"], self.device)
+        logger.info("Restored RNG state from checkpoint.")
 
     def load_transformer_from_seed(
         self,

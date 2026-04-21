@@ -45,7 +45,7 @@ from ..data import (
     prepare_vae_target_image,
     seed_worker,
 )
-from ..mixins import CheckpointingMixin, HsdpMixin, distributed_main
+from ..mixins import CheckpointingMixin, HsdpMixin, PreemptionMixin, distributed_main
 from ..mixins.logging import LoggingMixin
 from .convert import convert_to_rgba
 from .loss import RGBAVAELoss
@@ -58,7 +58,7 @@ class VaeTrainInput(TypedDict):
     clean_image: ImageTensor
 
 
-class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
+class VaeTrainer(LoggingMixin, HsdpMixin, PreemptionMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "vae"
 
@@ -389,6 +389,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             "scheduler_gen": self._scheduler_gen.state_dict(),
             "dataloader": self._dataloader.state_dict(),
             "current_step": self._current_step,
+            "rng": self.get_rng_state_bytes(),
         }
         if self._optimizer_disc is not None:
             state["discriminator"] = get_model_state_dict(
@@ -426,6 +427,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
                 options=opts,
             )
             self._scheduler_disc.load_state_dict(state_dict["scheduler_disc"])
+
+        self.load_rng_state_bytes(state_dict.get("rng"))
 
     # ------------------------------ Training -------------------------------- #
 
@@ -655,6 +658,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         if self._current_step % self.validation_steps == 0:
             self.validate_vae(self._current_step)
 
+        self.check_preempt_and_maybe_exit(self._current_step)
+
     def check_loss(self, loss: torch.Tensor) -> None:
         if not torch.isfinite(loss):
             logger.error(
@@ -712,8 +717,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         self.make_validation_dataloader()
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
-        if self.resume_from_dir is not None:
-            self.load_dcp_checkpoint(self.resume_from_dir)
+        self.maybe_auto_resume(self.resume_from_dir)
+        self.install_preempt_handler()
 
         self.validate_vae(self._current_step)
 

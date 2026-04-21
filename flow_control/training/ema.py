@@ -112,6 +112,22 @@ class EMAOptimizer(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
 
     @torch.no_grad()
+    def coerce_buffer_dtype(self, dtype: torch.dtype = torch.float32) -> None:
+        """Re-cast ``ema_buffer`` entries to ``dtype`` after a DCP load.
+
+        ``torch.distributed.checkpoint.set_optimizer_state_dict`` aligns loaded
+        optimizer state tensors with the param dtype (bfloat16 for LoRA
+        params). We want the EMA shadow to stay in fp32 for numerical
+        precision in ``_update_ema``'s ``lerp`` op, so we re-cast once after
+        load.
+        """
+        for group in self.param_groups:
+            for p in group["params"]:
+                buf = self.state.get(p, {}).get("ema_buffer")
+                if buf is not None and buf.dtype != dtype:
+                    self.state[p]["ema_buffer"] = buf.to(dtype=dtype)
+
+    @torch.no_grad()
     def apply_shadow(self):
         """Replace parameters with their EMA values, saving current params as backup."""
         for group in self.param_groups:
