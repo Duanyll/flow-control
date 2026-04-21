@@ -9,7 +9,6 @@ from typing import Any
 
 import json5
 import torch
-from PIL import Image
 from pydantic import BaseModel
 
 from flow_control.adapters import parse_model_adapter
@@ -20,11 +19,7 @@ from flow_control.samplers import Sampler
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.progress import report_progress
-from flow_control.utils.tensor import (
-    deep_cast_float_dtype,
-    deep_move_to_device,
-    tensor_to_pil,
-)
+from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
 
 from .config import ServeConfig
 
@@ -328,13 +323,6 @@ class ServingEngine:
         if not isinstance(processor_conf, dict):
             raise ValueError("Config must contain a 'processor' object.")
 
-        new_task = processor_conf.get("task")
-        if new_task != self.processor.task:
-            raise ValueError(
-                f"Changing processor.task from '{self.processor.task}' to "
-                f"'{new_task}' is not supported in the current Gradio session."
-            )
-
         return (
             parse_model_adapter(conf["model"]),
             parse_processor(processor_conf),
@@ -491,8 +479,12 @@ class ServingEngine:
         checkpoint_dir: str | None = None,
         use_ema: bool = False,
         force_reload: bool = False,
-    ) -> tuple[Image.Image, str]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run single-sample inference with optional config/sampler overrides.
+
+        Returns ``(result_dict, info_dict)`` where *result_dict* contains
+        decoded image tensors (CPU) and *info_dict* contains non-tensor
+        metadata for display.
 
         All state mutations and GPU work are serialized under ``_gpu_lock``.
         """
@@ -555,7 +547,13 @@ class ServingEngine:
         self,
         batch: Any,
         seed: int,
-    ) -> tuple[Image.Image, str]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Sample and decode, returning ``(result_dict, info_dict)``.
+
+        ``result_dict`` is the :class:`DecodedBatch` from the processor
+        (tensors on CPU).  ``info_dict`` contains non-tensor metadata
+        extracted from the processed batch for display.
+        """
         t0 = time.perf_counter()
 
         batch = deep_cast_float_dtype(batch, self.model.dtype)
@@ -592,14 +590,24 @@ class ServingEngine:
             output_latent = sample_output.final_latents.to(self.processor_device)
             result = self.processor.decode_output(output_latent, batch)
             result = deep_move_to_device(result, torch.device("cpu"))
-            image = tensor_to_pil(result["clean_image"])
         finally:
             if self.offload_processor:
                 self._move_processor_models(self.processor_device)
 
         elapsed = time.perf_counter() - t0
-        status = (
-            f"Seed: {seed} | Steps: {self.sampler.steps} | "
-            f"CFG: {self.sampler.cfg_scale} | Time: {elapsed:.1f}s"
-        )
-        return image, status
+
+        # Build info dict: sampler stats + non-tensor fields from the batch
+        info: dict[str, Any] = {
+            "seed": seed,
+            "steps": self.sampler.steps,
+            "cfg_scale": self.sampler.cfg_scale,
+            "time": f"{elapsed:.1f}s",
+        }
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                continue
+            if isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
+                continue
+            info[k] = v
+
+        return dict(result), info

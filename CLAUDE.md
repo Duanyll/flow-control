@@ -65,21 +65,4 @@ Rules to follow:
 1. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 
 2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
 3. Make sure you fix all linting and type errors.
-4. If you want to run the full processing / training pipeline, use `tmux` to avoid Bash session timeout. **Never** pipe through `tee` or redirect stdout/stderr — it breaks the PTY, causing Rich to lose colors, progress bars, and terminal width detection. The logging module already writes logs to `/tmp/flow-control/rank*.log` and tracebacks to `/tmp/flow-control/rank*.traceback.log`, so `tee` is unnecessary.
-
-   Example workflow:
-   ```bash
-   # Start training in a detached tmux session
-   tmux new-session -d -s train 'uv run flow-control train examples/train.jsonc'
-
-   # Check if it's still running
-   tmux has-session -t train 2>/dev/null && echo "running" || echo "stopped"
-
-   # View live output (user can attach with: tmux attach -t train)
-   tmux capture-pane -t train -p          # snapshot of current screen
-   tmux capture-pane -t train -p -S -50   # last 50 lines of scrollback
-
-   # Check logs and errors (always available, even after the session ends)
-   cat /tmp/flow-control/rank0000.log
-   cat /tmp/flow-control/rank0000.traceback.log
-   ```
+4. If you want to run the full processing / training pipeline, you need a way to survive the Bash tool timeout. Consider `sbatch` if slurm is available, or `tmux` if not. Read @flow_control/utils/logging.py for logging details.

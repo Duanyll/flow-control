@@ -45,6 +45,9 @@ def get_task_template(name: str) -> TaskTemplate:
 
 
 # Import task modules to trigger registration
+from . import efficient_layered as _efficient_layered  # noqa: E402, F401
 from . import inpaint as _inpaint  # noqa: E402, F401
+from . import qwen_layered as _qwen_layered  # noqa: E402, F401
 from . import t2i as _t2i  # noqa: E402, F401
+from . import t2i_control as _t2i_control  # noqa: E402, F401
 from . import tie as _tie  # noqa: E402, F401

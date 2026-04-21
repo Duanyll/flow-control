@@ -8,16 +8,23 @@ Logging behavior:
 
 - Single process or distributed local rank 0:
   - Use RichHandler for pretty console output.
-  - Save logs to ``/tmp/flow-control/rankXXXX.log``.
+  - Save logs to ``<LOG_DIR>/rankXXXX.log``.
 - Non-zero distributed ranks:
   - Silence the console and save logs to that rank's log file.
 - Multiprocessing workers spawned inside a rank:
   - Reconfigure themselves with ``setup_global_handler(QueueHandler(...))`` so their
     logs flow back to the parent process.
 - Every rank keeps uncaught Python tracebacks in
-  ``/tmp/flow-control/rankXXXX.traceback.log``.
+  ``<LOG_DIR>/rankXXXX.traceback.log``.
 - Ray workers (``FLOW_CONTROL_RAY_WORKER`` set):
   - Skip all logging customization; Ray handles logging itself.
+
+``LOG_DIR`` resolution (first match wins):
+
+1. ``$LOG_DIR`` env var if set.
+2. ``./logs/slurm-<SLURM_JOB_ID>[_<SLURM_ARRAY_TASK_ID>]`` when running under
+   Slurm (keeps each job's logs separate and co-located with the project).
+3. ``./logs`` otherwise.
 """
 
 from __future__ import annotations
@@ -49,7 +56,21 @@ from rich.logging import RichHandler
 
 from .describe import describe
 
-LOG_DIR = Path(os.getenv("LOG_DIR", "/tmp/flow-control"))
+
+def _default_log_dir() -> Path:
+    """Project-local log dir, with a per-Slurm-job subdir when available."""
+    base = Path.cwd() / "logs"
+    job_id = os.getenv("SLURM_JOB_ID") or os.getenv("SLURM_JOBID")
+    if not job_id:
+        return base
+    array_task_id = os.getenv("SLURM_ARRAY_TASK_ID")
+    suffix = f"slurm-{job_id}"
+    if array_task_id:
+        suffix = f"{suffix}_{array_task_id}"
+    return base / suffix
+
+
+LOG_DIR = Path(os.environ["LOG_DIR"]) if os.getenv("LOG_DIR") else _default_log_dir()
 LOG_FILE_TEMPLATE = "rank{rank:04d}.log"
 TRACEBACK_FILE_TEMPLATE = "rank{rank:04d}.traceback.log"
 TRACEBACK_SEPARATOR = "=" * 80

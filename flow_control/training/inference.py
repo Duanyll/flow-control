@@ -46,7 +46,7 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
     save_preview_dir: str | None = None
-    save_intermediate: bool = False
+    save_extra: bool = False
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
@@ -170,7 +170,7 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                     if key == "__padding__":
                         continue
                     if datasink is not None:
-                        if self.save_intermediate:
+                        if self.save_extra:
                             batch.update(result)
                             result = batch
                         datasink.write(result)
