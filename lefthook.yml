@@ -3,11 +3,17 @@ pre-commit:
   commands:
     ruff-format:
       glob: "*.py"
+      exclude:
+        - "flow_control/third_party/**"
+        - "notebooks/**"
       run: uv run ruff format {staged_files}
       stage_fixed: true
 
     ruff-check:
       glob: "*.py"
+      exclude:
+        - "flow_control/third_party/**"
+        - "notebooks/**"
       run: uv run ruff check --fix {staged_files}
       stage_fixed: true
 

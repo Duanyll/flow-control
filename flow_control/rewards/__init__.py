@@ -7,10 +7,14 @@ from typing import Annotated, Any
 import torch
 from pydantic import Discriminator, Tag, TypeAdapter
 
+from .aesthetic import AestheticReward
 from .base import BaseReward
+from .clip_image_similarity import CLIPImageSimilarityReward
 from .clip_score import CLIPScoreReward
 from .composite import CompositeReward
 from .geneval import GenevalReward
+from .hpsv2 import HPSv2Reward
+from .image_reward import ImageRewardReward
 from .normalize import (
     AffineNormalize,
     ClampNormalize,
@@ -19,6 +23,7 @@ from .normalize import (
     SigmoidNormalize,
     parse_normalize,
 )
+from .ocr import OcrReward
 from .pairwise import PairwiseReward
 from .pickscore import PickScoreReward
 from .unified_reward import UnifiedReward
@@ -29,7 +34,12 @@ Reward = Annotated[
     | Annotated[GenevalReward, Tag("geneval")]
     | Annotated[UnifiedReward, Tag("unified_reward")]
     | Annotated[CompositeReward, Tag("composite")]
-    | Annotated[PairwiseReward, Tag("pairwise")],
+    | Annotated[PairwiseReward, Tag("pairwise")]
+    | Annotated[AestheticReward, Tag("aesthetic")]
+    | Annotated[CLIPImageSimilarityReward, Tag("clip_image_similarity")]
+    | Annotated[HPSv2Reward, Tag("hpsv2")]
+    | Annotated[OcrReward, Tag("ocr")]
+    | Annotated[ImageRewardReward, Tag("image_reward")],
     Discriminator("type"),
 ]
 
