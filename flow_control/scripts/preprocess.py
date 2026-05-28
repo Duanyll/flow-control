@@ -127,7 +127,7 @@ class PreprocessConfig(BaseModel):
 
     num_loader_workers: int = 1
     num_sink_workers: int = 1
-    processor_devices: list[int] | int = [0]
+    processor_devices: list[int] | int | Literal["all"] = [0]
     processor_concurrency: int = 1
     """Max number of concurrent items per processor worker. """
     num_threads_per_worker: int = 8
@@ -155,6 +155,16 @@ def run(config_path: str) -> None:
     config = PreprocessConfig(**load_config_file(config_path))
     datasink_type = config.output.pop("type")
 
+    if config.processor_devices == "all":
+        num_gpus = torch.cuda.device_count()
+        gpu_ids = list(range(num_gpus))
+    elif isinstance(config.processor_devices, int):
+        num_gpus = config.processor_devices
+        gpu_ids = list(range(config.processor_devices))
+    else:
+        gpu_ids = config.processor_devices
+        num_gpus = len(gpu_ids)
+
     pipeline = Pipeline(
         source=SourceConfig(
             source=TorchDatasetSource,
@@ -179,12 +189,8 @@ def run(config_path: str) -> None:
             ),
             StageConfig(
                 stage=ProcessorStage,
-                num_workers=len(config.processor_devices)
-                if isinstance(config.processor_devices, list)
-                else config.processor_devices,
-                gpu_ids=config.processor_devices
-                if isinstance(config.processor_devices, list)
-                else list(range(config.processor_devices)),
+                num_workers=num_gpus,
+                gpu_ids=gpu_ids,
                 num_threads=config.num_threads_per_worker,
                 queue_size=config.queue_size,
                 max_concurrency=config.processor_concurrency,

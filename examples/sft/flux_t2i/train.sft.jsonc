@@ -25,7 +25,7 @@
     "peft_lora_rank": 16
   },
 
-  "sampler": {
+  "validation_sampler": {
     "steps": 20,
     "cfg_scale": 1.0,
     "shift": { "type": "linear" }
@@ -58,7 +58,7 @@
 
   "launch": {
     "type": "sft",
-    "devices": 4,
+    "devices": "all",
     "generate_dcp_seed": true
   }
 }

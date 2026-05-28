@@ -1,9 +1,7 @@
 {
   "$schema": "../../../schema/preprocess.schema.json",
   "num_loader_workers": 1,
-  "processor_devices": [
-    0
-  ],
+  "processor_devices": "all",
   "num_threads_per_worker": 8,
   "queue_size": 16,
   "num_sink_workers": 1,

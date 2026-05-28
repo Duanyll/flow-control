@@ -4,8 +4,8 @@
 
   "host": "0.0.0.0",
   "port": 7860,
-  "device": "cuda:0",
-  "processor_device": "cuda:2",  // Optional: put VAE/encoder on a separate GPU
+  "device": "cuda:0",            // With device_memory_distribution, actually cuda:0 + cuda:1
+  "processor_device": "cuda:2",  // With device_memory_distribution, actually cuda:2 + cuda:3
   "share": false,
 
   // Uncomment to load DCP checkpoints:
