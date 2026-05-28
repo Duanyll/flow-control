@@ -1,6 +1,8 @@
 import atexit
 import json
+import os
 import secrets
+import socket
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -69,10 +71,18 @@ class LoggingMixin(BaseModel):
     _status_values: dict[str, float] = PrivateAttr(default_factory=dict)
     _rich_status: Status | None = PrivateAttr(default=None)
 
+    def _resolve_run_id(self) -> str:
+        # env wins (launcher sets this); then explicit config; then generate.
+        env_run_id = os.getenv("FLOW_CONTROL_RUN_ID")
+        if env_run_id:
+            return env_run_id
+        if self.run_id:
+            return self.run_id
+        return f"{time.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(4)}"
+
     @main_process_only
     def init_tracker(self):
-        if self.run_id is None:
-            self.run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
+        self.run_id = self._resolve_run_id()
 
         conf = self.model_dump(mode="json", warnings="none")
         conf["flow_control_version"] = get_version()
@@ -98,13 +108,26 @@ class LoggingMixin(BaseModel):
         self._events_file = (self._run_dir / "events.jsonl").open(
             "a", buffering=1, encoding="utf-8"
         )
-        self._write_event("run_start", training_type=self.training_type)
+        attempt_fields: dict[str, Any] = {
+            "training_type": self.training_type,
+            "attempt_id": os.getenv("FLOW_CONTROL_ATTEMPT_ID", ""),
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+        }
+        slurm_job_id = os.getenv("SLURM_JOB_ID")
+        if slurm_job_id:
+            attempt_fields["slurm_job_id"] = slurm_job_id
+            array_task = os.getenv("SLURM_ARRAY_TASK_ID")
+            if array_task:
+                attempt_fields["slurm_array_task_id"] = array_task
+        self._write_event("run_start", **attempt_fields)
 
         atexit.register(self.finish_tracker)
 
         logger.info(
             f"Initialized trackio project={project} run={self.run_id} "
-            f"and jsonl at {self._run_dir}"
+            f"attempt={attempt_fields['attempt_id'] or 'n/a'} "
+            f"jsonl at {self._run_dir}"
         )
 
     @main_process_only

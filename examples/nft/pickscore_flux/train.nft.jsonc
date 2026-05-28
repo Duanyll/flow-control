@@ -1,7 +1,7 @@
 {
   "$schema": "../../../schema/nft.schema.json",
 
-  "checkpoint_root": "./runs/pickscore_flux/",
+  "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_nft_demo",
 

@@ -3,7 +3,7 @@ import re
 import shutil
 
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from flow_control.utils.logging import get_logger
 
@@ -41,6 +41,17 @@ class DcpMixin(BaseModel):
 class CheckpointingMixin(DcpMixin):
     checkpoint_root: str
     max_checkpoints: int = 5
+
+    @field_validator("checkpoint_root")
+    @classmethod
+    def _reject_auto_sentinel(cls, value: str) -> str:
+        if value == "$auto":
+            raise ValueError(
+                "checkpoint_root='$auto' must be resolved by flow_control.scripts.launch "
+                "before constructing the trainer. Launch via `flow-control launch <config>` "
+                "instead of instantiating the trainer directly."
+            )
+        return value
 
     @main_process_only
     def rotate_checkpoints_maybe(self):

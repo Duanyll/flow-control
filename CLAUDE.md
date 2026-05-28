@@ -60,6 +60,10 @@ Rules to follow:
 2. Prefer to pass images as `torch.Tensor` in `BCHW` format and in `[0, 1]` range. You may find `pil_to_tensor` and `tensor_to_pil` functions in `flow_control.utils.common` useful.
 3. If it brings extra complexity to support batch size > 1, just support batch size of 1. 
 
+## Output layout
+
+A training run writes everything for that run under one stable directory keyed by a `run_id` that survives preempt + Slurm requeue. See @docs/output-layout.md for the full directory tree, env var contract, and cleanup story.
+
 ## Workflow
 
 1. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 

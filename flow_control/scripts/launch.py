@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -7,8 +8,14 @@ from pathlib import Path
 
 from rich import print
 
+from flow_control.scripts.run_paths import (
+    AUTO_CHECKPOINT_ROOT_SENTINEL,
+    resolve_run_paths,
+)
 from flow_control.training.launch_config import LaunchConfig
 from flow_control.utils.config import load_config_file
+
+_TRAINING_TYPES = frozenset({"sft", "grpo", "nft", "vae"})
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
@@ -143,14 +150,7 @@ def try_generate_dcp_seed(
     return None
 
 
-def run(config_path: str) -> None:
-    """Launch training as the parent process (sets up env, execs torchrun)."""
-    launch_config, config = _load_launch_config(config_path)
-
-    try_generate_dcp_seed(config_path, launch_config, config)
-    if launch_config.preprocess_config:
-        try_preprocess_data(launch_config.preprocess_config)
-
+def _detect_num_gpus() -> int:
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -158,26 +158,78 @@ def run(config_path: str) -> None:
             text=True,
             check=True,
         )
-        num_gpus = len(result.stdout.strip().splitlines())
     except Exception as e:
         print(f"[red]Error detecting GPUs with nvidia-smi: {e}[/red]")
         sys.exit(1)
+    num_gpus = len(result.stdout.strip().splitlines())
     print(f"[blue]Detected {num_gpus} GPUs with nvidia-smi.[/blue]")
+    return num_gpus
 
-    if launch_config.devices == "all":
-        num_processes = num_gpus
-    elif isinstance(launch_config.devices, int):
-        if launch_config.devices > num_gpus:
+
+def _resolve_num_processes(launch_config: LaunchConfig) -> int:
+    num_gpus = _detect_num_gpus()
+    devices = launch_config.devices
+    if devices == "all":
+        return num_gpus
+    if isinstance(devices, int):
+        if devices > num_gpus:
             print(
-                f"[red]Error: 'devices' is set to {launch_config.devices} but only {num_gpus} GPUs are available.[/red]"
+                f"[red]Error: 'devices' is set to {devices} but only {num_gpus} GPUs are available.[/red]"
             )
             sys.exit(1)
-        num_processes = launch_config.devices
-    elif isinstance(launch_config.devices, list):
-        num_processes = len(launch_config.devices)
+        return devices
+    if isinstance(devices, list):
+        return len(devices)
+    print(f"[red]Invalid 'devices' configuration: {devices}[/red]")
+    sys.exit(1)
+
+
+def _prepare_run_layout(config: dict) -> tuple[str, dict[str, str]]:
+    """Resolve canonical paths, mkdir them, and write the resolved config tempfile.
+
+    Returns ``(resolved_config_path, env_to_export)``.
+    """
+    paths = resolve_run_paths(config)
+    paths.run_dir.mkdir(parents=True, exist_ok=True)
+    paths.attempt_dir.mkdir(parents=True, exist_ok=True)
+    paths.checkpoint_root.mkdir(parents=True, exist_ok=True)
+    paths.trackio_dir.mkdir(parents=True, exist_ok=True)
+
+    if config.get("checkpoint_root") == AUTO_CHECKPOINT_ROOT_SENTINEL:
+        config["checkpoint_root"] = str(paths.checkpoint_root)
+    # Children also need the stable run_id baked into the config they parse
+    # (so test paths that bypass env vars still see the right value).
+    config["run_id"] = paths.run_id
+
+    resolved_path = paths.attempt_dir / "resolved_config.json"
+    resolved_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    print(f"[blue]Run dir:[/blue] {paths.run_dir}")
+    print(f"[blue]Attempt dir:[/blue] {paths.attempt_dir}")
+    print(f"[blue]Checkpoint root:[/blue] {paths.checkpoint_root}")
+    print(f"[blue]Trackio dir:[/blue] {paths.trackio_dir}")
+    print(f"[blue]Resolved config:[/blue] {resolved_path}")
+
+    return str(resolved_path), paths.to_env()
+
+
+def run(config_path: str) -> None:
+    """Launch training as the parent process (sets up env, execs torchrun)."""
+    launch_config, config = _load_launch_config(config_path)
+
+    if launch_config.type in _TRAINING_TYPES:
+        resolved_config_path, run_env = _prepare_run_layout(config)
     else:
-        print(f"[red]Invalid 'devices' configuration: {launch_config.devices}[/red]")
-        sys.exit(1)
+        # inference and other non-training types don't have a run_id concept.
+        resolved_config_path, run_env = config_path, {}
+
+    try_generate_dcp_seed(config_path, launch_config, config)
+    if launch_config.preprocess_config:
+        try_preprocess_data(launch_config.preprocess_config)
+
+    num_processes = _resolve_num_processes(launch_config)
 
     cmd = [
         "torchrun",
@@ -185,12 +237,13 @@ def run(config_path: str) -> None:
         str(num_processes),
         "-m",
         "flow_control.scripts.launch",
-        config_path,
+        resolved_config_path,
         "--type",
         launch_config.type,
     ]
 
-    envs = launch_config.env
+    envs = dict(launch_config.env)
+    envs.update(run_env)
     if isinstance(launch_config.devices, list):
         envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
     if "OMP_NUM_THREADS" not in envs:

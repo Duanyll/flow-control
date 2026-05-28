@@ -1,7 +1,7 @@
 {
   "$schema": "../../../schema/sft.schema.json",
 
-  "checkpoint_root": "./runs/sft/flux",
+  "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_sft_demo",
   "max_checkpoints": 10,

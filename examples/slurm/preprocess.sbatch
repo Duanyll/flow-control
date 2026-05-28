@@ -13,5 +13,4 @@ cd $SLURM_SUBMIT_DIR
 
 CONFIG=${1:?usage: sbatch examples/slurm/preprocess.sbatch <config>}
 
-headless-tui-run --nvidia-smi --screen-file ./logs/slurm-$SLURM_JOB_ID/screen.txt -- \
-    uv run flow-control preprocess "$CONFIG"
+uv run flow-control preprocess "$CONFIG"

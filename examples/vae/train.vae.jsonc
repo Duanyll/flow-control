@@ -6,7 +6,7 @@
   // → effective global_batch_size = 8
 
   // ---- Checkpoint & Logging ----
-  "checkpoint_root": "./runs/vae_rgba/",
+  "checkpoint_root": "$auto",
   "experiment_name": "flux2_vae_rgba",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 

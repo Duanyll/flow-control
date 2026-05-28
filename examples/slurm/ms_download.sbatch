@@ -31,5 +31,5 @@ MODELSCOPE_CACHE="/gdata/hot3/huggingface/modelscope"
 models=("$@")
 for model in "${models[@]}"; do
     echo "Downloading model: $model"
-    retry_until_success "headless-tui-run --screen-file ./logs/hf_download.screen -- uvx modelscope download $model"
+    retry_until_success "uvx modelscope download $model"
 done

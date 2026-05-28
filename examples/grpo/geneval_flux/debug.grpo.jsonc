@@ -1,7 +1,7 @@
 {
   "$schema": "../../../schema/grpo.schema.json",
 
-  "checkpoint_root": "./runs/geneval_flux_debug/",
+  "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_grpo_demo_debug",
 

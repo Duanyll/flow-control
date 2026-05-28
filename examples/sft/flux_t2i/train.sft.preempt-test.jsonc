@@ -6,7 +6,7 @@
   //   early and still have runway for the second run to resume and finish.
   // - mid-training validation is effectively disabled (validation_steps > train_steps).
 
-  "checkpoint_root": "./runs/sft/flux_preempt_test",
+  "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_sft_preempt_test",
   "max_checkpoints": 10,

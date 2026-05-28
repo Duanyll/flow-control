@@ -30,24 +30,11 @@
 #SBATCH --requeue
 #SBATCH --signal=B:USR1@300
 #SBATCH --open-mode=append
-#SBATCH --output=logs/slurm-%j/sbatch.out
-#SBATCH --error=logs/slurm-%j/sbatch.err
-
-# Single-node multi-GPU: torchrun already handles the per-rank fan-out, so no
-# srun step is needed. Running the training tree directly under the batch
-# shell keeps the signal path short:
-#
-#   sbatch (bash, trap USR1) --> headless-tui-run --> tmux --> uv --> torchrun --> python workers
-#
-# The B: prefix tells Slurm to deliver the pre-termination USR1 only to the
-# batch shell. If USR1 reached the whole step it would kill the bash-based
-# `headless-tui-run` wrapper (bash default action on USR1 is terminate),
-# taking the cgroup down before Python could save. Instead we trap USR1
-# here and forward it straight to the Python workers via pkill.
-#
-# To trigger a preempt manually (testing), use:
-#   scancel --batch --signal=USR1 <jobid>
-# which targets the batch shell only and matches the auto-preempt path.
+#SBATCH --output=logs/slurm-%j.out
+#SBATCH --error=logs/slurm-%j.err
+# --output/--error capture bootstrap chatter only (Slurm doesn't know the
+# run_id at parse time). The Python launcher writes structured rank logs into
+# runs/<exp>/<run_id>/attempts/slurm-<job_id>/ — see CLAUDE.md for the layout.
 
 set -euo pipefail
 cd $SLURM_SUBMIT_DIR
@@ -67,8 +54,7 @@ forward_preempt() {
 }
 trap forward_preempt USR1
 
-headless-tui-run --nvidia-smi --screen-file ./logs/slurm-$SLURM_JOB_ID/screen.txt -- \
-    uv run flow-control launch "$CONFIG" &
+uv run flow-control launch "$CONFIG" &
 TRAIN_PID=$!
 
 # wait is interruptible by signals; loop so the trap can fire during long
@@ -78,8 +64,10 @@ while kill -0 "$TRAIN_PID" 2>/dev/null; do
 done
 wait "$TRAIN_PID"
 
-# Log files:
-# ./logs/slurm-<job_id>/rank0000.log: Live structured logs from the main process (rank 0).
-# ./logs/slurm-<job_id>/rank0000.traceback.log: Tracebacks from the main process, if any.
-# ./logs/slurm-<job_id>/screen.txt: Tmux rendered terminal output with nvidia-smi stats and progress bars, updated every 60 seconds.
-# ./logs/slurm-<job_id>/sbatch.out: Stdout from the sbatch script itself. `headless-tui-run` also dumps the entire tmux buffer here after execution.
+# Output layout (one place per run, stable across requeue):
+#   runs/<exp>/<run_id>/
+#     ├── metrics.jsonl / events.jsonl / meta.json
+#     ├── attempts/slurm-<job_id>/
+#     │     ├── rank0000.log
+#     │     └── rank0000.traceback.log
+#     └── checkpoints/step_*/

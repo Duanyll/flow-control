@@ -34,5 +34,5 @@ unset HF_HUB_DISABLE_XET
 models=("$@")
 for model in "${models[@]}"; do
     echo "Downloading model: $model"
-    retry_until_success "headless-tui-run --screen-file ./logs/hf_download.screen -- uvx hf download $model"
+    retry_until_success "uvx hf download $model"
 done
