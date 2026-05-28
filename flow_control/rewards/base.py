@@ -2,10 +2,12 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.tensor import deep_move_to_device
+
+from .normalize import IdentityNormalize, Normalize
 
 
 class BaseReward(RemoteOffloadable, ABC):
@@ -17,12 +19,16 @@ class BaseReward(RemoteOffloadable, ABC):
     fields it needs from the dict.
 
     Subclasses implement ``_load_model``, ``_score``, and optionally
-    ``_unload_model``.  The public ``load_model`` / ``score`` / ``unload_model``
-    methods handle transparent remote offloading when ``endpoint`` is set.
+    ``_unload_model``.  ``_score`` MUST return the raw, model-native score;
+    the optional :attr:`normalize` transform is applied automatically by
+    :meth:`score` / :meth:`async_score`.  The public ``load_model`` /
+    ``score`` / ``unload_model`` methods handle transparent remote offloading
+    when ``endpoint`` is set.
     """
 
     type: str
     weight: float = 1.0
+    normalize: Normalize = Field(default_factory=IdentityNormalize)
     model_config = ConfigDict(extra="forbid")
 
     @property
@@ -60,6 +66,16 @@ class BaseReward(RemoteOffloadable, ABC):
     def _unload_model(self) -> None:
         """Optional: unload reward model to free GPU memory."""
 
+    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+        """Async path for ``_score``.
+
+        Default implementation just calls the synchronous ``_score``.
+        Subclasses whose scoring is genuinely async (LLM judges, composite
+        gathering, etc.) override this instead of overriding ``async_score``,
+        so that :attr:`normalize` is still applied by :meth:`async_score`.
+        """
+        return self._score(batch)
+
     # ── Public API (handles remote dispatch transparently) ───────────────
 
     def load_model(self, device: torch.device) -> None:
@@ -73,11 +89,13 @@ class BaseReward(RemoteOffloadable, ABC):
         """Compute reward score, returning ``[C]`` component scores.
 
         If remote, filters batch by ``_batch_fields`` and sends only the
-        needed keys to save bandwidth.
+        needed keys to save bandwidth.  The remote server applies
+        :attr:`normalize` itself (same pydantic config is sent via
+        ``/load``), so the client just returns the server response.
         """
         if self.is_remote:
             return self._remote_batch_call("/score", batch, fields=self._batch_fields)
-        return self._score(batch).float()
+        return self.normalize.apply(self._score(batch).float())
 
     async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Async version of ``score`` for use in async RL loops."""
@@ -85,7 +103,8 @@ class BaseReward(RemoteOffloadable, ABC):
             return await self._async_remote_batch_call(
                 "/score", batch, fields=self._batch_fields
             )
-        return self._score(batch).float()
+        raw = await self._async_score(batch)
+        return self.normalize.apply(raw.float())
 
     def supports_rollout_overlap(self) -> bool:
         """Whether this reward can safely overlap with diffusion rollout work.

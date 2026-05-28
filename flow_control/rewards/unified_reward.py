@@ -2,12 +2,13 @@ import re
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.processors.components.llm import LLMClient
 from flow_control.utils.logging import get_logger
 
 from .base import BaseReward
+from .normalize import AffineNormalize, Normalize
 
 logger = get_logger(__name__)
 
@@ -53,6 +54,9 @@ class UnifiedReward(BaseReward):
         ScoreTag(name="Coherence Score"),
         ScoreTag(name="Style Score"),
     ]
+    # Raw scores are in [1, 5]; default normalize divides by 5 to land in
+    # [0.2, 1.0], matching the previous hard-coded behaviour.
+    normalize: Normalize = Field(default_factory=lambda: AffineNormalize(scale=0.2))
 
     model_config = ConfigDict(extra="forbid")
 
@@ -89,11 +93,14 @@ class UnifiedReward(BaseReward):
                 scores[tag.name] = 0.0
         return scores
 
-    async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Score an image using the LLM judge.
 
         Returns:
-            Tensor of shape ``[C]`` with per-tag scores normalized to ~[0, 1].
+            Tensor of shape ``[C]`` with raw per-tag scores in ``[1, 5]``.
+            The base class applies :attr:`normalize` on top.  Configure
+            ``normalize`` with e.g. ``{"type": "affine", "scale": 0.2}`` to
+            land back in ``[0.2, 1.0]`` as before.
         """
         prompt_text: str = batch["prompt"]
         image: torch.Tensor = batch["clean_image"]
@@ -103,8 +110,7 @@ class UnifiedReward(BaseReward):
 
         scores = self._parse_scores(llm_output)
 
-        # Return per-tag scores normalized to [0, 1] (raw scores are 1-5)
-        per_tag = [scores[tag.name] / 5.0 for tag in self.score_tags]
+        per_tag = [scores[tag.name] for tag in self.score_tags]
         return torch.tensor(per_tag, dtype=torch.float32)
 
     def supports_rollout_overlap(self) -> bool:

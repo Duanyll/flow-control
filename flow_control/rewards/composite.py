@@ -69,12 +69,13 @@ class CompositeReward(BaseReward):
             parts.append(reward.score(batch))
         return torch.cat(parts, dim=0)
 
-    async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Async version that scores children concurrently, returns ``[total_C]``."""
-        if self.is_remote:
-            return await self._async_remote_batch_call(
-                "/score", batch, fields=self._batch_fields
-            )
+    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+        """Score children concurrently and concatenate.
+
+        Each child's ``async_score`` already applies its own normalize; the
+        composite's own normalize is then applied on top of the concatenated
+        ``[total_C]`` tensor by ``BaseReward.async_score``.
+        """
         scores = await asyncio.gather(
             *(r.async_score(batch) for r in self._reward_instances)
         )

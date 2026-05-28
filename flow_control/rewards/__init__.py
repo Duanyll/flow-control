@@ -11,6 +11,14 @@ from .base import BaseReward
 from .clip_score import CLIPScoreReward
 from .composite import CompositeReward
 from .geneval import GenevalReward
+from .normalize import (
+    AffineNormalize,
+    ClampNormalize,
+    IdentityNormalize,
+    Normalize,
+    SigmoidNormalize,
+    parse_normalize,
+)
 from .pairwise import PairwiseReward
 from .pickscore import PickScoreReward
 from .unified_reward import UnifiedReward
@@ -250,9 +258,15 @@ def _score_composite_pairwise_group(
 
 
 __all__ = [
-    "Reward",
-    "parse_reward",
-    "execute_reward",
-    "execute_pairwise_reward",
+    "AffineNormalize",
+    "ClampNormalize",
+    "IdentityNormalize",
+    "Normalize",
     "PairwiseReward",
+    "Reward",
+    "SigmoidNormalize",
+    "execute_pairwise_reward",
+    "execute_reward",
+    "parse_normalize",
+    "parse_reward",
 ]
