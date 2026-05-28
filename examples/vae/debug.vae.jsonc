@@ -7,7 +7,6 @@
 
   // ---- Checkpoint & Logging ----
   "checkpoint_root": "./runs/vae_rgba/",
-  "aim_repo": "./runs",
   "experiment_name": "vae_rgba_debug",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 

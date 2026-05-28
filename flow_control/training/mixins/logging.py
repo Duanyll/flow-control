@@ -1,12 +1,16 @@
+import atexit
+import json
+import secrets
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TextIO
 
-import aim
-import numpy as np
 import torch
 import torch.distributed as dist
-from pydantic import BaseModel
+import trackio
+from pydantic import BaseModel, PrivateAttr
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -26,101 +30,156 @@ from flow_control.utils.tensor import (
 
 from .hsdp import main_process_only
 
+if TYPE_CHECKING:
+    from trackio.run import Run as TrackioRun
+
 logger = get_logger(__name__)
 
 
 class LoggingMixin(BaseModel):
-    aim_repo: str
     experiment_name: str
     training_type: str = ""
-    aim_image_background: None | BlendBackground = None
-    """Background to blend with alpha channel when logging images. If None, will keep alpha channel (if exists). """
 
-    _tracker: aim.Run | None = None
-    _aggregated_metrics: dict[str, list[float]] = {}
+    trackio_project: str | None = None
+    """Trackio project name. Defaults to ``experiment_name`` if None."""
+    trackio_space_id: str | None = None
+    """Optional HF Space id for remote trackio sync."""
 
-    _status_fields: dict[str, str] = {}  # Should be overridden by subclasses
-    _status_values: dict[str, float] = {}
-    _rich_status: Status | None = None
+    runs_root: str = "./runs"
+    """Root directory for append-only jsonl run logs."""
+    run_id: str | None = None
+    """Stable run identifier. Auto-generated at ``init_tracker()`` if None.
 
-    @property
-    def tracker(self) -> aim.Run:
-        if not self._tracker:
-            raise RuntimeError("Aim tracker not initialized, or not on main process.")
-        return self._tracker
+    Setting this explicitly lets a preempted job reuse the same on-disk run dir
+    (and the same trackio run via ``resume='allow'``).
+    """
 
-    def _build_context(self, subset: str | None = None) -> Any:
-        ctx: dict[str, Any] = {}
-        if self.training_type:
-            ctx["training_type"] = self.training_type
-        if subset:
-            ctx["subset"] = subset
-        return ctx if ctx else None
+    image_background: BlendBackground | None = None
+    """Background to blend with alpha channel when logging images. If None, the
+    alpha channel is preserved.
+    """
 
-    def _get_current_epoch(self) -> Any:
-        if hasattr(self, "current_epoch"):
-            return getattr(self, "current_epoch", None)
-        elif hasattr(self, "_current_epoch"):
-            return getattr(self, "_current_epoch", None)
-        return None
+    _trackio_run: "TrackioRun | None" = PrivateAttr(default=None)
+    _run_dir: Path | None = PrivateAttr(default=None)
+    _metrics_file: TextIO | None = PrivateAttr(default=None)
+    _events_file: TextIO | None = PrivateAttr(default=None)
+    _aggregated_metrics: dict[str, list[float]] = PrivateAttr(default_factory=dict)
+
+    _status_fields: dict[str, str] = PrivateAttr(default_factory=dict)
+    _status_values: dict[str, float] = PrivateAttr(default_factory=dict)
+    _rich_status: Status | None = PrivateAttr(default=None)
 
     @main_process_only
     def init_tracker(self):
-        self._tracker = aim.Run(repo=self.aim_repo, experiment=self.experiment_name)
+        if self.run_id is None:
+            self.run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
+
         conf = self.model_dump(mode="json", warnings="none")
-        conf["__version__"] = get_version()
-        self.tracker["hparams"] = conf
-        logger.info(
-            f"Initialized Aim tracker at {self.aim_repo}, "
-            f"experiment={self.experiment_name}."
+        conf["flow_control_version"] = get_version()
+
+        project = self.trackio_project or self.experiment_name
+        self._trackio_run = trackio.init(
+            project=project,
+            name=self.run_id,
+            config=conf,
+            space_id=self.trackio_space_id,
+            resume="allow",
         )
 
+        self._run_dir = Path(self.runs_root) / self.experiment_name / self.run_id
+        self._run_dir.mkdir(parents=True, exist_ok=True)
+        (self._run_dir / "meta.json").write_text(
+            json.dumps(conf, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._metrics_file = (self._run_dir / "metrics.jsonl").open(
+            "a", buffering=1, encoding="utf-8"
+        )
+        self._events_file = (self._run_dir / "events.jsonl").open(
+            "a", buffering=1, encoding="utf-8"
+        )
+        self._write_event("run_start", training_type=self.training_type)
+
+        atexit.register(self.finish_tracker)
+
+        logger.info(
+            f"Initialized trackio project={project} run={self.run_id} "
+            f"and jsonl at {self._run_dir}"
+        )
+
+    @main_process_only
+    def finish_tracker(self) -> None:
+        if self._events_file is not None:
+            self._write_event("run_finish", status="ok")
+        for handle in (self._metrics_file, self._events_file):
+            if handle is not None:
+                handle.close()
+        self._metrics_file = None
+        self._events_file = None
+        if self._trackio_run is not None:
+            trackio.finish()
+            self._trackio_run = None
+
+    def _write_event(self, kind: str, **fields: Any) -> None:
+        if self._events_file is None:
+            return
+        line = json.dumps(
+            {"t": time.time(), "kind": kind, **fields}, ensure_ascii=False
+        )
+        self._events_file.write(line + "\n")
+        self._events_file.flush()
+
+    def _emit_metrics(self, metrics: dict[str, float], step: int) -> None:
+        if self._trackio_run is not None:
+            trackio.log(dict(metrics), step=step)
+        if self._metrics_file is not None:
+            t = time.time()
+            for k, v in metrics.items():
+                line = json.dumps(
+                    {"t": t, "step": step, "key": k, "value": v},
+                    ensure_ascii=False,
+                )
+                self._metrics_file.write(line + "\n")
+            self._metrics_file.flush()
+
+    def _emit_image(
+        self, image: torch.Tensor, image_key: str, step: int, name: str
+    ) -> None:
+        if self.image_background is not None:
+            image = remove_alpha_channel(image, self.image_background)
+        pil = tensor_to_pil(image)
+        full_key = f"{name}/{image_key}"
+        if self._trackio_run is not None:
+            trackio.log({full_key: trackio.Image(pil)}, step=step)
+        self._write_event("image_logged", key=full_key, step=step)
+
     def log_image(
-        self, image: torch.Tensor, image_key: str, step: int, name: str = "validation"
+        self,
+        image: torch.Tensor,
+        image_key: str,
+        step: int,
+        name: str = "validation",
     ):
-        ctx = self._build_context(subset=name)
         is_main: bool = getattr(self, "is_main_process", True)
         world_size: int = getattr(self, "world_size", 1)
-        if self.aim_image_background is not None:
-            image = remove_alpha_channel(image, self.aim_image_background)
-        image_np = np.array(tensor_to_pil(image))
 
         if world_size == 1:
-            self.tracker.track(
-                aim.Image(image_np), name=f"{name}/{image_key}", step=step, context=ctx
-            )
+            self._emit_image(image, image_key, step, name)
             return
 
         if is_main:
             images: list = [None] * world_size
             keys: list = [None] * world_size
-            dist.gather_object(image_np, images, dst=0)
+            dist.gather_object(image, images, dst=0)
             dist.gather_object(image_key, keys, dst=0)
             for k, img in zip(keys, images, strict=True):
                 if k == "__padding__":
                     continue
-                self.tracker.track(
-                    aim.Image(img), name=f"{name}/{k}", step=step, context=ctx
-                )
+                assert isinstance(img, torch.Tensor) and isinstance(k, str)
+                self._emit_image(img, k, step, name)
         else:
-            dist.gather_object(image_np, None, dst=0)
+            dist.gather_object(image, None, dst=0)
             dist.gather_object(image_key, None, dst=0)
-
-    def _track_metrics_with_context(self, metrics: dict[str, float], step: int):
-        """Parse prefix/name keys, group by prefix, and track with aim context."""
-        grouped: dict[str | None, dict[str, float]] = {}
-        for k, v in metrics.items():
-            if "/" in k:
-                prefix, name = k.split("/", 1)
-                grouped.setdefault(prefix, {})[name] = v
-            else:
-                grouped.setdefault(None, {})[k] = v
-
-        for prefix, group in grouped.items():
-            ctx: Any = self._build_context(subset=prefix)
-            self.tracker.track(
-                group, step=step, context=ctx, epoch=self._get_current_epoch()
-            )
 
     def log_metrics(self, metrics: Mapping[str, float | torch.Tensor], step: int):
         is_main: bool = getattr(self, "is_main_process", True)
@@ -133,7 +192,7 @@ class LoggingMixin(BaseModel):
 
         if world_size == 1:
             self._update_status_bar(metrics)
-            self._track_metrics_with_context(metrics, step)
+            self._emit_metrics(metrics, step)
             return
 
         if is_main:
@@ -145,7 +204,7 @@ class LoggingMixin(BaseModel):
             }
 
             self._update_status_bar(avg_metrics)
-            self._track_metrics_with_context(avg_metrics, step)
+            self._emit_metrics(avg_metrics, step)
         else:
             dist.gather_object(metrics, None, dst=0)
 
@@ -200,3 +259,64 @@ class LoggingMixin(BaseModel):
             TimeElapsedColumn(),
             TimeRemainingColumn(),
         ]
+
+
+if __name__ == "__main__":
+    import shutil
+    import tempfile
+
+    from rich import print
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="flow_control_logging_smoke_"))
+    print(f"[dim]Smoke test workspace: {tmp_root}[/dim]")
+
+    class SmokeTrainer(LoggingMixin):
+        pass
+
+    trainer = SmokeTrainer(
+        experiment_name="smoke",
+        training_type="smoke_test",
+        runs_root=str(tmp_root / "runs"),
+        trackio_project="flow-control-smoke",
+        image_background="checkerboard",
+    )
+    trainer.init_tracker()
+    assert trainer.run_id is not None
+    run_dir = tmp_root / "runs" / "smoke" / trainer.run_id
+    assert run_dir.exists(), run_dir
+    print(f"[green]✓[/green] Created run dir {run_dir}")
+
+    trainer.log_metrics({"loss": 0.1, "lr": 1e-4}, step=0)
+    trainer.log_metrics({"loss": 0.05, "lr": 1e-4}, step=1)
+    trainer.log_image(torch.rand(1, 3, 32, 32), "sample_0", step=1, name="val")
+
+    trainer.log_aggregated_metrics({"agg": 1.0})
+    trainer.log_aggregated_metrics({"agg": 3.0})
+    trainer.flush_aggregated_metrics(step=2)
+
+    trainer.finish_tracker()
+
+    metrics_lines = (run_dir / "metrics.jsonl").read_text().strip().splitlines()
+    events_lines = (run_dir / "events.jsonl").read_text().strip().splitlines()
+    meta = json.loads((run_dir / "meta.json").read_text())
+
+    print(f"metrics.jsonl ({len(metrics_lines)} lines):")
+    for line in metrics_lines:
+        print(f"  {line}")
+    print(f"events.jsonl ({len(events_lines)} lines):")
+    for line in events_lines:
+        print(f"  {line}")
+    print(f"meta.json keys: {sorted(meta)}")
+
+    assert len(metrics_lines) == 5, metrics_lines  # 2+2+1
+    parsed = [json.loads(line) for line in metrics_lines]
+    assert {p["key"] for p in parsed} == {"loss", "lr", "agg"}
+    agg_value = next(p for p in parsed if p["key"] == "agg")
+    assert agg_value["value"] == 2.0, agg_value
+
+    parsed_events = [json.loads(line) for line in events_lines]
+    kinds = [e["kind"] for e in parsed_events]
+    assert kinds == ["run_start", "image_logged", "run_finish"], kinds
+
+    print("[bold green]All assertions passed.[/bold green]")
+    shutil.rmtree(tmp_root)

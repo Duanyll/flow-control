@@ -2,14 +2,12 @@
   "$schema": "../../../schema/sft.schema.json",
 
   // Derived from train.sft.jsonc for end-to-end preemption/resume testing:
-  // - aim_repo points to a local directory (the remote aim server is gone).
   // - smaller train_steps + tighter checkpoint_steps so we can trigger SIGUSR1
   //   early and still have runway for the second run to resume and finish.
   // - mid-training validation is effectively disabled (validation_steps > train_steps).
 
   "checkpoint_root": "./runs/sft/flux_preempt_test",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
-  "aim_repo": "./runs/sft/aim_preempt_test",
   "experiment_name": "flux_sft_preempt_test",
   "max_checkpoints": 10,
   "validation_steps": 10000,
