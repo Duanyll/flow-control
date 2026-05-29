@@ -47,7 +47,6 @@ from .data import (
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
-    PreemptionMixin,
     ValidationMixin,
     distributed_main,
 )
@@ -61,7 +60,7 @@ from .weighting import (
 logger = get_logger(__name__)
 
 
-class SftTrainer(ValidationMixin, PreemptionMixin, CheckpointingMixin):
+class SftTrainer(ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"
 
@@ -80,7 +79,8 @@ class SftTrainer(ValidationMixin, PreemptionMixin, CheckpointingMixin):
 
     global_batch_size: int = 16
     train_steps: int = 10000
-    checkpoint_steps: int = 500
+    checkpoint_interval: int = 500
+    """Archival checkpoint cadence in optimizer steps."""
     validation_steps: int = 1000
 
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
@@ -255,16 +255,14 @@ class SftTrainer(ValidationMixin, PreemptionMixin, CheckpointingMixin):
             step=self._current_step,
         )
 
-        if (self._current_step % self.checkpoint_steps == 0) or (
-            self._current_step == self.train_steps
-        ):
-            self.save(self._current_step)
+        self.save_maybe(
+            self._current_step,
+            force_archival=self._current_step == self.train_steps,
+        )
 
         if self._current_step % self.validation_steps == 0:
             with apply_ema_maybe(self._ema_optimizer):
                 self.validate_and_log(self.model, self._current_step)
-
-        self.check_preempt_and_maybe_exit(self._current_step)
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -291,7 +289,6 @@ class SftTrainer(ValidationMixin, PreemptionMixin, CheckpointingMixin):
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
         self.maybe_auto_resume(self.resume_from_dir)
-        self.install_preempt_handler()
 
         with apply_ema_maybe(self._ema_optimizer):
             self.validate_and_log(self.model, self._current_step)

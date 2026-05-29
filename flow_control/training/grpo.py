@@ -37,7 +37,6 @@ from .ema import (
 )
 from .mixins import (
     CheckpointingMixin,
-    PreemptionMixin,
     Rollout,
     RolloutMixin,
     ValidationMixin,
@@ -47,7 +46,7 @@ from .mixins import (
 logger = get_logger(__name__)
 
 
-class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingMixin):
+class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "grpo"
 
@@ -85,7 +84,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingM
 
     # Optimization / training loop
     train_epochs: int = 100
-    checkpoint_epochs: int = 5
     validation_epochs: int = 20
 
     # --------------------------------- Status bar ------------------------------- #
@@ -521,7 +519,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingM
                     self._optimizer_step()
                     self._current_step += 1
                     self.flush_aggregated_metrics(self._current_step)
-                    self.check_preempt_and_maybe_exit(self._current_step)
 
     # --- Main loop ---
 
@@ -541,7 +538,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingM
 
         os.makedirs(self.checkpoint_root, exist_ok=True)
         self.maybe_auto_resume(self.resume_from_dir)
-        self.install_preempt_handler()
 
         with apply_ema_maybe(self._ema_optimizer):
             self.validate_and_log(self.model, self._current_step, reward=self.reward)
@@ -583,11 +579,11 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingM
                 del rollouts, advantages
                 torch.cuda.empty_cache()
 
-                if self.checkpoint_epochs > 0 and (
-                    self._current_epoch % self.checkpoint_epochs == 0
-                    or self._current_epoch == self.train_epochs
-                ):
-                    self.save(self._current_step)
+                self.save_maybe(
+                    self._current_step,
+                    progress=self._current_epoch,
+                    force_archival=self._current_epoch == self.train_epochs,
+                )
 
                 if (
                     self.validation_epochs > 0

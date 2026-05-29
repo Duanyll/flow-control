@@ -45,7 +45,7 @@ from ..data import (
     prepare_vae_target_image,
     seed_worker,
 )
-from ..mixins import CheckpointingMixin, HsdpMixin, PreemptionMixin, distributed_main
+from ..mixins import CheckpointingMixin, HsdpMixin, distributed_main
 from ..mixins.logging import LoggingMixin
 from .convert import convert_to_rgba
 from .loss import RGBAVAELoss
@@ -58,7 +58,7 @@ class VaeTrainInput(TypedDict):
     clean_image: ImageTensor
 
 
-class VaeTrainer(LoggingMixin, HsdpMixin, PreemptionMixin, CheckpointingMixin):
+class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "vae"
 
@@ -79,7 +79,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, PreemptionMixin, CheckpointingMixin):
     # ------------------------------- Training ------------------------------- #
     global_batch_size: int = 8
     train_steps: int = 100000
-    checkpoint_steps: int = 5000
+    checkpoint_interval: int = 5000
+    """Archival checkpoint cadence in optimizer steps."""
     validation_steps: int = 5000
     resume_from_dir: str | None = None
     seed_checkpoint_dir: str | None = None
@@ -650,15 +651,13 @@ class VaeTrainer(LoggingMixin, HsdpMixin, PreemptionMixin, CheckpointingMixin):
         )
         self.log_metrics(metrics=metrics, step=self._current_step)
 
-        if (self._current_step % self.checkpoint_steps == 0) or (
-            self._current_step == self.train_steps
-        ):
-            self.save(self._current_step)
+        self.save_maybe(
+            self._current_step,
+            force_archival=self._current_step == self.train_steps,
+        )
 
         if self._current_step % self.validation_steps == 0:
             self.validate_vae(self._current_step)
-
-        self.check_preempt_and_maybe_exit(self._current_step)
 
     def check_loss(self, loss: torch.Tensor) -> None:
         if not torch.isfinite(loss):
@@ -718,7 +717,6 @@ class VaeTrainer(LoggingMixin, HsdpMixin, PreemptionMixin, CheckpointingMixin):
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
         self.maybe_auto_resume(self.resume_from_dir)
-        self.install_preempt_handler()
 
         self.validate_vae(self._current_step)
 

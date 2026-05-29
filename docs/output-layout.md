@@ -15,7 +15,9 @@ A training run launched via `flow-control launch <config>` writes everything for
 │   │   ├── rank0000.log                      # structured rank logs (see flow_control/utils/logging.py)
 │   │   ├── rank0000.traceback.log
 │   │   └── rankNNNN.log
-│   └── checkpoints/step_*/                   # DCP shards
+│   └── checkpoints/                          # DCP shards (see two tiers below)
+│       ├── step_*/                           # archival: sparse cadence, kept up to max_checkpoints
+│       └── rolling_step_*/                   # rolling: exactly one; time-gated preempt safety net
 └── logs/slurm-<job_id>.{out,err}             # Slurm bootstrap chatter (sbatch only)
 ```
 
@@ -24,6 +26,8 @@ A training run launched via `flow-control launch <config>` writes everything for
 Resolution happens once in `flow_control.scripts.launch.run` before exec-ing torchrun, then propagates to workers via env vars (`FLOW_CONTROL_RUN_ID`, `FLOW_CONTROL_ATTEMPT_ID`, `LOG_DIR`, `TRACKIO_DIR`) and a resolved-config tempfile.
 
 In configs, use `"checkpoint_root": "$auto"` to opt into the unified layout. Explicit paths still work for back-compat.
+
+Checkpoints come in two tiers (`CheckpointingMixin` in `flow_control/training/mixins/dcp.py`), both written only at clean boundaries: **archival** `step_*` on a sparse cadence (`checkpoint_interval`, in epochs for GRPO/NFT and steps for SFT/VAE), capped at `max_checkpoints`; and a single **rolling** `rolling_step_*` refreshed at most every `rolling_checkpoint_interval_seconds`. There is no preempt-time saving — on a hard kill / Slurm preempt the job is requeued externally and `FLOW_CONTROL_AUTO_RESUME=1` resumes from the newest of either tier (`find_latest_checkpoint`), so worst-case lost work is bounded by the rolling interval plus one boundary.
 
 Cleanup: `rm -rf runs/<exp>/<run_id>` purges the run's jsonl/logs/checkpoints but leaves trackio rows in `runs/.trackio/<exp>.sqlite` (cost of the shared project model). Use trackio's delete-run API to fully purge, or `rm runs/.trackio/<exp>.sqlite` to nuke the whole experiment's dashboard data.
 
