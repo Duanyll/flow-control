@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -13,6 +14,20 @@ from .logging import get_logger
 from .types import TorchDType
 
 logger = get_logger(__name__)
+
+
+def _hf_local_files_only() -> bool:
+    """True when ``HF_HUB_OFFLINE`` is set, so loads resolve purely from the
+    local cache.
+
+    Passing ``local_files_only=True`` to ``from_pretrained`` / ``load_config``
+    makes diffusers/transformers skip the ``model_info`` (``/api/models/...``)
+    revision-resolution call entirely. That call is what blows up under
+    ``HF_HUB_OFFLINE=1`` (the offline request hook *raises* instead of using the
+    cache) and what depends on a flaky proxy when offline is unset. With a
+    complete local cache this flag makes loading fully network-free.
+    """
+    return os.getenv("HF_HUB_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class LoadingScope:
@@ -123,13 +138,15 @@ class HfModelLoader[T](BaseModel):
         self._model = value
 
     def _load_model_on_meta(self, model_cls) -> T:
+        extra = dict(self.extra_from_pretrained_kwargs)
+        extra.setdefault("local_files_only", _hf_local_files_only())
         with init_empty_weights():
             if self.library == "diffusers":
                 config = model_cls.load_config(
                     self.pretrained_model_id,
                     revision=self.revision,
                     subfolder=self.subfolder,
-                    **self.extra_from_pretrained_kwargs,
+                    **extra,
                 )
                 model = model_cls.from_config(config)
             else:
@@ -137,7 +154,7 @@ class HfModelLoader[T](BaseModel):
                     self.pretrained_model_id,
                     revision=self.revision,
                     subfolder=self.subfolder,
-                    **self.extra_from_pretrained_kwargs,
+                    **extra,
                 )
                 model = model_cls(config)
             model.to(dtype=self.dtype)
@@ -152,6 +169,7 @@ class HfModelLoader[T](BaseModel):
         kwargs = {
             **self.extra_from_pretrained_kwargs,
         }
+        kwargs.setdefault("local_files_only", _hf_local_files_only())
         if self.revision != "main":
             kwargs["revision"] = self.revision
         if self.subfolder is not None:
