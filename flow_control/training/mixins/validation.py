@@ -1,5 +1,5 @@
 from collections.abc import Generator
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel
@@ -49,9 +49,9 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
     validation_dataset: DatasetConfig | None = None
     validation_num_workers: int = 1
     validation_same_seed: bool = True
-    validation_log_images: bool = True
+    validation_log_images: bool | int = True
     validation_log_rewards: bool = True
-    validation_reward: Reward | None = None
+    validation_reward: Reward | Literal[False] | None = None
     seed: int = 42
 
     processor: Processor  # Shared property
@@ -136,6 +136,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                 "Validating",
                 total=len(self.validation_dataloader),
             )
+            image_count = 0
             with progress:
                 for batch in self.validation_dataloader:
                     batch = deep_move_to_device(batch, self.device)
@@ -167,14 +168,22 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                     batch.update(decoded)
 
                     # Log image
-                    if self.validation_log_images:
+                    if (
+                        self.validation_log_images is True
+                        or image_count < self.validation_log_images
+                    ):
                         self.log_image(batch["clean_image"], key, step=step)
+                        image_count += self.world_size
 
                     progress.advance(task)
 
                     yield batch, key
 
-        metric_reward = self.validation_reward or reward
+        metric_reward = (
+            None
+            if self.validation_reward is False
+            else self.validation_reward or reward
+        )
         if metric_reward is not None and self.validation_log_rewards:
             # Use execute_reward to score all samples (with async overlap if supported)
             reward_values = execute_reward(

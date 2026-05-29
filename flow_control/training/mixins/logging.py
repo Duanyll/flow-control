@@ -94,6 +94,7 @@ class LoggingMixin(BaseModel):
             config=conf,
             space_id=self.trackio_space_id,
             resume="allow",
+            auto_log_gpu=True,
         )
 
         self._run_dir = Path(self.runs_root) / self.experiment_name / self.run_id

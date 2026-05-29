@@ -536,7 +536,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingM
         self.make_validation_dataloader()
 
         self.reward.load_model(self.device)
-        if self.validation_reward is not None:
+        if self.validation_reward:
             self.validation_reward.load_model(self.device)
 
         os.makedirs(self.checkpoint_root, exist_ok=True)

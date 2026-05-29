@@ -38,6 +38,7 @@ We prefer to: **Pass data through function arguments, and store configuration in
 
 1. We extend `pydantic.BaseModel` to define classes for configuration, avoid spread untyped kwargs and dicts in the code.
 2. Behaviours are preferred to be methods of the config class. Composition and mixin patterns are preferred over inheritance.
+3. To regenerate jsonc config schmema after editing the Pydantic models, run `uv run flow-control schema`.
 
 ### Logging and printing
 
@@ -62,7 +63,6 @@ Rules to follow:
 
 ## Output layout
 
-A training run writes everything for that run under one stable directory keyed by a `run_id` that survives preempt + Slurm requeue. See @docs/output-layout.md for the full directory tree, env var contract, and cleanup story.
 
 ## Workflow
 
