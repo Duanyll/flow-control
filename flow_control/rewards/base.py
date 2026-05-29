@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -8,6 +9,69 @@ from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.tensor import deep_move_to_device
 
 from .normalize import IdentityNormalize, Normalize
+
+
+@dataclass(frozen=True)
+class RewardResult:
+    """Structured reward output.
+
+    ``raw`` and ``normalized`` are shaped ``[N, C]``.  ``weights`` and
+    ``labels`` describe the component axis.
+    """
+
+    raw: torch.Tensor
+    normalized: torch.Tensor
+    weights: torch.Tensor
+    labels: list[str]
+
+    def __post_init__(self) -> None:
+        if self.raw.ndim != 2:
+            raise ValueError(f"raw must have shape [N, C], got {tuple(self.raw.shape)}")
+        if self.normalized.shape != self.raw.shape:
+            raise ValueError(
+                "normalized must have the same shape as raw, got "
+                f"{tuple(self.normalized.shape)} vs {tuple(self.raw.shape)}"
+            )
+        if self.weights.ndim != 1:
+            raise ValueError(
+                f"weights must have shape [C], got {tuple(self.weights.shape)}"
+            )
+        if self.weights.shape[0] != self.raw.shape[1]:
+            raise ValueError(
+                f"weights length {self.weights.shape[0]} does not match "
+                f"component count {self.raw.shape[1]}"
+            )
+        if len(self.labels) != self.raw.shape[1]:
+            raise ValueError(
+                f"labels length {len(self.labels)} does not match component count "
+                f"{self.raw.shape[1]}"
+            )
+
+    def aggregate(self) -> torch.Tensor:
+        """Return the weighted normalized reward as ``[N]``."""
+        weights = self.weights.to(
+            device=self.normalized.device, dtype=self.normalized.dtype
+        )
+        return (self.normalized * weights).sum(dim=-1)
+
+    def aggregate_raw(self) -> torch.Tensor:
+        """Return a weighted raw score as ``[N]``.
+
+        This is only meaningful when the raw components share a compatible
+        scale.  It exists for composite display modes that intentionally hide
+        internal component detail.
+        """
+        weights = self.weights.to(device=self.raw.device, dtype=self.raw.dtype)
+        return (self.raw * weights).sum(dim=-1)
+
+    def row(self, index: int) -> "RewardResult":
+        """Return a single-row view as another ``RewardResult``."""
+        return RewardResult(
+            raw=self.raw[index : index + 1],
+            normalized=self.normalized[index : index + 1],
+            weights=self.weights,
+            labels=self.labels,
+        )
 
 
 class BaseReward(RemoteOffloadable, ABC):
@@ -37,6 +101,11 @@ class BaseReward(RemoteOffloadable, ABC):
         return [1.0]
 
     @property
+    def component_labels(self) -> list[str]:
+        """Human-readable labels for the component axis."""
+        return [self.type]
+
+    @property
     @abstractmethod
     def _batch_fields(self) -> set[str]:
         """Set of expected batch keys for this reward."""
@@ -58,8 +127,9 @@ class BaseReward(RemoteOffloadable, ABC):
                 Other keys depend on the processor / task.
 
         Returns:
-            Float tensor of shape ``[C]`` where C = len(component_weights).
-            Single-component rewards return ``[1]``.
+            Float tensor of shape ``[C]`` or ``[N, C]`` where
+            C = len(component_weights).  Single-component rewards commonly
+            return ``[1]``.
         """
         ...
 
@@ -81,12 +151,38 @@ class BaseReward(RemoteOffloadable, ABC):
     def load_model(self, device: torch.device) -> None:
         """Load reward model. If ``endpoint`` is set, offloads to remote server."""
         if self.endpoint is not None:
-            self._init_remote(device)
+            self._init_remote(device, dtype=torch.float32)
         else:
             self._load_model(device)
 
-    def score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Compute reward score, returning ``[C]`` component scores.
+    def _canonicalize_raw_score(self, raw: torch.Tensor) -> torch.Tensor:
+        if raw.ndim == 0:
+            return raw.reshape(1, 1)
+        if raw.ndim == 1:
+            return raw.unsqueeze(0)
+        if raw.ndim == 2:
+            return raw
+        raise ValueError(
+            f"Reward raw score must have shape [], [C], or [N, C], got {raw.shape}"
+        )
+
+    def _make_result(self, raw: torch.Tensor) -> RewardResult:
+        raw = self._canonicalize_raw_score(raw.float())
+        normalized = self.normalize.apply(raw)
+        weights = torch.tensor(
+            self.component_weights,
+            device=normalized.device,
+            dtype=normalized.dtype,
+        )
+        return RewardResult(
+            raw=raw,
+            normalized=normalized,
+            weights=weights,
+            labels=self.component_labels,
+        )
+
+    def score(self, batch: dict[str, Any]) -> RewardResult:
+        """Compute reward score.
 
         If remote, filters batch by ``_batch_fields`` and sends only the
         needed keys to save bandwidth.  The remote server applies
@@ -94,17 +190,23 @@ class BaseReward(RemoteOffloadable, ABC):
         ``/load``), so the client just returns the server response.
         """
         if self.is_remote:
-            return self._remote_batch_call("/score", batch, fields=self._batch_fields)
-        return self.normalize.apply(self._score(batch).float())
-
-    async def async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Async version of ``score`` for use in async RL loops."""
-        if self.is_remote:
-            return await self._async_remote_batch_call(
+            result = self._remote_batch_object_call(
                 "/score", batch, fields=self._batch_fields
             )
+            assert isinstance(result, RewardResult)
+            return result
+        return self._make_result(self._score(batch))
+
+    async def async_score(self, batch: dict[str, Any]) -> RewardResult:
+        """Async version of ``score`` for use in async RL loops."""
+        if self.is_remote:
+            result = await self._async_remote_batch_object_call(
+                "/score", batch, fields=self._batch_fields
+            )
+            assert isinstance(result, RewardResult)
+            return result
         raw = await self._async_score(batch)
-        return self.normalize.apply(raw.float())
+        return self._make_result(raw)
 
     def supports_rollout_overlap(self) -> bool:
         """Whether this reward can safely overlap with diffusion rollout work.

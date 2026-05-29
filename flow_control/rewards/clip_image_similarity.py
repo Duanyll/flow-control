@@ -148,9 +148,9 @@ if __name__ == "__main__":
         "reference_image": image_tensor,
     }
     same_score = reward.score(same_batch)
-    print(f"[bold]Identical image similarity:[/] {same_score.item():.4f}")
-    assert same_score.item() >= 0.99, (
-        f"Expected identical similarity >= 0.99, got {same_score.item()}"
+    print(f"[bold]Identical image similarity:[/] {same_score.aggregate().item():.4f}")
+    assert same_score.aggregate().item() >= 0.99, (
+        f"Expected identical similarity >= 0.99, got {same_score.aggregate().item()}"
     )
 
     inverted_batch = {
@@ -158,10 +158,12 @@ if __name__ == "__main__":
         "reference_image": inverted_tensor,
     }
     inverted_score = reward.score(inverted_batch)
-    print(f"[bold]Inverted image similarity:[/] {inverted_score.item():.4f}")
-    assert inverted_score.item() < same_score.item(), (
+    print(
+        f"[bold]Inverted image similarity:[/] {inverted_score.aggregate().item():.4f}"
+    )
+    assert inverted_score.aggregate().item() < same_score.aggregate().item(), (
         f"Expected inverted similarity < identical similarity, got "
-        f"{inverted_score.item()} vs {same_score.item()}"
+        f"{inverted_score.aggregate().item()} vs {same_score.aggregate().item()}"
     )
 
     reward.unload_model()

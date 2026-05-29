@@ -2,9 +2,10 @@ from typing import Any, Literal
 
 import torch
 import torchvision.transforms as T
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from .base import BaseReward
+from .normalize import AffineNormalize, Normalize
 
 
 class CLIPScoreReward(BaseReward):
@@ -12,6 +13,9 @@ class CLIPScoreReward(BaseReward):
 
     type: Literal["clip_score"] = "clip_score"
     model_name: str = "openai/clip-vit-large-patch14"
+    normalize: Normalize = Field(
+        default_factory=lambda: AffineNormalize(scale=1.0 / 30.0)
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -83,8 +87,8 @@ class CLIPScoreReward(BaseReward):
         )
         text_inputs = {k: v.to(device=self._device) for k, v in text_inputs.items()}
         outputs = self._model(pixel_values=pixels, **text_inputs)
-        # Normalize score to ~[0, 1] range, return [1] tensor
-        return (outputs.logits_per_image.diagonal() / 30.0).unsqueeze(0)
+        # Return raw CLIP logits; BaseReward applies the configurable normalize.
+        return outputs.logits_per_image.diagonal()
 
     def _unload_model(self) -> None:
         import gc

@@ -214,12 +214,12 @@ if __name__ == "__main__":
     coco_score = reward.score({"clean_image": image_tensor})
     noise_score = reward.score({"clean_image": noise_tensor})
 
-    rprint(f"[bold]COCO aesthetic score:[/]  {coco_score.item():.4f}")
-    rprint(f"[bold]Noise aesthetic score:[/] {noise_score.item():.4f}")
+    rprint(f"[bold]COCO aesthetic score:[/]  {coco_score.aggregate().item():.4f}")
+    rprint(f"[bold]Noise aesthetic score:[/] {noise_score.aggregate().item():.4f}")
 
-    assert coco_score.item() > noise_score.item(), (
+    assert coco_score.aggregate().item() > noise_score.aggregate().item(), (
         f"Expected COCO image to score higher than random noise: "
-        f"coco={coco_score.item():.4f} noise={noise_score.item():.4f}"
+        f"coco={coco_score.aggregate().item():.4f} noise={noise_score.aggregate().item():.4f}"
     )
     rprint("[bold green]COCO image scored higher than noise, as expected.[/]")
 

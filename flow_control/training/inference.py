@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from pydantic import ConfigDict, model_validator
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
@@ -14,6 +15,8 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
+from flow_control.rewards import Reward
+from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler
 from flow_control.samplers.sampler import derive_seed
 from flow_control.utils.logging import console, dump_if_failed, get_logger
@@ -42,6 +45,7 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
     processor: Processor
     dataset: DatasetConfig
     datasink: DatasinkConfig | None = None
+    reward: Reward | None = None
 
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
@@ -107,6 +111,127 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             options=StateDictOptions(strict=False),
         )
 
+    # ---------------------------------- Rewards ---------------------------------- #
+
+    def _reward_fields(self, result: RewardResult) -> dict[str, Any]:
+        aggregate = result.aggregate().detach().cpu()
+        raw = result.raw.detach().cpu()
+        normalized = result.normalized.detach().cpu()
+        return {
+            "reward": aggregate,
+            "reward_raw": {
+                label: raw[:, i].clone() for i, label in enumerate(result.labels)
+            },
+            "reward_normalized": {
+                label: normalized[:, i].clone() for i, label in enumerate(result.labels)
+            },
+        }
+
+    def _print_reward_result(self, key: str, result: RewardResult) -> None:
+        aggregate = result.aggregate().detach().cpu()
+        raw = result.raw.detach().cpu()
+        parts = [
+            f"{label}={raw[:, i].mean().item():.4f}"
+            for i, label in enumerate(result.labels)
+        ]
+        console.print(
+            f"[bold]{key}[/] reward={aggregate.mean().item():.4f} " + " ".join(parts)
+        )
+
+    def _print_reward_summary(self, results: list[RewardResult]) -> None:
+        world_size: int = getattr(self, "world_size", 1)
+        is_main: bool = getattr(self, "is_main_process", True)
+
+        all_results = results
+        if world_size > 1:
+            if is_main:
+                gathered: list[Any] = [None] * world_size
+                dist.gather_object(results, gathered, dst=0)
+                all_results = [
+                    result for rank_results in gathered for result in rank_results
+                ]
+            else:
+                dist.gather_object(results, None, dst=0)
+                return
+
+        if not all_results:
+            return
+
+        normalized = torch.cat([r.normalized.cpu() for r in all_results], dim=0)
+        raw = torch.cat([r.raw.cpu() for r in all_results], dim=0)
+        weights = all_results[0].weights.cpu().to(dtype=normalized.dtype)
+        labels = all_results[0].labels
+        aggregate = (normalized * weights).sum(dim=-1)
+        console.rule("[bold green]Reward Summary[/bold green]")
+        console.print(
+            f"reward mean={aggregate.mean().item():.4f} "
+            f"std={aggregate.std(correction=0).item():.4f}"
+        )
+        for i, label in enumerate(labels):
+            console.print(
+                f"{label}: raw_mean={raw[:, i].mean().item():.4f} "
+                f"raw_std={raw[:, i].std(correction=0).item():.4f} "
+                f"normalized_mean={normalized[:, i].mean().item():.4f}"
+            )
+
+    def _run_one_batch(
+        self,
+        batch: Any,
+        datasink: Any,
+        reward_results: list[RewardResult],
+    ) -> None:
+        batch = deep_move_to_device(batch, self.device)
+        batch = self.preprocess_for_inference(batch, save_extra=True)
+        batch = deep_cast_float_dtype(batch, self.model.dtype)
+        negative_batch: Any = (
+            self.processor.get_negative_batch(batch)
+            if self.sampler.cfg_scale > 1.0
+            else None
+        )
+        key = batch.get("__key__", "unknown")
+        seed = derive_seed(self.seed, key)
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        self.processor.initialize_latents(
+            batch,
+            generator=generator,
+            device=self.device,
+            dtype=self.model.dtype,
+        )
+        sample_output = self.sampler.sample(
+            self.model,
+            batch,
+            negative_batch=negative_batch,
+            generator=generator,
+        )
+        decoded = self.processor.decode_output(
+            sample_output.final_latents,
+            batch,
+        )
+        batch.update(decoded)
+
+        reward_result: RewardResult | None = None
+        if self.reward is not None and key != "__padding__":
+            reward_result = self.reward.score(batch)
+            self._print_reward_result(key, reward_result)
+            reward_results.append(
+                deep_move_to_device(reward_result, torch.device("cpu"))
+            )
+
+        result = deep_move_to_device(decoded, torch.device("cpu"))
+        if reward_result is not None:
+            result.update(self._reward_fields(reward_result))
+        image = tensor_to_pil(result["clean_image"])
+        if key == "__padding__":
+            return
+        if datasink is not None:
+            if self.save_extra:
+                result = deep_move_to_device(batch, torch.device("cpu"))
+                if reward_result is not None:
+                    result.update(self._reward_fields(reward_result))
+            datasink.write(result)
+        if self.save_preview_dir is not None:
+            image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
+
     # ------------------------------- Main loop ---------------------------------- #
 
     @torch.no_grad()
@@ -116,6 +241,8 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.load_processor()
         self.make_dataloader()
+        if self.reward is not None:
+            self.reward.load_model(self.device)
 
         if self.checkpoint_dir is not None:
             self.load_dcp_checkpoint(self.checkpoint_dir)
@@ -134,48 +261,14 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             console=console,
         )
         task = progress.add_task("Inference", total=len(self.dataloader))
+        reward_results: list[RewardResult] = []
 
         with progress:
             for batch in self.dataloader:
                 with dump_if_failed(logger, batch):
-                    batch = deep_move_to_device(batch, self.device)
-                    batch: Any = self.preprocess_for_inference(batch, save_extra=True)
-                    batch = deep_cast_float_dtype(batch, self.model.dtype)
-                    negative_batch: Any = (
-                        self.processor.get_negative_batch(batch)
-                        if self.sampler.cfg_scale > 1.0
-                        else None
-                    )
-                    key = batch.get("__key__", "unknown")
-                    seed = derive_seed(self.seed, key)
-                    generator = torch.Generator(device=self.device).manual_seed(seed)
-                    self.processor.initialize_latents(
-                        batch,
-                        generator=generator,
-                        device=self.device,
-                        dtype=self.model.dtype,
-                    )
-                    sample_output = self.sampler.sample(
-                        self.model,
-                        batch,
-                        negative_batch=negative_batch,
-                        generator=generator,
-                    )
-                    result = self.processor.decode_output(
-                        sample_output.final_latents,
-                        batch,
-                    )
-                    result = deep_move_to_device(result, torch.device("cpu"))
-                    image = tensor_to_pil(result["clean_image"])
-                    if key == "__padding__":
-                        continue
-                    if datasink is not None:
-                        if self.save_extra:
-                            batch.update(result)
-                            result = batch
-                        datasink.write(result)
-                    if self.save_preview_dir is not None:
-                        image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
+                    self._run_one_batch(batch, datasink, reward_results)
                 progress.advance(task)
 
+        if self.reward is not None:
+            self._print_reward_summary(reward_results)
         console.rule("[bold green]Inference Completed[/bold green]")

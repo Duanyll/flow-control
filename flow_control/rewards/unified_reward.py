@@ -65,6 +65,10 @@ class UnifiedReward(BaseReward):
         return [tag.weight for tag in self.score_tags]
 
     @property
+    def component_labels(self) -> list[str]:
+        return [tag.name.lower().replace(" ", "_") for tag in self.score_tags]
+
+    @property
     def _batch_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 

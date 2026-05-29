@@ -1,12 +1,13 @@
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from transformers import CLIPModel, CLIPProcessor
 
 from flow_control.utils.hf_model import HfModelLoader
 
 from .base import BaseReward
+from .normalize import AffineNormalize, Normalize
 
 
 class PickScoreReward(BaseReward):
@@ -15,6 +16,9 @@ class PickScoreReward(BaseReward):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["pickscore"] = "pickscore"
+    normalize: Normalize = Field(
+        default_factory=lambda: AffineNormalize(scale=1.0 / 26.0)
+    )
 
     processor: HfModelLoader[CLIPProcessor] = HfModelLoader(
         library="transformers",
@@ -83,8 +87,8 @@ class PickScoreReward(BaseReward):
         logit_scale = model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
         scores = scores.diag()
-        # Normalize to ~[0, 1] range, return [1] tensor
-        return (scores / 26.0).unsqueeze(0)
+        # Return raw PickScore logits; BaseReward applies configurable normalize.
+        return scores
 
 
 if __name__ == "__main__":
@@ -117,7 +121,9 @@ if __name__ == "__main__":
         "prompt": "A dog playing with a ball in the park.",
     }
     score = reward.score(batch)
-    rprint(f"[bold]PickScore reward:[/] {score.item():.4f}")  # should be low
+    rprint(
+        f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
+    )  # should be low
 
     batch = {
         "clean_image": image_tensor,
@@ -125,5 +131,5 @@ if __name__ == "__main__":
     }
     score = reward.score(batch)
     rprint(
-        f"[bold]PickScore reward:[/] {score.item():.4f}"
+        f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
     )  # should be higher than the previous one

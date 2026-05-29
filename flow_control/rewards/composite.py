@@ -7,7 +7,7 @@ from pydantic import ConfigDict, PrivateAttr
 
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward
+from .base import BaseReward, RewardResult
 
 logger = get_logger(__name__)
 
@@ -17,6 +17,7 @@ class CompositeReward(BaseReward):
 
     type: Literal["composite"] = "composite"
     rewards: list[Any]  # (weight, reward_config_dict)
+    expose_internal_components: bool = True
 
     model_config = ConfigDict(extra="forbid")
 
@@ -47,9 +48,25 @@ class CompositeReward(BaseReward):
         """Flatten children's component weights, scaled by each child's weight."""
         weights: list[float] = []
         for reward in self._reward_instances:
-            for w in reward.component_weights:
-                weights.append(reward.weight * w)
+            if self.expose_internal_components:
+                for w in reward.component_weights:
+                    weights.append(reward.weight * w)
+            else:
+                weights.append(reward.weight)
         return weights
+
+    @property
+    def component_labels(self) -> list[str]:
+        labels: list[str] = []
+        for reward in self._reward_instances:
+            if not self.expose_internal_components:
+                labels.append(reward.type)
+                continue
+            for label in reward.component_labels:
+                labels.append(
+                    reward.type if label == reward.type else f"{reward.type}/{label}"
+                )
+        return labels
 
     @property
     def _batch_fields(self) -> set[str]:
@@ -63,23 +80,83 @@ class CompositeReward(BaseReward):
             reward.load_model(device)
 
     def _score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Concatenate children's per-component scores into ``[total_C]``."""
-        parts: list[torch.Tensor] = []
-        for reward in self._reward_instances:
-            parts.append(reward.score(batch))
-        return torch.cat(parts, dim=0)
+        raise NotImplementedError(
+            "CompositeReward.score() returns RewardResult directly."
+        )
 
-    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        """Score children concurrently and concatenate.
+    def _combine_results(self, results: list[RewardResult]) -> RewardResult:
+        raw_parts: list[torch.Tensor] = []
+        normalized_parts: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        labels: list[str] = []
+        device = results[0].normalized.device
+        dtype = results[0].normalized.dtype
 
-        Each child's ``async_score`` already applies its own normalize; the
-        composite's own normalize is then applied on top of the concatenated
-        ``[total_C]`` tensor by ``BaseReward.async_score``.
-        """
+        for reward, result in zip(self._reward_instances, results, strict=True):
+            if self.expose_internal_components:
+                raw_parts.append(result.raw.to(device=device))
+                normalized_parts.append(
+                    result.normalized.to(device=device, dtype=dtype)
+                )
+                weights.append(
+                    result.weights.to(device=device, dtype=dtype) * reward.weight
+                )
+                for label in result.labels:
+                    labels.append(
+                        reward.type
+                        if label == reward.type
+                        else f"{reward.type}/{label}"
+                    )
+            else:
+                raw_parts.append(result.aggregate_raw().to(device=device).unsqueeze(-1))
+                normalized_parts.append(
+                    result.aggregate().to(device=device, dtype=dtype).unsqueeze(-1)
+                )
+                weights.append(
+                    torch.tensor(
+                        [reward.weight],
+                        device=device,
+                        dtype=dtype,
+                    )
+                )
+                labels.append(reward.type)
+
+        raw = torch.cat(raw_parts, dim=-1)
+        normalized = torch.cat(normalized_parts, dim=-1)
+        normalized = self.normalize.apply(normalized)
+        return RewardResult(
+            raw=raw,
+            normalized=normalized,
+            weights=torch.cat(weights, dim=0),
+            labels=labels,
+        )
+
+    def score(self, batch: dict[str, Any]) -> RewardResult:
+        if self.is_remote:
+            result = self._remote_batch_object_call(
+                "/score", batch, fields=self._batch_fields
+            )
+            assert isinstance(result, RewardResult)
+            return result
+        return self._combine_results(
+            [reward.score(batch) for reward in self._reward_instances]
+        )
+
+    async def async_score(self, batch: dict[str, Any]) -> RewardResult:
+        if self.is_remote:
+            result = await self._async_remote_batch_object_call(
+                "/score", batch, fields=self._batch_fields
+            )
+            assert isinstance(result, RewardResult)
+            return result
+        return self._combine_results(await self._async_score_children(batch))
+
+    async def _async_score_children(self, batch: dict[str, Any]) -> list[RewardResult]:
+        """Score children concurrently before ``_combine_results`` concatenates."""
         scores = await asyncio.gather(
             *(r.async_score(batch) for r in self._reward_instances)
         )
-        return torch.cat(list(scores), dim=0)
+        return list(scores)
 
     def supports_rollout_overlap(self) -> bool:
         return all(

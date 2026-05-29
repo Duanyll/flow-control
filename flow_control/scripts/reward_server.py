@@ -12,7 +12,7 @@ from flow_control.rewards import Reward, parse_reward
 from flow_control.rewards.base import BaseReward
 from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
-from flow_control.utils.remote import deserialize_batch, serialize_tensor
+from flow_control.utils.remote import deserialize_batch, serialize_object
 from flow_control.utils.types import TorchDevice
 
 logger = get_logger(__name__)
@@ -73,8 +73,8 @@ def create_app(config: RewardServerConfig) -> Starlette:
         logger.info(f"Scoring batch with keys: {list(batch.keys())}")
         async with gpu_lock:
             with torch.no_grad():
-                result = reward._score(batch)
-            serialized = serialize_tensor(result)
+                result = reward.score(batch)
+            serialized = serialize_object(result)
         return Response(content=serialized, media_type="application/octet-stream")
 
     async def health(request: Request) -> Response:

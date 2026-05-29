@@ -687,6 +687,8 @@ class NftTrainer(RolloutMixin, ValidationMixin, PreemptionMixin, CheckpointingMi
         self.make_validation_dataloader()
 
         self.reward.load_model(self.device)
+        if self.validation_reward is not None:
+            self.validation_reward.load_model(self.device)
 
         os.makedirs(self.checkpoint_root, exist_ok=True)
         self.maybe_auto_resume(self.resume_from_dir)

@@ -149,17 +149,17 @@ if __name__ == "__main__":
         "prompt": cats_prompt,
     }
     score_cats = reward.score(batch_cats)
-    rprint(f"[bold]ImageReward (cats prompt):[/] {score_cats.item():.4f}")
+    rprint(f"[bold]ImageReward (cats prompt):[/] {score_cats.aggregate().item():.4f}")
 
     batch_car = {
         "clean_image": image_tensor.to(device),
         "prompt": car_prompt,
     }
     score_car = reward.score(batch_car)
-    rprint(f"[bold]ImageReward (car prompt) :[/] {score_car.item():.4f}")
+    rprint(f"[bold]ImageReward (car prompt) :[/] {score_car.aggregate().item():.4f}")
 
-    assert score_cats.item() > score_car.item(), (
+    assert score_cats.aggregate().item() > score_car.aggregate().item(), (
         f"Expected cats prompt to score higher than car prompt; "
-        f"got cats={score_cats.item():.4f}, car={score_car.item():.4f}"
+        f"got cats={score_cats.aggregate().item():.4f}, car={score_car.aggregate().item():.4f}"
     )
     rprint("[bold green]Ordering assertion passed:[/] cats > car")

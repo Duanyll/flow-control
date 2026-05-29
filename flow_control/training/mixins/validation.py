@@ -17,7 +17,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
-from flow_control.rewards import execute_reward
+from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import BaseReward
 from flow_control.samplers import Sampler
 from flow_control.samplers.sampler import derive_seed
@@ -51,6 +51,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
     validation_same_seed: bool = True
     validation_log_images: bool = True
     validation_log_rewards: bool = True
+    validation_reward: Reward | None = None
     seed: int = 42
 
     processor: Processor  # Shared property
@@ -173,24 +174,38 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
 
                     yield batch, key
 
-        if reward is not None and self.validation_log_rewards:
+        metric_reward = self.validation_reward or reward
+        if metric_reward is not None and self.validation_log_rewards:
             # Use execute_reward to score all samples (with async overlap if supported)
-            reward_values: list[torch.Tensor] = execute_reward(
-                reward,
+            reward_values = execute_reward(
+                metric_reward,
                 sample_submitter(),
-                lambda _tag, r: r.view(1) if r.ndim == 0 else r,
+                lambda _tag, r: r,
             )
 
             if reward_values:
-                local_mean = torch.stack(reward_values).mean().item()
-                local_std = torch.stack(reward_values).std().item()
-                self.log_metrics(
-                    {
-                        "val/reward_mean": local_mean,
-                        "val/reward_std": local_std,
-                    },
-                    step=step,
+                normalized = torch.cat([r.normalized for r in reward_values], dim=0)
+                raw = torch.cat([r.raw for r in reward_values], dim=0)
+                weights = reward_values[0].weights.to(
+                    device=normalized.device,
+                    dtype=normalized.dtype,
                 )
+                labels = reward_values[0].labels
+                aggregate = (normalized * weights).sum(dim=-1)
+                metrics: dict[str, float] = {
+                    "val/reward_mean": aggregate.mean().item(),
+                    "val/reward_std": aggregate.std(correction=0).item(),
+                }
+                for i, label in enumerate(labels):
+                    metrics[f"val/raw/{label}_mean"] = raw[:, i].mean().item()
+                    metrics[f"val/raw/{label}_std"] = raw[:, i].std(correction=0).item()
+                    metrics[f"val/normalized/{label}_mean"] = (
+                        normalized[:, i].mean().item()
+                    )
+                    metrics[f"val/normalized/{label}_std"] = (
+                        normalized[:, i].std(correction=0).item()
+                    )
+                self.log_metrics(metrics, step=step)
         else:
             # Just iterate to generate and log images, no reward scoring
             for _ in sample_submitter():

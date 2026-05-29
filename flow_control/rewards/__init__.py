@@ -8,7 +8,7 @@ import torch
 from pydantic import Discriminator, Tag, TypeAdapter
 
 from .aesthetic import AestheticReward
-from .base import BaseReward
+from .base import BaseReward, RewardResult
 from .clip_image_similarity import CLIPImageSimilarityReward
 from .clip_score import CLIPScoreReward
 from .composite import CompositeReward
@@ -82,7 +82,7 @@ class _RewardLoopThread:
         self._loop.close()
 
 
-def _score_blocking(reward: BaseReward, batch: dict[str, Any]) -> torch.Tensor:
+def _score_blocking(reward: BaseReward, batch: dict[str, Any]) -> RewardResult:
     try:
         return reward.score(batch)
     except NotImplementedError:
@@ -92,7 +92,7 @@ def _score_blocking(reward: BaseReward, batch: dict[str, Any]) -> torch.Tensor:
 def execute_reward[TBatch: dict, TTag, TResult](
     reward: BaseReward,
     submitter: Generator[tuple[TBatch, TTag]],
-    handler: Callable[[TTag, torch.Tensor], TResult],
+    handler: Callable[[TTag, RewardResult], TResult],
 ) -> list[TResult]:
     """Score batches from *submitter* and pass each reward to *handler*.
 
@@ -103,7 +103,7 @@ def execute_reward[TBatch: dict, TTag, TResult](
     overlap = reward.supports_rollout_overlap()
     reward_loop = _RewardLoopThread() if overlap else None
 
-    pending: list[tuple[TTag, concurrent.futures.Future[torch.Tensor] | None]] = []
+    pending: list[tuple[TTag, concurrent.futures.Future[RewardResult] | None]] = []
     results: list[TResult] = []
 
     try:
@@ -143,7 +143,7 @@ def _has_pairwise_child(reward: BaseReward) -> bool:
 def execute_pairwise_reward[TTag, TResult](
     reward: BaseReward,
     submitter: Generator[tuple[dict[str, Any], TTag]],
-    handler: Callable[[TTag, torch.Tensor], TResult],
+    handler: Callable[[TTag, RewardResult], TResult],
     num_rollouts_per_prompt: int,
 ) -> list[TResult]:
     """Score batches using the pairwise execution path.
@@ -210,7 +210,7 @@ def _score_pairwise_group(
     reward: PairwiseReward,
     loop: _RewardLoopThread,
     batches: list[dict[str, Any]],
-) -> list[torch.Tensor]:
+) -> list[RewardResult]:
     """Build win matrix for a prompt group and aggregate."""
     K = len(batches)
     # Launch pairwise comparisons incrementally
@@ -228,27 +228,28 @@ def _score_pairwise_group(
         win_matrix[i, j] = score
         win_matrix[j, i] = 1.0 - score
 
-    # Aggregate to per-sample scores [K] → list of [1] tensors
+    # Aggregate to per-sample raw scores [K] and normalize through the reward.
     aggregated = reward.aggregate(win_matrix)
-    return [aggregated[i].unsqueeze(0) for i in range(K)]
+    result = reward._make_result(aggregated.unsqueeze(-1))  # noqa: SLF001
+    return [result.row(i) for i in range(K)]
 
 
 def _score_composite_pairwise_group(
     reward: CompositeReward,
     loop: _RewardLoopThread,
     batches: list[dict[str, Any]],
-) -> list[torch.Tensor]:
+) -> list[RewardResult]:
     """Score a composite reward with mixed pairwise and non-pairwise children."""
     K = len(batches)
-    # Per-child scores: list of K tensors per child
-    child_scores: list[list[torch.Tensor]] = []
+    # Per-child scores: list of K results per child
+    child_scores: list[list[RewardResult]] = []
 
     for child in reward._reward_instances:  # noqa: SLF001
         if isinstance(child, PairwiseReward):
             child_scores.append(_score_pairwise_group(child, loop, batches))
         else:
             # Score each batch independently
-            per_batch: list[torch.Tensor] = []
+            per_batch: list[RewardResult] = []
             if child.supports_rollout_overlap():
                 futs = [loop.submit(child.async_score(b)) for b in batches]
                 for fut in futs:
@@ -258,11 +259,11 @@ def _score_composite_pairwise_group(
                     per_batch.append(_score_blocking(child, b))
             child_scores.append(per_batch)
 
-    # Concatenate per-child [C_i] scores for each sample → [total_C]
-    result: list[torch.Tensor] = []
+    # Concatenate per-child results for each sample.
+    result: list[RewardResult] = []
     for k in range(K):
         parts = [child_scores[c][k] for c in range(len(child_scores))]
-        result.append(torch.cat(parts, dim=0))
+        result.append(reward._combine_results(parts))  # noqa: SLF001
 
     return result
 
@@ -274,6 +275,7 @@ __all__ = [
     "Normalize",
     "PairwiseReward",
     "Reward",
+    "RewardResult",
     "SigmoidNormalize",
     "execute_pairwise_reward",
     "execute_reward",

@@ -24,6 +24,7 @@ from flow_control.rewards import (
     execute_pairwise_reward,
     execute_reward,
 )
+from flow_control.rewards.base import RewardResult
 from flow_control.samplers import SampleOutput, Sampler
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -49,6 +50,9 @@ logger = get_logger(__name__)
 class Rollout:
     trajectory: SampleOutput
     reward: torch.Tensor
+    raw_reward: torch.Tensor
+    reward_weights: torch.Tensor
+    reward_labels: list[str]
     key: str
     batch: Batch
     negative_batch: Batch | None
@@ -206,7 +210,10 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                             trajectory=deep_move_to_device(
                                 rollout_out, rollout_storage
                             ),
-                            reward=torch.tensor(0.0),  # placeholder
+                            reward=torch.zeros(1),  # placeholder
+                            raw_reward=torch.zeros(1),  # placeholder
+                            reward_weights=torch.ones(1),  # placeholder
+                            reward_labels=["reward"],  # placeholder
                             key=batch.get("__key__", "unknown"),
                             batch=deep_move_to_device(batch, rollout_storage),
                             negative_batch=(
@@ -223,9 +230,12 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                     progress.advance(rollout_task)
                     yield batch, len(rollouts) - 1
 
-        def reward_handler(idx: int, reward_tensor: torch.Tensor) -> None:
-            # reward_tensor is [C] from multi-component rewards
-            rollouts[idx].reward = reward_tensor.detach().cpu()
+        def reward_handler(idx: int, result: RewardResult) -> None:
+            # Result is [1, C] for the single rollout sample.
+            rollouts[idx].reward = result.normalized.squeeze(0).detach().cpu()
+            rollouts[idx].raw_reward = result.raw.squeeze(0).detach().cpu()
+            rollouts[idx].reward_weights = result.weights.detach().cpu()
+            rollouts[idx].reward_labels = result.labels
 
         if _has_pairwise_child(reward):
             execute_pairwise_reward(
@@ -250,12 +260,21 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
 
         # Stack per-sample [C] rewards into [B_local, C]
         local_rewards = torch.stack([s.reward for s in rollouts], dim=0).to(device)
+        local_raw_rewards = torch.stack([s.raw_reward for s in rollouts], dim=0).to(
+            device
+        )
 
         gathered_rewards_list: list[torch.Tensor] = [
             torch.zeros_like(local_rewards) for _ in range(world_size)
         ]
         dist.all_gather(gathered_rewards_list, local_rewards)
         gathered_rewards = torch.cat(gathered_rewards_list, dim=0)  # [B_global, C]
+
+        gathered_raw_rewards_list: list[torch.Tensor] = [
+            torch.zeros_like(local_raw_rewards) for _ in range(world_size)
+        ]
+        dist.all_gather(gathered_raw_rewards_list, local_raw_rewards)
+        gathered_raw_rewards = torch.cat(gathered_raw_rewards_list, dim=0)
 
         local_keys = [s.key for s in rollouts]
         all_keys_nested: list[Any] = [None] * world_size
@@ -271,31 +290,35 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
             device=gathered_rewards.device,
         )
 
-        component_weights = torch.tensor(
-            self.reward.component_weights,
+        component_weights = rollouts[0].reward_weights.to(
             device=gathered_rewards.device,
             dtype=gathered_rewards.dtype,
         )
+        component_labels = rollouts[0].reward_labels
         advantages = self.advantage.compute(
             gathered_rewards, prompt_ids, component_weights
         )
 
-        # Log per-component reward stats when multi-component
-        C = gathered_rewards.shape[-1]
+        # Log aggregate reward plus per-component raw/normalized stats.
         combined = (gathered_rewards * component_weights).sum(dim=-1)
         metrics: dict[str, float] = {
             "rollout/reward_mean": combined.mean().item(),
-            "rollout/reward_std": combined.std().item(),
+            "rollout/reward_std": combined.std(correction=0).item(),
             "rollout/adv_abs_mean": advantages.abs().mean().item(),
         }
-        if C > 1:
-            for i in range(C):
-                metrics[f"rollout/component_{i}_mean"] = (
-                    gathered_rewards[:, i].mean().item()
-                )
-                metrics[f"rollout/component_{i}_std"] = (
-                    gathered_rewards[:, i].std().item()
-                )
+        for i, label in enumerate(component_labels):
+            metrics[f"rollout/raw/{label}_mean"] = (
+                gathered_raw_rewards[:, i].mean().item()
+            )
+            metrics[f"rollout/raw/{label}_std"] = (
+                gathered_raw_rewards[:, i].std(correction=0).item()
+            )
+            metrics[f"rollout/normalized/{label}_mean"] = (
+                gathered_rewards[:, i].mean().item()
+            )
+            metrics[f"rollout/normalized/{label}_std"] = (
+                gathered_rewards[:, i].std(correction=0).item()
+            )
         log_metrics(metrics, step=step)
 
         local_b = local_rewards.shape[0]

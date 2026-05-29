@@ -317,7 +317,7 @@ if __name__ == "__main__":
     score_match = reward.score(batch_match)
     print(
         f"[bold]HPSv2.1[/] (matching prompt: {matching_prompt!r}) "
-        f"= [green]{score_match.item():.4f}[/]"
+        f"= [green]{score_match.aggregate().item():.4f}[/]"
     )
 
     batch_mismatch: dict[str, Any] = {
@@ -327,12 +327,12 @@ if __name__ == "__main__":
     score_mismatch = reward.score(batch_mismatch)
     print(
         f"[bold]HPSv2.1[/] (mismatching prompt: {mismatching_prompt!r}) "
-        f"= [red]{score_mismatch.item():.4f}[/]"
+        f"= [red]{score_mismatch.aggregate().item():.4f}[/]"
     )
 
-    assert score_match.item() > score_mismatch.item(), (
-        f"Expected matching prompt score ({score_match.item():.4f}) > "
-        f"mismatching prompt score ({score_mismatch.item():.4f})"
+    assert score_match.aggregate().item() > score_mismatch.aggregate().item(), (
+        f"Expected matching prompt score ({score_match.aggregate().item():.4f}) > "
+        f"mismatching prompt score ({score_mismatch.aggregate().item():.4f})"
     )
     print("[bold green]OK — matching prompt scores higher than mismatching prompt.[/]")
 

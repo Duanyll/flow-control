@@ -290,7 +290,7 @@ if __name__ == "__main__":
         {"clean_image": image_tensor, "prompt": negative_prompt}
     )
 
-    print(f"Positive (target='Hello World'): {positive_score.tolist()}")
-    print(f"Negative (target='Goodbye Mars'): {negative_score.tolist()}")
+    print(f"Positive (target='Hello World'): {positive_score.aggregate().tolist()}")
+    print(f"Negative (target='Goodbye Mars'): {negative_score.aggregate().tolist()}")
 
     reward_module.unload_model()
