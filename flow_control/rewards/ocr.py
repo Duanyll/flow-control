@@ -6,12 +6,16 @@ target and the OCR output as ``1 - levenshtein / len(target)`` clipped to
 ``[0, 1]``.
 
 The OCR backend is built on top of `rapidocr` 3.x (PP-OCR ONNX wrapper, no
-PaddlePaddle dependency).  See ``RapidOcrBackend`` for the GPU-vs-CPU
-trade-off currently in effect.
+PaddlePaddle dependency).  When loaded on CUDA, the ONNX Runtime sessions are
+configured to allocate through PyTorch's CUDA caching allocator so they can
+coexist with the training model.
 """
 
 from __future__ import annotations
 
+import ctypes
+import importlib
+from contextlib import suppress
 from typing import Any, Literal, Protocol
 
 import torch
@@ -24,6 +28,168 @@ from flow_control.utils.tensor import tensor_to_pil
 from .base import BaseReward
 
 logger = get_logger(__name__)
+
+
+def _cuda_device_index(device: torch.device) -> int:
+    if device.type != "cuda":
+        raise ValueError(f"Expected a CUDA device, got {device!s}.")
+
+    if device.index is not None:
+        return device.index
+
+    return torch.cuda.current_device()
+
+
+class _OrtTorchCudaAllocatorCallbacks:
+    """C callback bridge from ONNX Runtime to PyTorch's CUDA allocator.
+
+    ONNX Runtime accepts provider options containing raw function-pointer
+    addresses for ``gpu_external_alloc`` / ``gpu_external_free`` /
+    ``gpu_external_empty_cache``.  ``onnxruntime-training`` exposes first-party
+    helpers for those addresses, but the lighter ``onnxruntime-gpu`` wheel used
+    by this project does not.  These ``ctypes`` callbacks provide the same ABI
+    and are kept alive by ``RapidOcrBackend`` for as long as the ORT sessions
+    exist.
+    """
+
+    _AllocCallback = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+    _FreeCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+    _EmptyCacheCallback = ctypes.CFUNCTYPE(None)
+
+    def __init__(self, device: torch.device) -> None:
+        self._device = torch.device("cuda", _cuda_device_index(device))
+        device_for_callback = self._device
+
+        def alloc(size: int) -> int | None:
+            try:
+                with torch.cuda.device(device_for_callback):
+                    ptr = torch.cuda.caching_allocator_alloc(
+                        size, device=device_for_callback
+                    )
+                return int(ptr)
+            except Exception:
+                _OrtTorchCudaAllocatorCallbacks._log_callback_exception(
+                    "PyTorch CUDA allocator failed while serving ONNX Runtime."
+                )
+                return None
+
+        def free(ptr: int | None) -> None:
+            if not ptr:
+                return
+
+            try:
+                torch.cuda.caching_allocator_delete(ptr)
+            except Exception:
+                _OrtTorchCudaAllocatorCallbacks._log_callback_exception(
+                    "PyTorch CUDA allocator failed to free ONNX Runtime allocation."
+                )
+
+        def empty_cache() -> None:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                _OrtTorchCudaAllocatorCallbacks._log_callback_exception(
+                    "PyTorch CUDA allocator failed to empty cache for ONNX Runtime."
+                )
+
+        self._alloc_cb = self._AllocCallback(alloc)
+        self._free_cb = self._FreeCallback(free)
+        self._empty_cache_cb = self._EmptyCacheCallback(empty_cache)
+
+    @staticmethod
+    def _callback_address(callback: Any) -> str:
+        address = ctypes.cast(callback, ctypes.c_void_p).value
+        if address is None:
+            raise RuntimeError("Failed to obtain CUDA allocator callback address.")
+        return str(address)
+
+    def provider_options(self) -> dict[str, Any]:
+        return {
+            "device_id": self._device.index,
+            "gpu_external_alloc": self._callback_address(self._alloc_cb),
+            "gpu_external_free": self._callback_address(self._free_cb),
+            "gpu_external_empty_cache": self._callback_address(self._empty_cache_cb),
+        }
+
+    @staticmethod
+    def _log_callback_exception(message: str) -> None:
+        with suppress(Exception):
+            logger.exception(message)
+
+
+def _ortmodule_torch_allocator_options(
+    device: torch.device,
+) -> tuple[dict[str, Any], Any] | None:
+    """Return first-party ONNX Runtime allocator options when available."""
+    try:
+        torch_gpu_allocator = importlib.import_module(
+            "onnxruntime.training.ortmodule.torch_cpp_extensions.torch_gpu_allocator"
+        )
+    except ModuleNotFoundError:
+        return None
+
+    device_id = _cuda_device_index(device)
+    try:
+        options = {
+            "device_id": device_id,
+            "gpu_external_alloc": str(
+                torch_gpu_allocator.gpu_caching_allocator_raw_alloc_address()
+            ),
+            "gpu_external_free": str(
+                torch_gpu_allocator.gpu_caching_allocator_raw_delete_address()
+            ),
+            "gpu_external_empty_cache": str(
+                torch_gpu_allocator.gpu_caching_allocator_empty_cache_address()
+            ),
+        }
+    except AttributeError:
+        logger.warning(
+            "onnxruntime.training allocator helpers are present but incomplete; "
+            "falling back to ctypes CUDA allocator callbacks."
+        )
+        return None
+
+    return options, torch_gpu_allocator
+
+
+def _torch_cuda_allocator_options(device: torch.device) -> tuple[dict[str, Any], Any]:
+    ortmodule_options = _ortmodule_torch_allocator_options(device)
+    if ortmodule_options is not None:
+        return ortmodule_options
+
+    callbacks = _OrtTorchCudaAllocatorCallbacks(device)
+    return callbacks.provider_options(), callbacks
+
+
+def _rapidocr_params(
+    use_cuda: bool, cuda_ep_cfg: dict[str, Any] | None
+) -> dict[str, Any]:
+    from rapidocr import EngineType, LangDet, LangRec
+
+    params: dict[str, Any] = {
+        # Force ONNX Runtime for every task (det / cls / rec).
+        # rapidocr 3.x requires Enum instances for these keys.
+        "Det.engine_type": EngineType.ONNXRUNTIME,
+        "Det.lang_type": LangDet.EN,
+        "Cls.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.lang_type": LangRec.EN,
+        "EngineConfig.onnxruntime.use_cuda": use_cuda,
+        # Pin ONNX Runtime to a small thread budget — by default it spawns
+        # one intra-op thread per logical CPU and then tries to set
+        # affinities, which fails noisily inside Slurm cpusets and
+        # contends with the trainer's data loader workers.
+        "EngineConfig.onnxruntime.intra_op_num_threads": 4,
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        # Keep rapidocr quiet during training.
+        "Global.log_level": "error",
+    }
+
+    if cuda_ep_cfg is not None:
+        for key, value in cuda_ep_cfg.items():
+            params[f"EngineConfig.onnxruntime.cuda_ep_cfg.{key}"] = value
+
+    return params
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -72,62 +238,56 @@ class RapidOcrBackend:
 
     GPU integration notes
     ---------------------
-    ``rapidocr`` 3.x exposes the ONNX Runtime CUDA execution provider, but
-    its ``EngineConfig`` schema does not expose the
-    ``gpu_external_alloc`` provider option that would let ONNX Runtime
-    share PyTorch's CUDA allocator (see
-    ``rapidocr/inference_engine/onnxruntime/provider_config.py``).  The
-    only escape hatches are the documented ``cuda_ep_cfg`` keys
-    (``device_id``, ``arena_extend_strategy``,
-    ``cudnn_conv_algo_search``, ``do_copy_in_default_stream``), all of
-    which cause ONNX Runtime to allocate its own CUDA context separate
-    from PyTorch's.  That contends for GPU memory with the diffusion
-    model and defeats the user's intent of running OCR alongside the
-    trainer on the same device.
+    When ``device`` is CUDA, RapidOCR's ONNX Runtime execution provider is
+    asked to use PyTorch's CUDA caching allocator through the
+    ``gpu_external_*`` provider options.  RapidOCR does not expose these keys
+    as named constructor arguments, but its OmegaConf config accepts nested
+    ``EngineConfig.onnxruntime.cuda_ep_cfg.*`` values, so we inject them there.
 
-    Wiring up ``gpu_external_alloc`` against PyTorch's
-    :class:`torch.cuda.memory.CUDAPluggableAllocator` would require
-    constructing an ``OrtCudaExternalAllocatorInfo`` C struct, encoding
-    its address as a string, and managing its lifetime by hand — this is
-    too fragile to do here without first-party support from either
-    project.
-
-    Therefore this backend currently runs the OCR pipeline on the **CPU
-    execution provider**.  We emit a one-time warning so users are aware
-    that the ``device`` argument is intentionally ignored.
+    If CUDA provider setup fails, we fall back to CPU OCR instead of letting
+    ONNX Runtime reserve its own GPU arena and contend with the trainer.
     """
 
     def __init__(self, device: torch.device | None = None) -> None:
-        from rapidocr import EngineType, LangDet, LangRec, RapidOCR
+        from rapidocr import RapidOCR
 
-        # The device argument is accepted for API parity with other rewards
-        # but is currently ignored — see class docstring for details.
-        if device is not None and device.type == "cuda":
+        self._cuda_allocator: Any | None = None
+
+        cuda_device = device if device is not None and device.type == "cuda" else None
+        use_cuda = cuda_device is not None
+        cuda_ep_cfg: dict[str, Any] | None = None
+        if cuda_device is not None and not torch.cuda.is_available():
             logger.warning(
-                "Falling back to CPU OCR — could not wire up gpu_external_alloc "
-                "against PyTorch CUDA allocator; this avoids contending for GPU "
-                "memory with the diffusion model."
+                "CUDA OCR requested but no CUDA device is available; using CPU OCR."
             )
+            use_cuda = False
+        elif cuda_device is not None:
+            try:
+                cuda_ep_cfg, self._cuda_allocator = _torch_cuda_allocator_options(
+                    cuda_device
+                )
+            except Exception:
+                logger.exception(
+                    "Could not wire ONNX Runtime to PyTorch CUDA allocator; "
+                    "falling back to CPU OCR."
+                )
+                use_cuda = False
 
-        params: dict[str, Any] = {
-            # Force ONNX Runtime + CPU EP for every task (det / cls / rec).
-            # rapidocr 3.x requires Enum instances for these keys.
-            "Det.engine_type": EngineType.ONNXRUNTIME,
-            "Det.lang_type": LangDet.EN,
-            "Cls.engine_type": EngineType.ONNXRUNTIME,
-            "Rec.engine_type": EngineType.ONNXRUNTIME,
-            "Rec.lang_type": LangRec.EN,
-            "EngineConfig.onnxruntime.use_cuda": False,
-            # Pin ONNX Runtime to a small thread budget — by default it spawns
-            # one intra-op thread per logical CPU and then tries to set
-            # affinities, which fails noisily inside Slurm cpusets and
-            # contends with the trainer's data loader workers.
-            "EngineConfig.onnxruntime.intra_op_num_threads": 4,
-            "EngineConfig.onnxruntime.inter_op_num_threads": 1,
-            # Keep rapidocr quiet during training.
-            "Global.log_level": "error",
-        }
-        self._engine = RapidOCR(params=params)
+        params = _rapidocr_params(use_cuda=use_cuda, cuda_ep_cfg=cuda_ep_cfg)
+        try:
+            self._engine = RapidOCR(params=params)
+        except Exception:
+            if not use_cuda:
+                raise
+
+            logger.exception(
+                "RapidOCR CUDA initialization failed even with PyTorch allocator; "
+                "falling back to CPU OCR."
+            )
+            self._cuda_allocator = None
+            self._engine = RapidOCR(
+                params=_rapidocr_params(use_cuda=False, cuda_ep_cfg=None)
+            )
 
     def recognize(self, image: Image.Image) -> list[str]:
         import numpy as np
