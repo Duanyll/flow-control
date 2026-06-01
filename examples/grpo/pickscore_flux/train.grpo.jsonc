@@ -16,9 +16,14 @@
   "kl_beta": 0.0,
 
   "train_epochs": 500,
-  "checkpoint_epochs": 10,
+  "checkpoint_interval": 10,
   "validation_epochs": 10,
   "max_checkpoints": 10,
+
+  // Score a larger validation set (256 prompts) for a more accurate online
+  // reward metric, but only push the first 64 image samples to trackio so the
+  // db stays small. The mean reward is still computed over all 256.
+  "validation_log_images": 64,
 
   "model": {
     "arch": "flux1",
@@ -46,7 +51,7 @@
 
   "dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux_grpo/train",
+    "path": "./data/pickscore_flux/train",
   },
 
   "rollout_sampler": {
@@ -86,7 +91,8 @@
 
   "validation_dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux_grpo/validation",
+    "path": "./data/pickscore_flux/validation_grpo",
+    "limit": 256,
   },
 
   "validation_sampler": {

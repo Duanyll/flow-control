@@ -16,7 +16,7 @@
   "kl_beta": 0.0,
 
   "train_epochs": 20,
-  "checkpoint_epochs": 5,
+  "checkpoint_interval": 5,
   "validation_epochs": 5,
 
   "model": {
@@ -45,7 +45,7 @@
 
   "dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux_grpo/train",
+    "path": "./data/pickscore_flux/train",
   },
 
   "rollout_sampler": {
@@ -85,7 +85,7 @@
 
   "validation_dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux_grpo/validation",
+    "path": "./data/pickscore_flux/validation_grpo",
     "limit": 8,
   },
 

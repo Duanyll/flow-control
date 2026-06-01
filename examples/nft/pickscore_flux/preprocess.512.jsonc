@@ -1,7 +1,7 @@
 {
   "$schema": "../../../schema/preprocess.schema.json",
   "num_loader_workers": 1,
-  "processor_devices": [0],
+  "processor_devices": [0, 1, 2, 3],
   "num_threads_per_worker": 8,
   "queue_size": 16,
   "num_sink_workers": 1,
@@ -9,8 +9,7 @@
   "save_extra": true,
   "dataset": {
     "type": "lines",
-    "path": "./data/pickscore/test.txt",
-    "limit": 256,
+    "path": "./data/pickscore/train.txt",
   },
   "processor": {
     "task": "t2i",
@@ -19,6 +18,6 @@
   },
   "output": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux/validation_grpo",
+    "path": "./data/pickscore_flux_512/train",
   },
 }

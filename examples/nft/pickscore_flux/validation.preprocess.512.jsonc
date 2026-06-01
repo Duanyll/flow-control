@@ -10,7 +10,7 @@
   "dataset": {
     "type": "lines",
     "path": "./data/pickscore/test.txt",
-    "limit": 256,
+    "limit": 64
   },
   "processor": {
     "task": "t2i",
@@ -19,6 +19,6 @@
   },
   "output": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux/validation_grpo",
+    "path": "./data/pickscore_flux_512/validation",
   },
 }

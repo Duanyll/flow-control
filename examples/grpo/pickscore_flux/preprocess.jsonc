@@ -18,6 +18,6 @@
   },
   "output": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux_grpo/train",
+    "path": "./data/pickscore_flux/train",
   },
 }

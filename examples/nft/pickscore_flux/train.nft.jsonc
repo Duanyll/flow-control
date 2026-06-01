@@ -3,9 +3,9 @@
 
   "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
-  "experiment_name": "flux_nft_demo",
+  "experiment_name": "flux_nft_demo_512",
 
-  "gradient_checkpointing": true,
+  "gradient_checkpointing": false,
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 
@@ -23,7 +23,7 @@
   "kl_beta": 0.0,
 
   "train_epochs": 500,
-  "checkpoint_epochs": 10,
+  "checkpoint_interval": 5,
   "validation_epochs": 10,
   "max_checkpoints": 10,
 
@@ -53,7 +53,7 @@
 
   "dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux/train",
+    "path": "./data/pickscore_flux_512/train",
   },
 
   "rollout_sampler": {
@@ -100,7 +100,7 @@
 
   "validation_dataset": {
     "type": "pickle_directory",
-    "path": "./data/pickscore_flux/validation",
+    "path": "./data/pickscore_flux_512/validation",
   },
 
   "validation_sampler": {
@@ -112,12 +112,17 @@
   "processor": {
     "task": "t2i",
     "preset": "flux1",
-    "default_resolution": [384, 384],
+    "default_resolution": [512, 512],
   },
 
   "launch": {
     "type": "nft",
     "devices": 4,
     "generate_dcp_seed": true,
+    // Re-enable preprocess_config if the 512x512 latent/text cache is missing.
+    // "preprocess_config": [
+    //   "examples/nft/pickscore_flux/preprocess.512.jsonc",
+    //   "examples/nft/pickscore_flux/validation.preprocess.512.jsonc",
+    // ],
   },
 }
