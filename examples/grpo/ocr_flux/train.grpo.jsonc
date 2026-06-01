@@ -1,0 +1,112 @@
+{
+  "$schema": "../../../schema/grpo.schema.json",
+
+  "checkpoint_root": "$auto",
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
+  "experiment_name": "flux_ocr_grpo",
+
+  "num_batches_per_epoch": 12,
+  "num_prompts_per_batch": 4,
+  "num_rollouts_per_prompt": 24,
+  "num_inner_epochs": 1,
+  // Non-fast FLUX GRPO trains 5 stochastic replay steps for 6 rollout steps;
+  // this keeps two optimizer updates per epoch: 12 * 4 * 24 * 5 / 2.
+  "train_batch_size": 2880,
+
+  "clip_grad_norm": 1.0,
+  "clip_range": 1e-4,
+  "kl_beta": 0.04,
+
+  "train_epochs": 500,
+  "checkpoint_interval": 10,
+  "validation_epochs": 10,
+  "max_checkpoints": 10,
+
+  "model": {
+    "arch": "flux1",
+    "type": "base",
+    "guidance": 3.5,
+    "peft_lora_rank": 64,
+    "peft_lora_config": {
+      "lora_alpha": 128,
+      "init_lora_weights": "gaussian",
+      "target_modules": [
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2",
+      ],
+    },
+  },
+
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./data/ocr_flux_grpo/train",
+  },
+
+  "rollout_sampler": {
+    "steps": 6,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+    // Full-trajectory Flow-SDE rollout, not the fast CPS windowed setting.
+    // The OCR SD3.5 setting used noise_level=0.7; start there for OCR stability.
+    "solver": { "type": "flow", "eta": 0.7 },
+  },
+
+  "ema": {
+    "decay": 0.9,
+    "warmup": { "type": "standard" },
+    "interval": 1,
+  },
+
+  "reward": {
+    "type": "ocr",
+  },
+
+  "advantage": {
+    "type": "per_prompt",
+    "use_global_std": true,
+  },
+
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+  },
+
+  "scheduler_config": {
+    "class_name": "ConstantLR",
+    "factor": 1.0,
+  },
+
+  "validation_dataset": {
+    "type": "pickle_directory",
+    "path": "./data/ocr_flux_grpo/validation",
+  },
+
+  "validation_sampler": {
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1",
+    "default_resolution": [512, 512],
+  },
+
+  "launch": {
+    "type": "grpo",
+    "devices": 8,
+    "generate_dcp_seed": true,
+  },
+}
