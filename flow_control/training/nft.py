@@ -289,8 +289,14 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     def reference_model(self):
         """Temporarily switch to reference model weights."""
         if self.model.peft_lora_rank > 0:
-            with self.transformer.disable_adapter():
+            # diffusers LoRA models expose enable/disable_adapters() toggles;
+            # PEFT's disable_adapter() context manager is PeftModel-only and is
+            # absent on the FSDP-wrapped diffusers transformer.
+            self.transformer.disable_adapters()
+            try:
                 yield
+            finally:
+                self.transformer.enable_adapters()
         else:
             with apply_init_maybe(self._init_backup_optimizer):
                 yield
