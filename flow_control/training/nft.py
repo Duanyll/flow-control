@@ -31,7 +31,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
-from flow_control.utils.logging import console, get_logger
+from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.tensor import deep_move_to_device
 from flow_control.utils.types import (
     OptimizerConfig,
@@ -110,10 +110,22 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     """Legacy fallback for sampling timesteps when rollout timesteps are unavailable."""
     num_train_timesteps: int | None = None
-    """Timesteps per sample per inner epoch. ``None`` means derive from rollout
-    timesteps and ``timestep_fraction``."""
+    """Timesteps per sample per inner epoch. ``None`` means derive from the
+    eligible rollout timesteps and ``timestep_fraction``."""
     timestep_fraction: float = 1.0
-    """Fraction of rollout timesteps to train on for each sample."""
+    """Fraction of *eligible* rollout timesteps to train on for each sample."""
+    timestep_range: float = 1.0
+    """Restrict NFT training to the noisiest fraction of the trajectory.
+
+    Rollout timesteps live in ``[0, 1]`` (1 = pure noise). Only timesteps with
+    ``t >= 1 - timestep_range`` are eligible for training, so ``0.8`` keeps the
+    noisiest 80% and skips the cleanest 20% (matches Flow-Factory's
+    ``timestep_range``). ``1.0`` keeps the whole grid."""
+    train_timestep_sampling: Literal["random", "stratified"] = "random"
+    """How to draw the training timesteps from the eligible window each inner
+    epoch. ``random`` = uniform subset (legacy). ``stratified`` = one draw per
+    equal bin across the window, giving even noise coverage (matches
+    Flow-Factory's discrete stratified sampling)."""
 
     ema_old: EMAConfig = EMAConfig(
         decay=0.5, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001)
@@ -451,14 +463,37 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # ----------------------------- Training phase ------------------------------- #
 
-    def _resolve_num_train_timesteps(self, rollout: Rollout) -> int:
+    def _eligible_timestep_indices(self, rollout: Rollout) -> list[int]:
+        """Rollout-grid indices eligible for NFT training.
+
+        ``timestep_range`` keeps only the noisiest fraction of the trajectory
+        (``t >= 1 - timestep_range`` with ``t in [0, 1]``); ``1.0`` keeps all.
+        """
         rollout_timesteps = rollout.trajectory.timesteps
-        total_timesteps = (
-            rollout_timesteps.shape[0]
-            if rollout_timesteps is not None
-            else self.rollout_sampler.steps
+        if rollout_timesteps is None:
+            return list(range(self.rollout_sampler.steps))
+        total = rollout_timesteps.shape[0]
+        if not 0.0 < self.timestep_range <= 1.0:
+            raise ValueError(
+                f"timestep_range must be in (0, 1], got {self.timestep_range}."
+            )
+        if self.timestep_range >= 1.0:
+            return list(range(total))
+        threshold = 1.0 - self.timestep_range
+        eligible = (
+            (rollout_timesteps.float() >= threshold).nonzero(as_tuple=True)[0].tolist()
         )
-        if total_timesteps <= 0:
+        if not eligible:
+            warn_once(
+                logger,
+                f"timestep_range={self.timestep_range} excludes all rollout "
+                "timesteps; falling back to the full grid.",
+            )
+            return list(range(total))
+        return eligible
+
+    def _resolve_num_train_timesteps(self, num_eligible: int) -> int:
+        if num_eligible <= 0:
             raise RuntimeError(
                 "NFT rollout must contain at least one training timestep."
             )
@@ -471,8 +506,23 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 raise ValueError(
                     "num_train_timesteps must be positive when explicitly set."
                 )
-            return min(self.num_train_timesteps, total_timesteps)
-        return max(1, int(total_timesteps * self.timestep_fraction))
+            return min(self.num_train_timesteps, num_eligible)
+        return max(1, int(num_eligible * self.timestep_fraction))
+
+    def _select_timestep_positions(self, n: int, k: int) -> list[int]:
+        """Pick ``k`` positions in ``[0, n)`` from the eligible window.
+
+        ``stratified`` splits ``[0, n - 1]`` into ``k`` equal bins and draws one
+        position uniformly per bin (even noise coverage); ``random`` draws a
+        uniform distinct subset. ``k`` is assumed ``<= n``.
+        """
+        if self.train_timestep_sampling == "stratified":
+            boundaries = torch.linspace(0, n - 1, k + 1)
+            lower = boundaries[:-1].long()
+            upper = boundaries[1:].long()
+            offsets = (torch.rand(k) * (upper - lower)).long()
+            return (lower + offsets).tolist()
+        return torch.randperm(n)[:k].tolist()
 
     def _build_inner_epoch_train_items(
         self, rollouts: list[Rollout]
@@ -480,18 +530,14 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         train_items: list[NftTrainItem] = []
         for rollout_idx in torch.randperm(len(rollouts)).tolist():
             rollout = rollouts[rollout_idx]
-            total_timesteps = (
-                rollout.trajectory.timesteps.shape[0]
-                if rollout.trajectory.timesteps is not None
-                else self.rollout_sampler.steps
+            eligible = self._eligible_timestep_indices(rollout)
+            selected_timesteps = self._resolve_num_train_timesteps(len(eligible))
+            positions = self._select_timestep_positions(
+                len(eligible), selected_timesteps
             )
-            selected_timesteps = self._resolve_num_train_timesteps(rollout)
-            timestep_perm = torch.randperm(total_timesteps)[
-                :selected_timesteps
-            ].tolist()
             train_items.extend(
-                NftTrainItem(rollout_idx=rollout_idx, timestep_idx=timestep_idx)
-                for timestep_idx in timestep_perm
+                NftTrainItem(rollout_idx=rollout_idx, timestep_idx=eligible[p])
+                for p in positions
             )
         return train_items
 

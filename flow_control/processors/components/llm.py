@@ -138,6 +138,16 @@ class LLMClient(BaseModel):
         img_b64 = base64.b64encode(img_bytes).decode("utf-8")
         return f"data:image/png;base64,{img_b64}"
 
+    def encode_image(self, image: torch.Tensor) -> str:
+        """Encode an image tensor (``[C, H, W]`` or ``[1, C, H, W]`` in ``[0, 1]``)
+        to a PNG ``data:`` URL.
+
+        Exposed so callers can build their own interleaved content arrays (text
+        and images in an explicit order) and pass them to :meth:`generate` as a
+        list, instead of relying on the default images-first layout.
+        """
+        return self._tensor_to_base64url(image)
+
     def _build_payload(
         self, model_name: str, messages: list[Message]
     ) -> dict[str, Any]:
@@ -170,12 +180,19 @@ class LLMClient(BaseModel):
 
     async def generate(
         self,
-        user_prompt: str,
+        user_prompt: str | list[TextContent | ImageContent],
         images: list[torch.Tensor] | None = None,
         system_prompt: str = "You are a helpful assistant.",
         context: list[Message] | None = None,
         strip_think: bool = True,
     ) -> tuple[str, list[Message]]:
+        """Generate a completion.
+
+        ``user_prompt`` is either a plain string (images, if any, are prepended
+        to the user message) or a pre-built content array of text/image parts,
+        in which case it is used verbatim as the user message content and
+        ``images`` is ignored. Build image parts with :meth:`encode_image`.
+        """
         semaphore = self._get_semaphore()
 
         async def _generate_impl():
@@ -189,7 +206,10 @@ class LLMClient(BaseModel):
             else:
                 messages.append({"role": "system", "content": system_prompt})
 
-            if images:
+            if isinstance(user_prompt, list):
+                # Pre-built content array: used verbatim, ``images`` ignored.
+                messages.append({"role": "user", "content": user_prompt})
+            elif images:
                 image_contents: list[ImageContent] = []
                 for img in images:
                     img_url = self._tensor_to_base64url(img)

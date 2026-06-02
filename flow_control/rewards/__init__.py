@@ -26,6 +26,7 @@ from .normalize import (
 from .ocr import OcrReward
 from .pairwise import PairwiseReward
 from .pickscore import PickScoreReward
+from .rational_rewards import RationalRewardsT2IReward
 from .unified_reward import UnifiedReward
 
 Reward = Annotated[
@@ -39,7 +40,8 @@ Reward = Annotated[
     | Annotated[CLIPImageSimilarityReward, Tag("clip_image_similarity")]
     | Annotated[HPSv2Reward, Tag("hpsv2")]
     | Annotated[OcrReward, Tag("ocr")]
-    | Annotated[ImageRewardReward, Tag("image_reward")],
+    | Annotated[ImageRewardReward, Tag("image_reward")]
+    | Annotated[RationalRewardsT2IReward, Tag("rational_rewards_t2i")],
     Discriminator("type"),
 ]
 
