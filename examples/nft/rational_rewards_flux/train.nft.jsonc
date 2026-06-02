@@ -6,6 +6,7 @@
   // the reward block). Adjust dataset paths to your local cache.
 
   "checkpoint_root": "$auto",
+  "auto_resume": true,
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_nft_rational_rewards_512",
 
@@ -141,5 +142,10 @@
     "type": "nft",
     "devices": 4,
     "generate_dcp_seed": true,
+    // Re-enable preprocess_config if the 512x512 latent/text cache is missing.
+    // "preprocess_config": [
+    //   "examples/nft/rational_rewards_flux/preprocess.512.jsonc",
+    //   "examples/nft/rational_rewards_flux/validation.preprocess.512.jsonc",
+    // ],
   },
 }

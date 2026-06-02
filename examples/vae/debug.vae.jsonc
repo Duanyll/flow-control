@@ -7,6 +7,7 @@
 
   // ---- Checkpoint & Logging ----
   "checkpoint_root": "$auto",
+  "auto_resume": true,
   "experiment_name": "vae_rgba_debug",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
 
@@ -43,7 +44,7 @@
   // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = global_batch_size 8
   "global_batch_size": 8,
   "train_steps": 100,
-  "checkpoint_steps": 20,
+  "checkpoint_interval": 20,
   "validation_steps": 20,
 
   // ---- Optimizer ----

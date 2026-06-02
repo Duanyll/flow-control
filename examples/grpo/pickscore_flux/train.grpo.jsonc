@@ -2,6 +2,7 @@
   "$schema": "../../../schema/grpo.schema.json",
 
   "checkpoint_root": "$auto",
+  "auto_resume": true,
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_pickscore_grpo_fast",
 

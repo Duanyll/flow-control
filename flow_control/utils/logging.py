@@ -60,10 +60,14 @@ from .describe import describe
 def _default_log_dir() -> Path:
     """Fallback log dir for ad-hoc tools and tests.
 
-    Real training runs are launched via ``flow-control launch``, which always
-    sets ``$LOG_DIR`` to ``<run_dir>/attempts/<attempt_id>/`` before exec-ing
-    torchrun. This default only fires for scripts that bypass the launcher.
+    ``flow-control launch`` normally sets ``$LOG_DIR`` before exec-ing torchrun.
+    This default covers tools and tests that bypass the launcher.
     """
+    job_id = os.getenv("SLURM_JOB_ID")
+    if job_id:
+        array = os.getenv("SLURM_ARRAY_TASK_ID")
+        suffix = f"{job_id}_{array}" if array else job_id
+        return Path.cwd() / "logs" / f"slurm-{suffix}"
     return Path.cwd() / "logs"
 
 

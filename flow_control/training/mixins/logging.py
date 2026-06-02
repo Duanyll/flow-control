@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import re
 import secrets
 import socket
 import time
@@ -23,7 +24,7 @@ from rich.progress import (
 )
 from rich.status import Status
 
-from flow_control.utils.logging import console, get_logger, get_version
+from flow_control.utils.logging import LOG_DIR, console, get_logger, get_version
 from flow_control.utils.tensor import (
     BlendBackground,
     remove_alpha_channel,
@@ -36,6 +37,56 @@ if TYPE_CHECKING:
     from trackio.run import Run as TrackioRun
 
 logger = get_logger(__name__)
+
+AUTO_CHECKPOINT_ROOT_SENTINEL = "$auto"
+_STEP_DIR_RE = re.compile(r"^(?:rolling_)?step_(\d+)$")
+_RUN_ID_RE = re.compile(r"^\d{14}-[0-9a-f]{8}$")
+
+
+def _generate_run_id() -> str:
+    return f"{time.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(4)}"
+
+
+def _attempt_id_from_env() -> str:
+    job_id = os.getenv("SLURM_JOB_ID")
+    if job_id:
+        array = os.getenv("SLURM_ARRAY_TASK_ID")
+        return f"slurm-{job_id}_{array}" if array else f"slurm-{job_id}"
+    return f"local-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
+
+
+def _has_checkpoint(run_dir: Path) -> bool:
+    ckpt_root = run_dir / "checkpoints"
+    if not ckpt_root.is_dir():
+        return False
+    for child in ckpt_root.iterdir():
+        if _STEP_DIR_RE.match(child.name) and (child / ".metadata").is_file():
+            return True
+    return False
+
+
+def _find_resumable_run_id(experiment_dir: Path) -> str | None:
+    if not experiment_dir.is_dir():
+        return None
+    candidates: list[str] = []
+    for child in experiment_dir.iterdir():
+        if not child.is_dir():
+            continue
+        if not _RUN_ID_RE.match(child.name):
+            continue
+        if _has_checkpoint(child):
+            candidates.append(child.name)
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1]
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except OSError:
+        return False
 
 
 class LoggingMixin(BaseModel):
@@ -55,6 +106,8 @@ class LoggingMixin(BaseModel):
     Setting this explicitly lets a preempted job reuse the same on-disk run dir
     (and the same trackio run via ``resume='allow'``).
     """
+    attempt_id: str | None = None
+    """One OS/Slurm invocation within a run. Auto-generated if unset."""
 
     image_background: BlendBackground | None = None
     """Background to blend with alpha channel when logging images. If None, the
@@ -64,25 +117,64 @@ class LoggingMixin(BaseModel):
     _trackio_run: "TrackioRun | None" = PrivateAttr(default=None)
     _run_dir: Path | None = PrivateAttr(default=None)
     _metrics_file: TextIO | None = PrivateAttr(default=None)
-    _events_file: TextIO | None = PrivateAttr(default=None)
     _aggregated_metrics: dict[str, list[float]] = PrivateAttr(default_factory=dict)
 
     _status_fields: dict[str, str] = PrivateAttr(default_factory=dict)
     _status_values: dict[str, float] = PrivateAttr(default_factory=dict)
     _rich_status: Status | None = PrivateAttr(default=None)
 
-    def _resolve_run_id(self) -> str:
-        # env wins (launcher sets this); then explicit config; then generate.
-        env_run_id = os.getenv("FLOW_CONTROL_RUN_ID")
-        if env_run_id:
-            return env_run_id
+    def _sync_context_value(self, value: str) -> str:
+        if not dist.is_available() or not dist.is_initialized():
+            return value
+        payload = [value if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(payload, src=0)
+        synced = payload[0]
+        if not isinstance(synced, str):
+            raise TypeError(
+                f"Expected broadcast run context value to be str, got {synced!r}"
+            )
+        return synced
+
+    def _choose_run_id(self) -> str:
         if self.run_id:
             return self.run_id
-        return f"{time.strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(4)}"
+
+        checkpoint_root = getattr(self, "checkpoint_root", None)
+        auto_resume = bool(getattr(self, "auto_resume", False))
+        if checkpoint_root == AUTO_CHECKPOINT_ROOT_SENTINEL and auto_resume:
+            experiment_dir = Path(self.runs_root) / self.experiment_name
+            resumable = _find_resumable_run_id(experiment_dir)
+            if resumable is not None:
+                return resumable
+
+        return _generate_run_id()
+
+    def resolve_run_context(self) -> None:
+        """Resolve run identity and any ``checkpoint_root='$auto'`` in-place.
+
+        This runs after torchrun has initialized distributed state, so rank 0 can
+        choose a fresh run id once and broadcast it to the other ranks.
+        """
+        self.run_id = self._sync_context_value(self._choose_run_id())
+        self.attempt_id = self._sync_context_value(
+            self.attempt_id or _attempt_id_from_env()
+        )
+
+        checkpoint_root = getattr(self, "checkpoint_root", None)
+        if checkpoint_root == AUTO_CHECKPOINT_ROOT_SENTINEL:
+            run_id = self.run_id
+            if run_id is None:
+                raise RuntimeError("run_id was not resolved.")
+            resolved = (
+                Path(self.runs_root) / self.experiment_name / run_id / "checkpoints"
+            )
+            self.checkpoint_root = str(resolved)
 
     @main_process_only
     def init_tracker(self):
-        self.run_id = self._resolve_run_id()
+        self.resolve_run_context()
+        if self.run_id is None:
+            raise RuntimeError("run_id was not resolved.")
 
         conf = self.model_dump(mode="json", warnings="none")
         conf["flow_control_version"] = get_version()
@@ -99,6 +191,7 @@ class LoggingMixin(BaseModel):
 
         self._run_dir = Path(self.runs_root) / self.experiment_name / self.run_id
         self._run_dir.mkdir(parents=True, exist_ok=True)
+        self._link_log_dir()
         (self._run_dir / "meta.json").write_text(
             json.dumps(conf, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -106,12 +199,9 @@ class LoggingMixin(BaseModel):
         self._metrics_file = (self._run_dir / "metrics.jsonl").open(
             "a", buffering=1, encoding="utf-8"
         )
-        self._events_file = (self._run_dir / "events.jsonl").open(
-            "a", buffering=1, encoding="utf-8"
-        )
         attempt_fields: dict[str, Any] = {
             "training_type": self.training_type,
-            "attempt_id": os.getenv("FLOW_CONTROL_ATTEMPT_ID", ""),
+            "attempt_id": self.attempt_id or "",
             "hostname": socket.gethostname(),
             "pid": os.getpid(),
         }
@@ -121,7 +211,6 @@ class LoggingMixin(BaseModel):
             array_task = os.getenv("SLURM_ARRAY_TASK_ID")
             if array_task:
                 attempt_fields["slurm_array_task_id"] = array_task
-        self._write_event("run_start", **attempt_fields)
 
         atexit.register(self.finish_tracker)
 
@@ -130,28 +219,19 @@ class LoggingMixin(BaseModel):
             f"attempt={attempt_fields['attempt_id'] or 'n/a'} "
             f"jsonl at {self._run_dir}"
         )
+        logger.info(f"Run started: {attempt_fields}")
 
     @main_process_only
     def finish_tracker(self) -> None:
-        if self._events_file is not None:
-            self._write_event("run_finish", status="ok")
-        for handle in (self._metrics_file, self._events_file):
-            if handle is not None:
-                handle.close()
+        was_active = self._metrics_file is not None or self._trackio_run is not None
+        if self._metrics_file is not None:
+            self._metrics_file.close()
         self._metrics_file = None
-        self._events_file = None
         if self._trackio_run is not None:
             trackio.finish()
             self._trackio_run = None
-
-    def _write_event(self, kind: str, **fields: Any) -> None:
-        if self._events_file is None:
-            return
-        line = json.dumps(
-            {"t": time.time(), "kind": kind, **fields}, ensure_ascii=False
-        )
-        self._events_file.write(line + "\n")
-        self._events_file.flush()
+        if was_active:
+            logger.info("Run finished.")
 
     def _emit_metrics(self, metrics: dict[str, float], step: int) -> None:
         if self._trackio_run is not None:
@@ -175,7 +255,32 @@ class LoggingMixin(BaseModel):
         full_key = f"{name}/{image_key}"
         if self._trackio_run is not None:
             trackio.log({full_key: trackio.Image(pil)}, step=step)
-        self._write_event("image_logged", key=full_key, step=step)
+        logger.info(f"Image logged: key={full_key} step={step}")
+
+    def _link_log_dir(self) -> None:
+        if self._run_dir is None:
+            return
+        link_path = self._run_dir / "logs"
+        target = LOG_DIR.resolve(strict=False)
+        if link_path.is_symlink():
+            if _same_path(link_path, target):
+                return
+            link_path.unlink()
+        elif link_path.exists():
+            if _same_path(link_path, target):
+                return
+            logger.warning(
+                "Run log link target %s already exists and is not a symlink; "
+                "leaving it unchanged.",
+                link_path,
+            )
+            return
+        try:
+            link_path.symlink_to(target, target_is_directory=True)
+        except OSError:
+            logger.exception(
+                "Failed to create run log symlink %s -> %s", link_path, target
+            )
 
     def log_image(
         self,
@@ -308,6 +413,9 @@ if __name__ == "__main__":
     assert trainer.run_id is not None
     run_dir = tmp_root / "runs" / "smoke" / trainer.run_id
     assert run_dir.exists(), run_dir
+    log_link = run_dir / "logs"
+    assert log_link.is_symlink(), log_link
+    assert log_link.resolve(strict=False) == LOG_DIR.resolve(strict=False)
     print(f"[green]✓[/green] Created run dir {run_dir}")
 
     trainer.log_metrics({"loss": 0.1, "lr": 1e-4}, step=0)
@@ -321,14 +429,10 @@ if __name__ == "__main__":
     trainer.finish_tracker()
 
     metrics_lines = (run_dir / "metrics.jsonl").read_text().strip().splitlines()
-    events_lines = (run_dir / "events.jsonl").read_text().strip().splitlines()
     meta = json.loads((run_dir / "meta.json").read_text())
 
     print(f"metrics.jsonl ({len(metrics_lines)} lines):")
     for line in metrics_lines:
-        print(f"  {line}")
-    print(f"events.jsonl ({len(events_lines)} lines):")
-    for line in events_lines:
         print(f"  {line}")
     print(f"meta.json keys: {sorted(meta)}")
 
@@ -337,10 +441,6 @@ if __name__ == "__main__":
     assert {p["key"] for p in parsed} == {"loss", "lr", "agg"}
     agg_value = next(p for p in parsed if p["key"] == "agg")
     assert agg_value["value"] == 2.0, agg_value
-
-    parsed_events = [json.loads(line) for line in events_lines]
-    kinds = [e["kind"] for e in parsed_events]
-    assert kinds == ["run_start", "image_logged", "run_finish"], kinds
 
     print("[bold green]All assertions passed.[/bold green]")
     shutil.rmtree(tmp_root)

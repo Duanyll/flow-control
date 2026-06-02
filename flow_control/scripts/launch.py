@@ -1,21 +1,15 @@
 import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from rich import print
 
-from flow_control.scripts.run_paths import (
-    AUTO_CHECKPOINT_ROOT_SENTINEL,
-    resolve_run_paths,
-)
 from flow_control.training.launch_config import LaunchConfig
 from flow_control.utils.config import load_config_file
-
-_TRAINING_TYPES = frozenset({"sft", "grpo", "nft", "vae"})
 
 
 def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
@@ -184,46 +178,18 @@ def _resolve_num_processes(launch_config: LaunchConfig) -> int:
     sys.exit(1)
 
 
-def _prepare_run_layout(config: dict) -> tuple[str, dict[str, str]]:
-    """Resolve canonical paths, mkdir them, and write the resolved config tempfile.
-
-    Returns ``(resolved_config_path, env_to_export)``.
-    """
-    paths = resolve_run_paths(config)
-    paths.run_dir.mkdir(parents=True, exist_ok=True)
-    paths.attempt_dir.mkdir(parents=True, exist_ok=True)
-    paths.checkpoint_root.mkdir(parents=True, exist_ok=True)
-    paths.trackio_dir.mkdir(parents=True, exist_ok=True)
-
-    if config.get("checkpoint_root") == AUTO_CHECKPOINT_ROOT_SENTINEL:
-        config["checkpoint_root"] = str(paths.checkpoint_root)
-    # Children also need the stable run_id baked into the config they parse
-    # (so test paths that bypass env vars still see the right value).
-    config["run_id"] = paths.run_id
-
-    resolved_path = paths.attempt_dir / "resolved_config.json"
-    resolved_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    print(f"[blue]Run dir:[/blue] {paths.run_dir}")
-    print(f"[blue]Attempt dir:[/blue] {paths.attempt_dir}")
-    print(f"[blue]Checkpoint root:[/blue] {paths.checkpoint_root}")
-    print(f"[blue]Trackio dir:[/blue] {paths.trackio_dir}")
-    print(f"[blue]Resolved config:[/blue] {resolved_path}")
-
-    return str(resolved_path), paths.to_env()
+def _default_log_dir() -> str:
+    job_id = os.getenv("SLURM_JOB_ID")
+    if job_id:
+        array = os.getenv("SLURM_ARRAY_TASK_ID")
+        suffix = f"{job_id}_{array}" if array else job_id
+        return str(Path("logs") / f"slurm-{suffix}")
+    return str(Path("logs") / f"local-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}")
 
 
 def run(config_path: str) -> None:
     """Launch training as the parent process (sets up env, execs torchrun)."""
     launch_config, config = _load_launch_config(config_path)
-
-    if launch_config.type in _TRAINING_TYPES:
-        resolved_config_path, run_env = _prepare_run_layout(config)
-    else:
-        # inference and other non-training types don't have a run_id concept.
-        resolved_config_path, run_env = config_path, {}
 
     try_generate_dcp_seed(config_path, launch_config, config)
     if launch_config.preprocess_config:
@@ -237,18 +203,21 @@ def run(config_path: str) -> None:
         str(num_processes),
         "-m",
         "flow_control.scripts.launch",
-        resolved_config_path,
+        config_path,
         "--type",
         launch_config.type,
     ]
 
     envs = dict(launch_config.env)
-    envs.update(run_env)
+    if launch_config.trackio_dir is not None and "TRACKIO_DIR" not in envs:
+        envs["TRACKIO_DIR"] = launch_config.trackio_dir
     if isinstance(launch_config.devices, list):
         envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
     if "OMP_NUM_THREADS" not in envs:
         omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
         envs["OMP_NUM_THREADS"] = str(omp_threads)
+    if "LOG_DIR" not in envs and not os.getenv("LOG_DIR"):
+        envs["LOG_DIR"] = _default_log_dir()
     for k, v in envs.items():
         print(f"[blue]Setting environment variable:[/blue] {k}={v}")
         os.environ[k] = v

@@ -6,7 +6,7 @@ import time
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from flow_control.utils.logging import get_logger
 
@@ -14,7 +14,7 @@ from .hsdp import main_process_only
 
 logger = get_logger(__name__)
 
-AUTO_RESUME_ENV = "FLOW_CONTROL_AUTO_RESUME"
+AUTO_CHECKPOINT_ROOT_SENTINEL = "$auto"
 # Matches both archival ``step_XXXXXXX`` and rolling ``rolling_step_XXXXXXX`` dirs,
 # but not suffixed variants like ``step_XXXXX_final``.
 _STEP_DIR_RE = re.compile(r"^(?:rolling_)?step_(\d+)$")
@@ -60,6 +60,9 @@ class CheckpointingMixin(DcpMixin):
     """
 
     checkpoint_root: str
+    auto_resume: bool = False
+    """When ``resume_from_dir`` is unset, resume from the newest complete
+    checkpoint under ``checkpoint_root``."""
     checkpoint_interval: int = 5
     """Archival checkpoint cadence. The unit is trainer-defined: epochs for the
     RL trainers (GRPO/NFT), optimizer steps for SFT/VAE. ``0`` disables archival
@@ -74,23 +77,26 @@ class CheckpointingMixin(DcpMixin):
 
     _last_rolling_time: float = 0.0
 
-    @field_validator("checkpoint_root")
-    @classmethod
-    def _reject_auto_sentinel(cls, value: str) -> str:
-        if value == "$auto":
+    def ensure_checkpoint_root_resolved(self) -> None:
+        if self.checkpoint_root != AUTO_CHECKPOINT_ROOT_SENTINEL:
+            return
+        resolver = getattr(self, "resolve_run_context", None)
+        if callable(resolver):
+            resolver()
+        if self.checkpoint_root == AUTO_CHECKPOINT_ROOT_SENTINEL:
             raise ValueError(
-                "checkpoint_root='$auto' must be resolved by flow_control.scripts.launch "
-                "before constructing the trainer. Launch via `flow-control launch <config>` "
-                "instead of instantiating the trainer directly."
+                "checkpoint_root='$auto' requires a trainer with LoggingMixin "
+                "so the run context can be resolved before checkpoint access."
             )
-        return value
 
     # ------------------------------- Dir naming --------------------------------- #
 
     def get_checkpoint_dir(self, step: int) -> str:
+        self.ensure_checkpoint_root_resolved()
         return os.path.join(self.checkpoint_root, f"{_ARCHIVAL_PREFIX}{step:07d}")
 
     def get_rolling_dir(self, step: int) -> str:
+        self.ensure_checkpoint_root_resolved()
         return os.path.join(self.checkpoint_root, f"{_ROLLING_PREFIX}{step:07d}")
 
     # --------------------------------- Saving ----------------------------------- #
@@ -169,6 +175,7 @@ class CheckpointingMixin(DcpMixin):
     # -------------------------------- Rotation ---------------------------------- #
 
     def _checkpoint_dirs(self, prefix: str) -> list[str]:
+        self.ensure_checkpoint_root_resolved()
         if not os.path.isdir(self.checkpoint_root):
             return []
         return [
@@ -220,6 +227,7 @@ class CheckpointingMixin(DcpMixin):
         ``.metadata`` are considered, so partially-written checkpoints and
         suffixed artifacts like ``step_XXXXX_final`` are skipped.
         """
+        self.ensure_checkpoint_root_resolved()
         if not os.path.isdir(self.checkpoint_root):
             return None
         best_step = -1
@@ -240,27 +248,27 @@ class CheckpointingMixin(DcpMixin):
     def maybe_auto_resume(self, explicit_resume_dir: str | None) -> str | None:
         """Resolve the checkpoint dir to resume from.
 
-        Priority: explicit ``resume_from_dir`` config > ``FLOW_CONTROL_AUTO_RESUME=1``
-        env var with latest checkpoint in ``checkpoint_root`` > None.
+        Priority: explicit ``resume_from_dir`` config > ``auto_resume=true`` with
+        latest checkpoint in ``checkpoint_root`` > None.
         Returns the path that was resumed from (useful for logging).
         """
+        self.ensure_checkpoint_root_resolved()
         if explicit_resume_dir is not None:
             self.load_dcp_checkpoint(explicit_resume_dir)
             return explicit_resume_dir
 
-        if os.environ.get(AUTO_RESUME_ENV) != "1":
+        if not self.auto_resume:
             return None
 
         latest = self.find_latest_checkpoint()
         if latest is None:
             logger.info(
-                "%s=1 but no checkpoints found under %s; starting fresh.",
-                AUTO_RESUME_ENV,
+                "auto_resume=true but no checkpoints found under %s; starting fresh.",
                 self.checkpoint_root,
             )
             return None
 
-        logger.info("%s=1; auto-resuming from %s", AUTO_RESUME_ENV, latest)
+        logger.info("auto_resume=true; resuming from %s", latest)
         self.load_dcp_checkpoint(latest)
         return latest
 

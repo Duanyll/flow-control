@@ -722,6 +722,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     @distributed_main
     def run(self):
         self.set_seed()
+        self.resolve_run_context()
         self.init_tracker()
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()

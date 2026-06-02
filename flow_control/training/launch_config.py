@@ -16,4 +16,6 @@ class LaunchConfig(BaseModel):
     devices: int | list[int] | Literal["all"] = "all"
     generate_dcp_seed: bool = False
     preprocess_config: str | list[str] | None = None
+    trackio_dir: str | None = "./runs/.trackio"
+    """Local Trackio storage directory exported as ``TRACKIO_DIR`` by launcher."""
     env: dict[str, str] = {}

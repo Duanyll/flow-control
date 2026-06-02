@@ -1,4 +1,4 @@
-from .dcp import AUTO_RESUME_ENV, CheckpointingMixin, DcpMixin
+from .dcp import CheckpointingMixin, DcpMixin
 from .hsdp import (
     HsdpMixin,
     LaunchConfig,
@@ -12,7 +12,6 @@ from .rollout import Rollout, RolloutMixin
 from .validation import ValidationMixin
 
 __all__ = [
-    "AUTO_RESUME_ENV",
     "CheckpointingMixin",
     "DcpMixin",
     "HsdpMixin",

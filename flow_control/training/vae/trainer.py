@@ -703,6 +703,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     @distributed_main
     def run(self) -> None:
         self.set_seed()
+        self.resolve_run_context()
         self.init_tracker()
         if self.compute_dtype == torch.float16:
             logger.warning(
