@@ -1,98 +1,5 @@
-.fc-custom-media-root {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-  padding: 20px 24px 36px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  color: var(--body-text-color, #1f2937);
-}
-
-.fc-media-header {
-  margin-bottom: 18px;
-}
-
-.fc-eyebrow {
-  margin: 0 0 8px;
-  color: var(--body-text-color-subdued, #6b7280);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.fc-media-header h1 {
-  margin: 0;
-  font-size: 32px;
-  line-height: 1.1;
-}
-
-.fc-media-subtitle {
-  margin: 8px 0 0;
-  color: var(--body-text-color-subdued, #6b7280);
-  font-size: 15px;
-}
-
-.fc-media-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 12px;
-  width: 100%;
-  max-width: 100%;
-  margin: 0 0 18px;
-  padding: 14px;
-  border: 1px solid var(--border-color-primary, #e5e7eb);
-  border-radius: 12px;
-  background: var(--background-fill-primary, #fff);
-}
-
-.fc-media-controls:empty {
-  display: none;
-}
-
-.fc-control-field {
-  display: grid;
-  gap: 6px;
-  min-width: 140px;
-  color: var(--body-text-color-subdued, #6b7280);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.fc-control-wide {
-  min-width: min(360px, 100%);
-  flex: 1 1 260px;
-}
-
-.fc-control-field input,
-.fc-control-field select {
-  width: 100%;
-  min-height: 36px;
-  padding: 7px 10px;
-  border: 1px solid var(--border-color-primary, #e5e7eb);
-  border-radius: 8px;
-  background: var(--background-fill-primary, #fff);
-  color: var(--body-text-color, #1f2937);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 400;
-}
-
-.fc-secondary-button {
-  min-height: 36px;
-  padding: 7px 12px;
-  border: 1px solid var(--border-color-primary, #e5e7eb);
-  border-radius: 8px;
-  background: var(--background-fill-primary, #fff);
-  color: var(--body-text-color, #1f2937);
-  cursor: pointer;
-}
-
-.fc-secondary-button:hover {
-  background: var(--background-fill-secondary, #f9fafb);
-}
+/* The gallery itself: collapsible groups, chips, per-run lanes/strips, the
+   step-grid, and the individual media cards. */
 
 .fc-media-gallery {
   display: grid;
@@ -120,17 +27,43 @@
   cursor: pointer;
 }
 
-.fc-media-group summary span:first-child {
+.fc-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
+}
+
+.fc-group-title {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.fc-media-group summary span:last-child {
+.fc-group-count {
   color: var(--body-text-color-subdued, #6b7280);
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.fc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--border-color-primary, #e5e7eb);
+  border-radius: 999px;
+  background: var(--background-fill-secondary, #f9fafb);
+  color: var(--body-text-color-subdued, #6b7280);
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -238,39 +171,13 @@
   flex: 0 0 auto;
 }
 
-.fc-caption {
+.fc-media-step {
   color: var(--body-text-color, #1f2937);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.fc-empty-panel {
-  padding: 44px 20px;
-  border: 1px dashed var(--border-color-primary, #e5e7eb);
-  border-radius: 12px;
-  background: var(--background-fill-primary, #fff);
-  color: var(--body-text-color-subdued, #6b7280);
-  text-align: center;
+  font-weight: 600;
 }
 
 @media (max-width: 760px) {
-  .fc-custom-media-root {
-    padding: 16px;
-  }
-
   .fc-media-strip {
     grid-auto-columns: minmax(150px, 72vw);
   }
-}
-
-.fc-control-compact {
-  min-width: 120px;
-  flex: 0 0 140px;
-}
-
-.fc-button-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
 }

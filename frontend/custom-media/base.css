@@ -1,0 +1,99 @@
+/* Overlay scaffolding: hiding Trackio's native page, the overlay root, header,
+   cross-mode jump links, focus pulse, and the shared empty-state panel. */
+
+/* While our overlay is mounted, hide Trackio's native page content without
+   destroying it — its Svelte render anchor stays intact so other tabs work. */
+.page-content.fc-media-active > :not(.fc-custom-media-root) {
+  display: none !important;
+}
+
+.fc-custom-media-root {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  padding: 20px 24px 36px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  color: var(--body-text-color, #1f2937);
+}
+
+/* Cross-mode jump links (image-id ⇄ step) */
+.fc-jump {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fc-media-label.fc-jump {
+  display: block;
+  width: 100%;
+  color: var(--body-text-color, #1f2937);
+}
+
+.fc-media-step.fc-jump {
+  color: var(--body-text-color, #1f2937);
+  font-weight: 600;
+}
+
+.fc-jump:hover {
+  color: var(--link-text-color, #2563eb);
+  text-decoration: underline;
+}
+
+.fc-group-focused {
+  animation: fc-focus-pulse 1.6s ease-out;
+}
+
+@keyframes fc-focus-pulse {
+  0% {
+    box-shadow: 0 0 0 2px var(--link-text-color, #2563eb);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.fc-media-header {
+  margin-bottom: 18px;
+}
+
+.fc-eyebrow {
+  margin: 0 0 8px;
+  color: var(--body-text-color-subdued, #6b7280);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.fc-media-header h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.1;
+}
+
+.fc-media-subtitle {
+  margin: 8px 0 0;
+  color: var(--body-text-color-subdued, #6b7280);
+  font-size: 15px;
+}
+
+.fc-empty-panel {
+  padding: 44px 20px;
+  border: 1px dashed var(--border-color-primary, #e5e7eb);
+  border-radius: 12px;
+  background: var(--background-fill-primary, #fff);
+  color: var(--body-text-color-subdued, #6b7280);
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .fc-custom-media-root {
+    padding: 16px;
+  }
+}

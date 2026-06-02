@@ -1,0 +1,131 @@
+/* Full-screen lightbox: backdrop, zoomable image stage, info bar, and the
+   close/prev/next controls. */
+
+body.fc-viewer-open {
+  overflow: hidden;
+}
+
+.fc-viewer[hidden] {
+  display: none;
+}
+
+.fc-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 10, 14, 0.92);
+  backdrop-filter: blur(2px);
+  user-select: none;
+}
+
+.fc-viewer-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.fc-viewer-img {
+  max-width: 94vw;
+  max-height: 82vh;
+  object-fit: contain;
+  transform-origin: center center;
+  will-change: transform;
+  cursor: zoom-in;
+  -webkit-user-drag: none;
+}
+
+.fc-viewer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 12px 20px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #f3f4f6;
+  font-size: 13px;
+}
+
+.fc-viewer-counter {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.fc-viewer-caption {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #e5e7eb;
+  overflow-wrap: anywhere;
+}
+
+.fc-viewer-hint {
+  color: rgba(229, 231, 235, 0.55);
+  font-size: 12px;
+}
+
+.fc-viewer-btn {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.fc-viewer-btn:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.fc-viewer-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.fc-viewer-close {
+  top: 16px;
+  right: 18px;
+  width: 42px;
+  height: 42px;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.fc-viewer-prev,
+.fc-viewer-next {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 52px;
+  height: 52px;
+  font-size: 34px;
+  line-height: 1;
+}
+
+.fc-viewer-prev {
+  left: 18px;
+}
+
+.fc-viewer-next {
+  right: 18px;
+}
+
+@media (max-width: 760px) {
+  .fc-viewer-img {
+    max-width: 96vw;
+    max-height: 74vh;
+  }
+
+  .fc-viewer-prev,
+  .fc-viewer-next {
+    width: 44px;
+    height: 44px;
+    font-size: 28px;
+  }
+}

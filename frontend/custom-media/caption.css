@@ -1,0 +1,83 @@
+/* Captions / prompts: inline text, the collapsible "more/hide" fold, and the
+   group-level caption banner shown above a group's images. */
+
+.fc-caption {
+  color: var(--body-text-color, #1f2937);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.fc-caption-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--background-fill-secondary, #f3f4f6);
+  color: var(--body-text-color-subdued, #6b7280);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fc-caption-fold {
+  min-width: 0;
+}
+
+.fc-caption-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--body-text-color-subdued, #6b7280);
+}
+
+.fc-caption-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fc-caption-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fc-caption-fold[open] > summary .fc-caption-preview {
+  display: none;
+}
+
+.fc-caption-fold[open] > summary::after {
+  content: "hide";
+  color: var(--body-text-color-subdued, #6b7280);
+}
+
+.fc-caption-fold:not([open]) > summary::after {
+  content: "more";
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--link-text-color, #2563eb);
+  font-weight: 600;
+}
+
+.fc-caption-full {
+  margin-top: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  color: var(--body-text-color, #1f2937);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fc-caption-group {
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color-primary, #e5e7eb);
+  background: var(--background-fill-secondary, #f9fafb);
+  font-size: 13px;
+}
+
+.fc-caption-group .fc-caption-full {
+  max-height: 320px;
+}
