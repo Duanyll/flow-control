@@ -172,7 +172,13 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                         self.validation_log_images is True
                         or image_count < self.validation_log_images
                     ):
-                        self.log_image(batch["clean_image"], key, step=step)
+                        prompt = batch.get("prompt")
+                        self.log_image(
+                            batch["clean_image"],
+                            key,
+                            step=step,
+                            caption=prompt if isinstance(prompt, str) else None,
+                        )
                         image_count += self.world_size
 
                     progress.advance(task)

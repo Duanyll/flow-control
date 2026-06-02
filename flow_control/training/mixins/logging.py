@@ -247,14 +247,19 @@ class LoggingMixin(BaseModel):
             self._metrics_file.flush()
 
     def _emit_image(
-        self, image: torch.Tensor, image_key: str, step: int, name: str
+        self,
+        image: torch.Tensor,
+        image_key: str,
+        step: int,
+        name: str,
+        caption: str | None = None,
     ) -> None:
         if self.image_background is not None:
             image = remove_alpha_channel(image, self.image_background)
         pil = tensor_to_pil(image)
         full_key = f"{name}/{image_key}"
         if self._trackio_run is not None:
-            trackio.log({full_key: trackio.Image(pil)}, step=step)
+            trackio.log({full_key: trackio.Image(pil, caption=caption)}, step=step)
         logger.info(f"Image logged: key={full_key} step={step}")
 
     def _link_log_dir(self) -> None:
@@ -288,27 +293,31 @@ class LoggingMixin(BaseModel):
         image_key: str,
         step: int,
         name: str = "validation",
+        caption: str | None = None,
     ):
         is_main: bool = getattr(self, "is_main_process", True)
         world_size: int = getattr(self, "world_size", 1)
 
         if world_size == 1:
-            self._emit_image(image, image_key, step, name)
+            self._emit_image(image, image_key, step, name, caption)
             return
 
         if is_main:
             images: list = [None] * world_size
             keys: list = [None] * world_size
+            captions: list = [None] * world_size
             dist.gather_object(image, images, dst=0)
             dist.gather_object(image_key, keys, dst=0)
-            for k, img in zip(keys, images, strict=True):
+            dist.gather_object(caption, captions, dst=0)
+            for k, img, cap in zip(keys, images, captions, strict=True):
                 if k == "__padding__":
                     continue
                 assert isinstance(img, torch.Tensor) and isinstance(k, str)
-                self._emit_image(img, k, step, name)
+                self._emit_image(img, k, step, name, cap)
         else:
             dist.gather_object(image, None, dst=0)
             dist.gather_object(image_key, None, dst=0)
+            dist.gather_object(caption, None, dst=0)
 
     def log_metrics(self, metrics: Mapping[str, float | torch.Tensor], step: int):
         is_main: bool = getattr(self, "is_main_process", True)
@@ -420,7 +429,13 @@ if __name__ == "__main__":
 
     trainer.log_metrics({"loss": 0.1, "lr": 1e-4}, step=0)
     trainer.log_metrics({"loss": 0.05, "lr": 1e-4}, step=1)
-    trainer.log_image(torch.rand(1, 3, 32, 32), "sample_0", step=1, name="val")
+    trainer.log_image(
+        torch.rand(1, 3, 32, 32),
+        "sample_0",
+        step=1,
+        name="val",
+        caption="a quick brown fox jumps over the lazy dog",
+    )
 
     trainer.log_aggregated_metrics({"agg": 1.0})
     trainer.log_aggregated_metrics({"agg": 3.0})
