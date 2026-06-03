@@ -234,6 +234,14 @@ def distributed_main(func):
         try:
             self.init_device_mesh()
             return func(self, *args, **kwargs)
+        except Exception:
+            # Log the traceback to this rank's flushed log file BEFORE the
+            # finally's cleanup(): destroy_process_group() can block (other
+            # ranks still mid-collective), which would otherwise stop the
+            # exception from ever reaching sys.excepthook -> the real error is
+            # silently lost behind an NCCL-timeout hang.
+            logger.exception("Uncaught exception in distributed_main run()")
+            raise
         finally:
             self.cleanup()
 

@@ -173,9 +173,16 @@ class LoggingMixin(BaseModel):
 
     @main_process_only
     def init_tracker(self):
-        self.resolve_run_context()
+        # NOTE: this is @main_process_only, so it must NOT issue any collective.
+        # run-context resolution does (broadcast_object_list); it is the caller's
+        # job to call resolve_run_context() on ALL ranks first (run() does). A
+        # collective here would only run on rank 0 -> every subsequent collective
+        # (e.g. the DCP seed-load gather_object) desyncs and corrupts.
         if self.run_id is None:
-            raise RuntimeError("run_id was not resolved.")
+            raise RuntimeError(
+                "run_id was not resolved; call resolve_run_context() (on all "
+                "ranks) before init_tracker()."
+            )
 
         conf = self.model_dump(mode="json", warnings="none")
         conf["flow_control_version"] = get_version()
@@ -338,8 +345,17 @@ class LoggingMixin(BaseModel):
             all_metrics: list = [None] * world_size
             dist.gather_object(metrics, all_metrics, dst=0)
 
+            # Average per key over the ranks that actually reported it. Ranks may
+            # legitimately omit a key (e.g. log_progress_timing drops
+            # ``*_items_per_s`` when a phase had zero elapsed time); indexing
+            # every rank's dict by rank 0's keys would KeyError here and, since
+            # the gather above already completed, crash only rank 0 and deadlock
+            # the rest at the next collective.
+            all_keys = set().union(*(m.keys() for m in all_metrics))
             avg_metrics = {
-                k: sum(m[k] for m in all_metrics) / world_size for k in all_metrics[0]
+                k: sum(m[k] for m in all_metrics if k in m)
+                / sum(1 for m in all_metrics if k in m)
+                for k in all_keys
             }
 
             self._update_status_bar(avg_metrics)
@@ -474,6 +490,7 @@ if __name__ == "__main__":
         trackio_project="flow-control-smoke",
         image_background="checkerboard",
     )
+    trainer.resolve_run_context()
     trainer.init_tracker()
     assert trainer.run_id is not None
     run_dir = tmp_root / "runs" / "smoke" / trainer.run_id
