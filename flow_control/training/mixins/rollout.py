@@ -20,9 +20,11 @@ from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.rewards import (
     Reward,
+    RewardProfile,
     _has_pairwise_child,
     execute_pairwise_reward,
     execute_reward,
+    reduce_reward_profiles,
 )
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import SampleOutput, Sampler
@@ -237,6 +239,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
             rollouts[idx].reward_weights = result.weights.detach().cpu()
             rollouts[idx].reward_labels = result.labels
 
+        reward_profile = RewardProfile()
         if _has_pairwise_child(reward):
             execute_pairwise_reward(
                 reward,
@@ -245,7 +248,17 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                 num_rollouts_per_prompt=self.num_rollouts_per_prompt,
             )
         else:
-            execute_reward(reward, rollout_submitter(), reward_handler)
+            execute_reward(
+                reward, rollout_submitter(), reward_handler, profile=reward_profile
+            )
+
+        # Drain the (now-finished) Rollout progress bar -> GPU production timing,
+        # plus the async reward profile (the part the progress bar cannot see).
+        step = getattr(self, "_current_step", 0)
+        self.log_progress_timing(progress, step, prefix="profile/rollout")
+        self.log_reduced_metrics(
+            reward_profile.local_payload(), reduce_reward_profiles, step
+        )
 
         return rollouts
 

@@ -641,6 +641,10 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         if was_training:
             self.transformer.train()
 
+        self.log_progress_timing(
+            progress, self._current_step, prefix="profile/precompute"
+        )
+
     def _optimizer_step(self):
         """Clip gradients, step all optimizers (except old-EMA), and zero grads."""
         if self.clip_grad_norm > 0.0:
@@ -722,6 +726,8 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     self._optimizer_step()
                     self._current_step += 1
                     self.flush_aggregated_metrics(self._current_step)
+
+        self.log_progress_timing(progress, self._current_step, prefix="profile/train")
 
     # -------------------------------- Main loop --------------------------------- #
 

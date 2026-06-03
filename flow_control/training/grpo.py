@@ -411,6 +411,10 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
         if was_training:
             self.transformer.train()
+
+        self.log_progress_timing(
+            progress, self._current_step, prefix="profile/precompute"
+        )
         return ref_means
 
     def _build_train_items(
@@ -525,6 +529,8 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     self._optimizer_step()
                     self._current_step += 1
                     self.flush_aggregated_metrics(self._current_step)
+
+        self.log_progress_timing(progress, self._current_step, prefix="profile/train")
 
     # --- Main loop ---
 

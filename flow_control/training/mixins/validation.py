@@ -120,22 +120,23 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
         logger.info(f"Validating at step {step}...")
         model.transformer.eval()
 
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description:<20}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+            disable=len(self.validation_dataloader) <= 1,
+        )
+        task = progress.add_task(
+            "Validating",
+            total=len(self.validation_dataloader),
+        )
+
         def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description:<20}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                console=console,
-                transient=True,
-                disable=len(self.validation_dataloader) <= 1,
-            )
-            task = progress.add_task(
-                "Validating",
-                total=len(self.validation_dataloader),
-            )
             image_count = 0
             with progress:
                 for batch in self.validation_dataloader:
@@ -225,6 +226,8 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
             # Just iterate to generate and log images, no reward scoring
             for _ in sample_submitter():
                 pass
+
+        self.log_progress_timing(progress, step, prefix="profile/validation")
 
         model.transformer.train()
         logger.info(f"Completed validation at step {step}.")

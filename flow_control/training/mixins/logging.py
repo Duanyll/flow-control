@@ -5,7 +5,7 @@ import re
 import secrets
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
@@ -17,6 +17,7 @@ from pydantic import BaseModel, PrivateAttr
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
+    Progress,
     SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
@@ -358,6 +359,61 @@ class LoggingMixin(BaseModel):
         avg_metrics = {k: sum(v) / len(v) for k, v in self._aggregated_metrics.items()}
         self.log_metrics(avg_metrics, step)
         self._aggregated_metrics = {}
+
+    def log_progress_timing(
+        self, progress: Progress, step: int, prefix: str = "profile"
+    ) -> None:
+        """Drain a finished Rich ``Progress`` into timing metrics.
+
+        Each task's wall time and throughput are already computed by Rich and
+        otherwise discarded when the ``with progress:`` block exits.  This reads
+        them back out and logs them under ``<prefix>/<task-slug>_elapsed_s`` and
+        ``<prefix>/<task-slug>_items_per_s``.  Pass ``prefix=f"profile/{group}"``
+        to keep everything under a single ``profile/`` namespace with one
+        grouping level (Trackio groups panels by ``/``).
+
+        Goes through the averaging :meth:`log_metrics` path, so per-rank elapsed
+        times become a cross-rank mean.  That is valid for a duration and the
+        instrumented phases are balanced across ranks.
+        """
+        metrics: dict[str, float] = {}
+        for task in progress.tasks:
+            slug = re.sub(r"\W+", "_", task.description.strip().lower()).strip("_")
+            elapsed = float(task.elapsed or 0.0)
+            metrics[f"{prefix}/{slug}_elapsed_s"] = elapsed
+            if elapsed > 0:
+                metrics[f"{prefix}/{slug}_items_per_s"] = task.completed / elapsed
+        if metrics:
+            self.log_metrics(metrics, step=step)
+
+    def log_reduced_metrics(
+        self,
+        local_payload: dict[str, Any],
+        reduce: Callable[[list[dict[str, Any]]], dict[str, float]],
+        step: int,
+    ) -> None:
+        """Gather raw per-rank payloads to rank 0, reduce, and emit once.
+
+        Unlike :meth:`log_metrics`, which averages per-rank scalars, this gathers
+        the *raw* payloads so the caller-supplied ``reduce`` can compute quantities
+        that are not averageable (percentiles, max, pooled samples).  ``reduce``
+        receives the list of per-rank payload dicts (on rank 0 only) and returns
+        the final scalar metrics.
+
+        Must be called symmetrically by every rank (it participates in a
+        collective ``gather_object``); never guard it behind ``is_main_process``.
+        """
+        world_size: int = getattr(self, "world_size", 1)
+        if world_size == 1:
+            self._emit_metrics(reduce([local_payload]), step)
+            return
+
+        if getattr(self, "is_main_process", True):
+            gathered: list = [None] * world_size
+            dist.gather_object(local_payload, gathered, dst=0)
+            self._emit_metrics(reduce(gathered), step)
+        else:
+            dist.gather_object(local_payload, None, dst=0)
 
     @contextmanager
     def status_bar(self, title: str):
