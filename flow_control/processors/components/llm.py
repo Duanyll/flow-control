@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import re
@@ -63,8 +64,42 @@ class LLMClient(BaseModel):
     _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
     _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
     _model_lock: asyncio.Lock | None = PrivateAttr(default=None)
+    _bound_loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
+
+    def _reset_loop_bound_state_if_needed(self) -> None:
+        """Drop session/semaphore/lock when the running event loop changed.
+
+        ``execute_reward`` scores each batch in a fresh ``_RewardLoopThread``
+        event loop and closes it afterwards, but this client is long-lived and
+        caches its aiohttp session and asyncio primitives. Those bind to the
+        loop they were created on, so reusing them from a later loop raises
+        "Event loop is closed". Recreate them whenever the running loop differs
+        from the one the cached state belongs to.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._bound_loop is loop:
+            return
+        if self._session is not None:
+            # The old loop is already closed, so a clean async close is not
+            # possible; force_close=True on the connector means no live sockets
+            # linger. Best-effort sync cleanup to quiet "Unclosed client
+            # session" warnings, then abandon the reference.
+            connector = self._session.connector
+            if connector is not None:
+                with contextlib.suppress(Exception):
+                    connector.close()
+            with contextlib.suppress(Exception):
+                self._session._connector = None  # noqa: SLF001
+        self._session = None
+        self._semaphore = None
+        self._model_lock = None
+        self._bound_loop = loop
 
     def _get_session(self) -> aiohttp.ClientSession:
+        self._reset_loop_bound_state_if_needed()
         if self._session is None:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             connector = aiohttp.TCPConnector(
@@ -86,11 +121,13 @@ class LLMClient(BaseModel):
     def _get_semaphore(self) -> asyncio.Semaphore | None:
         if self.max_concurrency <= 0:
             return None
+        self._reset_loop_bound_state_if_needed()
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.max_concurrency)
         return self._semaphore
 
     def _get_model_lock(self) -> asyncio.Lock:
+        self._reset_loop_bound_state_if_needed()
         if self._model_lock is None:
             self._model_lock = asyncio.Lock()
         return self._model_lock
