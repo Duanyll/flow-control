@@ -15,6 +15,8 @@ data/
 workspace/
 outputs/
 demo/
+draft/
+local/
 
 docker-compose.*
 .devcontainer/
