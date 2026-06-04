@@ -1,6 +1,5 @@
 """Export DCP training checkpoints to HuggingFace save_pretrained format."""
 
-import argparse
 import os
 import re
 from typing import Any
@@ -9,7 +8,6 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
-from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -66,9 +64,12 @@ def _export_vae(config: dict, checkpoint_dir: str, output_dir: str) -> None:
     logger.info(f"Exported VAE to {output_dir}.")
 
 
-def run(config_path: str, output_dir: str, checkpoint_dir: str | None = None) -> None:
+def run(
+    config: dict,
+    output_dir: str,
+    checkpoint_dir: str | None = None,
+) -> None:
     """Export a DCP training checkpoint to HuggingFace format."""
-    config = load_config_file(config_path)
     launch_type = config.get("launch", {}).get("type", "")
 
     if launch_type != "vae":
@@ -91,30 +92,3 @@ def run(config_path: str, output_dir: str, checkpoint_dir: str | None = None) ->
         )
 
     _export_vae(config, checkpoint_dir, output_dir)
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Export DCP training checkpoints to HuggingFace format."
-    )
-    parser.add_argument(
-        "config_path", type=str, help="Path to the training config file."
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        required=True,
-        help="Output directory for the HuggingFace checkpoint.",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default=None,
-        help="DCP checkpoint directory. Defaults to latest step in checkpoint_root.",
-    )
-    args = parser.parse_args()
-    run(args.config_path, args.output_dir, args.checkpoint_dir)
-
-
-if __name__ == "__main__":
-    main()

@@ -1,10 +1,7 @@
-import argparse
-
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
-from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -44,22 +41,10 @@ def _run_vae_seed(config: dict) -> None:
     logger.info(f"Saved VAE DCP seed checkpoint to {seed_dir}.")
 
 
-def run(config_path: str) -> None:
+def run(config: dict) -> None:
     """Generate a seed checkpoint."""
-    config = load_config_file(config_path)
     launch_type = config.get("launch", {}).get("type", "")
     if launch_type == "vae":
         _run_vae_seed(config)
     else:
         _run_transformer_seed(config)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Generate a seed checkpoint.")
-    parser.add_argument("config_path", type=str, help="Path to the configuration file.")
-    args = parser.parse_args()
-    run(args.config_path)
-
-
-if __name__ == "__main__":
-    main()

@@ -1,11 +1,126 @@
+import argparse
 import contextlib
 import tomllib
-from collections.abc import MutableMapping
+from collections.abc import MutableMapping, Sequence
 from typing import Any
 
 import json5
 import yaml
+from jsonpath_ng.ext import parse
 from pydantic import BaseModel
+
+
+def add_config_patch_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--update",
+        dest="config_updates",
+        action="append",
+        default=[],
+        metavar="JSONPATH=VALUE",
+        help=(
+            "Update all config nodes matched by JSONPath. VALUE is parsed as a "
+            "JSON5 literal when possible, otherwise as a string. Can be repeated."
+        ),
+    )
+    parser.add_argument(
+        "--remove",
+        dest="config_removes",
+        action="append",
+        default=[],
+        metavar="JSONPATH",
+        help="Remove all config nodes matched by JSONPath. Can be repeated.",
+    )
+
+
+def format_config_patch_args(
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
+) -> list[str]:
+    """Render config patches back into ``--update``/``--remove`` CLI args.
+
+    Used to forward overrides across the process boundary to subprocesses that
+    re-load the same config file (e.g. ``launch`` spawning ``seed`` / torchrun).
+    """
+    args: list[str] = []
+    for update in updates:
+        args.extend(["--update", update])
+    for remove in removes:
+        args.extend(["--remove", remove])
+    return args
+
+
+def _find_update_separator(update: str) -> int | None:
+    quote: str | None = None
+    escaped = False
+    bracket_depth = 0
+
+    for i, char in enumerate(update):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+            continue
+        if char == "[":
+            bracket_depth += 1
+            continue
+        if char == "]" and bracket_depth:
+            bracket_depth -= 1
+            continue
+        if char == "=" and bracket_depth == 0:
+            return i
+
+    return None
+
+
+def _split_update(update: str) -> tuple[str, str]:
+    separator = _find_update_separator(update)
+    if separator is None:
+        raise ValueError(
+            f"Config update must be formatted as JSONPATH=VALUE: {update!r}"
+        )
+
+    path = update[:separator].strip()
+    value = update[separator + 1 :].strip()
+    if not path:
+        raise ValueError(f"Empty JSONPath in config update: {update!r}")
+    return path, value
+
+
+def _parse_update_value(value: str) -> Any:
+    try:
+        return json5.loads(value)
+    except ValueError:
+        return value
+
+
+def _require_matches(config: Any, expression: str) -> Any:
+    path = parse(expression)
+    if not path.find(config):
+        raise ValueError(f"JSONPath matched nothing: {expression}")
+    return path
+
+
+def apply_config_patches(
+    config: dict[str, Any],
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
+) -> dict[str, Any]:
+    for update in updates:
+        expression, value_text = _split_update(update)
+        _require_matches(config, expression).update(
+            config, _parse_update_value(value_text)
+        )
+    for expression in removes:
+        _require_matches(config, expression).filter(lambda _: True, config)
+    return config
 
 
 def flatten_dict(dictionary, parent_key="", separator="_"):
@@ -32,7 +147,11 @@ def deep_merge_dicts(dict1, dict2):
     return result
 
 
-def load_config_file(path: str) -> dict:
+def load_config_file(
+    path: str,
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
+) -> dict:
     """
     Load JSON, YAML or TOML configuration file.
     """
@@ -51,6 +170,10 @@ def load_config_file(path: str) -> dict:
     if isinstance(res, dict) and "$schema" in res:
         del res["$schema"]
 
+    if not isinstance(res, dict):
+        raise ValueError(f"Config file must contain an object: {path}")
+
+    apply_config_patches(res, updates, removes)
     return res
 
 

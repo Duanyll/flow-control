@@ -559,6 +559,7 @@ dependencies = [
     { name = "gradio" },
     { name = "httpx" },
     { name = "json5" },
+    { name = "jsonpath-ng" },
     { name = "kornia" },
     { name = "kornia-rs" },
     { name = "lmdb" },
@@ -614,6 +615,7 @@ requires-dist = [
     { name = "gradio", specifier = ">=6.10.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "json5", specifier = ">=0.12.1" },
+    { name = "jsonpath-ng", specifier = ">=1.8.0" },
     { name = "kornia", specifier = ">=0.8.2" },
     { name = "kornia-rs", specifier = ">=0.1.10" },
     { name = "lmdb", specifier = ">=1.7.5" },
@@ -1024,6 +1026,15 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/77/e8/a3f261a66e4663f22700bc8a17c08cb83e91fbf086726e7a228398968981/json5-0.13.0.tar.gz", hash = "sha256:b1edf8d487721c0bf64d83c28e91280781f6e21f4a797d3261c7c828d4c165bf" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/d7/9e/038522f50ceb7e74f1f991bf1b699f24b0c2bbe7c390dd36ad69f4582258/json5-0.13.0-py3-none-any.whl", hash = "sha256:9a08e1dd65f6a4d4c6fa82d216cf2477349ec2346a38fd70cc11d2557499fbcc" },
+]
+
+[[package]]
+name = "jsonpath-ng"
+version = "1.8.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/32/58/250751940d75c8019659e15482d548a4aa3b6ce122c515102a4bfdac50e3/jsonpath_ng-1.8.0.tar.gz", hash = "sha256:54252968134b5e549ea5b872f1df1168bd7defe1a52fed5a358c194e1943ddc3" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/03/99/33c7d78a3fb70d545fd5411ac67a651c81602cc09c9cf0df383733f068c5/jsonpath_ng-1.8.0-py3-none-any.whl", hash = "sha256:b8dde192f8af58d646fc031fac9c99fe4d00326afc4148f1f043c601a8cfe138" },
 ]
 
 [[package]]

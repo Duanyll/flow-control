@@ -10,7 +10,6 @@ from starlette.routing import Route
 
 from flow_control.rewards import Reward, parse_reward
 from flow_control.rewards.base import BaseReward
-from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_batch, serialize_object
 from flow_control.utils.types import TorchDevice
@@ -101,9 +100,9 @@ def create_app(config: RewardServerConfig) -> Starlette:
     return Starlette(routes=routes)
 
 
-def run(config_path: str) -> None:
-    """Start the reward server with the given config file."""
-    config = RewardServerConfig(**load_config_file(config_path))
+def run(config_data: dict) -> None:
+    """Start the reward server with the given config."""
+    config = RewardServerConfig(**config_data)
 
     if config.reward is not None:
         logger.info(f"Pre-loading reward model: {config.reward.type}")
@@ -111,16 +110,3 @@ def run(config_path: str) -> None:
     logger.info(f"Starting reward server on {config.host}:{config.port}")
     app = create_app(config)
     uvicorn.run(app, host=config.host, port=config.port)
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Start reward computation server.")
-    parser.add_argument("config_path", type=str, help="Path to the configuration file.")
-    args = parser.parse_args()
-    run(args.config_path)
-
-
-if __name__ == "__main__":
-    main()

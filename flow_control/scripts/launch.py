@@ -4,16 +4,25 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from rich import print
 
 from flow_control.training.launch_config import LaunchConfig
-from flow_control.utils.config import load_config_file
+from flow_control.utils.config import (
+    add_config_patch_arguments,
+    format_config_patch_args,
+    load_config_file,
+)
 
 
-def _load_launch_config(config_path: str) -> tuple[LaunchConfig, dict]:
-    config_data = load_config_file(config_path)
+def _load_launch_config(
+    config_path: str,
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
+) -> tuple[LaunchConfig, dict]:
+    config_data = load_config_file(config_path, updates, removes)
     if "launch" not in config_data:
         raise ValueError("Launch configuration section is missing in the config file.")
     launch_config = LaunchConfig(**config_data["launch"])
@@ -94,7 +103,8 @@ def try_preprocess_data(preprocess_config: str | list[str]) -> None:
         command = [
             sys.executable,
             "-m",
-            "flow_control.scripts.preprocess",
+            "flow_control.scripts.cli",
+            "preprocess",
             config,
         ]
         print(f"[blue]Executing data preprocessing command:[/blue] {' '.join(command)}")
@@ -108,7 +118,11 @@ def try_preprocess_data(preprocess_config: str | list[str]) -> None:
 
 
 def try_generate_dcp_seed(
-    config_path: str, launch_config: LaunchConfig, config_data: dict
+    config_path: str,
+    launch_config: LaunchConfig,
+    config_data: dict,
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
 ) -> None | str:
     if launch_config.generate_dcp_seed:
         if "seed_checkpoint_dir" not in config_data:
@@ -127,7 +141,14 @@ def try_generate_dcp_seed(
             print(f"[blue]Removing existing seed checkpoint directory:[/blue] {dir}")
             shutil.rmtree(dir)
         print(f"[blue]Generating DCP seed checkpoint in:[/blue] {dir}")
-        command = [sys.executable, "-m", "flow_control.scripts.seed", config_path]
+        command = [
+            sys.executable,
+            "-m",
+            "flow_control.scripts.cli",
+            "seed",
+            config_path,
+            *format_config_patch_args(updates, removes),
+        ]
         print(f"[blue]Executing command:[/blue] {' '.join(command)}")
         try:
             subprocess.run(command, check=True)
@@ -187,11 +208,15 @@ def _default_log_dir() -> str:
     return str(Path("logs") / f"local-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}")
 
 
-def run(config_path: str) -> None:
+def run(
+    config_path: str,
+    updates: Sequence[str] = (),
+    removes: Sequence[str] = (),
+) -> None:
     """Launch training as the parent process (sets up env, execs torchrun)."""
-    launch_config, config = _load_launch_config(config_path)
+    launch_config, config = _load_launch_config(config_path, updates, removes)
 
-    try_generate_dcp_seed(config_path, launch_config, config)
+    try_generate_dcp_seed(config_path, launch_config, config, updates, removes)
     if launch_config.preprocess_config:
         try_preprocess_data(launch_config.preprocess_config)
 
@@ -204,6 +229,7 @@ def run(config_path: str) -> None:
         "-m",
         "flow_control.scripts.launch",
         config_path,
+        *format_config_patch_args(updates, removes),
         "--type",
         launch_config.type,
     ]
@@ -240,15 +266,18 @@ def main():
         default=None,
         help="Do not manually set this argument.",
     )
+    add_config_patch_arguments(parser)
     args = parser.parse_args()
 
     if args.type:
         # This is child process (invoked by torchrun)
-        launch_config, config_data = _load_launch_config(args.config_path)
+        launch_config, config_data = _load_launch_config(
+            args.config_path, args.config_updates, args.config_removes
+        )
         _run_child(launch_config, config_data)
     else:
         # This is parent process
-        run(args.config_path)
+        run(args.config_path, args.config_updates, args.config_removes)
 
 
 if __name__ == "__main__":

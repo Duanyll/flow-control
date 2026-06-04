@@ -10,7 +10,6 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from flow_control.processors.components.vae import VAE, BaseVAE, PosteriorMode
-from flow_control.utils.config import load_config_file
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_tensor, serialize_tensor
 from flow_control.utils.types import TorchDevice
@@ -113,9 +112,9 @@ def create_app(config: VAEServerConfig) -> Starlette:
     return Starlette(routes=routes)
 
 
-def run(config_path: str) -> None:
-    """Start the VAE server with the given config file."""
-    config = VAEServerConfig(**load_config_file(config_path))
+def run(config_data: dict) -> None:
+    """Start the VAE server with the given config."""
+    config = VAEServerConfig(**config_data)
 
     if config.vae is not None:
         logger.info(f"Pre-loading VAE model: {config.vae.pretrained_model_id}")
@@ -123,16 +122,3 @@ def run(config_path: str) -> None:
     logger.info(f"Starting VAE server on {config.host}:{config.port}")
     app = create_app(config)
     uvicorn.run(app, host=config.host, port=config.port)
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Start VAE encoding/decoding server.")
-    parser.add_argument("config_path", type=str, help="Path to the configuration file.")
-    args = parser.parse_args()
-    run(args.config_path)
-
-
-if __name__ == "__main__":
-    main()

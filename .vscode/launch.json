@@ -18,8 +18,8 @@
       "name": "Python Debugger: Preprocess",
       "type": "debugpy",
       "request": "launch",
-      "module": "flow_control.scripts.preprocess",
-      "args": ["workspace/civitai-283235-flux1-preprocess.toml"]
+      "module": "flow_control.scripts.cli",
+      "args": ["preprocess", "workspace/civitai-283235-flux1-preprocess.toml"]
     },
     {
       "name": "Python Debugger: Inference",

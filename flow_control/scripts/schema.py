@@ -4,7 +4,6 @@ Usage:
     flow-control schema [--output-dir DIR]
 """
 
-import argparse
 import json
 from pathlib import Path
 
@@ -63,21 +62,3 @@ def run(output_dir: str = DEFAULT_OUTPUT_DIR) -> None:
         "\n[red]If your IDE caches JSON schemas (e.g. VSCode), "
         "reload the window to pick up the updated schemas.[/red]"
     )
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate JSON schemas for config types."
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory to write schema files (default: {DEFAULT_OUTPUT_DIR}).",
-    )
-    args = parser.parse_args()
-    run(args.output_dir)
-
-
-if __name__ == "__main__":
-    main()

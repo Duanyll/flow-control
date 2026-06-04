@@ -1,5 +1,19 @@
 import argparse
+import importlib
 import sys
+
+from flow_control.utils.config import add_config_patch_arguments, load_config_file
+
+# Subcommands that take a single config file and whose ``run(config)`` consumes
+# the already-loaded dict. ``launch`` also takes a config file but is dispatched
+# specially (it re-spawns subprocesses that re-load the file), so it is not here.
+CONFIG_COMMAND_MODULES = {
+    "preprocess": "flow_control.scripts.preprocess",
+    "seed": "flow_control.scripts.seed",
+    "vae-server": "flow_control.scripts.vae_server",
+    "reward-server": "flow_control.scripts.reward_server",
+    "serve": "flow_control.scripts.serve",
+}
 
 
 def main():
@@ -9,18 +23,12 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    for name in [
-        "preprocess",
-        "seed",
-        "launch",
-        "vae-server",
-        "reward-server",
-        "serve",
-    ]:
+    for name in (*CONFIG_COMMAND_MODULES, "launch"):
         sub = subparsers.add_parser(name)
         sub.add_argument(
             "config_path", type=str, help="Path to the configuration file."
         )
+        add_config_patch_arguments(sub)
 
     export_sub = subparsers.add_parser(
         "export", help="Export DCP checkpoints to HuggingFace format."
@@ -28,6 +36,7 @@ def main():
     export_sub.add_argument(
         "config_path", type=str, help="Path to the training configuration file."
     )
+    add_config_patch_arguments(export_sub)
     export_sub.add_argument(
         "--output-dir", type=str, required=True, help="Output directory."
     )
@@ -53,39 +62,42 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    _dispatch(args.command, args)
+    _dispatch(args)
 
 
-def _dispatch(command: str, args: argparse.Namespace) -> None:
+def _dispatch(args: argparse.Namespace) -> None:
     """Lazy-import and run the appropriate subcommand."""
+    command = args.command
+
     if command == "schema":
         from flow_control.scripts.schema import run as run_schema
 
         run_schema(**({"output_dir": args.output_dir} if args.output_dir else {}))
         return
 
+    # ``launch`` re-spawns subprocesses that re-load the config file themselves,
+    # so it needs the path and the raw patch args rather than a loaded dict.
+    if command == "launch":
+        from flow_control.scripts.launch import run as run_launch
+
+        run_launch(args.config_path, args.config_updates, args.config_removes)
+        return
+
+    config = load_config_file(
+        args.config_path, args.config_updates, args.config_removes
+    )
+
     if command == "export":
         from flow_control.scripts.export import run as run_export
 
-        run_export(args.config_path, args.output_dir, args.checkpoint_dir)
+        run_export(config, args.output_dir, args.checkpoint_dir)
         return
 
-    if command == "preprocess":
-        from flow_control.scripts.preprocess import run
-    elif command == "seed":
-        from flow_control.scripts.seed import run
-    elif command == "launch":
-        from flow_control.scripts.launch import run
-    elif command == "vae-server":
-        from flow_control.scripts.vae_server import run
-    elif command == "reward-server":
-        from flow_control.scripts.reward_server import run
-    elif command == "serve":
-        from flow_control.scripts.serve import run
-    else:
+    module_name = CONFIG_COMMAND_MODULES.get(command)
+    if module_name is None:
         raise ValueError(f"Unknown command: {command}")
 
-    run(args.config_path)
+    importlib.import_module(module_name).run(config)
 
 
 if __name__ == "__main__":
