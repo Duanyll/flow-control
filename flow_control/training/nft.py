@@ -583,6 +583,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         flat_items: list[NftTrainItem],
         progress: Progress,
         task_id: TaskID,
+        field: Literal["old_prediction", "ref_prediction"] = "old_prediction",
     ) -> None:
         for item in flat_items:
             rollout = rollouts[item.rollout_idx]
@@ -597,11 +598,17 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 raise RuntimeError("Missing cached NFT targets.")
             batch["noisy_latents"] = cached_targets.noisy_latents
             neg_for_cfg = negative_batch if negative_batch is not None else None
-            cached_targets.old_prediction = self._predict(
+            prediction = self._predict(
                 batch,
                 cached_targets.timestep,
                 neg_for_cfg,
             ).detach()
+            # Route to the requested cache field. This MUST be parameterised: the
+            # reference pass reuses this method, and writing to ``old_prediction``
+            # unconditionally would overwrite the EMA-teacher output with the
+            # reference output AND leave ``ref_prediction`` unset -> KL term
+            # silently 0 and the NFT teacher corrupted whenever kl_beta > 0.
+            setattr(cached_targets, field, prediction)
             progress.advance(task_id)
 
     def _precompute_aux_model_outputs_for_plan(
@@ -626,7 +633,9 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         with progress, torch.no_grad():
             self._prepare_cached_targets(rollouts, flat_items, progress, prepare_task)
             with apply_ema_maybe(self._old_ema):
-                self._precompute_predictions(rollouts, flat_items, progress, old_task)
+                self._precompute_predictions(
+                    rollouts, flat_items, progress, old_task, field="old_prediction"
+                )
 
             if self.kl_beta > 0:
                 ref_task = progress.add_task("Precompute ref", total=len(flat_items))
@@ -636,6 +645,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                         flat_items,
                         progress,
                         ref_task,
+                        field="ref_prediction",
                     )
 
         if was_training:
