@@ -6,6 +6,7 @@ pre-commit:
       exclude:
         - "flow_control/third_party/**"
         - "notebooks/**"
+        - "docs/**"
       run: uv run ruff format {staged_files}
       stage_fixed: true
 
@@ -14,6 +15,7 @@ pre-commit:
       exclude:
         - "flow_control/third_party/**"
         - "notebooks/**"
+        - "docs/**"
       run: uv run ruff check --fix {staged_files}
       stage_fixed: true
 

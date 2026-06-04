@@ -248,4 +248,4 @@ else:
 | [`training/mixins/dcp.py`](../flow_control/training/mixins/dcp.py) | DCP checkpoint 加载/保存、checkpoint 轮转 |
 | [`training/sft.py`](../flow_control/training/sft.py) | SFT Trainer，展示了两层 checkpoint 的完整用法 |
 | [`scripts/seed.py`](../flow_control/scripts/seed.py) | Seed checkpoint 生成脚本 |
-| [`examples/fsdp/dcp.py`](../examples/fsdp/dcp.py) | LoRA + FSDP2 + DCP 的独立示例 |
+| [`fsdp/dcp.py`](fsdp/dcp.py) | LoRA + FSDP2 + DCP 的独立示例（本文配套，可直接运行） |
