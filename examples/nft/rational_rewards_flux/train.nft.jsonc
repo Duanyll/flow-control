@@ -124,6 +124,7 @@
   "validation_dataset": {
     "type": "pickle_directory",
     "path": "./data/pickscore_flux_512/validation",
+    "limit": 256,
   },
 
   "validation_sampler": {
@@ -131,6 +132,8 @@
     "cfg_scale": 1.0,
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
+
+  "validation_log_images": 64,
 
   "processor": {
     "task": "t2i",

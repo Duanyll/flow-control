@@ -22,6 +22,9 @@
   "checkpoint_interval": 10,
   "validation_epochs": 10,
   "max_checkpoints": 10,
+  // Score a 256-prompt validation subset for a stable online reward metric,
+  // but only push the first 64 image samples to trackio (mirrors pickscore).
+  "validation_log_images": 64,
 
   "model": {
     "arch": "flux1",
@@ -91,6 +94,7 @@
   "validation_dataset": {
     "type": "pickle_directory",
     "path": "./data/ocr_flux_grpo/validation",
+    "limit": 256,
   },
 
   "validation_sampler": {

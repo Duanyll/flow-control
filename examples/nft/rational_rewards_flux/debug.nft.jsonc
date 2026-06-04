@@ -21,7 +21,9 @@
   "beta": 1.0,
   "clip_grad_norm": 1.0,
   "adv_clip_max": 5.0,
-  "kl_beta": 0.0,
+  // Non-zero so the debug exercises the v-based KL reference path
+  // (transformer.disable_adapters()) that the full train config uses.
+  "kl_beta": 0.002,
 
   "train_epochs": 20,
   "checkpoint_interval": 5,
@@ -124,6 +126,6 @@
   "launch": {
     "type": "nft",
     "devices": 4,
-    // "generate_dcp_seed": true,
+    "generate_dcp_seed": true,
   },
 }
