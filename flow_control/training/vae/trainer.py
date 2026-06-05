@@ -28,6 +28,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.datasets.coercion import ImageTensor
 from flow_control.processors.components.vae import VAE, BaseVAE
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.types import (
     OptimizerConfig,
@@ -173,7 +174,9 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
     def _autocast_context(self):
         if not self.use_autocast:
             return nullcontext()
-        return torch.autocast(device_type="cuda", dtype=self.compute_dtype)
+        return torch.autocast(
+            device_type=devutil.current_device_type(), dtype=self.compute_dtype
+        )
 
     # ------------------------------- Setup ---------------------------------- #
 
@@ -343,7 +346,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             batch_size=1,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=devutil.is_available(),
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
         )
@@ -375,7 +378,7 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             batch_size=1,
             sampler=sampler,
             num_workers=self.validation_num_workers,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=devutil.is_available(),
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
         )

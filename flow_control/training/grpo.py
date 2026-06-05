@@ -17,6 +17,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_move_to_device,
@@ -590,7 +591,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 progress.update(task, advance=1)
 
                 del rollouts, advantages
-                torch.cuda.empty_cache()
+                devutil.empty_cache()
 
                 self.save_maybe(
                     self._current_step,

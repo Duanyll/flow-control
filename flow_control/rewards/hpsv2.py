@@ -28,6 +28,7 @@ from pydantic import ConfigDict, PrivateAttr
 from torchvision.transforms import Compose, InterpolationMode, Normalize
 from torchvision.transforms import functional as TF
 
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDType
 
@@ -271,8 +272,7 @@ class HPSv2Reward(BaseReward):
         self._transform = None
         self._device = None
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        devutil.empty_cache()
 
 
 if __name__ == "__main__":
@@ -301,7 +301,7 @@ if __name__ == "__main__":
         f"[bold]Image size:[/] {image_pil.size}, tensor shape: {tuple(image_tensor.shape)}"
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = devutil.default_device()
     print(f"[bold]Device:[/] {device}")
 
     reward = HPSv2Reward()

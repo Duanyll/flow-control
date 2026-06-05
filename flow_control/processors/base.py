@@ -4,9 +4,10 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict, TypeVar
 
 import torch
 from einops import rearrange
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.datasets.coercion import JsonBeforeValidator
+from flow_control.utils.device import default_device
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.resize import (
     ResolutionList,
@@ -76,7 +77,7 @@ class BaseProcessor[
         "pooled_encoder",
     ]
     _decoding_components: list[str] = ["vae"]
-    device: TorchDevice = torch.device("cuda")
+    device: TorchDevice = Field(default_factory=default_device)
 
     def load_models(
         self,

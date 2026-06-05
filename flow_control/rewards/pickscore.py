@@ -4,6 +4,7 @@ import torch
 from pydantic import ConfigDict, Field
 from transformers import CLIPModel, CLIPProcessor
 
+from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 
 from .base import BaseReward
@@ -114,7 +115,7 @@ if __name__ == "__main__":
 
     # Quick test
     reward = PickScoreReward()
-    reward.load_model(torch.device("cuda:2"))
+    reward.load_model(devutil.default_device())
 
     batch = {
         "clean_image": image_tensor,

@@ -15,6 +15,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.fsdp import fully_shard
 
 from flow_control.adapters.base import BaseModelAdapter
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 
 from ..launch_config import LaunchConfig
@@ -69,7 +70,7 @@ class HsdpMixin(BaseModel):
 
     @property
     def device(self):
-        return torch.device(f"cuda:{self.local_rank}")
+        return torch.device(devutil.current_device_type(), self.local_rank)
 
     # ---------------------------------- Methods --------------------------------- #
 
@@ -79,10 +80,11 @@ class HsdpMixin(BaseModel):
         self._world_size = int(os.environ["WORLD_SIZE"])
         self._rank = int(os.environ["RANK"])
         self._local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(self.local_rank)
-        dist.init_process_group(backend="nccl", device_id=self.local_rank)
+        dev = self.device
+        devutil.set_device(dev)
+        dist.init_process_group(backend=devutil.dist_backend(dev), device_id=dev)
         self._mesh = dist.device_mesh.init_device_mesh(
-            "cuda",
+            devutil.current_device_type(),
             mesh_shape=(
                 self.world_size // self.hsdp_shard_dim,
                 self.hsdp_shard_dim,
@@ -101,12 +103,11 @@ class HsdpMixin(BaseModel):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        devutil.manual_seed_all(seed)
         logger.info(f"Random seed set to {seed} for rank {self.rank}.")
 
     def get_rng_state_bytes(self) -> bytes:
-        """Serialize this rank's global RNG state (torch/cuda/numpy/random).
+        """Serialize this rank's global RNG state (torch/accelerator/numpy/random).
 
         Packed as a single pickled blob so DCP treats it as a per-rank bytes
         object (each rank saves/loads its own copy, not a broadcast of rank 0).
@@ -116,8 +117,9 @@ class HsdpMixin(BaseModel):
             "numpy": np.random.get_state(),
             "python": random.getstate(),
         }
-        if torch.cuda.is_available():
-            state["cuda"] = torch.cuda.get_rng_state(self.device)
+        acc_state = devutil.get_rng_state(self.device)
+        if acc_state is not None:
+            state[devutil.current_device_type()] = acc_state
         return pickle.dumps(state)
 
     def load_rng_state_bytes(self, data: bytes | None) -> None:
@@ -127,8 +129,9 @@ class HsdpMixin(BaseModel):
         torch.set_rng_state(state["torch"])
         np.random.set_state(state["numpy"])
         random.setstate(state["python"])
-        if "cuda" in state and torch.cuda.is_available():
-            torch.cuda.set_rng_state(state["cuda"], self.device)
+        acc_state = state.get(devutil.current_device_type())
+        if acc_state is not None:
+            devutil.set_rng_state(acc_state, self.device)
         logger.info("Restored RNG state from checkpoint.")
 
     def load_transformer_from_seed(

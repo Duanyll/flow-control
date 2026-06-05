@@ -4,6 +4,8 @@ import torch
 import torchvision.transforms as T
 from pydantic import ConfigDict, PrivateAttr
 
+from flow_control.utils import device as devutil
+
 from .base import BaseReward
 
 
@@ -113,7 +115,7 @@ class CLIPImageSimilarityReward(BaseReward):
         self._processor = None
         self._transform = None
         gc.collect()
-        torch.cuda.empty_cache()
+        devutil.empty_cache()
 
 
 if __name__ == "__main__":
@@ -141,7 +143,7 @@ if __name__ == "__main__":
     print(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
 
     reward = CLIPImageSimilarityReward()
-    reward.load_model(torch.device("cuda"))
+    reward.load_model(devutil.default_device())
 
     same_batch = {
         "clean_image": image_tensor,

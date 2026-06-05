@@ -374,7 +374,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             logger.info(
                 f"Latent length test completed successfully up to length {current_len}."
             )
-        except torch.cuda.OutOfMemoryError:
+        except torch.OutOfMemoryError:
             logger.error(
                 f"Out of memory error encountered at latent length {current_len}."
             )

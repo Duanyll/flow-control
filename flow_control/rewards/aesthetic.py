@@ -28,6 +28,7 @@ from huggingface_hub import hf_hub_download
 from pydantic import ConfigDict, PrivateAttr
 from transformers import CLIPModel, CLIPProcessor
 
+from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
@@ -170,8 +171,7 @@ class AestheticReward(BaseReward):
         self.processor.unload_model()
         self._device = None
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        devutil.empty_cache()
 
 
 if __name__ == "__main__":
@@ -209,7 +209,7 @@ if __name__ == "__main__":
     )
 
     reward = AestheticReward()
-    reward.load_model(torch.device("cuda"))
+    reward.load_model(devutil.default_device())
 
     coco_score = reward.score({"clean_image": image_tensor})
     noise_score = reward.score({"clean_image": noise_tensor})

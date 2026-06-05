@@ -16,6 +16,7 @@ from flow_control.processors import (
     get_processor_input_typeddict,
     parse_processor,
 )
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
     DataSource,
@@ -88,7 +89,11 @@ class ProcessorStage(PipelineStage):
         self.worker_id = worker_id
         self.logger = get_logger(f"ProcessorStage-{worker_id}")
 
-        self.device = torch.device(f"cuda:{device}" if device is not None else "cpu")
+        self.device = (
+            torch.device(devutil.current_device_type(), device)
+            if device is not None
+            else torch.device("cpu")
+        )
         self.logger.info(f"Using device: {self.device}")
         processor_args["device"] = self.device
         self.processor = parse_processor(processor_args)
@@ -155,7 +160,7 @@ def run(config_data: dict) -> None:
     datasink_type = config.output.pop("type")
 
     if config.processor_devices == "all":
-        num_gpus = torch.cuda.device_count()
+        num_gpus = devutil.device_count()
         gpu_ids = list(range(num_gpus))
     elif isinstance(config.processor_devices, int):
         num_gpus = config.processor_devices

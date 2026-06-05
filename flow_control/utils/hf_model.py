@@ -10,6 +10,7 @@ import torch
 from accelerate import infer_auto_device_map, init_empty_weights
 from pydantic import BaseModel, ConfigDict
 
+from . import device as devutil
 from .logging import get_logger
 from .types import TorchDType
 
@@ -48,8 +49,8 @@ class LoadingScope:
             del HfModelLoader._model_cache[key]
             # key layout: (library, class_name, pretrained_id, ...)
             messages.append(f"Purged cached model: {key[1]} ({key[2]})")
-        if stale and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if stale:
+            devutil.empty_cache()
         return messages
 
 
@@ -121,8 +122,7 @@ class HfModelLoader[T](BaseModel):
         model = self._model
         self._model = None
         del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        devutil.empty_cache()
         logger.info(
             f"Unloaded model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''}"
         )

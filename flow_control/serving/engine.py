@@ -16,6 +16,7 @@ from flow_control.adapters.base import BaseModelAdapter
 from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
 from flow_control.samplers import Sampler
+from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.progress import report_progress
@@ -271,8 +272,7 @@ class ServingEngine:
             else:
                 loader._model = None
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        devutil.empty_cache()
 
     # ----------------------------- Model loading ----------------------------- #
 

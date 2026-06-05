@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from pydantic import BaseModel
 
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 
 from .hsdp import main_process_only
@@ -163,11 +164,7 @@ class CheckpointingMixin(DcpMixin):
             return bool(should_local)
         device = getattr(self, "device", None)
         if not isinstance(device, torch.device):
-            device = (
-                torch.device("cuda")
-                if torch.cuda.is_available()
-                else torch.device("cpu")
-            )
+            device = devutil.default_device()
         flag = torch.tensor([local], device=device, dtype=torch.int32)
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
         return bool(flag.item())

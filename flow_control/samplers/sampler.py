@@ -18,6 +18,7 @@ from rich.progress import (
 )
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
@@ -80,7 +81,9 @@ class Sampler(BaseModel):
 
     def _sync_negative_pass(self, negative_pass: bool):
         if dist.is_initialized():
-            negative_pass_tensor = torch.tensor(negative_pass, device="cuda")
+            negative_pass_tensor = torch.tensor(
+                negative_pass, device=devutil.default_device()
+            )
             dist.all_reduce(negative_pass_tensor, op=dist.ReduceOp.MAX)
             self._negative_pass = negative_pass_tensor.item() > 0
         else:

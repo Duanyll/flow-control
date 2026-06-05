@@ -22,6 +22,7 @@ import torch
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
@@ -433,7 +434,7 @@ if __name__ == "__main__":
     image_tensor = pil_to_tensor(canvas)
 
     reward_module = OcrReward()
-    test_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    test_device = devutil.default_device()
     print(f"Loading OcrReward on device: {test_device}")
     reward_module.load_model(test_device)
     image_tensor = image_tensor.to(test_device)

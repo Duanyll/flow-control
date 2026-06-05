@@ -1,9 +1,9 @@
-import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
+from flow_control.utils.device import default_device
 from flow_control.utils.types import TorchDevice
 
 
@@ -12,7 +12,7 @@ class ServeConfig(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = 7860
-    device: TorchDevice = torch.device("cuda")
+    device: TorchDevice = Field(default_factory=default_device)
     processor_device: TorchDevice | None = None
     offload_processor: bool = False
     share: bool = False

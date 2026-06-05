@@ -3,13 +3,14 @@ from typing import cast
 
 import torch
 import uvicorn
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from flow_control.processors.components.vae import VAE, BaseVAE, PosteriorMode
+from flow_control.utils.device import default_device
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_tensor, serialize_tensor
 from flow_control.utils.types import TorchDevice
@@ -24,7 +25,7 @@ class VAEServerConfig(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = 8000
-    device: TorchDevice = torch.device("cuda")
+    device: TorchDevice = Field(default_factory=default_device)
 
     vae: VAE | None = None
 

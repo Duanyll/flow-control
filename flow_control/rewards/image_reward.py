@@ -17,6 +17,7 @@ from huggingface_hub import hf_hub_download
 from pydantic import ConfigDict, PrivateAttr
 
 from flow_control.third_party.imagereward import ImageReward as _VendoredImageReward
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
@@ -111,8 +112,7 @@ class ImageRewardReward(BaseReward):
     def _unload_model(self) -> None:
         self._model = None
         self._device = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        devutil.empty_cache()
 
 
 if __name__ == "__main__":
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     rprint(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
 
     reward = ImageRewardReward()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = devutil.default_device()
     reward.load_model(device)
 
     cats_prompt = "Two cats lying on a couch with two tv remotes"

@@ -4,6 +4,8 @@ import torch
 import torchvision.transforms as T
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from flow_control.utils import device as devutil
+
 from .base import BaseReward
 from .normalize import AffineNormalize, Normalize
 
@@ -98,4 +100,4 @@ class CLIPScoreReward(BaseReward):
         self._processor = None
         self._transform = None
         gc.collect()
-        torch.cuda.empty_cache()
+        devutil.empty_cache()

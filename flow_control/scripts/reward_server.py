@@ -2,7 +2,7 @@ import asyncio
 
 import torch
 import uvicorn
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -10,6 +10,7 @@ from starlette.routing import Route
 
 from flow_control.rewards import Reward, parse_reward
 from flow_control.rewards.base import BaseReward
+from flow_control.utils.device import default_device
 from flow_control.utils.logging import get_logger
 from flow_control.utils.remote import deserialize_batch, serialize_object
 from flow_control.utils.types import TorchDevice
@@ -22,7 +23,7 @@ class RewardServerConfig(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = 8001
-    device: TorchDevice = torch.device("cuda")
+    device: TorchDevice = Field(default_factory=default_device)
 
     reward: Reward | None = None
 

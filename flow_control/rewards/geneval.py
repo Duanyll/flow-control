@@ -16,6 +16,7 @@ import torch.utils.data
 from PIL import Image, ImageOps
 from pydantic import ConfigDict, PrivateAttr
 
+from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
@@ -460,7 +461,7 @@ class GenevalReward(BaseReward):
         self._clip_tokenizer = None
         self._color_classifiers = {}
         gc.collect()
-        torch.cuda.empty_cache()
+        devutil.empty_cache()
 
 
 # ======================================================================
@@ -604,7 +605,7 @@ if __name__ == "__main__":
     image_tensor = pil_to_tensor(image_pil)  # [1, C, H, W] in [0, 1]
     rprint(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = devutil.default_device()
 
     # ==================================================================
     # Part A: Verify Mask2Former detection directly
@@ -653,7 +654,7 @@ if __name__ == "__main__":
     rprint(f"[bold green]Saved detection visualization to[/] {vis_path}")
 
     del detector
-    torch.cuda.empty_cache()
+    devutil.empty_cache()
 
     # ==================================================================
     # Part B: Verify GenevalReward scoring (both modes)
