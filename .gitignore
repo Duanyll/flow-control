@@ -17,6 +17,7 @@ outputs/
 demo/
 draft/
 local/
+notebooks/
 
 docker-compose.*
 .devcontainer/
