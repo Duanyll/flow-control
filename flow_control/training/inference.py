@@ -15,7 +15,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
-from flow_control.rewards import Reward
+from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler
 from flow_control.samplers.sampler import derive_seed
@@ -174,6 +174,24 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                 f"normalized_mean={normalized[:, i].mean().item():.4f}"
             )
 
+    def _score_one(self, batch: dict[str, Any]) -> RewardResult:
+        """Score a single generated batch, supporting async-only rewards.
+
+        ``BaseReward.score()`` only implements the synchronous ``_score()`` path,
+        which async-only rewards (e.g. the remote vLLM RationalRewards judge)
+        raise ``NotImplementedError`` on. Route through ``execute_reward`` instead,
+        which dispatches to ``async_score()`` when the reward needs the async path
+        and falls back to the synchronous path otherwise.
+        """
+        assert self.reward is not None
+        out: list[RewardResult] = []
+        execute_reward(
+            self.reward,
+            ((batch, None) for _ in range(1)),
+            lambda _tag, result: out.append(result),
+        )
+        return out[0]
+
     def _run_one_batch(
         self,
         batch: Any,
@@ -211,7 +229,7 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
 
         reward_result: RewardResult | None = None
         if self.reward is not None and key != "__padding__":
-            reward_result = self.reward.score(batch)
+            reward_result = self._score_one(batch)
             self._print_reward_result(key, reward_result)
             reward_results.append(
                 deep_move_to_device(reward_result, torch.device("cpu"))
