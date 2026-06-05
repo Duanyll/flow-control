@@ -165,7 +165,8 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
         console.rule("[bold green]Reward Summary[/bold green]")
         console.print(
             f"reward mean={aggregate.mean().item():.4f} "
-            f"std={aggregate.std(correction=0).item():.4f}"
+            f"std={aggregate.std(correction=0).item():.4f} "
+            f"(n={aggregate.shape[0]} over {world_size} rank(s))"
         )
         for i, label in enumerate(labels):
             console.print(
