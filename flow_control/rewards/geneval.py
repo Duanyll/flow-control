@@ -133,10 +133,6 @@ class GenevalReward(BaseReward):
         self._clip_tokenizer = open_clip.get_tokenizer(self.clip_arch)
         self._color_classifiers = {}
 
-        from clip_benchmark.metrics import zeroshot_classification as zsc
-
-        zsc.tqdm = lambda x, **kwargs: x  # disable tqdm in color classification
-
     # ------------------------------------------------------------------
     # Detection helpers
     # ------------------------------------------------------------------
@@ -214,7 +210,7 @@ class GenevalReward(BaseReward):
         bboxes: list[tuple[np.ndarray, np.ndarray | None]],
         classname: str,
     ) -> list[str]:
-        from clip_benchmark.metrics import zeroshot_classification as zsc
+        from flow_control.third_party import clip_benchmark_zeroshot as zsc
 
         if classname not in self._color_classifiers:
             self._color_classifiers[classname] = zsc.zero_shot_classifier(
