@@ -1,10 +1,13 @@
+import csv
 import os
+from collections.abc import Generator
 from typing import Any
 
 import torch
 import torch.distributed as dist
 from pydantic import ConfigDict, model_validator
-from rich.progress import Progress
+from rich.progress import Progress, TaskID
+from rich.table import Table
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -51,6 +54,13 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
     checkpoint_dir: str | None = None
     save_preview_dir: str | None = None
     save_extra: bool = False
+    reward_csv_path: str | None = None
+    """Optional path to write per-sample reward scores as a CSV.
+
+    The terminal only shows the aggregated summary; set this to keep the
+    full per-image breakdown. Written by the main process after gathering
+    scores from all ranks.
+    """
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
@@ -111,94 +121,15 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             options=StateDictOptions(strict=False),
         )
 
-    # ---------------------------------- Rewards ---------------------------------- #
+    # ---------------------------------- Sampling -------------------------------- #
 
-    def _reward_fields(self, result: RewardResult) -> dict[str, Any]:
-        aggregate = result.aggregate().detach().cpu()
-        raw = result.raw.detach().cpu()
-        normalized = result.normalized.detach().cpu()
-        return {
-            "reward": aggregate,
-            "reward_raw": {
-                label: raw[:, i].clone() for i, label in enumerate(result.labels)
-            },
-            "reward_normalized": {
-                label: normalized[:, i].clone() for i, label in enumerate(result.labels)
-            },
-        }
+    def _sample_one(self, batch: Any) -> tuple[Any, Any, str]:
+        """Run the sampler + decode for a single batch.
 
-    def _print_reward_result(self, key: str, result: RewardResult) -> None:
-        aggregate = result.aggregate().detach().cpu()
-        raw = result.raw.detach().cpu()
-        parts = [
-            f"{label}={raw[:, i].mean().item():.4f}"
-            for i, label in enumerate(result.labels)
-        ]
-        console.print(
-            f"[bold]{key}[/] reward={aggregate.mean().item():.4f} " + " ".join(parts)
-        )
-
-    def _print_reward_summary(self, results: list[RewardResult]) -> None:
-        world_size: int = getattr(self, "world_size", 1)
-        is_main: bool = getattr(self, "is_main_process", True)
-
-        all_results = results
-        if world_size > 1:
-            if is_main:
-                gathered: list[Any] = [None] * world_size
-                dist.gather_object(results, gathered, dst=0)
-                all_results = [
-                    result for rank_results in gathered for result in rank_results
-                ]
-            else:
-                dist.gather_object(results, None, dst=0)
-                return
-
-        if not all_results:
-            return
-
-        normalized = torch.cat([r.normalized.cpu() for r in all_results], dim=0)
-        raw = torch.cat([r.raw.cpu() for r in all_results], dim=0)
-        weights = all_results[0].weights.cpu().to(dtype=normalized.dtype)
-        labels = all_results[0].labels
-        aggregate = (normalized * weights).sum(dim=-1)
-        console.rule("[bold green]Reward Summary[/bold green]")
-        console.print(
-            f"reward mean={aggregate.mean().item():.4f} "
-            f"std={aggregate.std(correction=0).item():.4f} "
-            f"(n={aggregate.shape[0]} over {world_size} rank(s))"
-        )
-        for i, label in enumerate(labels):
-            console.print(
-                f"{label}: raw_mean={raw[:, i].mean().item():.4f} "
-                f"raw_std={raw[:, i].std(correction=0).item():.4f} "
-                f"normalized_mean={normalized[:, i].mean().item():.4f}"
-            )
-
-    def _score_one(self, batch: dict[str, Any]) -> RewardResult:
-        """Score a single generated batch, supporting async-only rewards.
-
-        ``BaseReward.score()`` only implements the synchronous ``_score()`` path,
-        which async-only rewards (e.g. the remote vLLM RationalRewards judge)
-        raise ``NotImplementedError`` on. Route through ``execute_reward`` instead,
-        which dispatches to ``async_score()`` when the reward needs the async path
-        and falls back to the synchronous path otherwise.
+        Returns ``(batch, decoded, key)`` where ``batch`` (still on device) has
+        the decoded outputs merged in, ``decoded`` is the decoded-only dict, and
+        ``key`` is the sample key (``"__padding__"`` for padding samples).
         """
-        assert self.reward is not None
-        out: list[RewardResult] = []
-        execute_reward(
-            self.reward,
-            ((batch, None) for _ in range(1)),
-            lambda _tag, result: out.append(result),
-        )
-        return out[0]
-
-    def _run_one_batch(
-        self,
-        batch: Any,
-        datasink: Any,
-        reward_results: list[RewardResult],
-    ) -> None:
         batch = deep_move_to_device(batch, self.device)
         batch = self.preprocess_for_inference(batch, save_extra=True)
         batch = deep_cast_float_dtype(batch, self.model.dtype)
@@ -227,29 +158,152 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             batch,
         )
         batch.update(decoded)
+        return batch, decoded, key
 
-        reward_result: RewardResult | None = None
-        if self.reward is not None and key != "__padding__":
-            reward_result = self._score_one(batch)
-            self._print_reward_result(key, reward_result)
-            reward_results.append(
-                deep_move_to_device(reward_result, torch.device("cpu"))
-            )
+    def _sample_submitter(
+        self,
+        progress: Progress,
+        task: TaskID,
+    ) -> Generator[tuple[dict[str, Any], tuple[dict[str, Any], str]]]:
+        """Generate samples and yield ``(batch, (record, key))`` for scoring.
 
-        result = deep_move_to_device(decoded, torch.device("cpu"))
+        ``batch`` (on device) is handed to ``execute_reward``, which snapshots
+        the fields it needs for async scoring and lets sampling of the next
+        batch overlap with the reward request still in flight. ``record`` is the
+        CPU payload written to the datasink / preview once its score is known.
+
+        Padding samples still run the model (to keep FSDP collectives balanced
+        across ranks) but are not yielded for scoring or output.
+        """
+        for batch in self.dataloader:
+            with dump_if_failed(logger, batch):
+                batch, decoded, key = self._sample_one(batch)
+                record = (
+                    None
+                    if key == "__padding__"
+                    else deep_move_to_device(
+                        batch if self.save_extra else decoded,
+                        torch.device("cpu"),
+                    )
+                )
+            progress.advance(task)
+            if record is not None:
+                yield batch, (record, key)
+
+    # ---------------------------------- Output ---------------------------------- #
+
+    def _reward_fields(self, result: RewardResult) -> dict[str, Any]:
+        raw = result.raw.detach().cpu()
+        normalized = result.normalized.detach().cpu()
+        return {
+            "reward": result.aggregate().detach().cpu(),
+            "reward_raw": {
+                label: raw[:, i].clone() for i, label in enumerate(result.labels)
+            },
+            "reward_normalized": {
+                label: normalized[:, i].clone() for i, label in enumerate(result.labels)
+            },
+        }
+
+    def _write_record(
+        self,
+        record: dict[str, Any],
+        key: str,
+        datasink: Any,
+        reward_result: RewardResult | None,
+    ) -> None:
+        """Write a single CPU ``record`` to the datasink and preview dir."""
         if reward_result is not None:
-            result.update(self._reward_fields(reward_result))
-        image = tensor_to_pil(result["clean_image"])
-        if key == "__padding__":
-            return
+            record.update(self._reward_fields(reward_result))
         if datasink is not None:
-            if self.save_extra:
-                result = deep_move_to_device(batch, torch.device("cpu"))
-                if reward_result is not None:
-                    result.update(self._reward_fields(reward_result))
-            datasink.write(result)
+            datasink.write(record)
         if self.save_preview_dir is not None:
+            image = tensor_to_pil(record["clean_image"])
             image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
+
+    # ---------------------------------- Rewards --------------------------------- #
+
+    def _gather_scored(
+        self,
+        scored: list[tuple[str, RewardResult]],
+    ) -> list[tuple[str, RewardResult]] | None:
+        """Gather per-sample scores onto the main process (None elsewhere)."""
+        if self.world_size <= 1:
+            return scored
+        if self.is_main_process:
+            gathered: list[Any] = [None] * self.world_size
+            dist.gather_object(scored, gathered, dst=0)
+            return [item for part in gathered for item in part]
+        dist.gather_object(scored, None, dst=0)
+        return None
+
+    def _write_reward_csv(
+        self,
+        scored: list[tuple[str, RewardResult]],
+        path: str,
+    ) -> None:
+        labels = scored[0][1].labels
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            header = ["key", "reward"]
+            for label in labels:
+                header.extend([f"raw/{label}", f"normalized/{label}"])
+            writer.writerow(header)
+            for key, result in scored:
+                raw = result.raw.flatten().tolist()
+                normalized = result.normalized.flatten().tolist()
+                row = [key, f"{result.aggregate().item():.6f}"]
+                for r, n in zip(raw, normalized, strict=True):
+                    row.extend([f"{r:.6f}", f"{n:.6f}"])
+                writer.writerow(row)
+        logger.info(f"Wrote per-sample reward scores to {path}")
+
+    def _print_reward_summary(
+        self,
+        scored: list[tuple[str, RewardResult]],
+    ) -> None:
+        normalized = torch.cat([r.normalized for _, r in scored], dim=0)
+        raw = torch.cat([r.raw for _, r in scored], dim=0)
+        weights = scored[0][1].weights.to(dtype=normalized.dtype)
+        labels = scored[0][1].labels
+        aggregate = (normalized * weights).sum(dim=-1)
+
+        console.rule("[bold green]Reward Summary[/bold green]")
+        table = Table(
+            caption=f"n={aggregate.shape[0]} samples over {self.world_size} rank(s)",
+            header_style="bold",
+        )
+        table.add_column("component")
+        for col in ("raw mean", "raw std", "norm mean", "norm std"):
+            table.add_column(col, justify="right")
+        table.add_row(
+            "[bold]weighted[/bold]",
+            "—",
+            "—",
+            f"{aggregate.mean().item():.4f}",
+            f"{aggregate.std(correction=0).item():.4f}",
+        )
+        for i, label in enumerate(labels):
+            table.add_row(
+                label,
+                f"{raw[:, i].mean().item():.4f}",
+                f"{raw[:, i].std(correction=0).item():.4f}",
+                f"{normalized[:, i].mean().item():.4f}",
+                f"{normalized[:, i].std(correction=0).item():.4f}",
+            )
+        console.print(table)
+
+    def _report_rewards(self, scored: list[tuple[str, RewardResult]]) -> None:
+        """Gather scores across ranks, then print the summary and write CSV."""
+        all_scored = self._gather_scored(scored)
+        if all_scored is None or not all_scored:
+            return
+        if self.reward_csv_path is not None:
+            self._write_reward_csv(all_scored, self.reward_csv_path)
+        self._print_reward_summary(all_scored)
 
     # ------------------------------- Main loop ---------------------------------- #
 
@@ -280,14 +334,26 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
             console=console,
         )
         task = progress.add_task("Inference", total=len(self.dataloader))
-        reward_results: list[RewardResult] = []
 
         with progress:
-            for batch in self.dataloader:
-                with dump_if_failed(logger, batch):
-                    self._run_one_batch(batch, datasink, reward_results)
-                progress.advance(task)
+            submitter = self._sample_submitter(progress, task)
+            if self.reward is not None:
+
+                def handler(
+                    tag: tuple[dict[str, Any], str],
+                    result: RewardResult,
+                ) -> tuple[str, RewardResult]:
+                    record, key = tag
+                    cpu_result = deep_move_to_device(result, torch.device("cpu"))
+                    self._write_record(record, key, datasink, cpu_result)
+                    return key, cpu_result
+
+                scored = execute_reward(self.reward, submitter, handler)
+            else:
+                for _batch, (record, key) in submitter:
+                    self._write_record(record, key, datasink, None)
+                scored = []
 
         if self.reward is not None:
-            self._print_reward_summary(reward_results)
+            self._report_rewards(scored)
         console.rule("[bold green]Inference Completed[/bold green]")

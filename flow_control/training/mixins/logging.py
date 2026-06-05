@@ -268,7 +268,6 @@ class LoggingMixin(BaseModel):
         full_key = f"{name}/{image_key}"
         if self._trackio_run is not None:
             trackio.log({full_key: trackio.Image(pil, caption=caption)}, step=step)
-        logger.info(f"Image logged: key={full_key} step={step}")
 
     def _link_log_dir(self) -> None:
         if self._run_dir is None:

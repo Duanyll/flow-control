@@ -181,6 +181,26 @@ def _detect_num_gpus() -> int:
     return num_gpus
 
 
+def _detect_nproc() -> int:
+    try:
+        result = subprocess.run(
+            ["nproc"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        num_cpus = int(result.stdout.strip())
+        print(f"[blue]Detected {num_cpus} CPUs with nproc.[/blue]")
+        return num_cpus
+    except Exception as e:
+        print(f"[red]Error detecting CPUs with nproc: {e}[/red]")
+        fallback = os.cpu_count() or 0
+        print(
+            f"[yellow]Falling back to os.cpu_count(): {fallback} CPUs detected.[/yellow]"
+        )
+        return fallback
+
+
 def _resolve_num_processes(launch_config: LaunchConfig) -> int:
     num_gpus = _detect_num_gpus()
     devices = launch_config.devices
@@ -240,7 +260,9 @@ def run(
     if isinstance(launch_config.devices, list):
         envs["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in launch_config.devices)
     if "OMP_NUM_THREADS" not in envs:
-        omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
+        # omp_threads = max(1, (os.cpu_count() or 0) // num_processes)
+        # Call `nproc` to get the number of CPUs available to this process
+        omp_threads = max(1, _detect_nproc() // num_processes)
         envs["OMP_NUM_THREADS"] = str(omp_threads)
     if "LOG_DIR" not in envs and not os.getenv("LOG_DIR"):
         envs["LOG_DIR"] = _default_log_dir()
