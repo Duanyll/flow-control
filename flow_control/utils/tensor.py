@@ -3,7 +3,6 @@ import functools
 from collections.abc import Callable
 from typing import Any, Literal
 
-import kornia
 import numpy as np
 import torch
 from einops import rearrange, repeat
@@ -12,42 +11,6 @@ from PIL import Image
 from .logging import get_logger
 
 logger = get_logger(__name__)
-
-
-def meshgrid_to_ij(grid: torch.Tensor, h: int, w: int):
-    """
-    Convert a meshgrid for F.grid_sample to the subscript index [i, j].
-
-    Args:
-        grid: (N, 2) tensor with the meshgrid coordinates, ranging from -1 to 1.
-        h: height of the image.
-        w: width of the image.
-    Returns:
-        ij: (N, 2) tensor with the subscript indices.
-    """
-    # Ensure grid is of shape (N, 2)
-    assert grid.shape[1] == 2, f"Expected grid shape (N, 2), got {grid.shape}"
-
-    # Extract x and y coordinates
-    x = grid[:, 0]  # (N,)
-    y = grid[:, 1]  # (N,)
-
-    # Convert from [-1, 1] to [0, w-1] for x and [0, h-1] for y
-    i = ((y + 1) / 2) * (h - 1)  # (N,)
-    j = ((x + 1) / 2) * (w - 1)  # (N,)
-
-    # Stack to form (N, 2) tensor [i, j]
-    ij = torch.stack([i, j], dim=1)
-
-    return ij
-
-
-def make_grid(h, w, device: torch.device) -> torch.Tensor:
-    grid_array = kornia.utils.create_meshgrid(
-        h, w, normalized_coordinates=True, device=device
-    )
-    grid = rearrange(grid_array, "1 h w c -> c h w")  # Shape: 2 H W
-    return grid
 
 
 def deep_apply_tensor_fn(data: Any, fn: Callable) -> Any:

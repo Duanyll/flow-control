@@ -14,8 +14,6 @@ dependencies = [
     "httpx>=0.28.1",
     "json5>=0.12.1",
     "jsonpath-ng>=1.8.0",
-    "kornia>=0.8.2",
-    "kornia-rs>=0.1.10",
     "lmdb>=1.7.5",
     "open-clip-torch>=3.3.0",
     "peft>=0.18.0",
@@ -23,7 +21,6 @@ dependencies = [
     "protobuf>=6.33.2",
     "pydantic>=2.12.5",
     "rich>=14.2.0",
-    "scipy>=1.17.0",
     "sentencepiece>=0.2.1",
     "starlette>=0.50.0",
     "timm>=1.0.22",
@@ -46,6 +43,7 @@ dev = [
     "matplotlib>=3.10.8",
     "seaborn>=0.13.2",
     "py-spy>=0.4.1",
+    "scipy>=1.17.1",
 ]
 
 [project.scripts]

@@ -1,5 +1,5 @@
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 from pydantic import Discriminator, Tag
@@ -370,7 +370,7 @@ class Qwen25VLEncoder(
             text_kwargs={"padding": True, "return_tensors": "pt"},
             images_kwargs={"return_tensors": "pt"},
         ).to(model.device)
-        generated_ids = model.generate(
+        generated_ids = cast(Any, model).generate(
             **model_inputs, max_new_tokens=self.generate_max_new_tokens
         )
         generated_ids_trimmed = [
@@ -557,7 +557,7 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
                 device=device, dtype=self.model.dtype
             )
 
-        generated_ids = self.model.generate(
+        generated_ids = cast(Any, self.model).generate(
             **inputs,
             max_new_tokens=512,
             do_sample=True,

@@ -49,16 +49,17 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     def in_channels(self) -> int:
         return self.model.config["in_channels"]
 
-    def load_model(self, device: torch.device, frozen: bool = True):
+    def load_model(self, device: torch.device, frozen: bool = True) -> bool:
         if self.endpoint is not None:
             logger.info(f"Using remote VAE endpoint: {self.endpoint}")
             self._init_remote(device)
             self._model = None
-        else:
-            super().load_model(device, frozen)
-            logger.info(
-                f"{self.__class__.__name__} requires {self.in_channels} input channels"
-            )
+            return False
+        fresh = super().load_model(device, frozen)
+        logger.info(
+            f"{self.__class__.__name__} requires {self.in_channels} input channels"
+        )
+        return fresh
 
     def _encode(
         self, images: torch.Tensor, posterior: PosteriorMode = "sample"

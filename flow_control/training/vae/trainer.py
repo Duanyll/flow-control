@@ -207,7 +207,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
 
         if self.seed_checkpoint_dir is not None:
             # Seed checkpoint pattern
-            model: Any = vae_loader.load_model(torch.device("meta"), frozen=False)
+            vae_loader.load_model(torch.device("meta"), frozen=False)
+            model: Any = vae_loader.model
 
             if self.do_convert_to_rgba:
                 model = convert_to_rgba(model)
@@ -242,7 +243,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
             logger.info(f"Loaded VAE seed checkpoint from {self.seed_checkpoint_dir}.")
         else:
             # Fallback: load directly on device, then shard
-            model = vae_loader.load_model(self.device, frozen=False)
+            vae_loader.load_model(self.device, frozen=False)
+            model = vae_loader.model
 
             if self.do_convert_to_rgba:
                 model = convert_to_rgba(model)
@@ -263,7 +265,8 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
         # Load reference VAE (frozen, no FSDP) if needed; keep loader dtype.
         if self.ref_kl_scale is not None and self.ref_vae is not None:
             ref_loader: BaseVAE[Any] = self.ref_vae
-            ref_model: Any = ref_loader.load_model(self.device, frozen=True)
+            ref_loader.load_model(self.device, frozen=True)
+            ref_model: Any = ref_loader.model
             ref_model.eval()
             self._ref_vae_model = ref_model
             logger.info("Loaded frozen reference VAE for KL regularization.")

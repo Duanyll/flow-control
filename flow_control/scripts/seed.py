@@ -29,7 +29,8 @@ def _run_vae_seed(config: dict) -> None:
 
     vae_adapter: TypeAdapter[Any] = TypeAdapter(VAE)
     vae_loader = vae_adapter.validate_python(config["vae"])
-    model = vae_loader.load_model(device=torch.device("cpu"), frozen=False)
+    vae_loader.load_model(device=torch.device("cpu"), frozen=False)
+    model = vae_loader.model
 
     if config.get("do_convert_to_rgba", False):
         model = convert_to_rgba(model)

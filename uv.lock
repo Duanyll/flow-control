@@ -514,8 +514,6 @@ dependencies = [
     { name = "httpx" },
     { name = "json5" },
     { name = "jsonpath-ng" },
-    { name = "kornia" },
-    { name = "kornia-rs" },
     { name = "lmdb" },
     { name = "open-clip-torch" },
     { name = "peft" },
@@ -523,7 +521,6 @@ dependencies = [
     { name = "protobuf" },
     { name = "pydantic" },
     { name = "rich" },
-    { name = "scipy" },
     { name = "sentencepiece" },
     { name = "starlette" },
     { name = "timm" },
@@ -553,6 +550,7 @@ dev = [
     { name = "py-spy" },
     { name = "pyright" },
     { name = "ruff" },
+    { name = "scipy" },
     { name = "seaborn" },
 ]
 
@@ -567,8 +565,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "json5", specifier = ">=0.12.1" },
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
-    { name = "kornia", specifier = ">=0.8.2" },
-    { name = "kornia-rs", specifier = ">=0.1.10" },
     { name = "lmdb", specifier = ">=1.7.5" },
     { name = "onnxruntime-gpu", marker = "extra == 'ocr'", specifier = ">=1.20.0" },
     { name = "open-clip-torch", specifier = ">=3.3.0" },
@@ -578,7 +574,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "rapidocr", marker = "extra == 'ocr'", specifier = ">=3.4.0" },
     { name = "rich", specifier = ">=14.2.0" },
-    { name = "scipy", specifier = ">=1.17.0" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
     { name = "starlette", specifier = ">=0.50.0" },
     { name = "timm", specifier = ">=1.0.22" },
@@ -603,6 +598,7 @@ dev = [
     { name = "py-spy", specifier = ">=0.4.1" },
     { name = "pyright", specifier = ">=1.1.407" },
     { name = "ruff", specifier = ">=0.14.8" },
+    { name = "scipy", specifier = ">=1.17.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
 ]
 
@@ -1039,34 +1035,6 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/0f/41/c5f71f9f00aabcc71fee8b7475e3f64747282580c2fe748961ba29b18385/kiwisolver-1.5.0-graalpy312-graalpy250_312_native-macosx_11_0_arm64.whl", hash = "sha256:f6764a4ccab3078db14a632420930f6186058750df066b8ea2a7106df91d3203" },
     { url = "https://mirrors.aliyun.com/pypi/packages/fa/06/7399a607f434119c6e1fdc8ec89a8d51ccccadf3341dee4ead6bd14caaf5/kiwisolver-1.5.0-graalpy312-graalpy250_312_native-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c31c13da98624f957b0fb1b5bae5383b2333c2c3f6793d9825dd5ce79b525cb7" },
     { url = "https://mirrors.aliyun.com/pypi/packages/b5/91/53255615acd2a1eaca307ede3c90eb550bae9c94581f8c00081b6b1c8f44/kiwisolver-1.5.0-graalpy312-graalpy250_312_native-win_amd64.whl", hash = "sha256:1f1489f769582498610e015a8ef2d36f28f505ab3096d0e16b4858a9ec214f57" },
-]
-
-[[package]]
-name = "kornia"
-version = "0.8.3"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
-dependencies = [
-    { name = "kornia-rs" },
-    { name = "packaging" },
-    { name = "torch", version = "2.12.0", source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-    { name = "torch", version = "2.12.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/1a/80/460e9dad0c1b68f3e83f198f3983638d62f910a88542b492290010d25f50/kornia-0.8.3.tar.gz", hash = "sha256:c06887374eaf39fb614a77ca054383e6cc2092cb7225e45437111b4984d0f866" }
-wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/85/05/0c1cc486e87d2a5ad6649eb96a8ccaa7c6002d8d73d676c13e2102f286c1/kornia-0.8.3-py3-none-any.whl", hash = "sha256:0b15f5d359aeafd7ff54ea631ed1943a3eb295c4a6dae3f745ddeada25e33289" },
-]
-
-[[package]]
-name = "kornia-rs"
-version = "0.1.14"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/09/0f/cd6985790031ad2f0d4fcdfdb9763a177bebb970edddc6fe29f9e6afd902/kornia_rs-0.1.14.tar.gz", hash = "sha256:7584f654a9db2b41bee05c9aaf865608b665e2f7195096372e001b6f220de1d2" }
-wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/d9/e3/e57480f38e395262616afd8efe91d0a1f7a4b875b52c9890e31aa85a057c/kornia_rs-0.1.14-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:76faf5389b1ea53452fc08561622ccad8ce81c8ff1857c4742be6ae4e82bf078" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/e4/4f/2935c5186cce45bfa85b587883d627627427bceb61d0b0e0aa0267339910/kornia_rs-0.1.14-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:0025db9854f3a34c66123c2646d52e71a534678d9343f3c897192136b2c3ddaf" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/d1/f5/dc5e8f69130de7ed8d59500789bc0cf1658ada8d5360164e416622cb47f1/kornia_rs-0.1.14-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:747b26a3ce0cad76aa1047ed65f95dcd649286a2d5417d8ad93f03bb1909238d" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/72/7f/01c9456a09a3a5731bf986724f6f6ff70d627ac8072cf298d842ec204692/kornia_rs-0.1.14-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:396f84661fcf260885c3f9db717caf6904eafd44857dca17be09a835bd7da8d9" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/e0/6f/01e0e2cf90c47ecf26656263cdabe491a1b206c94c0c30a1dd7e4d13ed29/kornia_rs-0.1.14-cp312-cp312-win_amd64.whl", hash = "sha256:ac4bbd0a8fd73b5058a39707c790fecec4c5204a42d1f5af17f1fa57cc83d406" },
 ]
 
 [[package]]
