@@ -1,73 +1,24 @@
-/* Captions / prompts: inline text, the collapsible "more/hide" fold, and the
-   group-level caption banner shown above a group's images. */
+/* Captions / prompts: a uniform line-clamped block (short and long prompts look
+   the same), plus the modal that shows the full text when a caption overflows. */
 
 .fc-caption {
   color: var(--body-text-color, #1f2937);
   line-height: 1.4;
   overflow-wrap: anywhere;
-}
-
-.fc-caption-tag {
-  flex: 0 0 auto;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--background-fill-secondary, #f3f4f6);
-  color: var(--body-text-color-subdued, #6b7280);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.fc-caption-fold {
-  min-width: 0;
-}
-
-.fc-caption-fold > summary {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  list-style: none;
-  cursor: pointer;
-  color: var(--body-text-color-subdued, #6b7280);
-}
-
-.fc-caption-fold > summary::-webkit-details-marker {
-  display: none;
-}
-
-.fc-caption-preview {
-  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.fc-caption-fold[open] > summary .fc-caption-preview {
-  display: none;
+/* Only captions that actually overflow the clamp become clickable. */
+.fc-caption-clip {
+  cursor: pointer;
 }
 
-.fc-caption-fold[open] > summary::after {
-  content: "hide";
-  color: var(--body-text-color-subdued, #6b7280);
-}
-
-.fc-caption-fold:not([open]) > summary::after {
-  content: "more";
-  margin-left: auto;
-  flex: 0 0 auto;
+.fc-caption-clip:hover {
   color: var(--link-text-color, #2563eb);
-  font-weight: 600;
-}
-
-.fc-caption-full {
-  margin-top: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-  color: var(--body-text-color, #1f2937);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .fc-caption-group {
@@ -78,6 +29,68 @@
   font-size: 13px;
 }
 
-.fc-caption-group .fc-caption-full {
-  max-height: 320px;
+/* Full-prompt modal: centered panel over a dimmed backdrop. */
+body.fc-caption-modal-open {
+  overflow: hidden;
+}
+
+.fc-caption-modal[hidden] {
+  display: none;
+}
+
+.fc-caption-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 10, 14, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.fc-caption-modal-panel {
+  position: relative;
+  width: min(720px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color-primary, #e5e7eb);
+  border-radius: 14px;
+  background: var(--background-fill-primary, #fff);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.fc-caption-modal-body {
+  margin: 0;
+  padding: 40px 26px 26px;
+  overflow-y: auto;
+  color: var(--body-text-color, #1f2937);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fc-caption-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--background-fill-secondary, #f3f4f6);
+  color: var(--body-text-color, #1f2937);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.fc-caption-modal-close:hover {
+  background: var(--border-color-primary, #e5e7eb);
 }

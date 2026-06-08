@@ -6,6 +6,13 @@ import { distinct, escapeHtml, numericInput } from "./utils.js";
 import { mediaUrl } from "./media-data.js";
 import { observeImages, resetImageLoader } from "./image-loader.js";
 import { openViewer } from "./viewer.js";
+import {
+  captionBlock,
+  captionText,
+  distinctCaptions,
+  markClampedCaptions,
+  openCaptionModal,
+} from "./caption.js";
 
 function imageIdMatches(imageId) {
   const query = state.controls.imageIdQuery.trim();
@@ -53,31 +60,6 @@ function fieldVaries(items, fn) {
   if (items.length <= 1) return false;
   const first = fn(items[0]);
   return items.some((item) => fn(item) !== first);
-}
-
-function captionText(item) {
-  const value = item?.caption;
-  return value == null ? "" : String(value).trim();
-}
-
-function distinctCaptions(items) {
-  return [...new Set(items.map(captionText).filter(Boolean))];
-}
-
-function captionBlock(text, { group = false } = {}) {
-  if (!text) return "";
-  const oneLine = text.replace(/\s+/g, " ").trim();
-  const isLong = oneLine.length > (group ? 200 : 80) || /\n/.test(text);
-  if (!isLong) {
-    return `<div class="fc-caption${group ? " fc-caption-group" : ""}">${escapeHtml(text)}</div>`;
-  }
-  const preview = escapeHtml(oneLine.slice(0, group ? 180 : 64));
-  return `
-    <details class="fc-caption-fold${group ? " fc-caption-group" : ""}">
-      <summary><span class="fc-caption-tag">prompt</span><span class="fc-caption-preview">${preview}…</span></summary>
-      <div class="fc-caption-full">${escapeHtml(text)}</div>
-    </details>
-  `;
 }
 
 function constChips(items, which) {
@@ -198,6 +180,12 @@ export function renderGallery(host) {
       focusAndSwitch(host, jump.dataset.fcJump, jump.dataset.fcValue);
       return;
     }
+    const caption = event.target?.closest?.(".fc-caption-clip");
+    if (caption) {
+      event.preventDefault();
+      openCaptionModal(caption.textContent);
+      return;
+    }
     const wrap = event.target?.closest?.(".fc-media-img-wrap");
     if (!wrap) return;
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -236,6 +224,7 @@ export function renderGallery(host) {
         `;
       })
       .join("") || '<div class="fc-empty-panel">No images match this step range.</div>';
+    markClampedCaptions(gallery);
     applyFocus(gallery);
     observeImages(gallery);
     return;
@@ -267,6 +256,7 @@ export function renderGallery(host) {
       `;
     })
     .join("") || '<div class="fc-empty-panel">No images match this image-id/step slice.</div>';
+  markClampedCaptions(gallery);
   applyFocus(gallery);
   observeImages(gallery);
 }
