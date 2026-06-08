@@ -123,7 +123,12 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
         dtype=torch.bfloat16,
     )
     peft_lora_config: LoraConfig = LoraConfig(
-        target_parameters=[
+        # Qwen-Image attention/MLP projections are all separate nn.Linear modules,
+        # so target them as modules (the proven config). Do NOT use
+        # `target_parameters` here: with `target_modules=None` PEFT's
+        # `_prepare_adapter_config` does a `model_config["model_type"]` lookup that
+        # KeyErrors on diffusers configs (which carry no `model_type`).
+        target_modules=[
             "attn.to_k",
             "attn.to_q",
             "attn.to_v",

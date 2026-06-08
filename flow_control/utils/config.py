@@ -115,9 +115,12 @@ def apply_config_patches(
 ) -> dict[str, Any]:
     for update in updates:
         expression, value_text = _split_update(update)
-        _require_matches(config, expression).update(
-            config, _parse_update_value(value_text)
-        )
+        # update_or_create (not strict .update): lets --update SET a key that the
+        # config file omits but the Pydantic model defines (e.g. run_id, attempt_id,
+        # which default to None and aren't written in the jsonc). Typos that create a
+        # genuinely unknown key are still caught downstream by the models'
+        # extra="forbid" validation.
+        parse(expression).update_or_create(config, _parse_update_value(value_text))
     for expression in removes:
         _require_matches(config, expression).filter(lambda _: True, config)
     return config
