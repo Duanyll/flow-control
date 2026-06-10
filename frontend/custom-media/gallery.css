@@ -124,13 +124,20 @@
 }
 
 .fc-media-img-wrap {
-  display: grid;
-  place-items: center;
+  display: block;
+  position: relative;
   aspect-ratio: 1 / 1;
+  /* Keep the box height driven solely by aspect-ratio. The <img> stays out of
+     flow (see below) so an unloaded image's `alt` text — the full caption for
+     off-screen cards in the concurrency-capped loader — can't inflate this
+     box, the card, or the single-row strip grid that sizes to the tallest card. */
+  overflow: hidden;
   background: var(--background-fill-secondary, #f9fafb);
 }
 
 .fc-media-card img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
