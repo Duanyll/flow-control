@@ -51,6 +51,13 @@
   flex: 0 0 140px;
 }
 
+/* Malformed step-filter expression: highlight the field; the gallery falls back
+   to showing every step until the expression parses. */
+.fc-control-field input.fc-input-invalid {
+  border-color: var(--error-border-color, #ef4444);
+  background: var(--error-background-fill, rgba(239, 68, 68, 0.06));
+}
+
 .fc-secondary-button {
   min-height: 36px;
   padding: 7px 12px;

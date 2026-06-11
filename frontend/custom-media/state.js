@@ -17,6 +17,7 @@ export const state = {
     imageIdMatch: "substring",
     minStep: "",
     maxStep: "",
+    stepFilter: "",
     search: "",
   },
   cache: new Map(),

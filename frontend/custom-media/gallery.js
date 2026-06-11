@@ -2,7 +2,7 @@
 // image-id or step, building cards/captions/chips, and wiring the control inputs.
 
 import { state } from "./state.js";
-import { distinct, escapeHtml, numericInput } from "./utils.js";
+import { distinct, escapeHtml, numericInput, parseStepFilter } from "./utils.js";
 import { mediaUrl } from "./media-data.js";
 import { observeImages, resetImageLoader } from "./image-loader.js";
 import { openViewer } from "./viewer.js";
@@ -33,11 +33,15 @@ function filteredItems() {
   const fallbackMax = allSteps.length ? Math.max(...allSteps) : 0;
   const minStep = numericInput(state.controls.minStep, fallbackMin);
   const maxStep = numericInput(state.controls.maxStep, fallbackMax);
+  const stepFilter = parseStepFilter(state.controls.stepFilter);
   const search = state.controls.search.trim().toLowerCase();
   return state.items.filter((item) => {
     if (state.controls.mode === "image" && !imageIdMatches(item.imageId)) return false;
     if (Number.isFinite(item.step) && item.step < minStep) return false;
     if (Number.isFinite(item.step) && item.step > maxStep) return false;
+    if (!stepFilter.empty && stepFilter.valid && Number.isFinite(item.step) && !stepFilter.match(item.step)) {
+      return false;
+    }
     if (search) {
       const haystack = [item.imageId, item.caption, item.runName, item.step].join(" ").toLowerCase();
       if (!haystack.includes(search)) return false;
@@ -140,6 +144,10 @@ export function renderControls(host) {
       <input data-fc-control="maxStep" type="number" step="1" min="${defaultMin}" max="${defaultMax}" placeholder="${defaultMax}" value="${escapeHtml(state.controls.maxStep)}">
     </label>
     <label class="fc-control-field fc-control-wide">
+      <span>Step filter</span>
+      <input data-fc-control="stepFilter" type="text" spellcheck="false" placeholder="e.g. 0,1,5,10:50,0:40:200" value="${escapeHtml(state.controls.stepFilter)}" title="Show only matching steps. Comma-separated: N exact · A:B range · A:S:B stride (start:step:stop). Blank = all.">
+    </label>
+    <label class="fc-control-field fc-control-wide">
       <span>Search</span>
       <input data-fc-control="search" type="search" placeholder="caption, run, image id" value="${escapeHtml(state.controls.search)}">
     </label>
@@ -166,6 +174,11 @@ export function renderGallery(host) {
   const filtered = filteredItems();
   const subtitle = host.querySelector(".fc-media-subtitle");
   const gallery = host.querySelector(".fc-media-gallery");
+  // Flag a malformed step-filter expression (we fall back to showing all steps).
+  const stepInput = host.querySelector('[data-fc-control="stepFilter"]');
+  if (stepInput) {
+    stepInput.classList.toggle("fc-input-invalid", !parseStepFilter(state.controls.stepFilter).valid);
+  }
   resetImageLoader(); // abort loads from the previous render before rebuilding
   state.viewerItems = [];
   const card = (item, fields) => {
@@ -317,6 +330,7 @@ export function bindControls(host) {
       state.controls.imageIdMatch = "substring";
       state.controls.minStep = "";
       state.controls.maxStep = "";
+      state.controls.stepFilter = "";
       state.controls.search = "";
       renderControls(host);
       bindControls(host);
