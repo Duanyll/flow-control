@@ -54,6 +54,10 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
     checkpoint_dir: str | None = None
     save_preview_dir: str | None = None
     save_extra: bool = False
+    annotate_output_image: bool = False
+    """Save the processor's annotated preview image (e.g. tie source + edit, or layered
+    layers merged with labels) to ``save_preview_dir`` instead of the bare clean image.
+    The datasink always receives the clean ``clean_image``."""
     reward_csv_path: str | None = None
     """Optional path to write per-sample reward scores as a CSV.
 
@@ -178,6 +182,13 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
         for batch in self.dataloader:
             with dump_if_failed(logger, batch):
                 batch, decoded, key = self._sample_one(batch)
+                # Build the annotated preview while the full GPU batch (e.g. tie's
+                # reference_images) and decoded outputs are still available.
+                preview = (
+                    self.processor.annotate_output(decoded, batch)
+                    if (self.annotate_output_image and key != "__padding__")
+                    else None
+                )
                 record = (
                     None
                     if key == "__padding__"
@@ -186,6 +197,8 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
                         torch.device("cpu"),
                     )
                 )
+                if record is not None and preview is not None:
+                    record["__preview_image__"] = preview.to(torch.device("cpu"))
             progress.advance(task)
             if record is not None:
                 yield batch, (record, key)
@@ -213,12 +226,17 @@ class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
         reward_result: RewardResult | None,
     ) -> None:
         """Write a single CPU ``record`` to the datasink and preview dir."""
+        # Pop the preview before the datasink write so the sink only stores the clean
+        # ``clean_image``; the annotated preview is for the saved PNG only.
+        preview = record.pop("__preview_image__", None)
         if reward_result is not None:
             record.update(self._reward_fields(reward_result))
         if datasink is not None:
             datasink.write(record)
         if self.save_preview_dir is not None:
-            image = tensor_to_pil(record["clean_image"])
+            image = tensor_to_pil(
+                preview if preview is not None else record["clean_image"]
+            )
             image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
 
     # ---------------------------------- Rewards --------------------------------- #

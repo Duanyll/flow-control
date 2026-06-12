@@ -142,6 +142,16 @@ class BaseProcessor[
             "clean_image": self.decode_latents(output_latent, size=batch["image_size"])
         }
 
+    def annotate_output(self, decoded: DecodedBatch, batch: TProcessed) -> torch.Tensor:
+        """Compose ONE labeled preview image from a decoded output batch.
+
+        ``decode_output`` returns the clean ``clean_image`` (used for reward scoring
+        and the datasink) plus any task-specific auxiliary tensors; ``annotate_output``
+        merges those into a single image for logging/saving, leaving ``clean_image``
+        untouched. The default returns ``clean_image`` unchanged.
+        """
+        return decoded["clean_image"]
+
     def get_latent_length(self, batch: TProcessed) -> int:
         """
         Computes the latent length for the given batch based on its image size. The

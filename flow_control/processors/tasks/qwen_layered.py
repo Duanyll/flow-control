@@ -1,4 +1,4 @@
-from typing import Literal, NotRequired
+from typing import Literal, NotRequired, cast
 
 import torch
 from einops import rearrange
@@ -166,7 +166,9 @@ class QwenImageLayeredProcessor(
         return (batch["num_layers"] + 1) * super().get_latent_length(batch)
 
     def decode_output(
-        self, output_latent: torch.Tensor, batch: ProcessedBatch
+        self,
+        output_latent: torch.Tensor,
+        batch: ProcessedBatch,
     ) -> QwenLayeredDecodedBatch:
         base_image, layer_images = self.decode_latents_layered(
             output_latent, batch["image_size"]
@@ -175,6 +177,16 @@ class QwenImageLayeredProcessor(
             clean_image=merge_images([base_image, *layer_images]),
             base_image=base_image,
             layer_images=layer_images,
+        )
+
+    def annotate_output(
+        self, decoded: DecodedBatch, batch: ProcessedBatch
+    ) -> torch.Tensor:
+        layered = cast(QwenLayeredDecodedBatch, decoded)
+        return merge_images(
+            [layered["base_image"], *layered["layer_images"]],
+            border_width=4,
+            draw_labels=True,
         )
 
     def initialize_latents(

@@ -50,6 +50,10 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
     validation_num_workers: int = 1
     validation_same_seed: bool = True
     validation_log_images: bool | int = True
+    validation_annotate_images: bool = True
+    """Log the processor's annotated preview (e.g. tie source + edit, or layered layers,
+    merged with labels) instead of the bare generated image. No-op for tasks whose
+    ``annotate_output`` returns ``clean_image`` unchanged (plain T2I)."""
     validation_log_rewards: bool = True
     validation_reward: Reward | Literal[False] | None = None
     seed: int = 42
@@ -174,8 +178,13 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
                         or image_count < self.validation_log_images
                     ):
                         prompt = batch.get("prompt")
+                        image = (
+                            self.processor.annotate_output(decoded, batch)
+                            if self.validation_annotate_images
+                            else batch["clean_image"]
+                        )
                         self.log_image(
-                            batch["clean_image"],
+                            image,
                             key,
                             step=step,
                             caption=prompt if isinstance(prompt, str) else None,

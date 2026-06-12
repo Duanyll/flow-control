@@ -1,6 +1,6 @@
 import asyncio
 import math
-from typing import Annotated, Literal, NotRequired
+from typing import Annotated, Literal, NotRequired, cast
 
 import torch
 from einops import repeat
@@ -79,7 +79,6 @@ class EfficientLayeredProcessor(
     detection_prompt: PromptStr = parse_prompt("@efficient_layered_detection_en")
     detection_coord_type: Literal["qwen25vl", "qwen3vl"] = "qwen3vl"
     save_annotated_image: bool = False
-    annotate_preview_image: bool = False
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         # Cropping is disabled to make resizing layer box calculation easier
@@ -317,7 +316,9 @@ class EfficientLayeredProcessor(
         )
 
     def decode_output(
-        self, output_latent: torch.Tensor, batch: EfficientLayeredProcessedBatch
+        self,
+        output_latent: torch.Tensor,
+        batch: EfficientLayeredProcessedBatch,
     ) -> EfficientLayeredDecodedBatch:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         latent_len_per_image = [
@@ -336,16 +337,18 @@ class EfficientLayeredProcessor(
                 latents, (layer_size[1] - layer_size[0], layer_size[3] - layer_size[2])
             )
             decoded_layers.append(decoded_layer)
-        if self.annotate_preview_image:
-            merged_image = merge_images(
-                decoded_layers, border_width=4, draw_labels=True
-            )
-        else:
-            merged_image = merge_images(decoded_layers)
         return EfficientLayeredDecodedBatch(
-            clean_image=merged_image,
+            clean_image=merge_images(decoded_layers),
             layer_images=decoded_layers,
         )
+
+    def annotate_output(
+        self,
+        decoded: DecodedBatch,
+        batch: EfficientLayeredProcessedBatch,
+    ) -> torch.Tensor:
+        layer_images = cast(EfficientLayeredDecodedBatch, decoded)["layer_images"]
+        return merge_images(layer_images, border_width=4, draw_labels=True)
 
     def initialize_latents(
         self,

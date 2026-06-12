@@ -28,7 +28,7 @@ from .normalize import (
 from .ocr import OcrReward
 from .pairwise import PairwiseReward
 from .pickscore import PickScoreReward
-from .rational_rewards import RationalRewardsT2IReward
+from .rational_rewards import RationalRewardsEditReward, RationalRewardsT2IReward
 from .unified_reward import UnifiedReward
 
 Reward = Annotated[
@@ -43,7 +43,8 @@ Reward = Annotated[
     | Annotated[HPSv2Reward, Tag("hpsv2")]
     | Annotated[OcrReward, Tag("ocr")]
     | Annotated[ImageRewardReward, Tag("image_reward")]
-    | Annotated[RationalRewardsT2IReward, Tag("rational_rewards_t2i")],
+    | Annotated[RationalRewardsT2IReward, Tag("rational_rewards_t2i")]
+    | Annotated[RationalRewardsEditReward, Tag("rational_rewards_edit")],
     Discriminator("type"),
 ]
 

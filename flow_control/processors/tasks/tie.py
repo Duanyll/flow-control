@@ -4,13 +4,20 @@ import torch
 
 from flow_control.datasets.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.logging import get_logger, warn_once
+from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import (
     resize_to_closest_resolution,
     resize_to_multiple_of,
     resize_to_resolution,
 )
 
-from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..base import (
+    BaseProcessor,
+    DecodedBatch,
+    InputBatch,
+    ProcessedBatch,
+    TrainInputBatch,
+)
 from ..components.prompts import PromptStr, parse_prompt
 
 logger = get_logger(__name__)
@@ -193,4 +200,16 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
             super().get_latent_length(batch)
             + batch["prompt_embeds"].shape[1]
             + sum((h * w) // ratio for h, w in batch["reference_sizes"])
+        )
+
+    def annotate_output(
+        self, decoded: DecodedBatch, batch: TIEProcessedBatch
+    ) -> torch.Tensor:
+        references = batch.get("reference_images")
+        if not references:
+            return decoded["clean_image"]
+        return merge_images(
+            [*references, decoded["clean_image"]],
+            border_width=4,
+            draw_labels=True,
         )
