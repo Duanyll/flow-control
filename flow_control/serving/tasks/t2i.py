@@ -6,7 +6,7 @@ from typing import Any
 
 import gradio as gr
 
-from . import register_task
+from .base import register_task
 
 
 @register_task("t2i")

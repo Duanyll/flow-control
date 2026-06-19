@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from flow_control.utils.registry import RegistryUnion
 
 from .base import BaseProcessor, task_registry
-from .presets import (  # noqa: F401  (imported for preset registration side effects)
+from .presets import (
     Flux1Preset,
     Flux2Klein4BPreset,
     Flux2Klein9BPreset,
@@ -16,11 +16,11 @@ from .presets import (  # noqa: F401  (imported for preset registration side eff
     ZImagePreset,
     preset_registry,
 )
-from .tasks.inpaint import InpaintProcessor  # noqa: F401
-from .tasks.qwen_layered import QwenImageLayeredProcessor  # noqa: F401
-from .tasks.t2i import T2IProcessor  # noqa: F401
-from .tasks.t2i_control import T2IControlProcessor  # noqa: F401
-from .tasks.tie import TIEProcessor  # noqa: F401
+from .tasks.inpaint import InpaintProcessor
+from .tasks.qwen_layered import QwenImageLayeredProcessor
+from .tasks.t2i import T2IProcessor
+from .tasks.t2i_control import T2IControlProcessor
+from .tasks.tie import TIEProcessor
 
 
 def parse_processor(conf: dict) -> BaseProcessor:
@@ -101,7 +101,26 @@ def get_processor_input_typeddict(
 
 
 __all__ = [
+    "BaseProcessor",
+    "Flux1Preset",
+    "Flux2Klein4BPreset",
+    "Flux2Klein9BPreset",
+    "Flux2Preset",
+    "InpaintProcessor",
+    "LongcatImageEditPreset",
+    "LongcatImagePreset",
     "Processor",
     "ProcessorConfig",
+    "QwenImageEditPreset",
+    "QwenImageLayeredPreset",
+    "QwenImageLayeredProcessor",
+    "QwenImagePreset",
+    "T2IControlProcessor",
+    "T2IProcessor",
+    "TIEProcessor",
+    "ZImagePreset",
+    "get_processor_input_typeddict",
     "parse_processor",
+    "preset_registry",
+    "task_registry",
 ]

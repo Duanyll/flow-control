@@ -7,12 +7,14 @@ from flow_control.utils.pipeline import DataSink
 
 from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
+from .registry import dataset_registry, datasink_registry
 
 
 class BucketDataset(Dataset):
     bucket_lengths: list[int]
 
 
+@dataset_registry.register("bucket_directory")
 class BucketDirectoryDataset(BucketDataset):
     def __init__(self, path: str, base_type: Literal["raw", "pickle"], **kwargs):
         bin_dirs = []
@@ -44,6 +46,7 @@ class BucketDirectoryDataset(BucketDataset):
         raise IndexError("Index out of range")
 
 
+@datasink_registry.register("bucket_directory")
 class BucketDirectoryDatasink(DataSink):
     def __init__(
         self,

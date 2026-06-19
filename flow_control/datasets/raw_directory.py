@@ -12,6 +12,8 @@ from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
 from flow_control.utils.tensor import pil_to_tensor, tensor_to_pil
 
+from .registry import dataset_registry, datasink_registry
+
 logger = get_logger(__name__)
 
 
@@ -132,6 +134,7 @@ def custom_json_decode_hook(dct: dict) -> Any:
     return dct
 
 
+@dataset_registry.register("raw_directory")
 class RawDirectoryDataset(Dataset):
     """
     Dataset directory structure:
@@ -260,6 +263,7 @@ class RawDirectoryDataset(Dataset):
             return obj
 
 
+@datasink_registry.register("raw_directory")
 class RawDirectoryDataSink(DataSink):
     """
     DataSink that writes samples to a directory with index.json format.

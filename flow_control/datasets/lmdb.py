@@ -11,11 +11,14 @@ from torch.utils.data import Dataset
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
 
+from .registry import dataset_registry, datasink_registry
+
 logger = get_logger(__name__)
 
 LMDB_MAX_DBS = 16
 
 
+@dataset_registry.register("lmdb")
 class LMDBDataset(BaseModel, Dataset):
     """LMDB-backed dataset. Pickle-safe: only config is serialized,
     the LMDB connection is lazily opened on first access."""
@@ -98,6 +101,7 @@ class LMDBDataset(BaseModel, Dataset):
         object.__setattr__(self, "__pydantic_private__", new.__pydantic_private__)
 
 
+@datasink_registry.register("lmdb")
 class LMDBDataSink(DataSink):
     def setup(
         self,

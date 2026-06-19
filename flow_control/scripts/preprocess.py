@@ -5,9 +5,9 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.datasets import (
-    DATASINK_REGISTRY,
     DatasetConfig,
     DatasinkConfig,
+    datasink_registry,
     parse_dataset,
 )
 from flow_control.processors import (
@@ -215,7 +215,7 @@ def run(config_data: dict) -> None:
             ),
         ],
         sink=SinkConfig(
-            sink=DATASINK_REGISTRY.get(datasink_type),  # type: ignore
+            sink=datasink_registry.get(datasink_type),  # type: ignore
             name="Saving",
             num_workers=config.num_sink_workers,
             queue_size=config.queue_size,

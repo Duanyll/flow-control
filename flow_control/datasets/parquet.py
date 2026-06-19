@@ -5,12 +5,15 @@ from torch.utils.data import Dataset
 
 from flow_control.utils.logging import get_logger
 
+from .registry import dataset_registry
+
 logger = get_logger(__name__)
 
 
 SIZE_LIMIT = 1024 * 1024 * 1024  # 1 GB
 
 
+@dataset_registry.register("parquet")
 class ParquetDataset(Dataset):
     """Dataset backed by a Parquet file.
 

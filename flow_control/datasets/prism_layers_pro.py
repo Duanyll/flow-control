@@ -11,7 +11,10 @@ from torch.utils.data import Dataset
 from flow_control.utils.logging import console
 from flow_control.utils.tensor import pil_to_tensor
 
+from .registry import dataset_registry
 
+
+@dataset_registry.register("prism_layers_pro")
 class PrismLayersProDataset(Dataset):
     _last_loaded_file: str | None = None
     _last_table: pa.Table

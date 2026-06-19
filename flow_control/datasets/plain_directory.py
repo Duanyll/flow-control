@@ -7,9 +7,12 @@ from torch.utils.data import Dataset
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import pil_to_tensor
 
+from .registry import dataset_registry
+
 logger = get_logger(__name__)
 
 
+@dataset_registry.register("plain_directory")
 class PlainDirectoryDataset(Dataset):
     """
     Plain directory dataset (Civitai format)

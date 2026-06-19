@@ -7,7 +7,6 @@ from torch.utils.data import ConcatDataset, Dataset
 from flow_control.datasets.coercion import build_type_adapter, coerce_record
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
-from flow_control.utils.registry import Registry
 
 from .bucket_directory import BucketDirectoryDataset, BucketDirectoryDatasink
 from .csv import CsvDataset
@@ -20,6 +19,7 @@ from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .plain_directory import PlainDirectoryDataset
 from .prism_layers_pro import PrismLayersProDataset
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
+from .registry import dataset_registry, datasink_registry
 
 logger = get_logger("flow_control.datasets")
 
@@ -90,22 +90,6 @@ DatasetConfig = Annotated[
     ),
 ]
 
-# Duck-typed family (members are torch ``Dataset`` subclasses, not BaseModels), so
-# ``base=None`` skips the nominal subclass guard. The classes are defined in their
-# own modules and only collected here, so register them explicitly.
-DATASET_REGISTRY: Registry[Any] = Registry("dataset")
-DATASET_REGISTRY.register("lmdb")(LMDBDataset)
-DATASET_REGISTRY.register("plain_directory")(PlainDirectoryDataset)
-DATASET_REGISTRY.register("pickle_directory")(PickleDirectoryDataset)
-DATASET_REGISTRY.register("raw_directory")(RawDirectoryDataset)
-DATASET_REGISTRY.register("bucket_directory")(BucketDirectoryDataset)
-DATASET_REGISTRY.register("prism_layers_pro")(PrismLayersProDataset)
-DATASET_REGISTRY.register("csv")(CsvDataset)
-DATASET_REGISTRY.register("inline")(InlineDataset)
-DATASET_REGISTRY.register("jsonl")(JsonlDataset)
-DATASET_REGISTRY.register("parquet")(ParquetDataset)
-DATASET_REGISTRY.register("lines")(LinesDataset)
-
 if TYPE_CHECKING:
 
     class MapDataset(Dataset):
@@ -147,7 +131,7 @@ def parse_dataset(
         dataset = ConcatDataset(datasets)
         assert is_map_dataset(dataset), "Concatenated dataset is not a MapDataset."
     else:
-        dataset_class = DATASET_REGISTRY.get(dataset_type)
+        dataset_class = dataset_registry.get(dataset_type)
         if dataset_class is None:
             raise ValueError(f"Unknown dataset type: {dataset_type}")
         dataset = dataset_class(**dataset_config)
@@ -183,12 +167,6 @@ DatasinkConfig = Annotated[
     ),
 ]
 
-DATASINK_REGISTRY: Registry[Any] = Registry("datasink")
-DATASINK_REGISTRY.register("lmdb")(LMDBDataSink)
-DATASINK_REGISTRY.register("pickle_directory")(PickleDirectoryDataSink)
-DATASINK_REGISTRY.register("raw_directory")(RawDirectoryDataSink)
-DATASINK_REGISTRY.register("bucket_directory")(BucketDirectoryDatasink)
-
 
 def parse_datasink(datasink_config: DatasinkConfig) -> DataSink:
     if "type" not in datasink_config:
@@ -196,7 +174,35 @@ def parse_datasink(datasink_config: DatasinkConfig) -> DataSink:
     datasink_config = datasink_config.copy()
     datasink_type = datasink_config.pop("type")
 
-    datasink_class = DATASINK_REGISTRY.get(datasink_type)
+    datasink_class = datasink_registry.get(datasink_type)
     if datasink_class is None:
         raise ValueError(f"Unknown datasink type: {datasink_type}")
     return datasink_class(**datasink_config)
+
+
+__all__ = [
+    "BucketDirectoryDataset",
+    "BucketDirectoryDatasink",
+    "CoercedDataset",
+    "CsvDataset",
+    "DatasetConfig",
+    "DatasinkConfig",
+    "InlineDataset",
+    "JsonlDataset",
+    "LMDBDataSink",
+    "LMDBDataset",
+    "LimitedDataset",
+    "LinesDataset",
+    "ParquetDataset",
+    "PickleDirectoryDataSink",
+    "PickleDirectoryDataset",
+    "PlainDirectoryDataset",
+    "PrismLayersProDataset",
+    "RawDirectoryDataSink",
+    "RawDirectoryDataset",
+    "dataset_registry",
+    "datasink_registry",
+    "is_map_dataset",
+    "parse_dataset",
+    "parse_datasink",
+]

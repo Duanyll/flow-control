@@ -8,9 +8,12 @@ from torch.utils.data import Dataset
 from flow_control.utils.logging import get_logger
 from flow_control.utils.pipeline import DataSink
 
+from .registry import dataset_registry, datasink_registry
+
 logger = get_logger(__name__)
 
 
+@dataset_registry.register("pickle_directory")
 class PickleDirectoryDataset(Dataset):
     def __init__(self, path: str):
         self.path = path
@@ -40,6 +43,7 @@ class PickleDirectoryDataset(Dataset):
         return sample
 
 
+@datasink_registry.register("pickle_directory")
 class PickleDirectoryDataSink(DataSink):
     def __init__(self, worker_id, path: str, use_compression: bool = False):
         self.worker_id = worker_id

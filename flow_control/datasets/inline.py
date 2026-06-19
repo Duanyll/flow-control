@@ -4,9 +4,12 @@ from torch.utils.data import Dataset
 
 from flow_control.utils.logging import get_logger
 
+from .registry import dataset_registry
+
 logger = get_logger(__name__)
 
 
+@dataset_registry.register("inline")
 class InlineDataset(Dataset):
     """Dataset whose records are passed directly as a list of dicts.
 
