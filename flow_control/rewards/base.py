@@ -5,6 +5,7 @@ from typing import Any
 import torch
 from pydantic import ConfigDict, Field
 
+from flow_control.utils.registry import Registry
 from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.tensor import deep_move_to_device
 
@@ -229,3 +230,9 @@ class BaseReward(RemoteOffloadable, ABC):
             self._close_remote()
         else:
             self._unload_model()
+
+
+# Lives here (not in ``__init__.py``) so member modules can import it without an
+# import cycle through the package ``__init__``. Members register at their
+# definition sites via ``@reward_registry.register("<tag>")``.
+reward_registry: Registry[BaseReward] = Registry("reward", base=BaseReward)

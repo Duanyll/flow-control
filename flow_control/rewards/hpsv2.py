@@ -32,7 +32,7 @@ from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDType
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 logger = get_logger(__name__)
 
@@ -152,6 +152,7 @@ def image_transform_tensor(
     return Compose(transforms)
 
 
+@reward_registry.register("hpsv2")
 class HPSv2Reward(BaseReward):
     """Human Preference Score v2.1 reward.
 

@@ -5,6 +5,7 @@ from diffusers import FluxTransformer2DModel
 
 from flow_control.utils.hf_model import HfModelLoader
 
+from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -15,6 +16,7 @@ class Flux1KontextBatch(Flux1Batch):
     """List of `(H, W)` tuples representing the sizes of the reference images."""
 
 
+@adapter_registry.register("flux1_kontext")
 class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
     type: Literal["kontext"] = "kontext"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(

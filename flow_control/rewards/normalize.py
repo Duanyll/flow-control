@@ -13,7 +13,9 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
+
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
 class _NormalizeBase(BaseModel):
@@ -25,6 +27,12 @@ class _NormalizeBase(BaseModel):
         raise NotImplementedError
 
 
+normalize_registry: Registry[_NormalizeBase] = Registry(
+    "normalize", base=_NormalizeBase
+)
+
+
+@normalize_registry.register("identity")
 class IdentityNormalize(_NormalizeBase):
     """No-op normalize (default).  Raw score is returned unchanged."""
 
@@ -34,6 +42,7 @@ class IdentityNormalize(_NormalizeBase):
         return x
 
 
+@normalize_registry.register("affine")
 class AffineNormalize(_NormalizeBase):
     """``x * scale + offset``.
 
@@ -49,6 +58,7 @@ class AffineNormalize(_NormalizeBase):
         return x * self.scale + self.offset
 
 
+@normalize_registry.register("sigmoid")
 class SigmoidNormalize(_NormalizeBase):
     """``sigmoid((x - offset) * scale)``.
 
@@ -65,6 +75,7 @@ class SigmoidNormalize(_NormalizeBase):
         return torch.sigmoid((x - self.offset) * self.scale)
 
 
+@normalize_registry.register("clamp")
 class ClampNormalize(_NormalizeBase):
     """``x.clamp(low, high)``.
 
@@ -80,13 +91,7 @@ class ClampNormalize(_NormalizeBase):
         return x.clamp(self.low, self.high)
 
 
-Normalize = Annotated[
-    Annotated[IdentityNormalize, Tag("identity")]
-    | Annotated[AffineNormalize, Tag("affine")]
-    | Annotated[SigmoidNormalize, Tag("sigmoid")]
-    | Annotated[ClampNormalize, Tag("clamp")],
-    Discriminator("type"),
-]
+Normalize = Annotated[_NormalizeBase, RegistryUnion(normalize_registry, "type")]
 
 
 _normalize_ta = TypeAdapter(Normalize)
@@ -103,6 +108,7 @@ __all__ = [
     "IdentityNormalize",
     "Normalize",
     "SigmoidNormalize",
+    "normalize_registry",
     "parse_normalize",
 ]
 

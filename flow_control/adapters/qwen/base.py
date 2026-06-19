@@ -6,7 +6,7 @@ from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 from peft import LoraConfig
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -109,6 +109,7 @@ class QwenImageBatch(Batch):
     """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
 
 
+@adapter_registry.register("qwen_base")
 class QwenImageAdapter[TBatch: QwenImageBatch](
     BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
 ):

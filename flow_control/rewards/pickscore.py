@@ -7,10 +7,11 @@ from transformers import CLIPModel, CLIPProcessor
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 from .normalize import AffineNormalize, Normalize
 
 
+@reward_registry.register("pickscore")
 class PickScoreReward(BaseReward):
     """PickScore-based preference reward."""
 

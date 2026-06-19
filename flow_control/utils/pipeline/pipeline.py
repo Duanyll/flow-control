@@ -245,6 +245,7 @@ class Pipeline:
                 log_queue,
                 source_done,
                 shutdown_event,
+                self.source.plugin_modules,
             ),
         )
         source_proc.start()
@@ -276,6 +277,7 @@ class Pipeline:
                         device,
                         stage_cfg.init_kwargs,
                         stage_cfg.max_concurrency,
+                        stage_cfg.plugin_modules,
                     ),
                 )
                 proc.start()
@@ -299,6 +301,7 @@ class Pipeline:
                     shutdown_event,
                     self.sink.num_threads,
                     self.sink.init_kwargs,
+                    self.sink.plugin_modules,
                 ),
             )
             proc.start()

@@ -33,7 +33,7 @@ from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 logger = get_logger(__name__)
 
@@ -65,6 +65,7 @@ class _AestheticMLP(nn.Module):
         return self.layers(embed)
 
 
+@reward_registry.register("aesthetic")
 class AestheticReward(BaseReward):
     """LAION improved aesthetic predictor reward.
 

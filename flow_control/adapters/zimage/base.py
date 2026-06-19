@@ -4,7 +4,7 @@ import torch
 from diffusers import ZImageTransformer2DModel
 from einops import rearrange
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -16,6 +16,7 @@ class ZImageBatch(Batch):
     """`[B, N, D]` Text embeddings from the Qwen3VL text encoder."""
 
 
+@adapter_registry.register("zimage_base")
 class ZImageAdapter[TBatch: ZImageBatch](
     BaseModelAdapter[ZImageTransformer2DModel, TBatch]
 ):

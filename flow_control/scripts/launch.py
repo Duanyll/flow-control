@@ -15,6 +15,7 @@ from flow_control.utils.config import (
     format_config_patch_args,
     load_config_file,
 )
+from flow_control.utils.registry import load_plugins
 
 
 def _load_launch_config(
@@ -31,6 +32,11 @@ def _load_launch_config(
 
 def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
     """Run the child process (invoked by torchrun)."""
+    # Import any declared plugin modules for their registry side effects BEFORE
+    # importing the trainer module and constructing the trainer (which validates
+    # the config and reads the registries). Passed explicitly, never via env var.
+    load_plugins(config_data.get("imports", []))
+
     if launch_config.type == "sft":
         from flow_control.training.sft import SftTrainer
 

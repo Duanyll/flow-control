@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from flow_control.processors.components.llm import LLMClient
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 from .normalize import AffineNormalize, Normalize
 
 logger = get_logger(__name__)
@@ -37,6 +37,7 @@ class ScoreTag(BaseModel):
     weight: float = 1.0
 
 
+@reward_registry.register("unified_reward")
 class UnifiedReward(BaseReward):
     """LLM-based reward that uses a vision-language model to judge images.
 

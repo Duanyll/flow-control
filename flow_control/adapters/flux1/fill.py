@@ -6,6 +6,7 @@ from einops import pack, rearrange
 
 from flow_control.utils.hf_model import HfModelLoader
 
+from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -17,6 +18,7 @@ class Flux1FillBatch(Flux1Batch):
         (indices, values) for sparse representation."""
 
 
+@adapter_registry.register("flux1_fill")
 class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
     """
     Adapter for the FLUX.1 fill model.

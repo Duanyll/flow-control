@@ -5,6 +5,7 @@ from diffusers import LongCatImageTransformer2DModel
 
 from flow_control.utils.hf_model import HfModelLoader
 
+from ..base import adapter_registry
 from .base import LongCatAdapter, LongCatBatch
 
 
@@ -15,6 +16,7 @@ class LongCatEditBatch(LongCatBatch):
     """List of `(H, W)` tuples representing the sizes of the reference images."""
 
 
+@adapter_registry.register("longcat_edit")
 class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
     type: Literal["edit"] = "edit"
     hf_model: HfModelLoader[LongCatImageTransformer2DModel] = HfModelLoader(

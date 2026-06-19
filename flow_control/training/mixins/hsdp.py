@@ -26,6 +26,10 @@ logger = get_logger(__name__)
 class HsdpMixin(BaseModel):
     # ---------------------------------- Configs --------------------------------- #
     launch: LaunchConfig
+    imports: list[str] = []
+    """Out-of-tree plugin modules to import (for registry side effects) before
+    constructing this config. Loaded explicitly by the launcher / CLI, never via
+    an env var."""
     seed: int = 42
     hsdp_shard_dim: int = 1
     """

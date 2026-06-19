@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 import torch
-from pydantic import Discriminator, Tag, TypeAdapter
+from pydantic import TypeAdapter
+
+from flow_control.utils.registry import RegistryUnion
 
 from .aesthetic import AestheticReward
-from .base import BaseReward, RewardResult
+from .base import BaseReward, RewardResult, reward_registry
 from .clip_image_similarity import CLIPImageSimilarityReward
 from .clip_score import CLIPScoreReward
 from .composite import CompositeReward
@@ -31,22 +33,7 @@ from .pickscore import PickScoreReward
 from .rational_rewards import RationalRewardsEditReward, RationalRewardsT2IReward
 from .unified_reward import UnifiedReward
 
-Reward = Annotated[
-    Annotated[CLIPScoreReward, Tag("clip_score")]
-    | Annotated[PickScoreReward, Tag("pickscore")]
-    | Annotated[GenevalReward, Tag("geneval")]
-    | Annotated[UnifiedReward, Tag("unified_reward")]
-    | Annotated[CompositeReward, Tag("composite")]
-    | Annotated[PairwiseReward, Tag("pairwise")]
-    | Annotated[AestheticReward, Tag("aesthetic")]
-    | Annotated[CLIPImageSimilarityReward, Tag("clip_image_similarity")]
-    | Annotated[HPSv2Reward, Tag("hpsv2")]
-    | Annotated[OcrReward, Tag("ocr")]
-    | Annotated[ImageRewardReward, Tag("image_reward")]
-    | Annotated[RationalRewardsT2IReward, Tag("rational_rewards_t2i")]
-    | Annotated[RationalRewardsEditReward, Tag("rational_rewards_edit")],
-    Discriminator("type"),
-]
+Reward = Annotated[BaseReward, RegistryUnion(reward_registry, "type")]
 
 _reward_ta = TypeAdapter(Reward)
 
@@ -400,20 +387,34 @@ def _score_composite_pairwise_group(
 
 
 __all__ = [
+    "AestheticReward",
     "AffineNormalize",
+    "BaseReward",
+    "CLIPImageSimilarityReward",
+    "CLIPScoreReward",
     "ClampNormalize",
+    "CompositeReward",
+    "GenevalReward",
+    "HPSv2Reward",
     "IdentityNormalize",
+    "ImageRewardReward",
     "Normalize",
+    "OcrReward",
     "PairwiseReward",
+    "PickScoreReward",
+    "RationalRewardsEditReward",
+    "RationalRewardsT2IReward",
     "Reward",
     "RewardProfile",
     "RewardResult",
     "SigmoidNormalize",
+    "UnifiedReward",
     "execute_pairwise_reward",
     "execute_reward",
     "parse_normalize",
     "parse_reward",
     "reduce_reward_profiles",
+    "reward_registry",
 ]
 
 

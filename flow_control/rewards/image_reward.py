@@ -21,7 +21,7 @@ from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 logger = get_logger(__name__)
 
@@ -30,6 +30,7 @@ _IMAGEREWARD_CHECKPOINT = "ImageReward.pt"
 _IMAGEREWARD_MED_CONFIG = "med_config.json"
 
 
+@reward_registry.register("image_reward")
 class ImageRewardReward(BaseReward):
     """ImageReward-based reward (THUDM / Jiazheng Xu et al.)."""
 

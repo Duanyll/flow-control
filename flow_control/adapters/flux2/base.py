@@ -4,7 +4,7 @@ import torch
 from diffusers import Flux2Transformer2DModel
 from einops import rearrange
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -24,6 +24,7 @@ class Flux2Batch(Batch):
     """`[B, N, 4]` Used for adding positional embeddings to the image embeddings."""
 
 
+@adapter_registry.register("flux2_base")
 class Flux2Adapter[TBatch: Flux2Batch](
     BaseModelAdapter[Flux2Transformer2DModel, TBatch]
 ):

@@ -15,6 +15,9 @@ class SourceConfig:
     name: str = "Scanning"
     queue_size: int = 8
     init_kwargs: dict = field(default_factory=dict)
+    plugin_modules: list[str] = field(default_factory=list)
+    """Out-of-tree plugin modules to import in the spawned worker (fresh imports)
+    before the source is constructed, so its registries are populated."""
 
 
 @dataclass
@@ -29,6 +32,9 @@ class StageConfig:
     max_concurrency: int = 1  # Max concurrent async process calls per worker
     name: str = ""  # Display name for progress bar (defaults to class name)
     init_kwargs: dict = field(default_factory=dict)
+    plugin_modules: list[str] = field(default_factory=list)
+    """Out-of-tree plugin modules to import in the spawned worker (fresh imports)
+    before the stage is constructed, so its registries are populated."""
 
     def __post_init__(self):
         if not self.name:
@@ -45,6 +51,9 @@ class SinkConfig:
     queue_size: int = 4
     name: str = "Writing"
     init_kwargs: dict = field(default_factory=dict)
+    plugin_modules: list[str] = field(default_factory=list)
+    """Out-of-tree plugin modules to import in the spawned worker (fresh imports)
+    before the sink is constructed, so its registries are populated."""
 
 
 @dataclass

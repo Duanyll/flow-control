@@ -4,7 +4,7 @@ import torch
 from diffusers import LongCatImageTransformer2DModel
 from einops import rearrange
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -22,6 +22,7 @@ class LongCatBatch(Batch):
            Will be calculated if not present."""
 
 
+@adapter_registry.register("longcat_base")
 class LongCatAdapter[TBatch: LongCatBatch](
     BaseModelAdapter[LongCatImageTransformer2DModel, TBatch]
 ):

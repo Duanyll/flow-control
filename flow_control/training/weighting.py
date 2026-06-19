@@ -2,7 +2,9 @@ import math
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag
+from pydantic import BaseModel, ConfigDict
+
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
 class BaseTimestepWeighting(BaseModel):
@@ -12,6 +14,12 @@ class BaseTimestepWeighting(BaseModel):
         raise NotImplementedError
 
 
+timestep_weighting_registry: Registry[BaseTimestepWeighting] = Registry(
+    "timestep_weighting", base=BaseTimestepWeighting
+)
+
+
+@timestep_weighting_registry.register("uniform")
 class UniformTimestepWeighting(BaseTimestepWeighting):
     type: Literal["uniform"] = "uniform"
 
@@ -19,6 +27,7 @@ class UniformTimestepWeighting(BaseTimestepWeighting):
         return torch.rand(batch_size)
 
 
+@timestep_weighting_registry.register("logit_normal")
 class LogitNormalTimestepWeighting(BaseTimestepWeighting):
     type: Literal["logit_normal"] = "logit_normal"
     mean: float = 0.0
@@ -30,6 +39,7 @@ class LogitNormalTimestepWeighting(BaseTimestepWeighting):
         return u
 
 
+@timestep_weighting_registry.register("mode")
 class ModeTimestepWeighting(BaseTimestepWeighting):
     type: Literal["mode"] = "mode"
     scale: float = 1.29
@@ -53,6 +63,7 @@ def _timeshift(shift: float, t: torch.Tensor) -> torch.Tensor:
     return shift * t / (1.0 + (shift - 1.0) * t)
 
 
+@timestep_weighting_registry.register("shifted_uniform")
 class ShiftedUniformTimestepWeighting(BaseTimestepWeighting):
     """Uniform sampling composed with the timeshift function.
 
@@ -67,6 +78,7 @@ class ShiftedUniformTimestepWeighting(BaseTimestepWeighting):
         return _timeshift(self.shift, u)
 
 
+@timestep_weighting_registry.register("shifted_logit_normal")
 class ShiftedLogitNormalTimestepWeighting(BaseTimestepWeighting):
     """Logit-normal with mean shifted by log(α).
 
@@ -113,6 +125,7 @@ def _logit_normal_cdf(t: float, mu: float, sigma: float) -> float:
     return 0.5 * (1.0 + math.erf((logit_t - mu) / (sigma * math.sqrt(2.0))))
 
 
+@timestep_weighting_registry.register("plateau_logit_normal")
 class PlateauLogitNormalTimestepWeighting(BaseTimestepWeighting):
     """Logit-normal that stays constant after its mode, biasing towards noise.
 
@@ -159,13 +172,7 @@ class PlateauLogitNormalTimestepWeighting(BaseTimestepWeighting):
 
 
 TimestepWeighting = Annotated[
-    Annotated[UniformTimestepWeighting, Tag("uniform")]
-    | Annotated[LogitNormalTimestepWeighting, Tag("logit_normal")]
-    | Annotated[ModeTimestepWeighting, Tag("mode")]
-    | Annotated[ShiftedUniformTimestepWeighting, Tag("shifted_uniform")]
-    | Annotated[ShiftedLogitNormalTimestepWeighting, Tag("shifted_logit_normal")]
-    | Annotated[PlateauLogitNormalTimestepWeighting, Tag("plateau_logit_normal")],
-    Discriminator("type"),
+    BaseTimestepWeighting, RegistryUnion(timestep_weighting_registry, "type")
 ]
 
 
@@ -176,6 +183,12 @@ class BaseLossWeighting(BaseModel):
         raise NotImplementedError
 
 
+loss_weighting_registry: Registry[BaseLossWeighting] = Registry(
+    "loss_weighting", base=BaseLossWeighting
+)
+
+
+@loss_weighting_registry.register("uniform")
 class UniformLossWeighting(BaseLossWeighting):
     type: Literal["uniform"] = "uniform"
 
@@ -183,6 +196,7 @@ class UniformLossWeighting(BaseLossWeighting):
         return torch.ones_like(timesteps)
 
 
+@loss_weighting_registry.register("sigma_squared")
 class SigmaSquaredLossWeighting(BaseLossWeighting):
     type: Literal["sigma_squared"] = "sigma_squared"
 
@@ -190,6 +204,7 @@ class SigmaSquaredLossWeighting(BaseLossWeighting):
         return timesteps ** (-2.0)
 
 
+@loss_weighting_registry.register("cosmap")
 class CosmapLossWeighting(BaseLossWeighting):
     type: Literal["cosmap"] = "cosmap"
 
@@ -200,10 +215,7 @@ class CosmapLossWeighting(BaseLossWeighting):
 
 
 LossWeighting = Annotated[
-    Annotated[UniformLossWeighting, Tag("uniform")]
-    | Annotated[SigmaSquaredLossWeighting, Tag("sigma_squared")]
-    | Annotated[CosmapLossWeighting, Tag("cosmap")],
-    Discriminator("type"),
+    BaseLossWeighting, RegistryUnion(loss_weighting_registry, "type")
 ]
 
 __all__ = [

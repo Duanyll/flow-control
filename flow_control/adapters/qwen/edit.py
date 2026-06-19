@@ -6,6 +6,7 @@ from diffusers import QwenImageTransformer2DModel
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
+from ..base import adapter_registry
 from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
@@ -18,6 +19,7 @@ class QwenImageEditBatch(QwenImageBatch):
     """List of `(H, W)` tuples representing the sizes of the reference images."""
 
 
+@adapter_registry.register("qwen_edit")
 class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
     type: Literal["edit"] = "edit"
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(

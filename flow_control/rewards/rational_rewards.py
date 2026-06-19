@@ -34,9 +34,10 @@ from flow_control.processors.components.llm import (
 )
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 logger = get_logger(__name__)
+
 
 # Aspect key -> (numbered-block prefix, header substring) used during parsing.
 SUPPORTED_ASPECTS: dict[str, tuple[str, str]] = {
@@ -399,6 +400,7 @@ class _RationalRewardsReward(BaseReward):
         return True
 
 
+@reward_registry.register("rational_rewards_t2i")
 class RationalRewardsT2IReward(_RationalRewardsReward):
     """VLM-judge reward for text-to-image generation (``rational_rewards_t2i``).
 
@@ -440,6 +442,7 @@ class RationalRewardsT2IReward(_RationalRewardsReward):
         ]
 
 
+@reward_registry.register("rational_rewards_edit")
 class RationalRewardsEditReward(_RationalRewardsReward):
     """VLM-judge reward for instruction-guided image editing (``rational_rewards_edit``).
 

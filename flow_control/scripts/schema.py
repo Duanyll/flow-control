@@ -10,14 +10,6 @@ from pathlib import Path
 from pydantic import TypeAdapter
 from rich import print
 
-from flow_control.scripts.preprocess import PreprocessConfig
-from flow_control.serving.config import ServeConfig
-from flow_control.training.grpo import GrpoTrainer
-from flow_control.training.inference import Inference
-from flow_control.training.nft import NftTrainer
-from flow_control.training.sft import SftTrainer
-from flow_control.training.vae import VaeTrainer
-
 DEFAULT_OUTPUT_DIR = "schema"
 
 
@@ -36,7 +28,21 @@ def _inject_schema_field(schema_dict: dict) -> dict:
 
 
 def generate_schemas() -> dict[str, dict]:
-    """Return a mapping of config name -> JSON schema dict."""
+    """Return a mapping of config name -> JSON schema dict.
+
+    The config classes are imported lazily here (not at module top) because
+    importing them builds and caches their pydantic core schema, which freezes
+    the registry-backed unions. Any plugins must be loaded before this call so
+    their members are captured; see ``run``.
+    """
+    from flow_control.scripts.preprocess import PreprocessConfig
+    from flow_control.serving.config import ServeConfig
+    from flow_control.training.grpo import GrpoTrainer
+    from flow_control.training.inference import Inference
+    from flow_control.training.nft import NftTrainer
+    from flow_control.training.sft import SftTrainer
+    from flow_control.training.vae import VaeTrainer
+
     schemas = {
         "sft": TypeAdapter(SftTrainer).json_schema(),
         "grpo": TypeAdapter(GrpoTrainer).json_schema(),
@@ -49,8 +55,21 @@ def generate_schemas() -> dict[str, dict]:
     return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 
 
-def run(output_dir: str = DEFAULT_OUTPUT_DIR) -> None:
-    """Generate schemas and write them to the output directory."""
+def run(output_dir: str = DEFAULT_OUTPUT_DIR, config_path: str | None = None) -> None:
+    """Generate schemas and write them to the output directory.
+
+    If ``config_path`` is given, its ``imports`` plugin modules are loaded
+    before the config classes are imported/schema-built, so the emitted schemas
+    include that config's plugin members. With no config the core-only schemas
+    are emitted.
+    """
+    if config_path is not None:
+        from flow_control.utils.config import load_config_file
+        from flow_control.utils.registry import load_plugins
+
+        config = load_config_file(config_path)
+        load_plugins(config.get("imports", []))
+
     schemas = generate_schemas()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

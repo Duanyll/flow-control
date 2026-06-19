@@ -3,6 +3,7 @@ from typing import Literal
 import torch
 from einops import repeat
 
+from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -11,6 +12,7 @@ class Flux1NConcatBatch(Flux1Batch):
     """`[B, N, D]` The VAE encoded control condition image."""
 
 
+@adapter_registry.register("flux1_n_concat")
 class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
     """
     Adapter for applying control to the model through concatenating the conditional image latent

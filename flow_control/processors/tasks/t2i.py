@@ -4,7 +4,13 @@ import torch
 
 from flow_control.datasets.coercion import ImageTensor
 
-from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..base import (
+    BaseProcessor,
+    InputBatch,
+    ProcessedBatch,
+    TrainInputBatch,
+    task_registry,
+)
 from ..components.prompts import PromptStr, parse_prompt
 
 
@@ -23,6 +29,7 @@ class T2IProcessedBatch(ProcessedBatch):
     pooled_prompt_embeds: torch.Tensor | None
 
 
+@task_registry.register("t2i")
 class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessedBatch]):
     task: Literal["t2i"] = "t2i"
     encoder_prompt: PromptStr = ""

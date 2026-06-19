@@ -23,6 +23,10 @@ _vae_ta = TypeAdapter(VAE)
 class VAEServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    imports: list[str] = []
+    """Out-of-tree plugin modules to import (for registry side effects) before
+    constructing this config. Loaded explicitly by the CLI, never via an env var."""
+
     host: str = "0.0.0.0"
     port: int = 8000
     device: TorchDevice = Field(default_factory=default_device)

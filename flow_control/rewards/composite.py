@@ -7,11 +7,12 @@ from pydantic import ConfigDict, PrivateAttr
 
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward, RewardResult
+from .base import BaseReward, RewardResult, reward_registry
 
 logger = get_logger(__name__)
 
 
+@reward_registry.register("composite")
 class CompositeReward(BaseReward):
     """Weighted combination of multiple reward functions."""
 

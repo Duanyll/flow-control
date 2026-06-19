@@ -2,31 +2,46 @@ from contextlib import contextmanager
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Discriminator
+from pydantic import BaseModel, ConfigDict
+
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
-class NoWarmup(BaseModel):
+class BaseWarmup(BaseModel):
+    """Base class for EMA decay warmup schedules."""
+
     model_config = ConfigDict(extra="forbid")
+    type: str
+
+    def get_decay(self, step: int, base_decay: float) -> float:
+        raise NotImplementedError
+
+
+warmup_registry: Registry[BaseWarmup] = Registry("warmup", base=BaseWarmup)
+
+
+@warmup_registry.register("none")
+class NoWarmup(BaseWarmup):
     type: Literal["none"] = "none"
 
     def get_decay(self, step: int, base_decay: float) -> float:
         return base_decay
 
 
-class StandardWarmup(BaseModel):
+@warmup_registry.register("standard")
+class StandardWarmup(BaseWarmup):
     """Original ``(1 + step) / (10 + step)`` schedule."""
 
-    model_config = ConfigDict(extra="forbid")
     type: Literal["standard"] = "standard"
 
     def get_decay(self, step: int, base_decay: float) -> float:
         return min((1 + step) / (10 + step), base_decay)
 
 
-class LinearRampWarmup(BaseModel):
+@warmup_registry.register("linear_ramp")
+class LinearRampWarmup(BaseWarmup):
     """NFT-style: 0 for *flat_steps*, then linear ramp up to ``EMAConfig.decay``."""
 
-    model_config = ConfigDict(extra="forbid")
     type: Literal["linear_ramp"] = "linear_ramp"
     flat_steps: int = 0
     ramp_rate: float = 0.001
@@ -37,7 +52,7 @@ class LinearRampWarmup(BaseModel):
         return min((step - self.flat_steps) * self.ramp_rate, base_decay)
 
 
-Warmup = Annotated[NoWarmup | StandardWarmup | LinearRampWarmup, Discriminator("type")]
+Warmup = Annotated[BaseWarmup, RegistryUnion(warmup_registry, "type")]
 
 
 class EMAConfig(BaseModel):
@@ -218,3 +233,36 @@ def apply_init_maybe(init_optimizer: InitBackupOptimizer | None):
     finally:
         if init_optimizer is not None:
             init_optimizer.restore_from_init_backup()
+
+
+if __name__ == "__main__":
+    from pydantic import TypeAdapter
+    from rich import print
+
+    adapter = TypeAdapter(Warmup)
+
+    # Each registered warmup parses from its discriminator tag.
+    none = adapter.validate_python({"type": "none"})
+    standard = adapter.validate_python({"type": "standard"})
+    ramp = adapter.validate_python(
+        {"type": "linear_ramp", "flat_steps": 5, "ramp_rate": 0.1}
+    )
+    assert isinstance(none, NoWarmup)
+    assert isinstance(standard, StandardWarmup)
+    assert isinstance(ramp, LinearRampWarmup)
+
+    # Decay schedules behave as expected.
+    assert none.get_decay(0, 0.99) == 0.99
+    assert standard.get_decay(0, 0.99) == min(1 / 10, 0.99)
+    assert ramp.get_decay(3, 0.99) == 0.0
+    assert ramp.get_decay(10, 0.99) == min(5 * 0.1, 0.99)
+
+    # EMAConfig embeds a warmup; passing through an already-built instance works.
+    cfg = EMAConfig(decay=0.5, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001))
+    assert isinstance(cfg.warmup, LinearRampWarmup)
+    cfg_from_dict = EMAConfig.model_validate(
+        {"decay": 0.5, "warmup": {"type": "standard"}}
+    )
+    assert isinstance(cfg_from_dict.warmup, StandardWarmup)
+
+    print("[green]ema warmup registry smoke test passed[/green]")

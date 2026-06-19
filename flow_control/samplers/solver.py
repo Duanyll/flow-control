@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag
+from pydantic import BaseModel, ConfigDict
+
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
 class SolverState:
@@ -134,6 +136,10 @@ class BaseSolver(BaseModel, ABC):
         return 1 - sigma, sigma
 
 
+solver_registry: Registry[BaseSolver] = Registry("solver", base=BaseSolver)
+
+
+@solver_registry.register("flow")
 class FlowSolver(BaseSolver):
     type: Literal["flow"] = "flow"
 
@@ -184,6 +190,7 @@ class FlowSolver(BaseSolver):
         )
 
 
+@solver_registry.register("dance")
 class DanceSolver(BaseSolver):
     type: Literal["dance"] = "dance"
 
@@ -236,6 +243,7 @@ class DanceSolver(BaseSolver):
         )
 
 
+@solver_registry.register("ddim")
 class DDIMSolver(BaseSolver):
     type: Literal["ddim"] = "ddim"
 
@@ -316,6 +324,7 @@ class DDIMSolver(BaseSolver):
         )
 
 
+@solver_registry.register("cps")
 class CPSSolver(BaseSolver):
     type: Literal["cps"] = "cps"
 
@@ -368,6 +377,7 @@ class CPSSolver(BaseSolver):
         )
 
 
+@solver_registry.register("dpm")
 class DPMSolver(BaseSolver):
     type: Literal["dpm"] = "dpm"
     order: Literal[1, 2]
@@ -524,11 +534,4 @@ class DPMSolver(BaseSolver):
         )
 
 
-Solver = Annotated[
-    Annotated[FlowSolver, Tag("flow")]
-    | Annotated[DanceSolver, Tag("dance")]
-    | Annotated[DDIMSolver, Tag("ddim")]
-    | Annotated[CPSSolver, Tag("cps")]
-    | Annotated[DPMSolver, Tag("dpm")],
-    Discriminator("type"),
-]
+Solver = Annotated[BaseSolver, RegistryUnion(solver_registry, "type")]

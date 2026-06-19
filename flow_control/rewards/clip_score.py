@@ -6,10 +6,11 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from flow_control.utils import device as devutil
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 from .normalize import AffineNormalize, Normalize
 
 
+@reward_registry.register("clip_score")
 class CLIPScoreReward(BaseReward):
     """CLIP-based text-image alignment reward."""
 

@@ -5,7 +5,7 @@ from diffusers import FluxTransformer2DModel
 from einops import rearrange
 from peft import LoraConfig
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -25,6 +25,7 @@ class Flux1Batch(Batch):
         Will be calculated if not present."""
 
 
+@adapter_registry.register("flux1_base")
 class Flux1Adapter[TBatch: Flux1Batch](
     BaseModelAdapter[FluxTransformer2DModel, TBatch]
 ):

@@ -17,6 +17,7 @@ from ..base import (
     InputBatch,
     ProcessedBatch,
     TrainInputBatch,
+    task_registry,
 )
 from ..components.prompts import PromptStr, parse_prompt
 
@@ -42,6 +43,7 @@ class TIEProcessedBatch(ProcessedBatch):
     reference_sizes: list[tuple[int, int]]
 
 
+@task_registry.register("tie")
 class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessedBatch]):
     task: Literal["tie"] = "tie"
     encoder_prompt: PromptStr = ""

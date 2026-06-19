@@ -13,6 +13,7 @@ from ..base import (
     InputBatch,
     ProcessedBatch,
     TrainInputBatch,
+    task_registry,
 )
 from ..components.prompts import PromptStr, parse_prompt
 from ..components.vae import PosteriorMode
@@ -43,6 +44,7 @@ class QwenLayeredDecodedBatch(DecodedBatch):
     layer_images: list[torch.Tensor]
 
 
+@task_registry.register("qwen_layered")
 class QwenImageLayeredProcessor(
     BaseProcessor[
         QwenLayeredInputBatch, QwenLayeredTrainInputBatch, QwenLayeredProcessedBatch

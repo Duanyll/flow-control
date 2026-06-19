@@ -3,6 +3,7 @@ import importlib
 import sys
 
 from flow_control.utils.config import add_config_patch_arguments, load_config_file
+from flow_control.utils.registry import load_plugins
 
 # Subcommands that take a single config file and whose ``run(config)`` consumes
 # the already-loaded dict. ``launch`` also takes a config file but is dispatched
@@ -56,6 +57,15 @@ def main():
         default=None,
         help="Directory to write schema files (default: schema).",
     )
+    schema_sub.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Optional config file whose `imports` plugins are loaded before "
+            "building schemas, so emitted schemas include those plugin members."
+        ),
+    )
 
     args = parser.parse_args()
     if args.command is None:
@@ -72,7 +82,12 @@ def _dispatch(args: argparse.Namespace) -> None:
     if command == "schema":
         from flow_control.scripts.schema import run as run_schema
 
-        run_schema(**({"output_dir": args.output_dir} if args.output_dir else {}))
+        kwargs: dict[str, str] = {}
+        if args.output_dir:
+            kwargs["output_dir"] = args.output_dir
+        if args.config:
+            kwargs["config_path"] = args.config
+        run_schema(**kwargs)
         return
 
     # ``launch`` re-spawns subprocesses that re-load the config file themselves,
@@ -86,6 +101,9 @@ def _dispatch(args: argparse.Namespace) -> None:
     config = load_config_file(
         args.config_path, args.config_updates, args.config_removes
     )
+    # Import any declared plugin modules for their registry side effects BEFORE
+    # constructing a config (validation reads the registries) or dispatching.
+    load_plugins(config.get("imports", []))
 
     if command == "export":
         from flow_control.scripts.export import run as run_export

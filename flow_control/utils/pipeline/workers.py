@@ -16,6 +16,7 @@ import torch
 import torch.multiprocessing as mp
 
 from ..logging import get_logger, setup_global_handler
+from ..registry import load_plugins
 from ..tensor import deep_apply_tensor_fn
 from .base import DataSink, DataSource, PipelineStage
 
@@ -125,9 +126,11 @@ def _source_worker(
     log_queue: Any,
     done_event: EventType,
     shutdown_event: EventType,
+    plugin_modules: list[str],
 ):
     """Worker that scans the data source and feeds items to the pipeline."""
     worker_logger = _setup_worker_logging("Source", log_queue)
+    load_plugins(plugin_modules)
     worker_logger.info("Source worker started")
 
     try:
@@ -180,11 +183,13 @@ def _stage_worker(
     device: int | None,
     init_kwargs: dict,
     max_concurrency: int = 1,
+    plugin_modules: list[str] | None = None,
 ):
     """Worker that processes items through a pipeline stage."""
     torch.set_num_threads(num_threads)
     worker_name = f"Stage{stage_index}-W{worker_id}"
     worker_logger = _setup_worker_logging(worker_name, log_queue)
+    load_plugins(plugin_modules or [])
     worker_logger.info(f"Stage worker started (device={device}, threads={num_threads})")
     stage = None
 
@@ -481,11 +486,13 @@ def _sink_worker(
     shutdown_event: EventType,
     num_threads: int,
     init_kwargs: dict,
+    plugin_modules: list[str],
 ):
     """Worker that writes items to the sink."""
     torch.set_num_threads(num_threads)
     worker_name = f"Sink-W{worker_id}"
     worker_logger = _setup_worker_logging(worker_name, log_queue)
+    load_plugins(plugin_modules)
     worker_logger.info(f"Sink worker started (threads={num_threads})")
     sink = None
 

@@ -2,7 +2,9 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Tag
+from pydantic import BaseModel, ConfigDict
+
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
 class AdvantageEstimator(BaseModel, ABC):
@@ -33,6 +35,12 @@ class AdvantageEstimator(BaseModel, ABC):
         ...
 
 
+advantage_registry: Registry[AdvantageEstimator] = Registry(
+    "advantage", base=AdvantageEstimator
+)
+
+
+@advantage_registry.register("per_prompt")
 class PerPromptAdvantage(AdvantageEstimator):
     """Per-prompt normalization: normalize within each prompt group."""
 
@@ -67,6 +75,7 @@ class PerPromptAdvantage(AdvantageEstimator):
         return advantages
 
 
+@advantage_registry.register("global")
 class GlobalAdvantage(AdvantageEstimator):
     """Global normalization: (r - mean) / (std + eps)."""
 
@@ -87,6 +96,7 @@ class GlobalAdvantage(AdvantageEstimator):
         return (combined - mean) / std
 
 
+@advantage_registry.register("gdpo")
 class GdpoAdvantage(AdvantageEstimator):
     """GDPO: normalize each reward component independently per-prompt-group,
     then combine with weights and batch-normalize.
@@ -126,21 +136,7 @@ class GdpoAdvantage(AdvantageEstimator):
         return (pre_bn - mean) / std
 
 
-def _passthrough_advantage(v: object) -> object:
-    """Allow already-instantiated AdvantageEstimator instances to pass through."""
-    if isinstance(v, AdvantageEstimator):
-        return v
-    return v
-
-
-_AdvantageUnion = Annotated[
-    Annotated[PerPromptAdvantage, Tag("per_prompt")]
-    | Annotated[GlobalAdvantage, Tag("global")]
-    | Annotated[GdpoAdvantage, Tag("gdpo")],
-    Discriminator("type"),
-]
-
-Advantage = Annotated[_AdvantageUnion, BeforeValidator(_passthrough_advantage)]
+Advantage = Annotated[AdvantageEstimator, RegistryUnion(advantage_registry, "type")]
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from einops import rearrange, repeat
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from ..base import BaseModelAdapter
+from ..base import BaseModelAdapter, adapter_registry
 from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
@@ -131,6 +131,7 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
         return vid_freqs, txt_freqs
 
 
+@adapter_registry.register("qwen_layered")
 class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
     type: Literal["layered"] = "layered"
 

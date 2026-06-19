@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from flow_control.datasets.coercion import JsonBeforeValidator
 from flow_control.utils.device import default_device
 from flow_control.utils.hf_model import HfModelLoader
+from flow_control.utils.registry import Registry
 from flow_control.utils.resize import (
     ResolutionList,
     resize_to_closest_resolution,
@@ -310,3 +311,6 @@ class BaseProcessor[
             "prompt_embeds": prompt_embeds,
             "pooled_prompt_embeds": pooled_prompt_embeds,
         }
+
+
+task_registry: Registry[BaseProcessor] = Registry("processor_task", base=BaseProcessor)

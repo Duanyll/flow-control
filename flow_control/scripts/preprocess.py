@@ -11,11 +11,11 @@ from flow_control.datasets import (
     parse_dataset,
 )
 from flow_control.processors import (
-    PROCESSOR_TASK_REGISTRY,
     ProcessorConfig,
     get_processor_input_typeddict,
     parse_processor,
 )
+from flow_control.processors.base import task_registry
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
@@ -60,8 +60,8 @@ class TorchDatasetLoaderStage(PipelineStage):
         coerce_to: type | None = None
         if enable_coercion and processor_args:
             task_name = processor_args.get("task")
-            if task_name and task_name in PROCESSOR_TASK_REGISTRY:
-                processor_class = PROCESSOR_TASK_REGISTRY[task_name]
+            processor_class = task_registry.get(task_name) if task_name else None
+            if processor_class is not None:
                 mode: Literal["training", "inference"] = processing_mode
                 coerce_to = get_processor_input_typeddict(processor_class, mode)
 
@@ -125,6 +125,11 @@ class ProcessorStage(PipelineStage):
 class PreprocessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    imports: list[str] = []
+    """Out-of-tree plugin modules to import (for registry side effects) before
+    constructing this config and threaded into spawn workers. Loaded explicitly,
+    never via an env var."""
+
     dataset: DatasetConfig
     processor: ProcessorConfig
     output: DatasinkConfig
@@ -175,6 +180,7 @@ def run(config_data: dict) -> None:
             name="Scanning",
             queue_size=config.queue_size,
             init_kwargs={"dataset_args": config.dataset},
+            plugin_modules=config.imports,
         ),
         stages=[
             StageConfig(
@@ -190,6 +196,7 @@ def run(config_data: dict) -> None:
                     "enable_coercion": config.enable_coercion,
                     "reassign_keys": config.reassign_keys,
                 },
+                plugin_modules=config.imports,
             ),
             StageConfig(
                 stage=ProcessorStage,
@@ -204,6 +211,7 @@ def run(config_data: dict) -> None:
                     "processing_mode": config.processing_mode,
                     "save_extra": config.save_extra,
                 },
+                plugin_modules=config.imports,
             ),
         ],
         sink=SinkConfig(
@@ -212,6 +220,7 @@ def run(config_data: dict) -> None:
             num_workers=config.num_sink_workers,
             queue_size=config.queue_size,
             init_kwargs=config.output,
+            plugin_modules=config.imports,
         ),
     )
 

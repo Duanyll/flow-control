@@ -20,7 +20,7 @@ from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 logger = get_logger(__name__)
 
@@ -63,6 +63,7 @@ class GenEvalMetadata(TypedDict):
     exclude: NotRequired[list[GenevalExcludeSpec]]
 
 
+@reward_registry.register("geneval")
 class GenevalReward(BaseReward):
     """GenEval reward based on Mask2Former object detection and CLIP color
     classification.

@@ -8,7 +8,10 @@ Each task module exports:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
+
+from flow_control.utils.registry import Registry
 
 
 class TaskTemplate(Protocol):
@@ -24,24 +27,24 @@ class TaskTemplate(Protocol):
     def coerce(self, *args: Any, **kwargs: Any) -> dict[str, Any]: ...
 
 
-TASK_TEMPLATE_REGISTRY: dict[str, type[TaskTemplate]] = {}
+# Duck-typed family: ``TaskTemplate`` is a Protocol, so ``base=None`` skips the
+# nominal subclass guard.
+TASK_TEMPLATE_REGISTRY: Registry[TaskTemplate] = Registry("serving_task")
 
 
-def register_task(name: str):
-    def decorator(cls: type[TaskTemplate]):
-        TASK_TEMPLATE_REGISTRY[name] = cls
-        return cls
-
-    return decorator
+def register_task[C](name: str) -> Callable[[type[C]], type[C]]:
+    """Thin wrapper over ``TASK_TEMPLATE_REGISTRY.register`` (identity-preserving)."""
+    return TASK_TEMPLATE_REGISTRY.register(name)
 
 
 def get_task_template(name: str) -> TaskTemplate:
-    if name not in TASK_TEMPLATE_REGISTRY:
+    template = TASK_TEMPLATE_REGISTRY.get(name)
+    if template is None:
         raise ValueError(
             f"No Gradio template for task '{name}'. "
-            f"Available: {list(TASK_TEMPLATE_REGISTRY.keys())}"
+            f"Available: {sorted(TASK_TEMPLATE_REGISTRY.members())}"
         )
-    return TASK_TEMPLATE_REGISTRY[name]()
+    return template()
 
 
 # Import task modules to trigger registration

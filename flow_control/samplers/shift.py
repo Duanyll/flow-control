@@ -3,9 +3,10 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag
+from pydantic import BaseModel, ConfigDict
 
 from flow_control.adapters.base import Batch
+from flow_control.utils.registry import Registry, RegistryUnion
 
 
 class BaseShift(BaseModel, ABC):
@@ -40,6 +41,10 @@ class BaseShift(BaseModel, ABC):
         raise NotImplementedError()
 
 
+shift_registry: Registry[BaseShift] = Registry("shift", base=BaseShift)
+
+
+@shift_registry.register("none")
 class NoShift(BaseShift):
     type: Literal["none"] = "none"
 
@@ -47,6 +52,7 @@ class NoShift(BaseShift):
         return 1.0
 
 
+@shift_registry.register("constant")
 class ConstantShift(BaseShift):
     type: Literal["constant"] = "constant"
     shift_value: float = 1.0
@@ -55,6 +61,7 @@ class ConstantShift(BaseShift):
         return self.shift_value
 
 
+@shift_registry.register("linear")
 class LinearShift(BaseShift):
     type: Literal["linear"] = "linear"
     base_image_seq_len: int = 256
@@ -71,6 +78,7 @@ class LinearShift(BaseShift):
         return math.exp(mu)
 
 
+@shift_registry.register("squared")
 class SquaredShift(BaseShift):
     type: Literal["squared"] = "squared"
     base_image_seq_len: int = 256
@@ -79,6 +87,7 @@ class SquaredShift(BaseShift):
         return (seq_len / self.base_image_seq_len) ** 0.5
 
 
+@shift_registry.register("flux2")
 class Flux2Shift(BaseShift):
     type: Literal["flux2"] = "flux2"
     a1: float = 8.73809524e-05
@@ -100,11 +109,4 @@ class Flux2Shift(BaseShift):
         return a * num_steps + b
 
 
-Shift = Annotated[
-    Annotated[NoShift, Tag("none")]
-    | Annotated[ConstantShift, Tag("constant")]
-    | Annotated[LinearShift, Tag("linear")]
-    | Annotated[SquaredShift, Tag("squared")]
-    | Annotated[Flux2Shift, Tag("flux2")],
-    Discriminator("type"),
-]
+Shift = Annotated[BaseShift, RegistryUnion(shift_registry, "type")]

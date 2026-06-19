@@ -2,7 +2,6 @@ import re
 from typing import Annotated, Any, Literal, cast
 
 import torch
-from pydantic import Discriminator, Tag
 from transformers import (
     CLIPTextModel,
     CLIPTokenizer,
@@ -18,6 +17,7 @@ from transformers import (
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
+from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.resize import resize_to_multiple_of, resize_to_resolution
 from flow_control.utils.tensor import remove_alpha_channel
 from flow_control.utils.types import TorchDType
@@ -50,6 +50,9 @@ class BaseEncoder[T](HfModelLoader[T]):
         raise NotImplementedError("Encode method must be implemented by subclasses.")
 
 
+encoder_registry: Registry[BaseEncoder] = Registry("encoder", base=BaseEncoder)
+
+
 def warn_no_image_support(func):
     def wrapper(self, prompt, images=None, system_prompt=None):
         if images:
@@ -72,6 +75,7 @@ class GenerativeEncoder:
         raise NotImplementedError("Generate method must be implemented by subclasses.")
 
 
+@encoder_registry.register("t5")
 class T5TextEncoder(BaseEncoder[T5EncoderModel]):
     type: Literal["t5"] = "t5"
 
@@ -115,6 +119,7 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
         return prompt_embeds
 
 
+@encoder_registry.register("clip")
 class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
     type: Literal["clip"] = "clip"
 
@@ -161,6 +166,7 @@ class ClipTextEncoder(BaseEncoder[CLIPTextModel]):
         return pooled_prompt_embeds
 
 
+@encoder_registry.register("qwen25vl")
 class Qwen25VLEncoder(
     BaseEncoder[Qwen2_5_VLForConditionalGeneration], GenerativeEncoder
 ):
@@ -387,6 +393,7 @@ class Qwen25VLEncoder(
         return output_text.strip()
 
 
+@encoder_registry.register("qwen3")
 class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
     type: Literal["qwen3"] = "qwen3"
     library: Literal["diffusers", "transformers"] = "transformers"
@@ -443,6 +450,7 @@ class Qwen3Encoder(BaseEncoder[Qwen3ForCausalLM]):
         return prompt_embeds
 
 
+@encoder_registry.register("mistral3")
 class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeEncoder):
     type: Literal["mistral3"] = "mistral3"
     library: Literal["diffusers", "transformers"] = "transformers"
@@ -576,11 +584,4 @@ class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeE
         return result[0].strip()
 
 
-Encoder = Annotated[
-    Annotated[T5TextEncoder, Tag("t5")]
-    | Annotated[ClipTextEncoder, Tag("clip")]
-    | Annotated[Qwen25VLEncoder, Tag("qwen25vl")]
-    | Annotated[Qwen3Encoder, Tag("qwen3")]
-    | Annotated[Mistral3Encoder, Tag("mistral3")],
-    Discriminator("type"),
-]
+Encoder = Annotated[BaseEncoder, RegistryUnion(encoder_registry, "type")]

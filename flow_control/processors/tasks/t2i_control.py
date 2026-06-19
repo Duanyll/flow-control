@@ -5,7 +5,13 @@ import torch
 from flow_control.datasets.coercion import ImageTensor
 from flow_control.utils.resize import resize_to_resolution
 
-from ..base import BaseProcessor, InputBatch, ProcessedBatch, TrainInputBatch
+from ..base import (
+    BaseProcessor,
+    InputBatch,
+    ProcessedBatch,
+    TrainInputBatch,
+    task_registry,
+)
 from ..components.prompts import PromptStr, parse_prompt
 
 
@@ -27,6 +33,7 @@ class T2IControlProcessedBatch(ProcessedBatch):
     control_latents: torch.Tensor
 
 
+@task_registry.register("t2i_control")
 class T2IControlProcessor(
     BaseProcessor[
         T2IControlInputBatch, T2IControlTrainInputBatch, T2IControlProcessedBatch

@@ -10,9 +10,10 @@ from typing import Any, Literal
 import torch
 from pydantic import ConfigDict
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 
+@reward_registry.register("pairwise")
 class PairwiseReward(BaseReward):
     """Base class for pairwise comparison rewards.
 

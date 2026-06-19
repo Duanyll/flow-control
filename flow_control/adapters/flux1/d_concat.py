@@ -3,6 +3,7 @@ from typing import Literal
 import torch
 from peft import LoraConfig
 
+from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -11,6 +12,7 @@ class Flux1DConcatBatch(Flux1Batch):
     """`[B, N, D]` The VAE encoded control condition image."""
 
 
+@adapter_registry.register("flux1_d_concat")
 class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     """
     Adapter for applying control to the model through concating the conditional image latent

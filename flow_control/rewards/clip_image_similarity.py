@@ -6,9 +6,10 @@ from pydantic import ConfigDict, PrivateAttr
 
 from flow_control.utils import device as devutil
 
-from .base import BaseReward
+from .base import BaseReward, reward_registry
 
 
+@reward_registry.register("clip_image_similarity")
 class CLIPImageSimilarityReward(BaseReward):
     """CLIP-based image-to-image cosine similarity reward.
 

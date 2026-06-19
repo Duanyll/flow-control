@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from flow_control.utils.hf_model import HfModelLoader
+from flow_control.utils.registry import Registry
 from flow_control.utils.resize import ResolutionList
 
 from .components.encoder import (
@@ -36,9 +37,12 @@ FLUX1_RESOLUTIONS = [
     (1568, 672),
 ]
 
+preset_registry: Registry = Registry("processor_preset")
+
 # ---------------------------------- Flux.1 ---------------------------------- #
 
 
+@preset_registry.register("flux1")
 class Flux1Preset(BaseModel):
     vae: VAE = Flux1VAE()
     encoder: Encoder = T5TextEncoder()
@@ -58,6 +62,7 @@ class Flux1Preset(BaseModel):
 # -------------------------------- Qwen-Image -------------------------------- #
 
 
+@preset_registry.register("qwen_image")
 class QwenImagePreset(BaseModel):
     vae: VAE = QwenImageVAE()
     encoder: Encoder = Qwen25VLEncoder()
@@ -80,12 +85,14 @@ class QwenImagePreset(BaseModel):
     save_negative: bool = True
 
 
+@preset_registry.register("qwen_image_edit")
 class QwenImageEditPreset(QwenImagePreset):
     encoder: Encoder = Qwen25VLEncoder(tokenizer_max_length=0)
     encoder_prompt: PromptStr = parse_prompt("@qwen_image_edit_encoder")
     max_reference_images: int = 3
 
 
+@preset_registry.register("qwen_image_layered")
 class QwenImageLayeredPreset(QwenImagePreset):
     vae: VAE = QwenImageVAE(
         pretrained_model_id="Qwen/Qwen-Image-Layered",
@@ -102,6 +109,7 @@ class QwenImageLayeredPreset(QwenImagePreset):
 # ------------------------------- Longcat Image ------------------------------ #
 
 
+@preset_registry.register("longcat_image")
 class LongcatImagePreset(BaseModel):
     vae: VAE = Flux1VAE()
     encoder: Encoder = Qwen25VLEncoder(
@@ -128,6 +136,7 @@ class LongcatImagePreset(BaseModel):
     t2i_enhance_prompt: PromptStr = parse_prompt("@longcat_t2i_enhance_en")
 
 
+@preset_registry.register("longcat_image_edit")
 class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
     max_reference_images: int = 1
@@ -136,6 +145,7 @@ class LongcatImageEditPreset(LongcatImagePreset):
 # ---------------------------------- Z-Image --------------------------------- #
 
 
+@preset_registry.register("zimage")
 class ZImagePreset(BaseModel):
     vae: VAE = Flux1VAE()
     encoder: Encoder = Qwen3Encoder()
@@ -189,6 +199,7 @@ class ZImagePreset(BaseModel):
 # ---------------------------------- Flux.2 ---------------------------------- #
 
 
+@preset_registry.register("flux2")
 class Flux2Preset(BaseModel):
     vae: VAE = Flux2VAE()
     encoder: Encoder = Mistral3Encoder()
@@ -213,6 +224,7 @@ class Flux2Preset(BaseModel):
     tie_enhance_prompt: PromptStr = parse_prompt("@flux2_tie_enhance")
 
 
+@preset_registry.register("flux2_klein_9b")
 class Flux2Klein9BPreset(Flux2Preset):
     encoder: Encoder = Qwen3Encoder(
         pretrained_model_id="black-forest-labs/FLUX.2-klein-9B",
@@ -231,6 +243,7 @@ class Flux2Klein9BPreset(Flux2Preset):
     encoder_prompt: PromptStr = ""
 
 
+@preset_registry.register("flux2_klein_4b")
 class Flux2Klein4BPreset(Flux2Preset):
     encoder: Encoder = Qwen3Encoder(
         pretrained_model_id="black-forest-labs/FLUX.2-klein-4B",

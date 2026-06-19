@@ -10,10 +10,10 @@ from diffusers import (
 from diffusers.models.autoencoders.autoencoder_kl import DecoderOutput
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from einops import rearrange
-from pydantic import Discriminator, Tag
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
+from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.types import TorchDType
 
@@ -99,6 +99,10 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
         return self._decode(latents)
 
 
+vae_registry: Registry[BaseVAE] = Registry("vae", base=BaseVAE)
+
+
+@vae_registry.register("flux1")
 class Flux1VAE(BaseVAE[AutoencoderKL]):
     type: Literal["flux1"] = "flux1"
 
@@ -131,6 +135,7 @@ class Flux1VAE(BaseVAE[AutoencoderKL]):
         return image
 
 
+@vae_registry.register("qwen")
 class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
     type: Literal["qwen"] = "qwen"
 
@@ -194,6 +199,7 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
         return images
 
 
+@vae_registry.register("flux2")
 class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
     type: Literal["flux2"] = "flux2"
 
@@ -287,9 +293,4 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
         return image
 
 
-VAE = Annotated[
-    Annotated[Flux1VAE, Tag("flux1")]
-    | Annotated[QwenImageVAE, Tag("qwen")]
-    | Annotated[Flux2VAE, Tag("flux2")],
-    Discriminator("type"),
-]
+VAE = Annotated[BaseVAE, RegistryUnion(vae_registry, "type")]

@@ -1,10 +1,9 @@
 from typing import Annotated, Any, Literal
 
-from pydantic import Discriminator, GetCoreSchemaHandler, Tag
-from pydantic_core import CoreSchema, core_schema
+from flow_control.utils.registry import RegistryUnion
 
-from .base import BaseProcessor
-from .presets import (
+from .base import BaseProcessor, task_registry
+from .presets import (  # noqa: F401  (imported for preset registration side effects)
     Flux1Preset,
     Flux2Klein4BPreset,
     Flux2Klein9BPreset,
@@ -15,120 +14,60 @@ from .presets import (
     QwenImageLayeredPreset,
     QwenImagePreset,
     ZImagePreset,
+    preset_registry,
 )
-from .tasks.efficient_layered import EfficientLayeredProcessor
-from .tasks.inpaint import InpaintProcessor
-from .tasks.qwen_layered import QwenImageLayeredProcessor
-from .tasks.t2i import T2IProcessor
-from .tasks.t2i_control import T2IControlProcessor
-from .tasks.tie import TIEProcessor
-
-PROCESSOR_TASK_REGISTRY = {
-    "t2i": T2IProcessor,
-    "t2i_control": T2IControlProcessor,
-    "inpaint": InpaintProcessor,
-    "efficient_layered": EfficientLayeredProcessor,
-    "qwen_layered": QwenImageLayeredProcessor,
-    "tie": TIEProcessor,
-}
-
-PROCESSOR_PRESET_REGISTRY = {
-    "flux1": Flux1Preset,
-    "qwen_image": QwenImagePreset,
-    "qwen_image_edit": QwenImageEditPreset,
-    "qwen_image_layered": QwenImageLayeredPreset,
-    "longcat_image": LongcatImagePreset,
-    "longcat_image_edit": LongcatImageEditPreset,
-    "zimage": ZImagePreset,
-    "flux2": Flux2Preset,
-    "flux2_klein_4b": Flux2Klein4BPreset,
-    "flux2_klein_9b": Flux2Klein9BPreset,
-}
+from .tasks.inpaint import InpaintProcessor  # noqa: F401
+from .tasks.qwen_layered import QwenImageLayeredProcessor  # noqa: F401
+from .tasks.t2i import T2IProcessor  # noqa: F401
+from .tasks.t2i_control import T2IControlProcessor  # noqa: F401
+from .tasks.tie import TIEProcessor  # noqa: F401
 
 
 def parse_processor(conf: dict) -> BaseProcessor:
     task = conf["task"]
-    ctor = PROCESSOR_TASK_REGISTRY[task]
-    if "preset" in conf:
-        preset_name = conf["preset"]
-        preset_ctor = PROCESSOR_PRESET_REGISTRY[preset_name]
+    task_ctor = task_registry.get(task)
+    if task_ctor is None:
+        raise ValueError(
+            f"Unknown processor task {task!r}; "
+            f"registered: {sorted(task_registry.members())}"
+        )
+    ctor: type[BaseProcessor] = task_ctor
+
+    preset_name = conf.get("preset")
+    if preset_name:
+        preset_ctor = preset_registry.get(preset_name)
+        if preset_ctor is None:
+            raise ValueError(
+                f"Unknown processor preset {preset_name!r}; "
+                f"registered: {sorted(preset_registry.members())}"
+            )
         ctor = type(
-            f"{preset_ctor.__name__.replace('Preset', '')}{ctor.__name__}",
-            (preset_ctor, ctor),
+            f"{preset_ctor.__name__.replace('Preset', '')}{task_ctor.__name__}",
+            (preset_ctor, task_ctor),
             {},
         )
     return ctor(**conf)
 
 
-# Schema-only union of task classes for JSON schema generation
-_ProcessorTaskUnion = Annotated[
-    Annotated[T2IProcessor, Tag("t2i")]
-    | Annotated[T2IControlProcessor, Tag("t2i_control")]
-    | Annotated[InpaintProcessor, Tag("inpaint")]
-    | Annotated[EfficientLayeredProcessor, Tag("efficient_layered")]
-    | Annotated[QwenImageLayeredProcessor, Tag("qwen_layered")]
-    | Annotated[TIEProcessor, Tag("tie")],
-    Discriminator("task"),
+def _validate_processor_dict(conf: dict[str, Any]) -> dict[str, Any]:
+    # Validate by constructing the processor, but return the original dict
+    # unchanged so the value can cross multiprocessing boundaries.
+    parse_processor(conf)
+    return conf
+
+
+# Runtime validation dispatches through parse_processor (task x preset mixin
+# composition); JSON schema is the materialized task union.
+Processor = Annotated[
+    BaseProcessor, RegistryUnion(task_registry, "task", parser=parse_processor)
 ]
 
-
-class _ProcessorAnnotation:
-    """Custom annotation for Processor type.
-
-    - Core schema: wraps the task union schema so $defs are shared with the parent.
-    - Runtime: uses parse_processor for preset mixin composition.
-    - JSON schema: the union schema's JSON schema is generated automatically.
-    """
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, source_type: Any, handler: GetCoreSchemaHandler
-    ) -> CoreSchema:
-        # Generate the union schema through the handler so all $defs are
-        # registered in the parent's schema generation context.
-        union_schema = handler.generate_schema(_ProcessorTaskUnion)
-        return core_schema.with_info_wrap_validator_function(
-            cls._validate,
-            union_schema,
-        )
-
-    @staticmethod
-    def _validate(value: Any, handler: Any, info: Any) -> BaseProcessor:
-        # Ignore the union handler — use parse_processor for runtime
-        if isinstance(value, BaseProcessor):
-            return value
-        if isinstance(value, dict):
-            return parse_processor(value)
-        raise ValueError(f"Expected dict or BaseProcessor, got {type(value)}")
-
-
-Processor = Annotated[BaseProcessor, _ProcessorAnnotation]
-
-
-class _ProcessorConfigAnnotation:
-    """Custom annotation for ProcessorConfig type.
-
-    Same JSON schema as Processor (full task union with $defs), but the
-    validated value stays as a plain dict so it can cross multiprocessing
-    boundaries. Runtime validation is done via parse_processor.
-    """
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, source_type: Any, handler: GetCoreSchemaHandler
-    ) -> CoreSchema:
-        union_schema = handler.generate_schema(_ProcessorTaskUnion)
-        return core_schema.with_info_wrap_validator_function(
-            cls._validate,
-            union_schema,
-        )
-
-    @staticmethod
-    def _validate(value: Any, handler: Any, info: Any) -> dict[str, Any]:
-        if isinstance(value, dict):
-            parse_processor(value)  # validate, discard the instance
-            return value
-        raise ValueError(f"Expected dict, got {type(value)}")
+# Same JSON schema as Processor, but the validated value stays a plain dict so
+# it can cross multiprocessing boundaries.
+ProcessorConfig = Annotated[
+    dict[str, Any],
+    RegistryUnion(task_registry, "task", parser=_validate_processor_dict),
+]
 
 
 def get_processor_input_typeddict(
@@ -160,8 +99,6 @@ def get_processor_input_typeddict(
                 return args[1]
     return None
 
-
-ProcessorConfig = Annotated[dict[str, Any], _ProcessorConfigAnnotation]
 
 __all__ = [
     "Processor",
