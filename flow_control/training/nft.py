@@ -49,13 +49,13 @@ from .ema import (
     apply_ema_maybe,
     apply_init_maybe,
 )
-from .launch_config import trainer_registry
 from .mixins import (
     CheckpointingMixin,
     Rollout,
     RolloutMixin,
     ValidationMixin,
     distributed_main,
+    trainer_registry,
 )
 from .weighting import LogitNormalTimestepWeighting, TimestepWeighting
 

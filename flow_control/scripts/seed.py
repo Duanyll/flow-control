@@ -6,14 +6,16 @@ def run(config: dict) -> None:
     train something else (e.g. the VAE trainer) override it. Plugin trainers are
     already registered by this point (cli loads ``imports`` before dispatching).
     """
-    from flow_control.training.launch_config import trainer_registry
+    from flow_control.training import import_builtin_trainers
+    from flow_control.training.mixins import trainer_registry
 
+    import_builtin_trainers()
     launch_type = config.get("launch", {}).get("type", "")
     trainer_cls = trainer_registry.get(launch_type)
     if trainer_cls is None:
         raise ValueError(
             f"Unknown trainer type {launch_type!r}. Registered: "
-            f"{sorted(trainer_registry.tags())}. If it is a plugin trainer, add "
+            f"{sorted(trainer_registry.members())}. If it is a plugin trainer, add "
             "its module to the config's `imports`."
         )
     trainer = trainer_cls(**config)

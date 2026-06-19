@@ -35,13 +35,13 @@ from .data import (
     collate_fn,
     seed_worker,
 )
-from .launch_config import trainer_registry
 from .mixins import (
     BaseTrainer,
     DcpMixin,
     LoggingMixin,
     PreprocessMixin,
     distributed_main,
+    trainer_registry,
 )
 
 logger = get_logger(__name__)

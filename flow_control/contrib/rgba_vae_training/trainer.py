@@ -36,11 +36,11 @@ from flow_control.training.data import (
     prepare_vae_target_image,
     seed_worker,
 )
-from flow_control.training.launch_config import trainer_registry
 from flow_control.training.mixins import (
     BaseTrainer,
     CheckpointingMixin,
     distributed_main,
+    trainer_registry,
 )
 from flow_control.training.mixins.logging import LoggingMixin
 from flow_control.utils import device as devutil

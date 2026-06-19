@@ -9,7 +9,7 @@ from pathlib import Path
 
 from rich import print
 
-from flow_control.training.launch_config import LaunchConfig, trainer_registry
+from flow_control.training.launch_config import LaunchConfig
 from flow_control.utils.config import (
     add_config_patch_arguments,
     format_config_patch_args,
@@ -34,14 +34,19 @@ def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
     """Run the child process (invoked by torchrun)."""
     # Import any declared plugin modules for their registry side effects BEFORE
     # resolving the trainer (which validates the config and reads the registries).
-    # Passed explicitly, never via env var.
+    # Passed explicitly, never via env var. The trainer registry is imported here
+    # (not at module top) to keep the launch parent torch-free.
     load_plugins(config_data.get("imports", []))
 
+    from flow_control.training import import_builtin_trainers
+    from flow_control.training.mixins import trainer_registry
+
+    import_builtin_trainers()
     trainer_cls = trainer_registry.get(launch_config.type)
     if trainer_cls is None:
         raise ValueError(
             f"Unknown trainer type {launch_config.type!r}. Registered: "
-            f"{sorted(trainer_registry.tags())}. If it is a plugin trainer, add "
+            f"{sorted(trainer_registry.members())}. If it is a plugin trainer, add "
             "its module to the config's `imports`."
         )
 

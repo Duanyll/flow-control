@@ -78,10 +78,12 @@ plugin datasets/processors work inside workers too.
 ### Trainers
 
 Trainers are a registry too: `trainer_registry` (in
-`flow_control/training/launch_config.py`) maps a config's `launch.type` to a trainer
-class. Built-ins (`sft`/`grpo`/`nft`/`inference`) register lazily; plugin trainers
-(e.g. `vae` from `flow_control.contrib.rgba_vae_training`) register via `imports`. A
-trainer subclasses `BaseTrainer` (`flow_control/training/mixins/base.py`) and
+`flow_control/training/mixins/base.py`, next to `BaseTrainer`) maps a config's
+`launch.type` to a trainer class. Built-ins (`sft`/`grpo`/`nft`/`inference`) are
+registered by `import_builtin_trainers()` (`flow_control/training/__init__.py`),
+which the entry points call before resolving; plugin trainers (e.g. `vae` from
+`flow_control.contrib.rgba_vae_training`) register via `imports`. A trainer
+subclasses `BaseTrainer` (`flow_control/training/mixins/base.py`) and
 overrides `run()`; it may also override `seed_checkpoint()` / `export_checkpoint()`
 (the base seeds a transformer adapter and rejects export). `flow-control
 launch`/`seed`/`export` dispatch through the registry uniformly.

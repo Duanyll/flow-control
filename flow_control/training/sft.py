@@ -45,11 +45,11 @@ from .data import (
     seed_worker,
 )
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
-from .launch_config import trainer_registry
 from .mixins import (
     CheckpointingMixin,
     ValidationMixin,
     distributed_main,
+    trainer_registry,
 )
 from .weighting import (
     LogitNormalTimestepWeighting,

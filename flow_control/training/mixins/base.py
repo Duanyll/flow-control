@@ -17,6 +17,7 @@ from torch.distributed.fsdp import fully_shard
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
+from flow_control.utils.registry import Registry
 
 from ..launch_config import LaunchConfig
 
@@ -265,6 +266,14 @@ class BaseTrainer(BaseModel):
             self._mesh = None
 
         logger.info("Cleaned up distributed resources.")
+
+
+# tag -> trainer class, mapping a config's ``launch.type`` to its trainer. Lives
+# here next to ``BaseTrainer`` (like every other family's registry lives next to
+# its base). ``base=BaseTrainer`` enforces that registered trainers implement the
+# lifecycle interface. The launch *parent* never imports this module (it imports
+# only ``launch_config``, staying torch-free); the child resolves trainers here.
+trainer_registry: Registry[BaseTrainer] = Registry("trainer", base=BaseTrainer)
 
 
 def distributed_main(func):

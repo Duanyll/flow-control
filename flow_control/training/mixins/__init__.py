@@ -4,6 +4,7 @@ from .base import (
     distributed_main,
     main_process_first,
     main_process_only,
+    trainer_registry,
 )
 from .dcp import CheckpointingMixin, DcpMixin
 from .logging import LoggingMixin
@@ -24,4 +25,5 @@ __all__ = [
     "distributed_main",
     "main_process_first",
     "main_process_only",
+    "trainer_registry",
 ]
