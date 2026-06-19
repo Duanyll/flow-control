@@ -33,14 +33,14 @@ from ..data import (
     collate_fn,
     seed_worker,
 )
-from .hsdp import HsdpMixin
+from .base import BaseTrainer
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
 
 logger = get_logger(__name__)
 
 
-class ValidationMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
+class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     Mixin that provides validation: sampling images and optionally scoring rewards.
     """

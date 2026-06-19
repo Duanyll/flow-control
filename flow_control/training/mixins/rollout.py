@@ -41,7 +41,7 @@ from ..data import (
     collate_fn,
     seed_worker,
 )
-from .hsdp import HsdpMixin
+from .base import BaseTrainer
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
 
@@ -60,7 +60,7 @@ class Rollout:
     negative_batch: Batch | None
 
 
-class RolloutMixin(PreprocessMixin, LoggingMixin, HsdpMixin, BaseModel):
+class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     """Mixin providing rollout collection and advantage computation.
 
     Subclasses must implement :pyattr:`rollout_sampler_instance` and provide the

@@ -7,10 +7,10 @@ from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor, get_processor_input_typeddict
 from flow_control.processors.base import ProcessedBatch
 
-from .hsdp import HsdpMixin
+from .base import BaseTrainer
 
 
-class PreprocessMixin(HsdpMixin):
+class PreprocessMixin(BaseTrainer):
     processor: Processor
     enable_preprocess: bool = False
     """

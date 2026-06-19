@@ -45,6 +45,7 @@ from .data import (
     seed_worker,
 )
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
+from .launch_config import trainer_registry
 from .mixins import (
     CheckpointingMixin,
     ValidationMixin,
@@ -60,6 +61,7 @@ from .weighting import (
 logger = get_logger(__name__)
 
 
+@trainer_registry.register("sft")
 class SftTrainer(ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"

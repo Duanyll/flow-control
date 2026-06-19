@@ -23,7 +23,7 @@ from ..launch_config import LaunchConfig
 logger = get_logger(__name__)
 
 
-class HsdpMixin(BaseModel):
+class BaseTrainer(BaseModel):
     # ---------------------------------- Configs --------------------------------- #
     launch: LaunchConfig
     imports: list[str] = []
@@ -38,6 +38,38 @@ class HsdpMixin(BaseModel):
     NUMA nodes or NVLink domain because of the communication overhead.
     """
     gradient_checkpointing: bool = True
+
+    # ------------------------------ Lifecycle hooks ----------------------------- #
+    # The launchable entry points (launch / seed / export) construct a trainer and
+    # call these uniformly; subclasses override as needed. No external code
+    # special-cases a trainer type.
+
+    def run(self) -> None:
+        """Run the trainer's main loop. Subclasses implement this."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement run().")
+
+    def seed_checkpoint(self) -> None:
+        """Generate a DCP seed checkpoint (``flow-control seed``).
+
+        Default: seed the transformer adapter (``self.model``) — the common case
+        for the diffusion trainers. Trainers that train something else (e.g. the
+        VAE trainer) override this.
+        """
+        # ``model`` / ``seed_checkpoint_dir`` are declared by the diffusion
+        # trainers that use this default; the VAE trainer overrides instead.
+        model = self.model  # type: ignore[attr-defined]
+        model.load_transformer(device=torch.device("cpu"))
+        self.save_transformer_to_seed(model, self.seed_checkpoint_dir)  # type: ignore[attr-defined]
+
+    def export_checkpoint(self, checkpoint_dir: str, output_dir: str) -> None:
+        """Export a trained DCP checkpoint to HuggingFace format (``export``).
+
+        Not supported by default; trainers that can export (e.g. the VAE trainer)
+        override this.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support checkpoint export."
+        )
 
     # -------------------------------- Properties -------------------------------- #
     _world_size: int = 1
@@ -237,7 +269,7 @@ class HsdpMixin(BaseModel):
 
 def distributed_main(func):
     @wraps(func)
-    def wrapper(self: HsdpMixin, *args, **kwargs):
+    def wrapper(self: BaseTrainer, *args, **kwargs):
         try:
             self.init_device_mesh()
             return func(self, *args, **kwargs)

@@ -1,11 +1,11 @@
-from .dcp import CheckpointingMixin, DcpMixin
-from .hsdp import (
-    HsdpMixin,
+from .base import (
+    BaseTrainer,
     LaunchConfig,
     distributed_main,
     main_process_first,
     main_process_only,
 )
+from .dcp import CheckpointingMixin, DcpMixin
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
 from .rollout import Rollout, RolloutMixin
@@ -14,7 +14,7 @@ from .validation import ValidationMixin
 __all__ = [
     "CheckpointingMixin",
     "DcpMixin",
-    "HsdpMixin",
+    "BaseTrainer",
     "LaunchConfig",
     "LoggingMixin",
     "Rollout",

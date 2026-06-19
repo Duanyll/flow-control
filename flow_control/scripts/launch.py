@@ -9,7 +9,7 @@ from pathlib import Path
 
 from rich import print
 
-from flow_control.training.launch_config import LaunchConfig
+from flow_control.training.launch_config import LaunchConfig, trainer_registry
 from flow_control.utils.config import (
     add_config_patch_arguments,
     format_config_patch_args,
@@ -33,37 +33,20 @@ def _load_launch_config(
 def _run_child(launch_config: LaunchConfig, config_data: dict) -> None:
     """Run the child process (invoked by torchrun)."""
     # Import any declared plugin modules for their registry side effects BEFORE
-    # importing the trainer module and constructing the trainer (which validates
-    # the config and reads the registries). Passed explicitly, never via env var.
+    # resolving the trainer (which validates the config and reads the registries).
+    # Passed explicitly, never via env var.
     load_plugins(config_data.get("imports", []))
 
-    if launch_config.type == "sft":
-        from flow_control.training.sft import SftTrainer
+    trainer_cls = trainer_registry.get(launch_config.type)
+    if trainer_cls is None:
+        raise ValueError(
+            f"Unknown trainer type {launch_config.type!r}. Registered: "
+            f"{sorted(trainer_registry.tags())}. If it is a plugin trainer, add "
+            "its module to the config's `imports`."
+        )
 
-        trainer = SftTrainer(**config_data)
-        trainer.run()
-    elif launch_config.type == "grpo":
-        from flow_control.training.grpo import GrpoTrainer
-
-        trainer = GrpoTrainer(**config_data)
-        trainer.run()
-    elif launch_config.type == "nft":
-        from flow_control.training.nft import NftTrainer
-
-        trainer = NftTrainer(**config_data)
-        trainer.run()
-    elif launch_config.type == "vae":
-        from flow_control.training.vae import VaeTrainer
-
-        trainer = VaeTrainer(**config_data)
-        trainer.run()
-    elif launch_config.type == "inference":
-        from flow_control.training.inference import Inference
-
-        trainer = Inference(**config_data)
-        trainer.run()
-    else:
-        raise ValueError(f"Unknown launch type: {launch_config.type}")
+    trainer = trainer_cls(**config_data)
+    trainer.run()
 
 
 def is_on_ram_disk(path):

@@ -36,15 +36,22 @@ from __future__ import annotations
 import importlib
 import operator
 from collections.abc import Callable, Iterable, Mapping
-from functools import reduce
+from functools import cache, reduce
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Discriminator, GetCoreSchemaHandler, Tag
 from pydantic_core import CoreSchema, core_schema
 
-from flow_control.utils.logging import get_logger
 
-logger = get_logger(__name__)
+@cache
+def _logger():
+    # Imported lazily so this module stays torch-free: ``flow_control.utils.logging``
+    # pulls in torch, but the launch parent imports this module (via the trainer
+    # registry in launch_config) and must not load torch. The logger is only ever
+    # touched once a member actually registers (by which point torch is loaded).
+    from flow_control.utils.logging import get_logger
+
+    return get_logger(__name__)
 
 
 class Registry[T]:
@@ -63,6 +70,12 @@ class Registry[T]:
         # Widened to ``type[Any]`` so the identity-preserving ``register`` below
         # can stash an arbitrary concrete ``type[C]`` without a cast.
         self._members: dict[str, type[Any]] = {}
+        # tag -> module path for members that are too heavy to import eagerly
+        # (e.g. trainers, which pull torch and per-algorithm deps). ``get`` imports
+        # the module on demand, which runs its ``@register`` decorator. This lets
+        # built-in members dispatch through the same ``get`` as plugin members
+        # (loaded via a config's ``imports``) with no special-casing in callers.
+        self._lazy: dict[str, str] = {}
 
     def register[C](self, tag: str) -> Callable[[type[C]], type[C]]:
         # The *unbounded* method-level type var ``C`` is what keeps the decorator
@@ -93,7 +106,7 @@ class Registry[T]:
                         f"Tag {tag!r} already registered in registry {self.name!r} "
                         f"by {existing.__name__}; cannot re-register {cls.__name__}."
                     )
-                logger.debug(
+                _logger().debug(
                     "Ignoring duplicate registration of %r (%s) in registry %r "
                     "(module double-load).",
                     tag,
@@ -102,7 +115,7 @@ class Registry[T]:
                 )
                 return registered
             if existing is None:
-                logger.debug(
+                _logger().debug(
                     "Registered %r -> %s in registry %r", tag, cls.__name__, self.name
                 )
             self._members[tag] = registered
@@ -110,14 +123,29 @@ class Registry[T]:
 
         return decorator
 
+    def register_lazy(self, tag: str, module: str) -> None:
+        """Declare that ``tag`` is provided by ``module`` (imported on demand).
+
+        The module must, when imported, register the concrete class under ``tag``
+        (via ``@reg.register(tag)``). Used for built-in members that are expensive
+        to import eagerly; ``get(tag)`` triggers the import.
+        """
+        self._lazy[tag] = module
+
     def members(self) -> Mapping[str, type[T]]:
         return dict(self._members)
 
+    def tags(self) -> set[str]:
+        """All known tags (registered + lazily-declared)."""
+        return set(self._members) | set(self._lazy)
+
     def get(self, tag: str) -> type[T] | None:
+        if tag not in self._members and tag in self._lazy:
+            importlib.import_module(self._lazy[tag])  # runs its @register
         return self._members.get(tag)
 
     def __contains__(self, tag: str) -> bool:
-        return tag in self._members
+        return tag in self._members or tag in self._lazy
 
     def __len__(self) -> int:
         return len(self._members)
@@ -220,7 +248,7 @@ def load_plugins(modules: Iterable[str]) -> None:
                 "or installed in the environment."
             ) from exc
         _loaded_plugins.add(name)
-        logger.info("Loaded plugin module %s", name)
+        _logger().info("Loaded plugin module %s", name)
 
 
 __all__ = ["Registry", "RegistryUnion", "load_plugins"]

@@ -2,11 +2,6 @@
 
 import os
 import re
-from typing import Any
-
-import torch
-import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
 from flow_control.utils.logging import get_logger
 
@@ -33,50 +28,29 @@ def _find_latest_checkpoint(checkpoint_root: str) -> str:
     return os.path.join(checkpoint_root, best_name)
 
 
-def _export_vae(config: dict, checkpoint_dir: str, output_dir: str) -> None:
-    """Export a VAE DCP checkpoint to HuggingFace format."""
-    from pydantic import TypeAdapter
-
-    from flow_control.processors.components.vae import VAE
-    from flow_control.training.vae.convert import convert_to_rgba
-
-    vae_adapter: TypeAdapter[Any] = TypeAdapter(VAE)
-    vae_loader = vae_adapter.validate_python(config["vae"])
-    vae_loader.load_model(device=torch.device("cpu"), frozen=False)
-    model = vae_loader.model
-
-    if config.get("do_convert_to_rgba", False):
-        model = convert_to_rgba(model)
-
-    logger.info(f"Loading VAE weights from {checkpoint_dir}...")
-    model_sd, _ = get_state_dict(model, [], options=StateDictOptions(strict=False))
-    state: dict[str, Any] = {"app": {"vae": model_sd}}
-    dcp.load(
-        state,
-        checkpoint_id=checkpoint_dir,
-        no_dist=True,
-        planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
-    )
-    model.load_state_dict(state["app"]["vae"])
-    logger.info(f"Loaded VAE weights from {checkpoint_dir}.")
-
-    os.makedirs(output_dir, exist_ok=True)
-    model.save_pretrained(output_dir)
-    logger.info(f"Exported VAE to {output_dir}.")
-
-
 def run(
     config: dict,
     output_dir: str,
     checkpoint_dir: str | None = None,
 ) -> None:
-    """Export a DCP training checkpoint to HuggingFace format."""
-    launch_type = config.get("launch", {}).get("type", "")
+    """Export a DCP training checkpoint to HuggingFace format.
 
-    if launch_type != "vae":
+    Resolves the checkpoint generically, then delegates the format-specific
+    export to the trainer's ``export_checkpoint(checkpoint_dir, output_dir)``
+    method (the base raises for trainers that don't support export). Plugin
+    trainers are already registered (cli loads ``imports`` before dispatching).
+    """
+    from flow_control.training.launch_config import trainer_registry
+
+    launch_type = config.get("launch", {}).get("type", "")
+    trainer_cls = trainer_registry.get(launch_type)
+    if trainer_cls is None:
         raise ValueError(
-            f"Export currently only supports launch.type='vae', got '{launch_type}'."
+            f"Unknown trainer type {launch_type!r}. Registered: "
+            f"{sorted(trainer_registry.tags())}. If it is a plugin trainer, add "
+            "its module to the config's `imports`."
         )
+    trainer = trainer_cls(**config)
 
     if checkpoint_dir is None:
         checkpoint_root = config.get("checkpoint_root")
@@ -92,4 +66,4 @@ def run(
             f"{checkpoint_dir} is not a valid DCP checkpoint (missing .metadata)."
         )
 
-    _export_vae(config, checkpoint_dir, output_dir)
+    trainer.export_checkpoint(checkpoint_dir, output_dir)

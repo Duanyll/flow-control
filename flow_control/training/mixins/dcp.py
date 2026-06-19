@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 
-from .hsdp import main_process_only
+from .base import main_process_only
 
 logger = get_logger(__name__)
 

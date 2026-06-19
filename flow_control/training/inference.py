@@ -35,12 +35,20 @@ from .data import (
     collate_fn,
     seed_worker,
 )
-from .mixins import DcpMixin, HsdpMixin, LoggingMixin, PreprocessMixin, distributed_main
+from .launch_config import trainer_registry
+from .mixins import (
+    BaseTrainer,
+    DcpMixin,
+    LoggingMixin,
+    PreprocessMixin,
+    distributed_main,
+)
 
 logger = get_logger(__name__)
 
 
-class Inference(PreprocessMixin, HsdpMixin, DcpMixin):
+@trainer_registry.register("inference")
+class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     model_config = ConfigDict(extra="forbid")
 
     model: ModelAdapter

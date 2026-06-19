@@ -30,28 +30,23 @@ def _inject_schema_field(schema_dict: dict) -> dict:
 def generate_schemas() -> dict[str, dict]:
     """Return a mapping of config name -> JSON schema dict.
 
-    The config classes are imported lazily here (not at module top) because
-    importing them builds and caches their pydantic core schema, which freezes
-    the registry-backed unions. Any plugins must be loaded before this call so
-    their members are captured; see ``run``.
+    One schema per registered trainer (``trainer_registry``) plus the standalone
+    ``preprocess`` / ``serve`` configs. ``trainer_registry.get`` lazily imports
+    each built-in trainer so it self-registers; any plugin trainers loaded via a
+    config's ``imports`` (see ``run``) are already in the registry and get a
+    schema too. Importing a config class builds + caches its pydantic core schema,
+    freezing the registry-backed unions, so plugins must be loaded before this.
     """
     from flow_control.scripts.preprocess import PreprocessConfig
     from flow_control.serving.config import ServeConfig
-    from flow_control.training.grpo import GrpoTrainer
-    from flow_control.training.inference import Inference
-    from flow_control.training.nft import NftTrainer
-    from flow_control.training.sft import SftTrainer
-    from flow_control.training.vae import VaeTrainer
+    from flow_control.training.launch_config import trainer_registry
 
     schemas = {
-        "sft": TypeAdapter(SftTrainer).json_schema(),
-        "grpo": TypeAdapter(GrpoTrainer).json_schema(),
-        "nft": TypeAdapter(NftTrainer).json_schema(),
-        "inference": TypeAdapter(Inference).json_schema(),
-        "preprocess": TypeAdapter(PreprocessConfig).json_schema(),
-        "vae": TypeAdapter(VaeTrainer).json_schema(),
-        "serve": TypeAdapter(ServeConfig).json_schema(),
+        tag: TypeAdapter(trainer_registry.get(tag)).json_schema()
+        for tag in sorted(trainer_registry.tags())
     }
+    schemas["preprocess"] = TypeAdapter(PreprocessConfig).json_schema()
+    schemas["serve"] = TypeAdapter(ServeConfig).json_schema()
     return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 
 

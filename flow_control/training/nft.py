@@ -49,6 +49,7 @@ from .ema import (
     apply_ema_maybe,
     apply_init_maybe,
 )
+from .launch_config import trainer_registry
 from .mixins import (
     CheckpointingMixin,
     Rollout,
@@ -76,6 +77,7 @@ class NftTrainItem:
     cached_targets: NftCachedTargets | None = None
 
 
+@trainer_registry.register("nft")
 class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "nft"

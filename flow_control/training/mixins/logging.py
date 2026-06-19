@@ -32,7 +32,7 @@ from flow_control.utils.tensor import (
     tensor_to_pil,
 )
 
-from .hsdp import main_process_only
+from .base import main_process_only
 
 if TYPE_CHECKING:
     from trackio.run import Run as TrackioRun

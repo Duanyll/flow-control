@@ -87,6 +87,8 @@
   "lpips_weights_path": "data/vgg_lpips.pth",
 
   // ---- Launch ----
+  // Experimental RGBA VAE trainer lives in contrib; load it as a plugin.
+  "imports": ["flow_control.contrib.rgba_vae_training"],
   "launch": {
     "type": "vae",
     "devices": 4,

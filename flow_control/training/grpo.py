@@ -36,6 +36,7 @@ from .ema import (
     apply_ema_maybe,
     apply_init_maybe,
 )
+from .launch_config import trainer_registry
 from .mixins import (
     CheckpointingMixin,
     Rollout,
@@ -47,6 +48,7 @@ from .mixins import (
 logger = get_logger(__name__)
 
 
+@trainer_registry.register("grpo")
 class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "grpo"

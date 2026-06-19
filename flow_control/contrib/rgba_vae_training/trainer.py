@@ -28,6 +28,21 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.datasets.coercion import ImageTensor
 from flow_control.processors.components.vae import VAE, BaseVAE
+from flow_control.training.data import (
+    DistributedBucketSampler,
+    PaddingAwareDatasetWrapper,
+    VaeTargetDatasetWrapper,
+    collate_fn,
+    prepare_vae_target_image,
+    seed_worker,
+)
+from flow_control.training.launch_config import trainer_registry
+from flow_control.training.mixins import (
+    BaseTrainer,
+    CheckpointingMixin,
+    distributed_main,
+)
+from flow_control.training.mixins.logging import LoggingMixin
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.types import (
@@ -38,16 +53,6 @@ from flow_control.utils.types import (
     parse_scheduler,
 )
 
-from ..data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    VaeTargetDatasetWrapper,
-    collate_fn,
-    prepare_vae_target_image,
-    seed_worker,
-)
-from ..mixins import CheckpointingMixin, HsdpMixin, distributed_main
-from ..mixins.logging import LoggingMixin
 from .convert import convert_to_rgba
 from .loss import RGBAVAELoss
 
@@ -59,7 +64,8 @@ class VaeTrainInput(TypedDict):
     clean_image: ImageTensor
 
 
-class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
+@trainer_registry.register("vae")
+class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "vae"
 
@@ -197,6 +203,44 @@ class VaeTrainer(LoggingMixin, HsdpMixin, CheckpointingMixin):
                 fully_shard(submodule, mesh=self.mesh)
         fully_shard(model, mesh=self.mesh)
         logger.info("Applied FSDP2 sharding to VAE.")
+
+    def seed_checkpoint(self) -> None:
+        """Seed the (optionally RGBA-converted) VAE.
+
+        Overrides ``BaseTrainer.seed_checkpoint`` (which seeds a transformer):
+        saves a no-dist DCP seed checkpoint of the VAE to ``seed_checkpoint_dir``.
+        """
+        if self.seed_checkpoint_dir is None:
+            raise ValueError("seed_checkpoint_dir must be set to generate a VAE seed.")
+        self.vae.load_model(device=torch.device("cpu"), frozen=False)
+        model: Any = self.vae.model
+        if self.do_convert_to_rgba:
+            model = convert_to_rgba(model)
+        logger.info(f"Saving VAE DCP seed checkpoint to {self.seed_checkpoint_dir}...")
+        model_sd, _ = get_state_dict(model, [], options=StateDictOptions(strict=False))
+        dcp.save(model_sd, checkpoint_id=self.seed_checkpoint_dir, no_dist=True)
+        logger.info(f"Saved VAE DCP seed checkpoint to {self.seed_checkpoint_dir}.")
+
+    def export_checkpoint(self, checkpoint_dir: str, output_dir: str) -> None:
+        """Export a trained VAE DCP checkpoint to HuggingFace ``save_pretrained``."""
+        self.vae.load_model(device=torch.device("cpu"), frozen=False)
+        model: Any = self.vae.model
+        if self.do_convert_to_rgba:
+            model = convert_to_rgba(model)
+        logger.info(f"Loading VAE weights from {checkpoint_dir}...")
+        model_sd, _ = get_state_dict(model, [], options=StateDictOptions(strict=False))
+        state: dict[str, Any] = {"app": {"vae": model_sd}}
+        dcp.load(
+            state,
+            checkpoint_id=checkpoint_dir,
+            no_dist=True,
+            planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
+        )
+        model.load_state_dict(state["app"]["vae"])
+        logger.info(f"Loaded VAE weights from {checkpoint_dir}.")
+        os.makedirs(output_dir, exist_ok=True)
+        model.save_pretrained(output_dir)
+        logger.info(f"Exported VAE to {output_dir}.")
 
     def load_vae(self) -> None:
         """Load VAE, optionally convert to RGBA, and apply FSDP2.
