@@ -45,22 +45,26 @@ dev = [
     "py-spy>=0.4.1",
     "scipy>=1.17.1",
 ]
-
-[project.scripts]
-flow-control = "flow_control.scripts.cli:main"
-describe = "flow_control.scripts.describe:main"
-
-[project.optional-dependencies]
+# OCR reward backend (flow_control/rewards/ocr.py). A dependency-group rather
+# than an extra so `default-groups` can keep it installed across `uv sync`.
 ocr = [
     "onnxruntime-gpu>=1.20.0",
     "rapidocr>=3.4.0",
 ]
+
+[project.scripts]
+flow-control = "flow_control.scripts.cli:main"
+describe = "flow_control.scripts.describe:main"
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv]
+# Install the `ocr` group on `uv sync` (alongside `dev`) so the RapidOCR / ONNX
+# Runtime backend stays resolved instead of being pruned. Drop it for a lean
+# environment with `uv sync --no-default-groups` (or `--only-group dev`).
+default-groups = ["dev", "ocr"]
 # diffusers 0.38.0 bumped its safetensors floor to >=0.8.0-rc.0 in a metadata-only
 # commit (huggingface/diffusers#13470, no code change), so pin back to the stable
 # 0.7.x line and avoid pulling a pre-release. Drop once safetensors 0.8.0 is final.

@@ -818,12 +818,6 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
-[package.optional-dependencies]
-ocr = [
-    { name = "onnxruntime-gpu" },
-    { name = "rapidocr" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
@@ -836,6 +830,10 @@ dev = [
     { name = "ruff" },
     { name = "scipy" },
     { name = "seaborn" },
+]
+ocr = [
+    { name = "onnxruntime-gpu" },
+    { name = "rapidocr" },
 ]
 
 [package.metadata]
@@ -850,13 +848,11 @@ requires-dist = [
     { name = "json5", specifier = ">=0.12.1" },
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
     { name = "lmdb", specifier = ">=1.7.5" },
-    { name = "onnxruntime-gpu", marker = "extra == 'ocr'", specifier = ">=1.20.0" },
     { name = "open-clip-torch", specifier = ">=3.3.0" },
     { name = "peft", specifier = ">=0.18.0" },
     { name = "prodigyopt", specifier = ">=1.1.2" },
     { name = "protobuf", specifier = ">=6.33.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "rapidocr", marker = "extra == 'ocr'", specifier = ">=3.4.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
     { name = "starlette", specifier = ">=0.50.0" },
@@ -870,7 +866,6 @@ requires-dist = [
     { name = "transformers", specifier = ">=4.57.3" },
     { name = "uvicorn", specifier = ">=0.40.0" },
 ]
-provides-extras = ["ocr"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -884,6 +879,10 @@ dev = [
     { name = "ruff", specifier = ">=0.14.8" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
+]
+ocr = [
+    { name = "onnxruntime-gpu", specifier = ">=1.20.0" },
+    { name = "rapidocr", specifier = ">=3.4.0" },
 ]
 
 [[package]]
