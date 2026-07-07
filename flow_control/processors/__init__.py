@@ -13,6 +13,7 @@ from .presets import (
     QwenImageEditPreset,
     QwenImageLayeredPreset,
     QwenImagePreset,
+    Sd35MediumPreset,
     ZImagePreset,
     preset_registry,
 )
@@ -115,6 +116,7 @@ __all__ = [
     "QwenImageLayeredPreset",
     "QwenImageLayeredProcessor",
     "QwenImagePreset",
+    "Sd35MediumPreset",
     "T2IControlProcessor",
     "T2IProcessor",
     "TIEProcessor",

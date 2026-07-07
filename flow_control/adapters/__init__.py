@@ -17,6 +17,7 @@ from .qwen import (
     QwenImageEditAdapter,
     QwenImageLayeredAdapter,
 )
+from .sd3 import SD3Adapter
 from .zimage import ZImageAdapter
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "QwenImageAdapter",
     "QwenImageEditAdapter",
     "QwenImageLayeredAdapter",
+    "SD3Adapter",
     "ZImageAdapter",
 ]
 

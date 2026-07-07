@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_sd35_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "sd3",
+    "type": "base"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_sd35_t2i"
+  },
+  "sampler": {
+    // SD3.5 is not guidance-distilled: use true CFG (cfg_scale > 1 with a negative
+    // batch, produced because the preset sets save_negative=true) and a constant
+    // resolution-independent shift ~= 3.0.
+    "steps": 28,
+    "cfg_scale": 7.0,
+    "shift": {
+      "type": "constant",
+      "shift_value": 3.0
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "sd35_medium"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/sd35/preprocess.jsonc"
+  }
+}
