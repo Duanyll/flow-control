@@ -10,11 +10,10 @@ wheels/
 .venv
 
 runs/
+runs
 logs/
 data/
-workspace/
-outputs/
-demo/
+data
 draft/
 local/
 notebooks/
