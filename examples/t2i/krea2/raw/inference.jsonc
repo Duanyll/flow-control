@@ -1,0 +1,37 @@
+{
+  "$schema": "../../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_krea2_raw_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "krea2",
+    "type": "base"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_krea2_raw_t2i"
+  },
+  "sampler": {
+    // Krea 2 Raw is undistilled: use true CFG with a negative batch (the preset sets
+    // save_negative=true). Krea's guidance_scale=g maps to our cfg_scale = 1 + g
+    // (default g=4.5 -> 5.5). Shift is the resolution-aware exponential schedule; our
+    // LinearShift == Krea's calculate_shift (exp(mu)).
+    "steps": 28,
+    "cfg_scale": 5.5,
+    "shift": {
+      "type": "linear",
+      "base_image_seq_len": 256,
+      "max_image_seq_len": 6400,
+      "base_shift": 0.5,
+      "max_shift": 1.15
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "krea2_raw"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/krea2/raw/preprocess.jsonc"
+  }
+}

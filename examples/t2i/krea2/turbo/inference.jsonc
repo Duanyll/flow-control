@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_krea2_turbo_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "krea2",
+    "type": "turbo"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_krea2_turbo_t2i"
+  },
+  "sampler": {
+    // Krea 2 Turbo is 8-step distilled and guidance-free: cfg_scale=1.0 (no negative
+    // batch). Distilled path uses a fixed shift mu=1.15 -> constant shift exp(1.15)=3.158.
+    "steps": 8,
+    "cfg_scale": 1.0,
+    "shift": {
+      "type": "constant",
+      "shift_value": 3.158
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "krea2_turbo"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/krea2/turbo/preprocess.jsonc"
+  }
+}

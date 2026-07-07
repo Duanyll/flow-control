@@ -706,8 +706,8 @@ wheels = [
 
 [[package]]
 name = "diffusers"
-version = "0.38.0"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+version = "0.39.0.dev0"
+source = { git = "https://github.com/huggingface/diffusers.git#d1b988b08f51110670a0a187f998470d913fb85a" }
 dependencies = [
     { name = "filelock" },
     { name = "httpx" },
@@ -718,10 +718,6 @@ dependencies = [
     { name = "regex" },
     { name = "requests" },
     { name = "safetensors" },
-]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/01/ed/255d3dfd4a2271dffc8f1895f9d2720b3bf1beaecf02148bb5604439e594/diffusers-0.38.0.tar.gz", hash = "sha256:1e094ec5c16f18c42fb89d37f07a94cf9aab3ebbe527ab059c609597b8857626" }
-wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/42/c0/3237566ea6e3a542f3c0669a253d62fe75f27b84b3d7bd4fb3b5ee89d73c/diffusers-0.38.0-py3-none-any.whl", hash = "sha256:18e53f9e539096320470f62c6360a6fd5727ff28cffda566265316e13fcdb612" },
 ]
 
 [[package]]
@@ -841,7 +837,7 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.12.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=0.48.2" },
     { name = "datasets", specifier = ">=4.4.1" },
-    { name = "diffusers", specifier = ">=0.38.0" },
+    { name = "diffusers", git = "https://github.com/huggingface/diffusers.git" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gradio", specifier = ">=6.10.0" },
     { name = "httpx", specifier = ">=0.28.1" },
