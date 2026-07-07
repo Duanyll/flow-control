@@ -44,6 +44,7 @@ from flow_control.training.mixins import (
 )
 from flow_control.training.mixins.logging import LoggingMixin
 from flow_control.utils import device as devutil
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.types import (
     OptimizerConfig,
@@ -312,6 +313,14 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         # Load reference VAE (frozen, no FSDP) if needed; keep loader dtype.
         if self.ref_kl_scale is not None and self.ref_vae is not None:
             ref_loader: BaseVAE[Any] = self.ref_vae
+            # The trainable VAE and the reference VAE share the same pretrained
+            # source (e.g. both `flux2`), hence the same HfModelLoader config_key.
+            # The class-level model cache would otherwise hand the reference the
+            # *same* instance we just RGBA-converted, FSDP-sharded, and are
+            # training — then freeze it (frozen=True), zeroing every trainable
+            # parameter. Drop the cache entry so the reference loads a fresh,
+            # independent, unconverted 3-channel copy.
+            HfModelLoader.invalidate_cache(ref_loader.config_key)
             ref_loader.load_model(self.device, frozen=True)
             ref_model: Any = ref_loader.model
             ref_model.eval()
