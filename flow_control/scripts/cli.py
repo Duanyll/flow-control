@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import sys
+from pathlib import Path
 
 from flow_control.utils.config import add_config_patch_arguments, load_config_file
 from flow_control.utils.registry import load_plugins
@@ -48,6 +49,35 @@ def main():
         help="DCP checkpoint directory. Defaults to latest step.",
     )
 
+    report_sub = subparsers.add_parser(
+        "report",
+        help="Append a Markdown report to an existing trackio run.",
+    )
+    report_sub.add_argument(
+        "project", type=str, help="Trackio project (== experiment_name)."
+    )
+    report_sub.add_argument("run_id", type=str, help="Trackio run name (== run_id).")
+    report_source = report_sub.add_mutually_exclusive_group(required=True)
+    report_source.add_argument(
+        "--file", type=str, help="Path to a markdown file to log."
+    )
+    report_source.add_argument("--text", type=str, help="Markdown text logged inline.")
+    report_sub.add_argument(
+        "--key",
+        type=str,
+        default="report",
+        help="Metric key to log the markdown under (default: report).",
+    )
+    report_sub.add_argument(
+        "--step", type=int, default=None, help="Optional step to log the report at."
+    )
+    report_sub.add_argument(
+        "--trackio-dir",
+        type=str,
+        default="./runs/.trackio",
+        help="Trackio DB directory (default: ./runs/.trackio).",
+    )
+
     schema_sub = subparsers.add_parser(
         "schema", help="Generate JSON schemas for config types."
     )
@@ -88,6 +118,20 @@ def _dispatch(args: argparse.Namespace) -> None:
         if args.config:
             kwargs["config_path"] = args.config
         run_schema(**kwargs)
+        return
+
+    if command == "report":
+        from flow_control.scripts.report import run as run_report
+
+        text = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
+        run_report(
+            args.project,
+            args.run_id,
+            text,
+            key=args.key,
+            step=args.step,
+            trackio_dir=args.trackio_dir,
+        )
         return
 
     # ``launch`` re-spawns subprocesses that re-load the config file themselves,
