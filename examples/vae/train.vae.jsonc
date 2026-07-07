@@ -29,54 +29,54 @@
     "type": "concat",
     "AM-2k": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/AM-2k",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/AM-2k",
       "is_rgba": true,
     },
     "HHM2K": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/HHM2K",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/HHM2K",
       "is_rgba": true,
     },
     "P3M-500-NP": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/P3M-500-NP",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/P3M-500-NP",
       "is_rgba": true,
     },
     "SIMD": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/SIMD",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/SIMD",
       "is_rgba": true,
     },
     "Distinctions-646": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Distinctions-646",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/Distinctions-646",
       "is_rgba": true,
     },
     "Human2K": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Human2K",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/Human2K",
       "is_rgba": true,
     },
     "RealWorldPortrait-636": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/RealWorldPortrait-636",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/RealWorldPortrait-636",
       "is_rgba": true,
     },
     "Transparent-460": {
       "type": "plain_directory",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/Transparent-460",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/Transparent-460",
       "is_rgba": true,
     },
     "MAGICK": {
       "type": "csv",
-      "path": "/gdata/cold2/duanyule/datasets/rgba_images/magick_handpicked.csv",
-      "attachment_dir": "/gdata/cold2/duanyule/datasets/MAGICK/images/",
+      "path": "/gdata/users/duanyll/datasets/rgba_images/magick_handpicked.csv",
+      "attachment_dir": "/gdata/users/duanyll/datasets/MAGICK/images/",
       "limit": 2000
     }
   },
   "validation_dataset": {
     "type": "plain_directory",
-    "path": "/gdata/cold2/duanyule/datasets/rgba_images/PhotoMatte85/",
+    "path": "/gdata/users/duanyll/datasets/rgba_images/PhotoMatte85/",
     "is_rgba": true,
     "limit": 8
   },
@@ -139,7 +139,7 @@
   "imports": ["flow_control.contrib.rgba_vae_training"],
   "launch": {
     "type": "vae",
-    "devices": 4,
-    // "generate_dcp_seed": true
+    "devices": 8,
+    "generate_dcp_seed": true
   }
 }
