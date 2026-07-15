@@ -98,6 +98,7 @@
 | `SftTrainer` | 监督微调（SFT），支持时间步加权、EMA |
 | `GrpoTrainer` | 组相对策略优化（GRPO），用于 RL 微调 |
 | `NftTrainer` | Negative-aware Fine-Tuning |
+| `AwmTrainer` | Advantage Weighted Matching（优势加权的 flow-matching 策略梯度）|
 | `VaeTrainer` | VAE 训练 |
 | `Inference` | 推理/生成 pipeline |
 
@@ -153,7 +154,7 @@
 |------|------|
 | `preprocess` | 数据预处理管线 |
 | `seed` | 初始化种子检查点 |
-| `launch` | 启动分布式训练（SFT / GRPO / NFT / VAE / Inference） |
+| `launch` | 启动分布式训练（SFT / GRPO / NFT / AWM / VAE / Inference） |
 | `vae-server` | 独立 VAE 编码服务 |
 | `reward-server` | 独立奖励计算服务 |
 | `serve` | Gradio 推理 Web UI |

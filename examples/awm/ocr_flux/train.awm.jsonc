@@ -1,0 +1,136 @@
+{
+  "$schema": "../../../schema/awm.schema.json",
+
+  // AWM (Advantage Weighted Matching) FLUX.1-dev OCR / text-rendering run.
+  // The AWM paper reports FLUX OCR 0.95; the released repo ships only SD3.5-M
+  // configs, so the AWM knobs follow dgx_awm.py:ocr_sd3 (beta 3e-3) and the FLUX
+  // model/sampler blocks follow examples/grpo/ocr_flux. FLUX is guidance-
+  // distilled -> rollout cfg_scale 1.0 (distilled guidance embedding in adapter).
+  // Reuses the shared ./data/ocr_flux_grpo caches produced by ../../grpo/ocr_flux.
+  "checkpoint_root": "$auto",
+  "auto_resume": true,
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed_flux_ocr_awm",
+  "experiment_name": "flux_ocr_awm",
+
+  "rollout_storage_device": "device",
+  "precompute_aux_model_outputs": true,
+
+  // 12 x 4 = 48 unique prompts, x24 rollouts = 1152 rollouts.
+  "num_batches_per_epoch": 12,
+  "num_prompts_per_batch": 4,
+  "num_rollouts_per_prompt": 24,
+  "num_inner_epochs": 1,
+  // 1152 rollouts x 6 training timesteps -> 6912 items, 1 optimizer update per epoch.
+  "train_batch_size": 6912,
+  "num_train_timesteps": 6,
+  "timestep_fraction": 0.9,
+  "train_timestep_sampling": "discrete_wo_init",
+
+  "beta": 0.003,
+  "ema_beta": 1.0,
+  "advantage_max": 1.0,
+  "adv_clip_max": 5.0,
+  "clip_range": 1.0,
+  "weighting": "ghuber",
+  "ghuber_power": 0.25,
+  "kl_weight": "uniform",
+  "kl_ema_weight": "uniform",
+  "off_policy": false,
+  "clip_grad_norm": 1.0,
+
+  "train_epochs": 500,
+  "checkpoint_interval": 10,
+  "validation_epochs": 10,
+  "max_checkpoints": 10,
+
+  "model": {
+    "arch": "flux1",
+    "type": "base",
+    "peft_lora_rank": 64,
+    "peft_lora_config": {
+      "lora_alpha": 128,
+      "init_lora_weights": "gaussian",
+      "target_modules": [
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2",
+      ],
+    },
+  },
+
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./data/ocr_flux_grpo/train",
+  },
+
+  "rollout_sampler": {
+    "steps": 14,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+    "solver": { "type": "flow", "eta": 0.4 },
+  },
+
+  "ema_old": {
+    "decay": 0.3,
+    "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.001 },
+    "interval": 1,
+  },
+
+  "ema": {
+    "decay": 0.99,
+    "warmup": { "type": "standard" },
+    "interval": 1,
+  },
+
+  "reward": {
+    "type": "ocr",
+  },
+
+  "advantage": {
+    "type": "per_prompt",
+    "use_global_std": true,
+  },
+
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+  },
+
+  "scheduler_config": {
+    "class_name": "ConstantLR",
+    "factor": 1.0,
+  },
+
+  "validation_dataset": {
+    "type": "pickle_directory",
+    "path": "./data/ocr_flux_grpo/validation",
+  },
+
+  "validation_sampler": {
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1",
+    "default_resolution": [512, 512],
+  },
+
+  "launch": {
+    "type": "awm",
+    "devices": 8,
+    "generate_dcp_seed": true,
+  },
+}
