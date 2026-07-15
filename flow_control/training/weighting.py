@@ -50,6 +50,25 @@ class ModeTimestepWeighting(BaseTimestepWeighting):
         return u
 
 
+@timestep_weighting_registry.register("power_law")
+class PowerLawTimestepWeighting(BaseTimestepWeighting):
+    """Power-law density ``p(t) ∝ t^alpha`` on ``[0, 1]`` (RAM's timestep sampler).
+
+    Inverse-CDF sampling: ``F(t) = t^(alpha+1)`` → ``t = u^(1/(alpha+1))``. With
+    ``alpha=1`` the density is ``∝ t`` (linearly increasing), placing more mass on
+    the noise end (``t→1``). This matches the reference RAM implementation, which
+    draws grid indices with weight ``t_grid^alpha`` (``AndreasBergmeister/ram``,
+    ``scripts/training_sd3.py::sample_timesteps``).
+    """
+
+    type: Literal["power_law"] = "power_law"
+    alpha: float = 1.0
+
+    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
+        u = torch.rand(batch_size)
+        return u ** (1.0 / (self.alpha + 1.0))
+
+
 # -------------------- Flux2 blog training distributions ---------------------- #
 # Reference: https://bfl.ai/techblog/representation-comparison/index.html
 #
@@ -235,6 +254,8 @@ if __name__ == "__main__":
         {"type": "plateau_logit_normal", "shift": 4.63},
         {"type": "shifted_logit_normal", "shift": 1.0},
         {"type": "plateau_logit_normal", "shift": 1.0},
+        {"type": "power_law", "alpha": 1.0},
+        {"type": "power_law", "alpha": 2.0},
     ]
 
     from pydantic import TypeAdapter

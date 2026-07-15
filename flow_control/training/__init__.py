@@ -18,5 +18,5 @@ def import_builtin_trainers() -> None:
     """
     import importlib
 
-    for name in ("sft", "grpo", "nft", "awm", "inference"):
+    for name in ("sft", "grpo", "nft", "awm", "ram", "inference"):
         importlib.import_module(f"flow_control.training.{name}")

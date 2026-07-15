@@ -1,0 +1,132 @@
+{
+  "$schema": "../../../schema/ram.schema.json",
+
+  // RAM (Reinforce Adjoint Matching) FLUX.1-dev PickScore run -- EXPERIMENTAL.
+  // RAM's official repo has NO FLUX experiments: it is built for SD3.5-M and
+  // samples endpoints with TRUE CFG=2.0. FLUX is guidance-distilled and does not
+  // take a true CFG pass, so this config sets cfg_scale 1.0 (distilled guidance
+  // embedding in the adapter). This deviates from the paper and is provided for
+  // exploration only -- expect it to behave differently from the SD3.5-M runs.
+  // Reuses the shared ./data/pickscore_flux caches produced by ../../grpo/pickscore_flux.
+  "checkpoint_root": "$auto",
+  "auto_resume": true,
+  "seed_checkpoint_dir": "/dev/shm/flow-control/seed_flux_pickscore_ram",
+  "experiment_name": "flux_pickscore_ram",
+
+  "rollout_storage_device": "device",
+  "precompute_aux_model_outputs": true,
+
+  // 12 x 4 = 48 unique prompts, x24 rollouts = 1152 rollouts.
+  "num_batches_per_epoch": 12,
+  "num_prompts_per_batch": 4,
+  "num_rollouts_per_prompt": 24,
+  "num_inner_epochs": 1,
+  // 1152 rollouts x K=8 loss targets -> 9216 items, 1 optimizer update per epoch.
+  "train_batch_size": 9216,
+  "num_train_timesteps": 8,
+  "timestep_weighting": { "type": "power_law", "alpha": 1.0 },
+
+  "reward_multiplier": 1000.0,
+  "adv_clip_max": null,
+  "clip_grad_norm": 0.0,
+
+  "train_epochs": 500,
+  "checkpoint_interval": 10,
+  "validation_epochs": 10,
+  "max_checkpoints": 10,
+  "validation_log_images": 64,
+
+  "model": {
+    "arch": "flux1",
+    "type": "base",
+    "peft_lora_rank": 64,
+    "peft_lora_config": {
+      "lora_alpha": 128,
+      "init_lora_weights": "gaussian",
+      "target_modules": [
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2",
+      ],
+    },
+  },
+
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./data/pickscore_flux/train",
+  },
+
+  "rollout_sampler": {
+    // FLUX distilled: no true CFG. cfg_scale 1.0 (vs RAM's SD3 CFG 2.0).
+    "steps": 20,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+    "solver": { "type": "flow", "eta": 0.0 },
+  },
+
+  "ema_old": {
+    "decay": 0.9,
+    "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.01 },
+    "interval": 1,
+  },
+
+  "ema": {
+    "decay": 0.9,
+    "warmup": { "type": "standard" },
+    "interval": 1,
+  },
+
+  "reward": {
+    "type": "pickscore",
+  },
+
+  "advantage": {
+    "type": "per_prompt",
+    "use_global_std": true,
+  },
+
+  "optimizer_config": {
+    "class_name": "AdamW",
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+    "betas": [0.9, 0.99],
+  },
+
+  "scheduler_config": {
+    "class_name": "ConstantLR",
+    "factor": 1.0,
+  },
+
+  "validation_dataset": {
+    "type": "pickle_directory",
+    "path": "./data/pickscore_flux/validation_grpo",
+    "limit": 256,
+  },
+
+  "validation_sampler": {
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "shift": { "type": "linear" },
+  },
+
+  "processor": {
+    "task": "t2i",
+    "preset": "flux1",
+    "default_resolution": [512, 512],
+  },
+
+  "launch": {
+    "type": "ram",
+    "devices": 8,
+    "generate_dcp_seed": true,
+  },
+}
