@@ -1,0 +1,48 @@
+{
+  "$schema": "../../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_hidream_full_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "hidream",
+    "type": "full"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_hidream_full_t2i"
+  },
+  "sampler": {
+    // Official full-model recipe: 50-step FlowUniPC (order 2 + UniC corrector),
+    // true CFG 5.0 with " " as the unconditional prompt (preset saves the
+    // negative batch). custom_sigmas is the exact official grid — the reference
+    // FlowUniPCMultistepScheduler applies its shift-3.0 transform twice (once
+    // baked into sigma_max, once over the linspace), so a plain
+    // {"type": "constant", "shift_value": 3.0} shift is only a ~0.03%
+    // approximation of it (fine for training configs).
+    "steps": 50,
+    "cfg_scale": 5.0,
+    "solver": {
+      "type": "flow_unipc",
+      "order": 2
+    },
+    "custom_sigmas": [
+      0.999889, 0.993131, 0.986189, 0.979053, 0.971717, 0.964171,
+      0.956406, 0.948413, 0.940181, 0.931700, 0.922958, 0.913943,
+      0.904642, 0.895041, 0.885125, 0.874878, 0.864285, 0.853326,
+      0.841982, 0.830233, 0.818058, 0.805431, 0.792328, 0.778721,
+      0.764581, 0.749875, 0.734569, 0.718625, 0.702003, 0.684658,
+      0.666543, 0.647604, 0.627785, 0.607022, 0.585247, 0.562383,
+      0.538346, 0.513045, 0.486377, 0.458227, 0.428469, 0.396961,
+      0.363544, 0.328039, 0.290244, 0.249931, 0.206837, 0.160666,
+      0.111077, 0.057674, 0.000000
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "hidream_o1_full"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/hidream/full/preprocess.jsonc"
+  }
+}

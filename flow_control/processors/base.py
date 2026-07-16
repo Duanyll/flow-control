@@ -172,6 +172,10 @@ class BaseProcessor[
     vae_scale_factor: int = 8
     patch_size: int = 2
     latent_channels: int = 16
+    initial_noise_scale: float = 1.0
+    """Scale applied to the initial sampling noise in :meth:`initialize_latents`.
+    Some models deliberately start below the training noise level (HiDream-O1's
+    official pipeline initializes at 7.5/8 = 0.9375 of its noise scale)."""
     target_posterior: PosteriorMode = "distribution"
     condition_posterior: PosteriorMode = "mode"
 
@@ -218,6 +222,8 @@ class BaseProcessor[
         latents = torch.randn(
             (1, c, h, w), generator=generator, device=device, dtype=dtype
         )
+        if self.initial_noise_scale != 1.0:
+            latents = latents * self.initial_noise_scale
         noisy_latents = batch["noisy_latents"] = self._pack_latents(latents)
         return noisy_latents
 

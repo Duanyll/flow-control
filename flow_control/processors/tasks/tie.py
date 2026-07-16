@@ -50,6 +50,11 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
     tie_enhance_prompt: PromptStr = parse_prompt("@default_tie_enhance")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    negative_with_images: bool = False
+    """Encode the negative prompt together with the reference images. Models
+    whose unconditional pass still conditions on the references (e.g.
+    HiDream-O1) need this so the negative overlay stays consistent with the
+    positive batch's image tensors."""
     enable_enhance: bool = False
     max_reference_images: int = 0
 
@@ -152,6 +157,7 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
         if self.save_negative:
             result["negative"] = self.encode_prompt(
                 batch.get("negative_prompt", None) or self.default_negative_prompt,
+                images=batch["reference_images"] if self.negative_with_images else None,
                 system_prompt=self.encoder_prompt,
             )
 
@@ -192,6 +198,7 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
         if self.save_negative:
             result["negative"] = self.encode_prompt(
                 self.default_negative_prompt,
+                images=batch["reference_images"] if self.negative_with_images else None,
                 system_prompt=self.encoder_prompt,
             )
         return result

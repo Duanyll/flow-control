@@ -6,6 +6,7 @@ from diffusers import ModelMixin
 from einops import rearrange
 from peft import LoraConfig
 from pydantic import BaseModel, ConfigDict
+from transformers import PreTrainedModel
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
@@ -29,7 +30,9 @@ class Batch(TypedDict):
     """`[B, N, D]` The noisy latents to denoise."""
 
 
-class BaseModelAdapter[TModel: ModelMixin, TBatch: Batch](BaseModel, ABC):
+class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
+    BaseModel, ABC
+):
     """
     Base class for all control adapters.
     """

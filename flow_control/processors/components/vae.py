@@ -293,4 +293,47 @@ class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
         return image
 
 
+@vae_registry.register("identity")
+class IdentityVAE(BaseVAE[ModelMixin]):
+    """Pass-through "VAE" for pixel-space models: latents *are* pixels.
+
+    ``_encode`` maps ``[0, 1]`` images to ``(2x - 1) * scaling``. Absorbing the
+    model's forward-process noise scale into ``scaling`` turns a scaled-noise
+    pixel flow into a standard unit-noise rectified flow in latent space: with
+    ``scaling = 1/8``, HiDream-O1's ``x_t = (1-t)*x0 + t*(8*eps)`` becomes
+    ``z_t = (1-t)*z0 + t*eps`` for ``z = x/8``, so every unit-noise assumption
+    in the framework (``initialize_latents``, trainers' ``randn_like``, SDE
+    solvers) holds unchanged. The adapter multiplies by ``1/scaling`` before
+    feeding pixels to the model.
+
+    There is no posterior: all :data:`PosteriorMode` values return the same
+    deterministic result. Nothing is loaded from disk.
+    """
+
+    type: Literal["identity"] = "identity"
+
+    library: Literal["diffusers", "transformers", "custom"] = "transformers"
+    class_name: str = ""
+    pretrained_model_id: str = ""
+    dtype: TorchDType = torch.bfloat16
+
+    scaling: float = 0.125
+
+    @property
+    def in_channels(self) -> int:
+        return 3
+
+    def load_model(self, device: torch.device, frozen: bool = True) -> bool:
+        # Nothing to load; keep _model unset so misuse fails loudly.
+        return False
+
+    def _encode(
+        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
+    ) -> torch.Tensor:
+        return (images.to(self.dtype) * 2 - 1) * self.scaling
+
+    def _decode(self, latents: torch.Tensor) -> torch.Tensor:
+        return ((latents / self.scaling + 1) / 2).clamp(0, 1)
+
+
 VAE = Annotated[BaseVAE, RegistryUnion(vae_registry, "type")]

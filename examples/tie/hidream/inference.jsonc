@@ -1,0 +1,44 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_hidream_tie_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "hidream",
+    "type": "full"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_hidream_tie"
+  },
+  "sampler": {
+    // The official README recommends the undistilled full model for editing:
+    // same 50-step UniPC + CFG 5.0 recipe as t2i (the unconditional pass keeps
+    // the reference images — the preset sets negative_with_images).
+    "steps": 50,
+    "cfg_scale": 5.0,
+    "solver": {
+      "type": "flow_unipc",
+      "order": 2
+    },
+    "custom_sigmas": [
+      0.999889, 0.993131, 0.986189, 0.979053, 0.971717, 0.964171,
+      0.956406, 0.948413, 0.940181, 0.931700, 0.922958, 0.913943,
+      0.904642, 0.895041, 0.885125, 0.874878, 0.864285, 0.853326,
+      0.841982, 0.830233, 0.818058, 0.805431, 0.792328, 0.778721,
+      0.764581, 0.749875, 0.734569, 0.718625, 0.702003, 0.684658,
+      0.666543, 0.647604, 0.627785, 0.607022, 0.585247, 0.562383,
+      0.538346, 0.513045, 0.486377, 0.458227, 0.428469, 0.396961,
+      0.363544, 0.328039, 0.290244, 0.249931, 0.206837, 0.160666,
+      0.111077, 0.057674, 0.000000
+    ]
+  },
+  "processor": {
+    "task": "tie",
+    "preset": "hidream_o1_full"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/tie/hidream/preprocess.jsonc"
+  }
+}

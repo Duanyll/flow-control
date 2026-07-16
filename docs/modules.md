@@ -16,6 +16,9 @@
 | `QwenImageAdapter` / `QwenImageEditAdapter` / `QwenImageLayeredAdapter` | Qwen 图像生成系列适配器 |
 | `LongCatAdapter` / `LongCatEditAdapter` | LongCat 适配器 |
 | `ZImageAdapter` | ZImage 适配器 |
+| `SD3Adapter` | Stable Diffusion 3.5 适配器 |
+| `Krea2Adapter` | Krea 2（Raw / Turbo）适配器 |
+| `HiDreamO1Adapter` | HiDream-O1（像素空间统一 Transformer，无 VAE；full / dev）适配器 |
 | `parse_model_adapter(conf)` | 工厂函数，根据配置字典创建对应适配器 |
 
 ---
@@ -48,14 +51,14 @@
 
 **任务类型** (`task`)：`t2i`（文生图）, `t2i_control`（可控文生图）, `inpaint`（图像修复）, `efficient_layered`, `qwen_layered`, `tie`
 
-**预设** (`preset`)：`flux1`, `flux2`, `flux2_klein_4b`, `flux2_klein_9b`, `qwen_image`, `qwen_image_edit`, `qwen_image_layered`, `longcat_image`, `longcat_image_edit`, `zimage`
+**预设** (`preset`)：`flux1`, `flux2`, `flux2_klein_4b`, `flux2_klein_9b`, `qwen_image`, `qwen_image_edit`, `qwen_image_layered`, `longcat_image`, `longcat_image_edit`, `zimage`, `sd35_medium`, `krea2_raw`, `krea2_turbo`, `hidream_o1_full`, `hidream_o1_dev`
 
 **组件**：
 
 | 组件 | 说明 |
 |------|------|
-| `VAE` / `Flux1VAE` / `Flux2VAE` / `QwenImageVAE` | 变分自编码器 |
-| `Encoder` / `T5TextEncoder` / `ClipTextEncoder` / `Qwen3Encoder` 等 | 文本编码器 |
+| `VAE` / `Flux1VAE` / `Flux2VAE` / `QwenImageVAE` / `IdentityVAE` | 变分自编码器（`IdentityVAE` 供像素空间模型使用：latent = 缩放后的像素） |
+| `Encoder` / `T5TextEncoder` / `ClipTextEncoder` / `Qwen3Encoder` 等 | 文本编码器（`HiDreamO1Encoder` 仅 tokenizer：产出 token ids 而非 embedding） |
 | `LLMClient` | LLM 调用客户端（用于 prompt 改写等） |
 
 ---
@@ -81,9 +84,11 @@
 
 | 接口 | 说明 |
 |------|------|
-| `Sampler` | 主采样器（Pydantic 模型），支持 CFG、多种 solver 和 shift 策略 |
+| `Sampler` | 主采样器（Pydantic 模型），支持 CFG、多种 solver 和 shift 策略，以及显式 sigma 表（`custom_sigmas`，用于蒸馏模型的官方 timestep 表） |
 | `SampleOutput` | 采样结果，包含最终 latent、轨迹、对数概率 |
 | `derive_seed()` | 确定性种子派生 |
+
+**Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正，HiDream-O1 full 官方采样）, `flash`（每步全量重加噪 + 噪声截断，HiDream-O1 Dev 官方采样，支持 GRPO log-prob） |
 
 ---
 

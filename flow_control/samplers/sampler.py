@@ -74,6 +74,11 @@ class Sampler(BaseModel):
     steps: int = 50
     solver: Solver = Field(default_factory=FlowSolver)
     shift: Shift = Field(default_factory=NoShift)
+    custom_sigmas: list[float] | None = None
+    """Explicit sigma grid of length ``steps + 1`` (descending, terminal usually
+    0.0), e.g. a distilled model's official timestep table. When set it replaces
+    the linspace grid and *bypasses* ``shift`` (and the ``t_start``/``t_end``
+    arguments of :meth:`sample`)."""
     trajectory_window_size: int | None = None
     trajectory_window_range: tuple[int, int] | None = None
 
@@ -108,8 +113,18 @@ class Sampler(BaseModel):
         if negative_batch is not None:
             negative_batch = deep_move_to_device(negative_batch, model.device)
 
-        sigmas = torch.linspace(t_start, t_end, self.steps + 1)
-        sigmas = self.shift.apply(sigmas, batch, self.steps)
+        if self.custom_sigmas is not None:
+            # Validated here rather than in the config model: serving mutates
+            # `steps` at runtime, so the lengths can only be checked per call.
+            if len(self.custom_sigmas) != self.steps + 1:
+                raise ValueError(
+                    f"custom_sigmas must have steps + 1 = {self.steps + 1} entries, "
+                    f"got {len(self.custom_sigmas)}."
+                )
+            sigmas = torch.tensor(self.custom_sigmas, dtype=torch.float32)
+        else:
+            sigmas = torch.linspace(t_start, t_end, self.steps + 1)
+            sigmas = self.shift.apply(sigmas, batch, self.steps)
         return self._run_sampling_loop(
             model=model,
             batch=batch,

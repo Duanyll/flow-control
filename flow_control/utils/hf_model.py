@@ -78,7 +78,10 @@ class HfModelLoader[T](BaseModel):
         """Remove a cache entry without touching any instance's ``_model``."""
         cls._model_cache.pop(key, None)
 
-    library: Literal["diffusers", "transformers"]
+    library: Literal["diffusers", "transformers", "custom"]
+    """Where to resolve ``class_name``. ``"custom"`` treats ``class_name`` as a
+    dotted import path (e.g. ``"flow_control.adapters.x.modeling.XModel"``) to a
+    transformers-style ``PreTrainedModel`` subclass (vendored/local modeling code)."""
     class_name: str
     pretrained_model_id: str
     revision: str = "main"
@@ -150,10 +153,12 @@ class HfModelLoader[T](BaseModel):
                 )
                 model = model_cls.from_config(config)
             else:
+                # transformers requires subfolder to be a string ("" = root),
+                # unlike diffusers' load_config which accepts None.
                 config = model_cls.config_class.from_pretrained(
                     self.pretrained_model_id,
                     revision=self.revision,
-                    subfolder=self.subfolder,
+                    subfolder=self.subfolder or "",
                     **extra,
                 )
                 model = model_cls(config)
@@ -177,7 +182,7 @@ class HfModelLoader[T](BaseModel):
 
         if self.library == "diffusers":
             kwargs["torch_dtype"] = self.dtype
-        elif self.library == "transformers":
+        else:  # transformers and custom (transformers-style) classes
             kwargs["dtype"] = self.dtype
         model = model_cls.from_pretrained(
             self.pretrained_model_id,
@@ -233,7 +238,7 @@ class HfModelLoader[T](BaseModel):
 
         if self.library == "diffusers":
             kwargs["torch_dtype"] = self.dtype
-        elif self.library == "transformers":
+        else:  # transformers and custom (transformers-style) classes
             kwargs["dtype"] = self.dtype
         model = model_cls.from_pretrained(
             self.pretrained_model_id,
@@ -245,6 +250,27 @@ class HfModelLoader[T](BaseModel):
         )
         self._model = model
         return model
+
+    def _resolve_model_class(self) -> Any:
+        if self.library == "diffusers":
+            import diffusers
+
+            return getattr(diffusers, self.class_name)
+        if self.library == "transformers":
+            import transformers
+
+            return getattr(transformers, self.class_name)
+        if self.library == "custom":
+            import importlib
+
+            module_path, _, cls_name = self.class_name.rpartition(".")
+            if not module_path:
+                raise ValueError(
+                    f"library='custom' requires a dotted import path in class_name, "
+                    f"got {self.class_name!r}"
+                )
+            return getattr(importlib.import_module(module_path), cls_name)
+        raise ValueError(f"Unknown model library: {self.library}")
 
     def load_model(self, device: torch.device, frozen: bool = True) -> bool:
         """Load the model onto *device*.
@@ -274,16 +300,7 @@ class HfModelLoader[T](BaseModel):
             return False
 
         # Fresh load from pretrained
-        if self.library == "diffusers":
-            import diffusers
-
-            model_cls = getattr(diffusers, self.class_name)
-        elif self.library == "transformers":
-            import transformers
-
-            model_cls = getattr(transformers, self.class_name)
-        else:
-            raise ValueError(f"Unknown model library: {self.library}")
+        model_cls = self._resolve_model_class()
 
         if device.type == "meta":
             self._load_model_on_meta(model_cls)

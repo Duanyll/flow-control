@@ -1,0 +1,44 @@
+{
+  "$schema": "../../../../schema/inference.schema.json",
+  "save_preview_dir": "./demo/inference_hidream_dev_t2i_preview",
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "hidream",
+    "type": "dev"
+  },
+  "dataset": {
+    "type": "pickle_directory",
+    "path": "./demo/preprocess_hidream_dev_t2i"
+  },
+  "sampler": {
+    // Official Dev recipe: 28 hardcoded timesteps (DEFAULT_TIMESTEPS / 1000 with
+    // a zero terminal) and the "flash" full-re-noise sampler (fresh noise every
+    // step, scale 7.5/8 = 0.9375 in latent space, clipped at 2.5 std). The model
+    // is guidance-distilled: no true CFG (cfg_scale 1.0, preset saves no
+    // negative). For the official dev *editing* scheduler (flow_match) use
+    // {"solver": {"type": "flow"}} instead — a plain deterministic Euler.
+    "steps": 28,
+    "cfg_scale": 1.0,
+    "solver": {
+      "type": "flash",
+      "eta": 1.0,
+      "noise_scale_start": 0.9375,
+      "noise_scale_end": 0.9375,
+      "noise_clip_std": 2.5
+    },
+    "custom_sigmas": [
+      0.999, 0.987, 0.974, 0.960, 0.945, 0.929, 0.913, 0.895, 0.877, 0.857,
+      0.836, 0.814, 0.790, 0.764, 0.737, 0.707, 0.675, 0.640, 0.602, 0.560,
+      0.515, 0.464, 0.409, 0.347, 0.278, 0.199, 0.110, 0.008, 0.0
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "hidream_o1_dev"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/hidream/dev/preprocess.jsonc"
+  }
+}
