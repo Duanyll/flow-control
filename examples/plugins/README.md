@@ -78,4 +78,16 @@ imports = ["flow_control.contrib.efficient_layered"]
 ```
 
 That single import registers both `qwen_efficient_layered` (model adapter) and
-`efficient_layered` (processor task).
+`efficient_layered` (processor task) — but not the serving UI, so training and
+preprocessing runs stay free of the Gradio stack.
+
+The experimental task's Gradio template lives in the `.serving` submodule. A
+**serving** config adds it explicitly (importing `.serving` also pulls in the
+adapter + processor via the package `__init__`):
+
+```toml
+imports = [
+  "flow_control.contrib.efficient_layered",          # adapter + processor
+  "flow_control.contrib.efficient_layered.serving",  # + Gradio UI template
+]
+```

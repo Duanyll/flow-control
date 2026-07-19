@@ -9,10 +9,10 @@ from PIL import Image
 
 from flow_control.datasets.coercion import _coerce_to_image_tensor
 
-from .base import register_task
+from .base import task_template_registry
 
 
-@register_task("t2i_control")
+@task_template_registry.register("t2i_control")
 class T2IControlTemplate:
     """Text-to-image with control image: prompt + control image + optional size."""
 

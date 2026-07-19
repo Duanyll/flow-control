@@ -6,10 +6,10 @@ from typing import Any
 
 import gradio as gr
 
-from .base import register_task
+from .base import task_template_registry
 
 
-@register_task("t2i")
+@task_template_registry.register("t2i")
 class T2ITemplate:
     """Text-to-image: prompt + optional negative prompt + image size."""
 

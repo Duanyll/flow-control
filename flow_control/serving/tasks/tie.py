@@ -9,10 +9,10 @@ from PIL import Image
 
 from flow_control.datasets.coercion import _coerce_to_image_tensor
 
-from .base import register_task
+from .base import task_template_registry
 
 
-@register_task("tie")
+@task_template_registry.register("tie")
 class TIETemplate:
     """Text-image exemplar: prompt + reference images."""
 

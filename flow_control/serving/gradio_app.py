@@ -19,7 +19,7 @@ from flow_control.utils.tensor import (
 )
 
 from .engine import ServingEngine
-from .tasks import get_task_template
+from .tasks import task_template_registry
 
 logger = get_logger(__name__)
 
@@ -193,7 +193,13 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                 def render_task_inputs(  # noqa: ANN202
                     current_task: str,
                 ) -> None:
-                    template = get_task_template(current_task)
+                    template_cls = task_template_registry.get(current_task)
+                    if template_cls is None:
+                        raise ValueError(
+                            f"No Gradio template for task '{current_task}'. "
+                            f"Available: {sorted(task_template_registry.members())}"
+                        )
+                    template = template_cls()
                     task_components = template.render()
 
                     async def on_generate(

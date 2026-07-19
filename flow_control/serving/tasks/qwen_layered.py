@@ -9,10 +9,10 @@ from PIL import Image
 
 from flow_control.datasets.coercion import _coerce_to_image_tensor
 
-from .base import register_task
+from .base import task_template_registry
 
 
-@register_task("qwen_layered")
+@task_template_registry.register("qwen_layered")
 class QwenLayeredTemplate:
     """Qwen layered decomposition: image + optional prompt and layer count."""
 

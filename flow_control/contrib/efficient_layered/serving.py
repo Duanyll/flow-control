@@ -1,4 +1,13 @@
-"""Gradio UI template for the efficient_layered task."""
+"""Gradio UI template for the experimental ``efficient_layered`` task.
+
+Kept separate from the package ``__init__`` so training/preprocess runs that opt
+into ``flow_control.contrib.efficient_layered`` (adapter + processor) do not pull
+in the Gradio/serving stack. Serving configs import this submodule explicitly:
+
+    imports = ["flow_control.contrib.efficient_layered.serving"]
+
+which transitively registers the adapter + processor via the package ``__init__``.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +17,10 @@ import gradio as gr
 from PIL import Image
 
 from flow_control.datasets.coercion import _coerce_to_image_tensor
+from flow_control.serving.tasks.base import task_template_registry
 
-from .base import register_task
 
-
-@register_task("efficient_layered")
+@task_template_registry.register("efficient_layered")
 class EfficientLayeredTemplate:
     """Efficient layered decomposition: input image only.
 
