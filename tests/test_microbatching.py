@@ -1,5 +1,6 @@
 import random
 import unittest
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -13,6 +14,7 @@ from flow_control.samplers import ReplayRequest, Sampler, SampleRequest
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import FlowSolver
 from flow_control.training.data import collate_fn
+from flow_control.training.mixins.microbatch import MicrobatchTrainMixin
 
 
 def make_batch(
@@ -411,6 +413,79 @@ class SamplerBatchingTest(unittest.TestCase):
 
         self.assertEqual(tuple(output.log_prob.shape), (1,))
         self.assertEqual(tuple(output.mean.shape), (1, 1, 1))
+
+
+@dataclass(slots=True)
+class _IndexedItem:
+    rollout_idx: int
+
+
+class MicrobatchArithmeticTest(unittest.TestCase):
+    def make_mixin(
+        self, train_batch_size: int, micro_batch_size: int
+    ) -> MicrobatchTrainMixin:
+        return MicrobatchTrainMixin.model_construct(
+            train_batch_size=train_batch_size,
+            train_micro_batch_size=micro_batch_size,
+        )
+
+    def test_micro_updates_cover_items_in_order(self) -> None:
+        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=3)
+        updates = list(mixin.iter_micro_updates(list(range(10))))
+
+        self.assertEqual(
+            [update.items for update in updates],
+            [[0, 1, 2], [3], [4, 5, 6], [7], [8, 9]],
+        )
+        self.assertEqual(
+            [update.is_sync_step for update in updates],
+            [False, True, False, True, True],
+        )
+        self.assertEqual(
+            [update.loss_scale for update in updates],
+            [0.75, 0.25, 0.75, 0.25, 1.0],
+        )
+
+    def test_loss_scales_sum_to_one_per_chunk(self) -> None:
+        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=3)
+        chunk_scale = 0.0
+        for update in mixin.iter_micro_updates(list(range(11))):
+            chunk_scale += update.loss_scale
+            if update.is_sync_step:
+                self.assertAlmostEqual(chunk_scale, 1.0)
+                chunk_scale = 0.0
+        self.assertEqual(chunk_scale, 0.0)
+
+    def test_micro_batches_preserve_item_identity(self) -> None:
+        # Precompute passes fill cached fields in place through these slices.
+        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=2)
+        items = [_IndexedItem(rollout_idx=index) for index in range(3)]
+        sliced = [
+            item
+            for micro_items in mixin.iter_train_micro_batches(items)
+            for item in micro_items
+        ]
+        for original, batched in zip(items, sliced, strict=True):
+            self.assertIs(original, batched)
+
+    def test_empty_items_are_rejected(self) -> None:
+        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=1)
+        with self.assertRaisesRegex(RuntimeError, "no train items"):
+            next(mixin.iter_micro_updates([]))
+
+    def test_batch_divisibility_is_validated(self) -> None:
+        with self.assertRaisesRegex(ValueError, "train_micro_batch_size"):
+            _ = self.make_mixin(train_batch_size=8, micro_batch_size=3).grad_acc_steps
+        self.assertEqual(
+            self.make_mixin(train_batch_size=8, micro_batch_size=2).grad_acc_steps, 4
+        )
+
+    def test_non_finite_loss_reports_rollout_indices(self) -> None:
+        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=2)
+        items = [_IndexedItem(rollout_idx=3), _IndexedItem(rollout_idx=5)]
+        mixin._check_finite_loss(torch.tensor(1.0), items)
+        with self.assertRaisesRegex(RuntimeError, r"rollout_indices=\[3, 5\]"):
+            mixin._check_finite_loss(torch.tensor(float("nan")), items)
 
 
 class _OrderedDataset(Dataset[dict[str, int]]):

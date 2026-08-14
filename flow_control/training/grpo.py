@@ -1,9 +1,10 @@
 import os
 from contextlib import contextmanager
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any
 
 import torch
-from pydantic import ConfigDict, PositiveInt
+from pydantic import ConfigDict
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -38,6 +39,7 @@ from .ema import (
 )
 from .mixins import (
     CheckpointingMixin,
+    MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
     ValidationMixin,
@@ -48,8 +50,17 @@ from .mixins import (
 logger = get_logger(__name__)
 
 
+@dataclass(slots=True)
+class GrpoTrainItem:
+    rollout_idx: int
+    timestep_idx: int
+    cached_ref_mean: torch.Tensor | None = None
+
+
 @trainer_registry.register("grpo")
-class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
+class GrpoTrainer(
+    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "grpo"
 
@@ -66,14 +77,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
 
     num_inner_epochs: int = 1
-    train_batch_size: int = 4
-    """
-    How many (rollout, timestep) items should the optimizer see before each update step.
-    Must be divisible by world_size. Gradient accumulation steps will be automatically
-    set to train_batch_size // world_size.
-    """
-    train_micro_batch_size: PositiveInt = 1
-    """Number of replay items combined in each per-rank model forward."""
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
@@ -110,26 +113,6 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     @property
     def transformer(self):
         return self.model.transformer
-
-    @property
-    def grad_acc_steps(self) -> int:
-        local_batch_size = self.local_train_batch_size
-        if local_batch_size % self.train_micro_batch_size != 0:
-            raise ValueError(
-                f"Per-rank train batch ({local_batch_size}) must be divisible by "
-                f"train_micro_batch_size ({self.train_micro_batch_size})."
-            )
-        return local_batch_size // self.train_micro_batch_size
-
-    @property
-    def local_train_batch_size(self) -> int:
-        world_size: int = getattr(self, "world_size", 1)
-        if self.train_batch_size % world_size != 0:
-            raise ValueError(
-                f"global_batch_size ({self.train_batch_size}) must be divisible "
-                f"by world_size ({world_size})."
-            )
-        return self.train_batch_size // world_size
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -329,12 +312,16 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     def _compute_loss_at_items(
         self,
-        items: list[tuple[Rollout, torch.Tensor, int, torch.Tensor | None]],
+        items: list[GrpoTrainItem],
+        rollouts: list[Rollout],
+        advantages: torch.Tensor,
     ) -> torch.Tensor:
         requests: list[ReplayRequest] = []
         old_log_probs: list[torch.Tensor] = []
-        for rollout, _advantage, timestep_idx, _cached_ref_mean in items:
-            request, old_log_prob = self._make_replay_request(rollout, timestep_idx)
+        for item in items:
+            request, old_log_prob = self._make_replay_request(
+                rollouts[item.rollout_idx], item.timestep_idx
+            )
             requests.append(request)
             old_log_probs.append(old_log_prob)
 
@@ -342,7 +329,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             self.model, requests
         )
         uncached_reference_outputs = None
-        if self.kl_beta > 0 and any(item[3] is None for item in items):
+        if self.kl_beta > 0 and any(item.cached_ref_mean is None for item in items):
             with torch.no_grad(), self.reference_model():
                 uncached_reference_outputs = (
                     self.rollout_sampler.compute_logprob_at_step(self.model, requests)
@@ -352,10 +339,9 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         for index, (item, replay_output, old_log_prob) in enumerate(
             zip(items, replay_outputs, old_log_probs, strict=True)
         ):
-            _rollout, advantage, _timestep_idx, cached_ref_mean = item
             ref_mean = (
-                cached_ref_mean.to(device=self.device)
-                if cached_ref_mean is not None
+                item.cached_ref_mean.to(device=self.device)
+                if item.cached_ref_mean is not None
                 else (
                     uncached_reference_outputs[index].mean
                     if uncached_reference_outputs is not None
@@ -366,7 +352,7 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 self.grpo_loss(
                     log_prob=replay_output.log_prob,
                     old_log_prob=old_log_prob,
-                    advantages=advantage.to(device=self.device),
+                    advantages=advantages[item.rollout_idx].to(device=self.device),
                     mean=replay_output.mean,
                     ref_mean=ref_mean,
                     std_dev=replay_output.std_dev,
@@ -377,55 +363,34 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     def _precompute_reference_means(
         self,
         rollouts: list[Rollout],
-    ) -> list[list[torch.Tensor]] | None:
+        items: list[GrpoTrainItem],
+    ) -> None:
+        """Fill ``item.cached_ref_mean`` for every item using the reference model."""
         if not self.precompute_aux_model_outputs or self.kl_beta <= 0:
-            return None
+            return
 
         was_training = self.transformer.training
         self.transformer.eval()
-
-        total_items = 0
-        for rollout in rollouts:
-            log_probs = rollout.trajectory.log_probs
-            if log_probs is None:
-                raise RuntimeError("Rollout is missing log-prob trajectory data.")
-            total_items += log_probs.shape[1]
-
         progress = Progress(
             *self.get_progress_columns(),
             console=console,
             transient=True,
         )
-        precompute_task = progress.add_task("Precompute ref", total=total_items)
-        num_timesteps_per_rollout: list[int] = []
-        for rollout in rollouts:
-            latents = rollout.trajectory.latents
-            if latents is None:
-                raise RuntimeError("Rollout is missing latent trajectory data.")
-            num_timesteps_per_rollout.append(latents.shape[1] - 1)
-        ref_means: list[list[torch.Tensor | None]] = [
-            [None] * num_timesteps for num_timesteps in num_timesteps_per_rollout
-        ]
-        train_items = [
-            (rollout_idx, timestep_idx)
-            for rollout_idx, num_timesteps in enumerate(num_timesteps_per_rollout)
-            for timestep_idx in range(num_timesteps)
-        ]
+        precompute_task = progress.add_task("Precompute ref", total=len(items))
 
         with progress, torch.no_grad(), self.reference_model():
-            for start in range(0, len(train_items), self.train_micro_batch_size):
-                micro_items = train_items[start : start + self.train_micro_batch_size]
+            for micro_items in self.iter_train_micro_batches(items):
                 requests = [
-                    self._make_replay_request(rollouts[rollout_idx], timestep_idx)[0]
-                    for rollout_idx, timestep_idx in micro_items
+                    self._make_replay_request(
+                        rollouts[item.rollout_idx], item.timestep_idx
+                    )[0]
+                    for item in micro_items
                 ]
                 outputs = self.rollout_sampler.compute_logprob_at_step(
                     self.model, requests
                 )
-                for (rollout_idx, timestep_idx), output in zip(
-                    micro_items, outputs, strict=True
-                ):
-                    ref_means[rollout_idx][timestep_idx] = output.mean.detach()
+                for item, output in zip(micro_items, outputs, strict=True):
+                    item.cached_ref_mean = output.mean.detach()
                 progress.advance(precompute_task, advance=len(micro_items))
 
         if was_training:
@@ -434,30 +399,21 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         self.log_progress_timing(
             progress, self._current_step, prefix="profile/precompute"
         )
-        if any(value is None for rollout_means in ref_means for value in rollout_means):
-            raise RuntimeError("Missing precomputed reference mean.")
-        return [cast(list[torch.Tensor], rollout_means) for rollout_means in ref_means]
 
-    def _build_train_items(
-        self, num_rollouts: int, num_timesteps: int
-    ) -> list[tuple[int, int]]:
-        train_items: list[tuple[int, int]] = []
-        for rollout_idx in range(num_rollouts):
-            train_items.extend((rollout_idx, j) for j in range(num_timesteps))
-        return train_items
-
-    def _warn_if_non_divisible(self, num_train_items: int) -> None:
-        if (
-            num_train_items % self.local_train_batch_size != 0
-            and self.is_main_process
-            and self._current_epoch == 0
-        ):
-            logger.warning(
-                "Local loss count (%d) is not divisible by local train batch (%d). "
-                "The tail update uses a smaller effective batch.",
-                num_train_items,
-                self.local_train_batch_size,
+    def _build_train_items(self, rollouts: list[Rollout]) -> list[list[GrpoTrainItem]]:
+        """One item group per rollout, in trajectory timestep order."""
+        item_groups: list[list[GrpoTrainItem]] = []
+        for rollout_idx, rollout in enumerate(rollouts):
+            latents = rollout.trajectory.latents
+            if latents is None:
+                raise RuntimeError("Rollout is missing latent trajectory data.")
+            item_groups.append(
+                [
+                    GrpoTrainItem(rollout_idx=rollout_idx, timestep_idx=timestep_idx)
+                    for timestep_idx in range(latents.shape[1] - 1)
+                ]
             )
+        return item_groups
 
     # --- Core training phases ---
 
@@ -483,86 +439,39 @@ class GrpoTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         """Training phase: update model using collected rollouts and advantages."""
         self.transformer.train()
 
-        ref_means = self._precompute_reference_means(rollouts)
-        first_log_probs = rollouts[0].trajectory.log_probs
-        if first_log_probs is None:
-            raise RuntimeError("Rollout is missing log-prob trajectory data.")
-        num_timesteps = first_log_probs.shape[1]
-        total_items = self.num_inner_epochs * len(rollouts) * num_timesteps
+        item_groups = self._build_train_items(rollouts)
+        all_items = [item for group in item_groups for item in group]
+        self._precompute_reference_means(rollouts, all_items)
 
         progress = Progress(
             *self.get_progress_columns(),
             console=console,
             transient=True,
         )
-        train_task = progress.add_task("Training", total=total_items)
+        train_task = progress.add_task(
+            "Training", total=self.num_inner_epochs * len(all_items)
+        )
 
         with progress:
             for _inner_epoch in range(self.num_inner_epochs):
-                perm = torch.randperm(len(rollouts))
-                shuffled_rollouts = [rollouts[perm[i]] for i in range(len(rollouts))]
-                shuffled_advantages = advantages[perm]
-                shuffled_ref_means = (
-                    [ref_means[perm[i]] for i in range(len(rollouts))]
-                    if ref_means is not None
-                    else None
-                )
+                # Shuffle rollout order while keeping each rollout's timesteps
+                # contiguous and in trajectory order.
+                perm = torch.randperm(len(item_groups)).tolist()
+                train_items = [item for index in perm for item in item_groups[index]]
 
-                train_items = self._build_train_items(
-                    len(shuffled_rollouts), num_timesteps
-                )
-
-                if len(train_items) == 0:
-                    raise RuntimeError(
-                        "No training items were selected in GRPO inner epoch."
+                for update in self.iter_micro_updates(train_items):
+                    self.transformer.set_requires_gradient_sync(update.is_sync_step)
+                    loss = self._compute_loss_at_items(
+                        update.items, rollouts, advantages
                     )
+                    self._check_finite_loss(loss, update.items)
+                    (loss * update.loss_scale).backward()
+                    progress.advance(train_task, advance=len(update.items))
 
-                self._warn_if_non_divisible(len(train_items))
-
-                for chunk_start in range(
-                    0, len(train_items), self.local_train_batch_size
-                ):
-                    chunk = train_items[
-                        chunk_start : chunk_start + self.local_train_batch_size
-                    ]
-                    chunk_size = len(chunk)
-
-                    for micro_start in range(
-                        0, chunk_size, self.train_micro_batch_size
-                    ):
-                        micro_items = chunk[
-                            micro_start : micro_start + self.train_micro_batch_size
-                        ]
-                        is_sync_step = micro_start + len(micro_items) == chunk_size
-                        self.transformer.set_requires_gradient_sync(is_sync_step)
-
-                        loss_items = [
-                            (
-                                shuffled_rollouts[rollout_idx],
-                                shuffled_advantages[rollout_idx],
-                                timestep_idx,
-                                (
-                                    shuffled_ref_means[rollout_idx][timestep_idx]
-                                    if shuffled_ref_means is not None
-                                    else None
-                                ),
-                            )
-                            for rollout_idx, timestep_idx in micro_items
-                        ]
-                        loss = self._compute_loss_at_items(loss_items)
-
-                        if not torch.isfinite(loss):
-                            raise RuntimeError(
-                                f"Non-finite GRPO loss detected: {loss.item()}. "
-                                f"(items={micro_items})"
-                            )
-
-                        (loss * (len(micro_items) / chunk_size)).backward()
-                        progress.advance(train_task, advance=len(micro_items))
-
-                    self._optimizer_step()
-                    self._current_step += 1
-                    self.flush_aggregated_metrics(self._current_step)
+                    if update.is_sync_step:
+                        self._optimizer_step()
+                        self._current_step += 1
+                        self.flush_aggregated_metrics(self._current_step)
 
         self.log_progress_timing(progress, self._current_step, prefix="profile/train")
 

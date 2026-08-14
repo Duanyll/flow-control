@@ -155,6 +155,11 @@ gradient_accumulation_steps = local_update_batch // M
 - [x] Scale a short microbatch mean by `m / C` within an optimizer chunk of
       `C` logical items.
 - [x] Enable FSDP gradient synchronization only on the final physical microbatch.
+- [x] Share the chunk/microbatch slicing, loss scaling, tail-update warning, and
+      non-finite loss check across GRPO/NFT/AWM/RAM via `MicrobatchTrainMixin`
+      (`flow_control/training/mixins/microbatch.py`); trainer loss entry points
+      take `(items, rollouts, advantages)` and GRPO caches reference means on
+      `GrpoTrainItem` in place of a separate matrix.
 - [x] Preserve independent SFT CFG drop, timestep, noise, target, and weight.
 - [x] Batch GRPO current/reference replay and reference precomputation.
 - [x] Batch NFT current/old/reference prediction, including CFG synchronization.
@@ -190,7 +195,7 @@ gradient_accumulation_steps = local_update_batch // M
 - [x] `uv run ruff format flow_control tests`
 - [x] `uv run ruff check --fix flow_control tests`
 - [x] `uv run pyright flow_control tests`
-- [x] 19 focused unit tests pass.
+- [x] 25 focused unit tests pass (19 original plus microbatch-arithmetic tests).
 - [x] Two-rank Gloo distributed worker passes.
 - [x] JSON schemas regenerate successfully.
 - [x] `git diff --check` passes.

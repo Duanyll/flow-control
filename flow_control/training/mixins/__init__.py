@@ -9,6 +9,7 @@ from .base import (
 )
 from .dcp import CheckpointingMixin, DcpMixin
 from .logging import LoggingMixin
+from .microbatch import MicrobatchTrainMixin, MicroUpdate
 from .preprocess import PreprocessMixin
 from .rollout import Rollout, RolloutMixin
 from .validation import ValidationMixin
@@ -20,6 +21,8 @@ __all__ = [
     "LaunchConfig",
     "TorchCompileConfig",
     "LoggingMixin",
+    "MicrobatchTrainMixin",
+    "MicroUpdate",
     "Rollout",
     "RolloutMixin",
     "ValidationMixin",

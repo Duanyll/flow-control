@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, PositiveInt
+from pydantic import ConfigDict
 from rich.progress import Progress, TaskID
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -51,6 +51,7 @@ from .ema import (
 )
 from .mixins import (
     CheckpointingMixin,
+    MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
     ValidationMixin,
@@ -90,7 +91,9 @@ class _NftLossInput:
 
 
 @trainer_registry.register("nft")
-class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
+class NftTrainer(
+    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "nft"
 
@@ -107,13 +110,6 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
 
     num_inner_epochs: int = 1
-    train_batch_size: int = 4
-    """
-    How many (rollout, timestep) items should the optimizer see before each
-    update step. Must be divisible by world_size.
-    """
-    train_micro_batch_size: PositiveInt = 1
-    """Number of NFT items combined in each per-rank model forward."""
 
     # NFT-specific hyperparameters
     beta: float = 1.0
@@ -186,26 +182,6 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     @property
     def transformer(self):
         return self.model.transformer
-
-    @property
-    def grad_acc_steps(self) -> int:
-        local_batch_size = self.local_train_batch_size
-        if local_batch_size % self.train_micro_batch_size != 0:
-            raise ValueError(
-                f"Per-rank train batch ({local_batch_size}) must be divisible by "
-                f"train_micro_batch_size ({self.train_micro_batch_size})."
-            )
-        return local_batch_size // self.train_micro_batch_size
-
-    @property
-    def local_train_batch_size(self) -> int:
-        world_size: int = getattr(self, "world_size", 1)
-        if self.train_batch_size % world_size != 0:
-            raise ValueError(
-                f"global_batch_size ({self.train_batch_size}) must be divisible "
-                f"by world_size ({world_size})."
-            )
-        return self.train_batch_size // world_size
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -475,13 +451,18 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     def nft_loss_batched(
         self,
-        items: list[tuple[Rollout, torch.Tensor, int, NftCachedTargets | None]],
+        items: list[NftTrainItem],
+        rollouts: list[Rollout],
+        advantages: torch.Tensor,
     ) -> torch.Tensor:
         prepared = [
             self._prepare_nft_loss_input(
-                rollout, advantage, timestep_idx, cached_targets
+                rollouts[item.rollout_idx],
+                advantages[item.rollout_idx],
+                item.timestep_idx,
+                item.cached_targets,
             )
-            for rollout, advantage, timestep_idx, cached_targets in items
+            for item in items
         ]
         batches = [item.batch for item in prepared]
         timesteps = [item.timestep for item in prepared]
@@ -540,6 +521,13 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
         ``timestep_range`` keeps only the noisiest fraction of the trajectory
         (``t >= 1 - timestep_range`` with ``t in [0, 1]``); ``1.0`` keeps all.
+
+        Distributed invariant: every rank must build the same number of train
+        items per inner epoch, or the per-microbatch model collectives stop
+        lining up across ranks. With ``timestep_range < 1`` the eligible count
+        is derived from the rollout's sigma grid, which a resolution-dependent
+        ``shift`` makes image-size dependent — mixed-resolution data could then
+        skew per-rank totals. Fixed-resolution workloads are unaffected.
         """
         rollout_timesteps = rollout.trajectory.timesteps
         if rollout_timesteps is None:
@@ -651,8 +639,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         task_id: TaskID,
         field: Literal["old_prediction", "ref_prediction"] = "old_prediction",
     ) -> None:
-        for start in range(0, len(flat_items), self.train_micro_batch_size):
-            micro_items = flat_items[start : start + self.train_micro_batch_size]
+        for micro_items in self.iter_train_micro_batches(flat_items):
             batches: list[Any] = []
             timesteps: list[torch.Tensor] = []
             negative_batches: list[Any | None] = []
@@ -761,66 +748,17 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
         with progress:
             for train_items in train_plan:
-                if len(train_items) == 0:
-                    raise RuntimeError(
-                        "No training items were selected in NFT inner epoch."
-                    )
+                for update in self.iter_micro_updates(train_items):
+                    self.transformer.set_requires_gradient_sync(update.is_sync_step)
+                    loss = self.nft_loss_batched(update.items, rollouts, advantages)
+                    self._check_finite_loss(loss, update.items)
+                    (loss * update.loss_scale).backward()
+                    progress.advance(train_task, advance=len(update.items))
 
-                if (
-                    len(train_items) % self.local_train_batch_size != 0
-                    and self.is_main_process
-                    and self._current_epoch == 0
-                ):
-                    logger.warning(
-                        "Local loss count (%d) is not divisible by "
-                        "local train batch (%d). The tail update uses a smaller "
-                        "effective batch.",
-                        len(train_items),
-                        self.local_train_batch_size,
-                    )
-
-                for chunk_start in range(
-                    0, len(train_items), self.local_train_batch_size
-                ):
-                    chunk = train_items[
-                        chunk_start : chunk_start + self.local_train_batch_size
-                    ]
-                    chunk_size = len(chunk)
-
-                    for micro_start in range(
-                        0, chunk_size, self.train_micro_batch_size
-                    ):
-                        micro_items = chunk[
-                            micro_start : micro_start + self.train_micro_batch_size
-                        ]
-                        is_sync_step = micro_start + len(micro_items) == chunk_size
-                        self.transformer.set_requires_gradient_sync(is_sync_step)
-
-                        loss = self.nft_loss_batched(
-                            [
-                                (
-                                    rollouts[item.rollout_idx],
-                                    advantages[item.rollout_idx],
-                                    item.timestep_idx,
-                                    item.cached_targets,
-                                )
-                                for item in micro_items
-                            ]
-                        )
-
-                        if not torch.isfinite(loss):
-                            raise RuntimeError(
-                                f"Non-finite NFT loss detected: {loss.item()}. "
-                                f"(rollout_indices="
-                                f"{[item.rollout_idx for item in micro_items]})"
-                            )
-
-                        (loss * (len(micro_items) / chunk_size)).backward()
-                        progress.advance(train_task, advance=len(micro_items))
-
-                    self._optimizer_step()
-                    self._current_step += 1
-                    self.flush_aggregated_metrics(self._current_step)
+                    if update.is_sync_step:
+                        self._optimizer_step()
+                        self._current_step += 1
+                        self.flush_aggregated_metrics(self._current_step)
 
         self.log_progress_timing(progress, self._current_step, prefix="profile/train")
 
