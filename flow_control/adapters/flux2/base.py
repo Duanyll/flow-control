@@ -28,6 +28,16 @@ class Flux2Batch(Batch):
 class Flux2Adapter[TBatch: Flux2Batch](
     BaseModelAdapter[Flux2Transformer2DModel, TBatch]
 ):
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+        "reference_latents",
+        "reference_sizes",
+        "txt_ids",
+        "img_ids",
+    )
     arch: Literal["flux2"] = "flux2"
     type: Literal["base"] = "base"
 
@@ -98,15 +108,20 @@ class Flux2Adapter[TBatch: Flux2Batch](
         reference_ids = rearrange(reference_ids, "n d -> 1 n d")
         return reference_ids.to(self.device)
 
-    def make_guidance(self) -> torch.Tensor | None:
+    def make_guidance(self, batch_size: int) -> torch.Tensor | None:
         if self.transformer.config["guidance_embeds"]:
-            return torch.tensor([self.guidance], device=self.device, dtype=self.dtype)
+            return torch.full(
+                (batch_size,),
+                self.guidance,
+                device=self.device,
+                dtype=self.dtype,
+            )
         else:
             return None
 
     def _predict_velocity(self, batch, timestep):
         b, n, d = batch["noisy_latents"].shape
-        guidance = self.make_guidance()
+        guidance = self.make_guidance(b)
         if "reference_latents" in batch and "reference_sizes" in batch:
             latent_model_input = torch.cat(
                 [batch["noisy_latents"]] + batch["reference_latents"], dim=1
@@ -116,12 +131,14 @@ class Flux2Adapter[TBatch: Flux2Batch](
                     [self.make_latent_ids(batch["image_size"])]
                     + [self.make_reference_ids(batch["reference_sizes"])],
                     dim=1,
-                )
+                ).expand(b, -1, -1)
             img_ids = batch["img_ids"]
         else:
             latent_model_input = batch["noisy_latents"]
             if "img_ids" not in batch:
-                batch["img_ids"] = self.make_latent_ids(batch["image_size"])
+                batch["img_ids"] = self.make_latent_ids(batch["image_size"]).expand(
+                    b, -1, -1
+                )
             img_ids = batch["img_ids"]
 
         if "txt_ids" not in batch:

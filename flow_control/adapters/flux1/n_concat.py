@@ -22,6 +22,7 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
     """
 
     type: Literal["n_concat"] = "n_concat"
+    dense_batch_fields = (*Flux1Adapter.dense_batch_fields, "control_latents")
 
     def _predict_velocity(
         self,

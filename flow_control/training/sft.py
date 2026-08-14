@@ -4,8 +4,7 @@ import time
 from typing import Any
 
 import torch
-from einops import reduce
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PositiveInt
 from rich.panel import Panel
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
@@ -80,6 +79,8 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
 
     global_batch_size: int = 16
+    micro_batch_size: PositiveInt = 1
+    """Number of logical samples in each per-rank physical forward."""
     train_steps: int = 10000
     checkpoint_interval: int = 500
     """Archival checkpoint cadence in optimizer steps."""
@@ -113,7 +114,18 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
 
     @property
     def grad_acc_steps(self):
-        return self.global_batch_size // self.world_size
+        if self.global_batch_size % self.world_size != 0:
+            raise ValueError(
+                f"global_batch_size ({self.global_batch_size}) must be divisible "
+                f"by world_size ({self.world_size})."
+            )
+        local_update_batch = self.global_batch_size // self.world_size
+        if local_update_batch % self.micro_batch_size != 0:
+            raise ValueError(
+                f"Per-rank update batch ({local_update_batch}) must be divisible "
+                f"by micro_batch_size ({self.micro_batch_size})."
+            )
+        return local_update_batch // self.micro_batch_size
 
     @property
     def total_epochs(self):
@@ -141,6 +153,9 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             self._ema_optimizer = EMAOptimizer(params, self.ema)
 
     def make_train_dataloader(self):
+        # The sampler pads logical items to a complete optimizer update, while
+        # the DataLoader groups those items into physical microbatches.
+        physical_grad_acc_steps = self.grad_acc_steps
         dataset = PaddingAwareDatasetWrapper(self.parse_training_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
@@ -148,11 +163,11 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             rank=self.rank,
             shuffle=True,
             seed=self.seed,
-            grad_acc_steps=self.grad_acc_steps,
+            grad_acc_steps=physical_grad_acc_steps * self.micro_batch_size,
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=1,
+            batch_size=self.micro_batch_size,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
@@ -206,34 +221,48 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
 
     # ------------------------------- Training ----------------------------------- #
 
-    def train_step(self, batch: Any):
-        if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
-            negative_batch = self.processor.get_negative_batch(batch)
-            if negative_batch is not None:
-                batch = negative_batch
-            else:
-                warn_once(
-                    logger,
-                    f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) batch available.",
+    def train_step(self, batches: list[Any]) -> torch.Tensor:
+        timesteps: list[torch.Tensor] = []
+        targets: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        model_batches: list[Any] = []
+
+        for original_batch in batches:
+            batch: Any = original_batch
+            if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
+                negative_batch = self.processor.get_negative_batch(batch)
+                if negative_batch is not None:
+                    batch = negative_batch
+                else:
+                    warn_once(
+                        logger,
+                        f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) batch available.",
+                    )
+
+            timestep = self.timestep_weighting.sample_timesteps(1).to(
+                device=self.device, dtype=torch.float32
+            )
+            clean = batch["clean_latents"].float()
+            noise = torch.randn_like(clean, dtype=torch.float32)
+            batch["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
+
+            model_batches.append(batch)
+            timesteps.append(timestep)
+            targets.append(noise - clean)
+            weights.append(
+                self.loss_weighting.get_weights(timestep).to(
+                    device=self.device, dtype=torch.float32
                 )
+            )
 
-        timesteps = self.timestep_weighting.sample_timesteps(1)
-        timesteps = timesteps.to(device=self.device, dtype=torch.float32)
-        clean = batch["clean_latents"].float()
-        noise = torch.randn_like(clean, dtype=torch.float32)
-        batch["noisy_latents"] = (1.0 - timesteps) * clean + timesteps * noise
-
-        model_pred = self.model.predict_velocity(
-            batch, timesteps.to(dtype=self.model.dtype)
-        ).float()
-        target = noise - clean
-        loss = (model_pred - target) ** 2
-        loss = reduce(loss, "b n d -> 1", reduction="mean")
-
-        weighting = self.loss_weighting.get_weights(timesteps)
-        weighting = weighting.to(device=loss.device, dtype=loss.dtype)
-        weighted_loss = (loss * weighting).mean()
-        return weighted_loss
+        predictions = self.model.predict_velocity_batched(model_batches, timesteps)
+        per_sample_losses = [
+            ((prediction - target) ** 2).mean() * weight.mean()
+            for prediction, target, weight in zip(
+                predictions, targets, weights, strict=True
+            )
+        ]
+        return torch.stack(per_sample_losses).mean()
 
     def _after_sync_step(self, total_loss: float):
         """Handle optimizer step, logging, checkpointing after a gradient sync."""
@@ -308,28 +337,34 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
 
         with self.status_bar("SFT Training"), progress:
             starting_epoch = self.current_epoch
+            accumulated_loss = 0.0
             for _ in range(starting_epoch, self.total_epochs):
                 if hasattr(self._dataloader.sampler, "set_epoch"):
                     self._dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
-                for i, batch in enumerate(self._dataloader):
-                    with dump_if_failed(logger, batch):
+                for i, items in enumerate(self._dataloader):
+                    with dump_if_failed(logger, items):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        batch = deep_move_to_device(batch, self.device)
-                        batch: Any = self.preprocess_for_training(batch)
-                        batch = deep_cast_float_dtype(batch, self.model.dtype)
+                        items = deep_move_to_device(items, self.device)
+                        batches = [
+                            deep_cast_float_dtype(
+                                self.preprocess_for_training(item), self.model.dtype
+                            )
+                            for item in items
+                        ]
 
-                        loss = self.train_step(batch) / self.grad_acc_steps
+                        loss = self.train_step(batches)
                         self.check_loss(loss)
-                        loss.backward()
-
-                        total_loss = loss.item()
+                        scaled_loss = loss / self.grad_acc_steps
+                        scaled_loss.backward()
+                        accumulated_loss += scaled_loss.item()
 
                     if not is_sync_step:
                         continue
 
-                    self._after_sync_step(total_loss)
+                    self._after_sync_step(accumulated_loss)
+                    accumulated_loss = 0.0
                     progress.advance(task)
 
                     if self._current_step >= self.train_steps:
@@ -364,7 +399,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
                 logger.info(f"Testing latent length: {current_len}")
                 batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
-                loss = self.train_step(batch)
+                loss = self.train_step([batch])
                 loss.backward()
                 self._optimizer.step()
                 self._optimizer.zero_grad()

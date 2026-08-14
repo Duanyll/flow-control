@@ -10,7 +10,7 @@
 
 | 接口 | 说明 |
 |------|------|
-| `BaseModelAdapter` | 适配器抽象基类，定义 `load_transformer()`, `predict_velocity()`, `forward()` 等方法 |
+| `BaseModelAdapter` | 适配器抽象基类，定义 `load_transformer()` 和 list-only `predict_velocity_batched()`；固定形状输入可合并 forward，不兼容输入会安全回退 |
 | `Flux1Adapter` / `Flux1FillAdapter` / `Flux1KontextAdapter` | FLUX.1 系列适配器（含拼接、填充、上下文变体） |
 | `Flux2Adapter` | FLUX.2 适配器 |
 | `QwenImageAdapter` / `QwenImageEditAdapter` / `QwenImageLayeredAdapter` | Qwen 图像生成系列适配器 |

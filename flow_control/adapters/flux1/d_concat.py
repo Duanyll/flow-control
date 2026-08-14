@@ -22,6 +22,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     """
 
     type: Literal["d_concat"] = "d_concat"
+    dense_batch_fields = (*Flux1Adapter.dense_batch_fields, "control_latents")
     input_dimension: int = 128
 
     peft_lora_rank: int = 128

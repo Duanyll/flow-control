@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, PositiveInt, model_validator
 from rich.progress import Progress, TaskID
 from rich.table import Table
 from torch.distributed.checkpoint.state_dict import (
@@ -22,7 +22,7 @@ from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import Sampler
+from flow_control.samplers import Sampler, SampleRequest
 from flow_control.samplers.sampler import derive_seed
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
@@ -84,6 +84,8 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     full per-image breakdown. Written by the main process after gathering
     scores from all ranks.
     """
+    micro_batch_size: PositiveInt = 1
+    """Number of logical samples submitted to each sampler call per rank."""
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
@@ -131,7 +133,7 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=1,
+            batch_size=self.micro_batch_size,
             sampler=sampler,
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
@@ -181,42 +183,47 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     # ---------------------------------- Sampling -------------------------------- #
 
-    def _sample_one(self, batch: Any) -> tuple[Any, Any, str]:
-        """Run the sampler + decode for a single batch.
+    def _sample_many(self, items: list[Any]) -> list[tuple[Any, Any, str]]:
+        """Preprocess separately, sample together, then decode separately."""
+        batches: list[Any] = []
+        keys: list[str] = []
+        requests: list[SampleRequest] = []
+        for item in items:
+            batch = deep_move_to_device(item, self.device)
+            batch = self.preprocess_for_inference(batch, save_extra=True)
+            batch = deep_cast_float_dtype(batch, self.model.dtype)
+            negative_batch: Any = (
+                self.processor.get_negative_batch(batch)
+                if self.sampler.cfg_scale > 1.0
+                else None
+            )
+            key = batch.get("__key__", "unknown")
+            generator = torch.Generator(device=self.device).manual_seed(
+                derive_seed(self.seed, key)
+            )
+            self.processor.initialize_latents(
+                batch,
+                generator=generator,
+                device=self.device,
+                dtype=self.model.dtype,
+            )
+            batches.append(batch)
+            keys.append(key)
+            requests.append(
+                SampleRequest(
+                    batch=batch,
+                    negative_batch=negative_batch,
+                    generator=generator,
+                )
+            )
 
-        Returns ``(batch, decoded, key)`` where ``batch`` (still on device) has
-        the decoded outputs merged in, ``decoded`` is the decoded-only dict, and
-        ``key`` is the sample key (``"__padding__"`` for padding samples).
-        """
-        batch = deep_move_to_device(batch, self.device)
-        batch = self.preprocess_for_inference(batch, save_extra=True)
-        batch = deep_cast_float_dtype(batch, self.model.dtype)
-        negative_batch: Any = (
-            self.processor.get_negative_batch(batch)
-            if self.sampler.cfg_scale > 1.0
-            else None
-        )
-        key = batch.get("__key__", "unknown")
-        seed = derive_seed(self.seed, key)
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-        self.processor.initialize_latents(
-            batch,
-            generator=generator,
-            device=self.device,
-            dtype=self.model.dtype,
-        )
-        sample_output = self.sampler.sample(
-            self.model,
-            batch,
-            negative_batch=negative_batch,
-            generator=generator,
-        )
-        decoded = self.processor.decode_output(
-            sample_output.final_latents,
-            batch,
-        )
-        batch.update(decoded)
-        return batch, decoded, key
+        outputs = self.sampler.sample(self.model, requests)
+        results: list[tuple[Any, Any, str]] = []
+        for batch, output, key in zip(batches, outputs, keys, strict=True):
+            decoded = self.processor.decode_output(output.final_latents, batch)
+            batch.update(decoded)
+            results.append((batch, decoded, key))
+        return results
 
     def _sample_submitter(
         self,
@@ -233,9 +240,10 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         Padding samples still run the model (to keep FSDP collectives balanced
         across ranks) but are not yielded for scoring or output.
         """
-        for batch in self.dataloader:
-            with dump_if_failed(logger, batch):
-                batch, decoded, key = self._sample_one(batch)
+        for items in self.dataloader:
+            with dump_if_failed(logger, items):
+                sampled = self._sample_many(items)
+            for batch, decoded, key in sampled:
                 # Build the annotated preview while the full GPU batch (e.g. tie's
                 # reference_images) and decoded outputs are still available.
                 preview = (
@@ -253,9 +261,9 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
                 )
                 if record is not None and preview is not None:
                     record["__preview_image__"] = preview.to(torch.device("cpu"))
-            progress.advance(task)
-            if record is not None:
-                yield batch, (record, key)
+                progress.advance(task)
+                if record is not None:
+                    yield batch, (record, key)
 
     # ---------------------------------- Output ---------------------------------- #
 
@@ -412,7 +420,10 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
             *LoggingMixin.get_progress_columns(),
             console=console,
         )
-        task = progress.add_task("Inference", total=len(self.dataloader))
+        task = progress.add_task(
+            "Inference",
+            total=len(self.dataloader.sampler),  # type: ignore[arg-type]
+        )
 
         with progress:
             submitter = self._sample_submitter(progress, task)

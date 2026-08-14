@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 from rich.progress import Progress
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -27,7 +27,7 @@ from flow_control.rewards import (
     reduce_reward_profiles,
 )
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import SampleOutput, Sampler
+from flow_control.samplers import SampleOutput, Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -83,6 +83,8 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     Number of rollouts to generate for each prompt.
     """
+    rollout_micro_batch_size: PositiveInt = 1
+    """Number of logical rollouts submitted to each sampler call per rank."""
     rollout_storage_device: Literal["cpu", "device"] = "cpu"
     """
     Where to store collected rollout results between the rollout and training phases.
@@ -133,7 +135,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=1,
+            batch_size=self.rollout_micro_batch_size,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
@@ -153,7 +155,6 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         seed: int = self.seed
         rank: int = self.rank
-        world_size: int = self.world_size
         dataloader = self._dataloader
         get_progress_columns = self.get_progress_columns
 
@@ -171,66 +172,89 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         dataloader.sampler.set_epoch(epoch)  # type: ignore[union-attr]
 
         def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
+            rollout_ordinal = 0
             with progress:
-                for batch_idx, batch in enumerate(dataloader):
-                    batch = deep_move_to_device(batch, device)
-                    batch: Any = self.preprocess_for_inference(batch, save_extra=True)
-                    batch = deep_cast_float_dtype(batch, model.dtype)
-
-                    generator = torch.Generator(device=device).manual_seed(
-                        seed + epoch * 10000 + batch_idx * world_size + rank
-                    )
-                    processor.initialize_latents(
-                        batch,
-                        generator=generator,
-                        device=device,
-                    )
-
-                    negative_batch: Any = (
-                        processor.get_negative_batch(batch)
-                        if self.rollout_sampler.cfg_scale > 1.0
-                        else None
-                    )
+                for items in dataloader:
+                    batches: list[Any] = []
+                    negative_batches: list[Any] = []
+                    requests: list[SampleRequest] = []
+                    for item in items:
+                        batch = deep_move_to_device(item, device)
+                        batch = self.preprocess_for_inference(batch, save_extra=True)
+                        batch = deep_cast_float_dtype(batch, model.dtype)
+                        key = batch.get("__key__", "unknown")
+                        sample_seed = derive_seed(
+                            seed,
+                            f"rollout:{epoch}:{rank}:{rollout_ordinal}:{key}",
+                        )
+                        rollout_ordinal += 1
+                        generator = torch.Generator(device=device).manual_seed(
+                            sample_seed
+                        )
+                        processor.initialize_latents(
+                            batch,
+                            generator=generator,
+                            device=device,
+                        )
+                        negative_batch: Any = (
+                            processor.get_negative_batch(batch)
+                            if self.rollout_sampler.cfg_scale > 1.0
+                            else None
+                        )
+                        batches.append(batch)
+                        negative_batches.append(negative_batch)
+                        requests.append(
+                            SampleRequest(
+                                batch=batch,
+                                negative_batch=negative_batch,
+                                generator=generator,
+                            )
+                        )
 
                     with torch.no_grad():
-                        rollout_out = self.rollout_sampler.sample(
+                        rollout_outputs = self.rollout_sampler.sample(
                             model,
-                            batch,
-                            negative_batch=negative_batch,
+                            requests,
                             return_trajectory=self._rollout_needs_trajectory,
-                            generator=generator,
                         )
+
+                    for batch, negative_batch, rollout_out in zip(
+                        batches,
+                        negative_batches,
+                        rollout_outputs,
+                        strict=True,
+                    ):
                         batch["clean_latents"] = rollout_out.final_latents
                         decoded = processor.decode_output(
                             rollout_out.final_latents,
                             batch,
                         )
-                    batch.update(decoded)
+                        batch.update(decoded)
 
-                    rollouts.append(
-                        Rollout(
-                            trajectory=deep_move_to_device(
-                                rollout_out, rollout_storage
-                            ),
-                            reward=torch.zeros(1),  # placeholder
-                            raw_reward=torch.zeros(1),  # placeholder
-                            reward_weights=torch.ones(1),  # placeholder
-                            reward_labels=["reward"],  # placeholder
-                            key=batch.get("__key__", "unknown"),
-                            batch=deep_move_to_device(batch, rollout_storage),
-                            negative_batch=(
-                                deep_move_to_device(
-                                    negative_batch,
-                                    rollout_storage,
-                                )
-                                if negative_batch is not None
-                                else None
-                            ),
+                        rollouts.append(
+                            Rollout(
+                                trajectory=deep_move_to_device(
+                                    rollout_out, rollout_storage
+                                ),
+                                reward=torch.zeros(1),  # placeholder
+                                raw_reward=torch.zeros(1),  # placeholder
+                                reward_weights=torch.ones(1),  # placeholder
+                                reward_labels=["reward"],  # placeholder
+                                key=batch.get("__key__", "unknown"),
+                                batch=deep_move_to_device(batch, rollout_storage),
+                                negative_batch=(
+                                    deep_move_to_device(
+                                        negative_batch,
+                                        rollout_storage,
+                                    )
+                                    if negative_batch is not None
+                                    else None
+                                ),
+                            )
                         )
-                    )
 
-                    progress.advance(rollout_task)
-                    yield batch, len(rollouts) - 1
+                        progress.advance(rollout_task)
+                        yield batch, len(rollouts) - 1
 
         def reward_handler(idx: int, result: RewardResult) -> None:
             # Result is [1, C] for the single rollout sample.

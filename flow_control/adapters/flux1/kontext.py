@@ -19,6 +19,11 @@ class Flux1KontextBatch(Flux1Batch):
 @adapter_registry.register("flux1_kontext")
 class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
     type: Literal["kontext"] = "kontext"
+    dense_batch_fields = (
+        *Flux1Adapter.dense_batch_fields,
+        "reference_latents",
+        "reference_sizes",
+    )
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

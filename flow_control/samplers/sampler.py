@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import random
 from dataclasses import dataclass
 from typing import Literal
 
@@ -19,7 +18,6 @@ from rich.progress import (
 )
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
@@ -50,12 +48,50 @@ def make_sample_progress() -> Progress:
 
 
 @dataclass(slots=True)
+class SampleRequest:
+    batch: Batch
+    negative_batch: Batch | None = None
+    generator: torch.Generator | None = None
+
+
+@dataclass(slots=True)
 class SampleOutput:
     final_latents: torch.Tensor
     latents: torch.Tensor | None = None
     log_probs: torch.Tensor | None = None
     timesteps: torch.Tensor | None = None
     solver_states: list[SolverState | None] | None = None
+
+
+@dataclass(slots=True)
+class ReplayRequest:
+    batch: Batch
+    latent_t: torch.Tensor
+    latent_next: torch.Tensor
+    sigma: torch.Tensor
+    sigma_next: torch.Tensor
+    negative_batch: Batch | None = None
+    solver_state: SolverState | None = None
+
+
+@dataclass(slots=True)
+class StepLogProbOutput:
+    log_prob: torch.Tensor
+    mean: torch.Tensor
+    std_dev: torch.Tensor
+
+
+@dataclass(slots=True)
+class _SamplingState:
+    request: SampleRequest
+    sigmas: torch.Tensor
+    latents: torch.Tensor
+    solver_state: SolverState | None
+    train_start: int
+    train_end: int
+    selected_latents: list[torch.Tensor] | None
+    log_probs: list[torch.Tensor] | None
+    solver_states: list[SolverState | None] | None
 
 
 class Sampler(BaseModel):
@@ -90,45 +126,52 @@ class Sampler(BaseModel):
 
     _negative_pass: bool = False
 
-    def _sync_negative_pass(self, negative_pass: bool):
+    @staticmethod
+    def _validate_distributed_request_count(
+        count: int,
+        device: torch.device,
+        operation: str,
+    ) -> None:
+        if not dist.is_initialized():
+            return
+        counts = torch.tensor([count, -count], device=device, dtype=torch.int64)
+        dist.all_reduce(counts, op=dist.ReduceOp.MIN)
+        if int(counts[0].item()) != -int(counts[1].item()):
+            raise ValueError(
+                f"All distributed ranks must submit the same number of requests "
+                f"to Sampler.{operation}."
+            )
+
+    def _sync_negative_pass(
+        self,
+        negative_pass: bool,
+        device: torch.device,
+    ) -> None:
         if dist.is_initialized():
             negative_pass_tensor = torch.tensor(
-                negative_pass, device=devutil.default_device()
+                int(negative_pass), device=device, dtype=torch.int64
             )
             dist.all_reduce(negative_pass_tensor, op=dist.ReduceOp.MAX)
-            self._negative_pass = negative_pass_tensor.item() > 0
+            self._negative_pass = bool(negative_pass_tensor.item())
         else:
             self._negative_pass = negative_pass
 
-    def sample(
+    def _make_sigmas(
         self,
-        model: BaseModelAdapter,
         batch: Batch,
-        negative_batch: Batch | None = None,
-        t_start=1.0,
-        t_end=0.0,
-        return_trajectory: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> SampleOutput:
-        if self.cfg_scale > 1.0 and negative_batch is None:
-            warn_once(
-                logger,
-                "cfg_scale > 1.0 but no negative_batch provided. This will disable classifier-free guidance.",
-            )
-        batch = deep_move_to_device(batch, model.device)
-        if negative_batch is not None:
-            negative_batch = deep_move_to_device(negative_batch, model.device)
-
+        t_start: float,
+        t_end: float,
+    ) -> torch.Tensor:
         if self.custom_sigmas is not None:
-            # Validated here rather than in the config model: serving mutates
-            # `steps` at runtime, so the lengths can only be checked per call.
+            # Serving may mutate steps at runtime, so validate this per call.
             if len(self.custom_sigmas) != self.steps + 1:
                 raise ValueError(
                     f"custom_sigmas must have steps + 1 = {self.steps + 1} entries, "
                     f"got {len(self.custom_sigmas)}."
                 )
-            sigmas = torch.tensor(self.custom_sigmas, dtype=torch.float32)
-        elif self.sigma_schedule == "diffusers_flow":
+            return torch.tensor(self.custom_sigmas, dtype=torch.float32)
+
+        if self.sigma_schedule == "diffusers_flow":
             if t_start != 1.0 or t_end != 0.0:
                 raise ValueError(
                     "diffusers_flow sigma schedule currently requires "
@@ -146,217 +189,379 @@ class Sampler(BaseModel):
                 shifted_training_grid[0], shifted_training_grid[-1], self.steps
             )
             inference_grid = self.shift.apply(inference_grid, batch, self.steps)
-            sigmas = torch.cat([inference_grid, inference_grid.new_zeros(1)])
-        else:
-            sigmas = torch.linspace(t_start, t_end, self.steps + 1)
-            sigmas = self.shift.apply(sigmas, batch, self.steps)
-        return self._run_sampling_loop(
-            model=model,
-            batch=batch,
-            sigmas=sigmas,
-            negative_batch=negative_batch,
-            return_trajectory=return_trajectory,
-            generator=generator,
-        )
+            return torch.cat([inference_grid, inference_grid.new_zeros(1)])
+
+        sigmas = torch.linspace(t_start, t_end, self.steps + 1)
+        return self.shift.apply(sigmas, batch, self.steps)
+
+    def sample(
+        self,
+        model: BaseModelAdapter,
+        requests: list[SampleRequest],
+        t_start: float = 1.0,
+        t_end: float = 0.0,
+        return_trajectory: bool = False,
+    ) -> list[SampleOutput]:
+        if not requests:
+            raise ValueError("sample requires at least one request.")
+        self._validate_distributed_request_count(len(requests), model.device, "sample")
+
+        if self.cfg_scale > 1.0 and any(
+            request.negative_batch is None for request in requests
+        ):
+            warn_once(
+                logger,
+                "cfg_scale > 1.0 but at least one request has no negative_batch; "
+                "classifier-free guidance is disabled for those requests.",
+            )
+
+        prepared_requests = [
+            SampleRequest(
+                batch=deep_move_to_device(request.batch, model.device),
+                negative_batch=(
+                    deep_move_to_device(request.negative_batch, model.device)
+                    if request.negative_batch is not None
+                    else None
+                ),
+                generator=request.generator,
+            )
+            for request in requests
+        ]
+        sigmas = [
+            self._make_sigmas(request.batch, t_start, t_end).to(
+                device=model.device, dtype=torch.float32
+            )
+            for request in prepared_requests
+        ]
+
+        if isinstance(self.solver, SASolver):
+            if len(requests) > 1:
+                warn_once(
+                    logger,
+                    "SA-Solver does not expose a step-wise state API; requests "
+                    "will be sampled sequentially.",
+                )
+            return [
+                self._run_sa_sampling_loop(
+                    model=model,
+                    request=request,
+                    sigmas=request_sigmas,
+                    return_trajectory=return_trajectory,
+                )
+                for request, request_sigmas in zip(
+                    prepared_requests, sigmas, strict=True
+                )
+            ]
+
+        states = [
+            self._init_sampling_state(request, request_sigmas, return_trajectory)
+            for request, request_sigmas in zip(prepared_requests, sigmas, strict=True)
+        ]
+        self._run_sampling_loop(model, states, return_trajectory)
+        return [
+            self._make_sample_output(state, model.dtype, return_trajectory)
+            for state in states
+        ]
 
     def get_guided_velocity(
         self,
         model: BaseModelAdapter,
-        latents: torch.Tensor,
-        timestep: torch.Tensor,
-        batch: Batch,
-        negative_batch: Batch | None,
-    ) -> torch.Tensor:
-        # Sync per-call so CFG behavior is correct even when callers bypass sample().
-        has_negative = self.cfg_scale > 1.0 and negative_batch is not None
-        self._sync_negative_pass(has_negative)
+        batches: list[Batch],
+        negative_batches: list[Batch | None],
+        latents: list[torch.Tensor],
+        timesteps: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        lengths = {
+            len(batches),
+            len(negative_batches),
+            len(latents),
+            len(timesteps),
+        }
+        if lengths == {0}:
+            raise ValueError("get_guided_velocity requires at least one sample.")
+        if len(lengths) != 1:
+            raise ValueError(
+                "batches, negative_batches, latents, and timesteps must have "
+                "equal lengths."
+            )
 
-        batch["noisy_latents"] = latents
-        cond = model.predict_velocity(batch, timestep)
-        if self._negative_pass:
-            if negative_batch is not None:
-                negative_batch["noisy_latents"] = latents
-                uncond = model.predict_velocity(negative_batch, timestep)
-                combined_velocity = uncond + (cond - uncond) * self.cfg_scale
+        conditional_batches: list[Batch] = []
+        for batch, latent in zip(batches, latents, strict=True):
+            conditional_batch = batch.copy()
+            conditional_batch["noisy_latents"] = latent
+            conditional_batches.append(conditional_batch)
 
-                if self.enable_cfg_renorm:
-                    cond_norm = torch.norm(cond, dim=2, keepdim=True)
-                    noise_norm = torch.norm(combined_velocity, dim=2, keepdim=True)
-                    combined_velocity = combined_velocity * (
-                        cond_norm / (noise_norm + self.cfg_renorm_eps)
-                    ).clamp(min=self.cfg_renorm_min, max=1.0)
-                return combined_velocity
+        has_negative = [
+            self.cfg_scale > 1.0 and negative_batch is not None
+            for negative_batch in negative_batches
+        ]
+        self._sync_negative_pass(any(has_negative), model.device)
+
+        conditional = model.predict_velocity_batched(conditional_batches, timesteps)
+        if not self._negative_pass:
+            return conditional
+
+        unconditional_batches: list[Batch] = []
+        for conditional_batch, negative_batch, latent, use_negative in zip(
+            conditional_batches,
+            negative_batches,
+            latents,
+            has_negative,
+            strict=True,
+        ):
+            if use_negative:
+                assert negative_batch is not None
+                unconditional_batch = negative_batch.copy()
+                unconditional_batch["noisy_latents"] = latent
+                unconditional_batches.append(unconditional_batch)
             else:
-                # Must do an empty forward pass to sync with other processes
-                _ = model.predict_velocity(batch, timestep)
-                return cond
-        else:
-            return cond
+                # A real forward keeps FSDP collectives aligned across ranks. Its
+                # output is intentionally ignored for samples without CFG.
+                unconditional_batches.append(conditional_batch)
 
-    def _select_trajectory_window(self, num_timesteps: int) -> tuple[int, int]:
-        if self.trajectory_window_size:
-            range_start, range_end = self.trajectory_window_range or (
-                0,
-                num_timesteps - 1,
+        unconditional = model.predict_velocity_batched(unconditional_batches, timesteps)
+        guided: list[torch.Tensor] = []
+        for cond, uncond, use_negative in zip(
+            conditional, unconditional, has_negative, strict=True
+        ):
+            if not use_negative:
+                guided.append(cond)
+                continue
+
+            combined = uncond + (cond - uncond) * self.cfg_scale
+            if self.enable_cfg_renorm:
+                cond_norm = torch.norm(cond, dim=2, keepdim=True)
+                noise_norm = torch.norm(combined, dim=2, keepdim=True)
+                combined = combined * (
+                    cond_norm / (noise_norm + self.cfg_renorm_eps)
+                ).clamp(min=self.cfg_renorm_min, max=1.0)
+            guided.append(combined)
+        return guided
+
+    def _select_trajectory_window(
+        self,
+        num_timesteps: int,
+        generator: torch.Generator | None,
+    ) -> tuple[int, int]:
+        if self.trajectory_window_size is None:
+            return 0, num_timesteps - 1
+
+        window_size = self.trajectory_window_size
+        if window_size <= 0:
+            raise ValueError("trajectory_window_size must be positive.")
+        range_start, range_end = self.trajectory_window_range or (
+            0,
+            num_timesteps - 1,
+        )
+        if not 0 <= range_start < range_end < num_timesteps:
+            raise ValueError(
+                "trajectory_window_range must satisfy 0 <= start < end < num_timesteps."
             )
-            assert 0 <= range_start < range_end < num_timesteps, (
-                "Invalid trajectory_window_range"
+        max_start = range_end - window_size
+        if max_start < range_start:
+            raise ValueError(
+                f"trajectory_window_size={window_size} does not fit in "
+                f"trajectory_window_range=({range_start}, {range_end})."
             )
-            window_start = random.randint(
+
+        random_device = generator.device if generator is not None else "cpu"
+        window_start = int(
+            torch.randint(
                 range_start,
-                range_end - self.trajectory_window_size,
-            )
-            return window_start, window_start + self.trajectory_window_size
-        return 0, num_timesteps - 1
+                max_start + 1,
+                (),
+                generator=generator,
+                device=random_device,
+            ).item()
+        )
+        return window_start, window_start + window_size
+
+    def _init_sampling_state(
+        self,
+        request: SampleRequest,
+        sigmas: torch.Tensor,
+        return_trajectory: bool,
+    ) -> _SamplingState:
+        train_start, train_end = self._select_trajectory_window(
+            self.steps, request.generator
+        )
+        return _SamplingState(
+            request=request,
+            sigmas=sigmas,
+            latents=request.batch["noisy_latents"].float(),
+            solver_state=self.solver.init_state(self.steps),
+            train_start=train_start,
+            train_end=train_end,
+            selected_latents=[] if return_trajectory else None,
+            log_probs=[] if return_trajectory else None,
+            solver_states=[] if return_trajectory else None,
+        )
 
     def _run_sampling_loop(
         self,
         model: BaseModelAdapter,
-        batch: Batch,
-        sigmas: torch.Tensor,
-        negative_batch: Batch | None = None,
-        return_trajectory: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> SampleOutput:
-        device = model.device
-        dtype = model.dtype
-
-        sigmas = sigmas.to(device=device, dtype=torch.float32)
-        latents = batch["noisy_latents"].float()
-
-        if isinstance(self.solver, SASolver):
-            with make_sample_progress() as progress:
-                task = progress.add_task("Sampling", total=self.steps)
-
-                def model_fn(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-                    # SA-Solver evolves one scalar time for the whole latent batch,
-                    # while DiT timestep embeddings require one value per sample.
-                    timestep = t.reshape(1).expand(x.shape[0])
-                    return self.get_guided_velocity(
-                        model, x, timestep, batch, negative_batch
-                    )
-
-                def report_step(step: int) -> None:
-                    progress.advance(task)
-                    report_progress(
-                        step / self.steps,
-                        f"Sampling {step}/{self.steps}",
-                    )
-
-                final_latents, intermediate_latents = self.solver.sample(
-                    model_fn=model_fn,
-                    latents=latents,
-                    sigmas=sigmas,
-                    generator=generator,
-                    step_callback=report_step,
-                )
-
-            return SampleOutput(
-                final_latents=final_latents.to(dtype),
-                latents=(
-                    torch.stack(intermediate_latents, dim=1)
-                    if return_trajectory
-                    else None
-                ),
-                timesteps=sigmas[:-1].clone(),
-            )
-
-        solver_state = self.solver.init_state(self.steps)
-
-        train_start, train_end = self._select_trajectory_window(self.steps)
-        selected_latents: list[torch.Tensor] | None = [] if return_trajectory else None
-        all_log_probs: list[torch.Tensor] | None = [] if return_trajectory else None
-        all_solver_states: list[SolverState | None] | None = (
-            [] if return_trajectory else None
-        )
-
+        states: list[_SamplingState],
+        return_trajectory: bool,
+    ) -> None:
         with make_sample_progress() as progress:
             task = progress.add_task("Sampling", total=self.steps)
-            for i in range(self.steps):
-                sigma = sigmas[i : i + 1]
-                sigma_next = sigmas[i + 1 : i + 2]
-                velocity = self.get_guided_velocity(
-                    model,
-                    latents,
-                    sigma,
-                    batch,
-                    negative_batch,
+            for step in range(self.steps):
+                velocities = self.get_guided_velocity(
+                    model=model,
+                    batches=[state.request.batch for state in states],
+                    negative_batches=[state.request.negative_batch for state in states],
+                    latents=[state.latents for state in states],
+                    timesteps=[state.sigmas[step : step + 1] for state in states],
                 )
-                step_eta = self.solver.eta if train_start <= i < train_end else 0.0
-                if return_trajectory and i == train_start:
-                    assert selected_latents is not None
-                    selected_latents.append(latents)
-                if return_trajectory and train_start <= i < train_end:
-                    assert all_solver_states is not None
-                    all_solver_states.append(solver_state)
+                for state, velocity in zip(states, velocities, strict=True):
+                    sigma = state.sigmas[step : step + 1]
+                    sigma_next = state.sigmas[step + 1 : step + 2]
+                    step_eta = (
+                        self.solver.eta
+                        if state.train_start <= step < state.train_end
+                        else 0.0
+                    )
+                    if return_trajectory and step == state.train_start:
+                        assert state.selected_latents is not None
+                        state.selected_latents.append(state.latents)
+                    if (
+                        return_trajectory
+                        and state.train_start <= step < state.train_end
+                    ):
+                        assert state.solver_states is not None
+                        state.solver_states.append(state.solver_state)
 
-                step_result = self.solver.step(
-                    velocity=velocity,
-                    latents=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    eta=step_eta,
-                    state=solver_state,
-                    generator=generator,
-                )
-                latents = step_result.next_latents
-                solver_state = step_result.state
+                    step_result = self.solver.step(
+                        velocity=velocity,
+                        latents=state.latents,
+                        sigma=sigma,
+                        sigma_next=sigma_next,
+                        eta=step_eta,
+                        state=state.solver_state,
+                        generator=state.request.generator,
+                    )
+                    state.latents = step_result.next_latents
+                    state.solver_state = step_result.state
 
-                if return_trajectory and train_start <= i < train_end:
-                    assert selected_latents is not None
-                    assert all_log_probs is not None
-                    selected_latents.append(latents)
-                    all_log_probs.append(step_result.log_prob)
+                    if (
+                        return_trajectory
+                        and state.train_start <= step < state.train_end
+                    ):
+                        assert state.selected_latents is not None
+                        assert state.log_probs is not None
+                        state.selected_latents.append(state.latents)
+                        state.log_probs.append(step_result.log_prob)
 
                 progress.advance(task)
                 report_progress(
-                    (i + 1) / self.steps,
-                    f"Sampling {i + 1}/{self.steps}",
+                    (step + 1) / self.steps,
+                    f"Sampling {step + 1}/{self.steps}",
                 )
 
+    @staticmethod
+    def _make_sample_output(
+        state: _SamplingState,
+        dtype: torch.dtype,
+        return_trajectory: bool,
+    ) -> SampleOutput:
         output = SampleOutput(
-            final_latents=latents.to(dtype),
-            timesteps=sigmas[:-1].clone(),
+            final_latents=state.latents.to(dtype),
+            timesteps=state.sigmas[:-1].clone(),
         )
         if not return_trajectory:
             return output
 
-        assert selected_latents is not None
-        assert all_log_probs is not None
-        assert all_solver_states is not None
-        output.latents = torch.stack(selected_latents, dim=1)
-        output.log_probs = torch.stack(all_log_probs, dim=1)
-        output.timesteps = sigmas[train_start : train_end + 1]
-        output.solver_states = all_solver_states
+        assert state.selected_latents is not None
+        assert state.log_probs is not None
+        assert state.solver_states is not None
+        output.latents = torch.stack(state.selected_latents, dim=1)
+        output.log_probs = torch.stack(state.log_probs, dim=1)
+        output.timesteps = state.sigmas[state.train_start : state.train_end + 1]
+        output.solver_states = state.solver_states
         return output
+
+    def _run_sa_sampling_loop(
+        self,
+        model: BaseModelAdapter,
+        request: SampleRequest,
+        sigmas: torch.Tensor,
+        return_trajectory: bool,
+    ) -> SampleOutput:
+        assert isinstance(self.solver, SASolver)
+        latents = request.batch["noisy_latents"].float()
+
+        with make_sample_progress() as progress:
+            task = progress.add_task("Sampling", total=self.steps)
+
+            def model_fn(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+                timestep = t.reshape(1).expand(x.shape[0])
+                return self.get_guided_velocity(
+                    model=model,
+                    batches=[request.batch],
+                    negative_batches=[request.negative_batch],
+                    latents=[x],
+                    timesteps=[timestep],
+                )[0]
+
+            def report_step(step: int) -> None:
+                progress.advance(task)
+                report_progress(
+                    step / self.steps,
+                    f"Sampling {step}/{self.steps}",
+                )
+
+            final_latents, intermediate_latents = self.solver.sample(
+                model_fn=model_fn,
+                latents=latents,
+                sigmas=sigmas,
+                generator=request.generator,
+                step_callback=report_step,
+            )
+
+        return SampleOutput(
+            final_latents=final_latents.to(model.dtype),
+            latents=(
+                torch.stack(intermediate_latents, dim=1) if return_trajectory else None
+            ),
+            timesteps=sigmas[:-1].clone(),
+        )
 
     def compute_logprob_at_step(
         self,
         model: BaseModelAdapter,
-        batch: Batch,
-        latent_t: torch.Tensor,
-        latent_next: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        negative_batch: Batch | None = None,
-        solver_state: SolverState | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        requests: list[ReplayRequest],
+    ) -> list[StepLogProbOutput]:
+        if not requests:
+            raise ValueError("compute_logprob_at_step requires at least one request.")
+        self._validate_distributed_request_count(
+            len(requests), model.device, "compute_logprob_at_step"
+        )
         if not self.solver.supports_step_log_prob:
             msg = f"Solver '{self.solver.type}' does not support step-wise replay log-prob."
             raise ValueError(msg)
-        velocity = self.get_guided_velocity(
-            model,
-            latent_t,
-            sigma,
-            batch,
-            negative_batch,
+
+        velocities = self.get_guided_velocity(
+            model=model,
+            batches=[request.batch for request in requests],
+            negative_batches=[request.negative_batch for request in requests],
+            latents=[request.latent_t for request in requests],
+            timesteps=[request.sigma for request in requests],
         )
-        step_result = self.solver.replay_step(
-            velocity=velocity,
-            latents=latent_t,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            prev_sample=latent_next,
-            state=solver_state,
-        )
-        return step_result.log_prob, step_result.mean, step_result.std_dev
+        outputs: list[StepLogProbOutput] = []
+        for request, velocity in zip(requests, velocities, strict=True):
+            step_result = self.solver.replay_step(
+                velocity=velocity,
+                latents=request.latent_t,
+                sigma=request.sigma,
+                sigma_next=request.sigma_next,
+                prev_sample=request.latent_next,
+                state=request.solver_state,
+            )
+            outputs.append(
+                StepLogProbOutput(
+                    log_prob=step_result.log_prob,
+                    mean=step_result.mean,
+                    std_dev=step_result.std_dev,
+                )
+            )
+        return outputs

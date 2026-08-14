@@ -15,7 +15,7 @@ from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
-from flow_control.samplers import Sampler
+from flow_control.samplers import Sampler, SampleRequest
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
@@ -578,8 +578,15 @@ class ServingEngine:
             )
             report_progress(0.0, "Sampling...")
             sample_output = self.sampler.sample(
-                self.model, batch, negative_batch=negative_batch, generator=generator
-            )
+                self.model,
+                [
+                    SampleRequest(
+                        batch=batch,
+                        negative_batch=negative_batch,
+                        generator=generator,
+                    )
+                ],
+            )[0]
 
             # Reload processor back to GPU for decode
             if self.offload_processor:

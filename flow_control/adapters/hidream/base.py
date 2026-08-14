@@ -7,7 +7,6 @@ from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.third_party.hidream_o1 import get_rope_index_fix_point
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
-from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
 
 from .modeling import HiDreamO1Transformer
 
@@ -100,13 +99,9 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
                 update={"pretrained_model_id": repo}
             )
 
-    def predict_velocity(self, batch: TBatch, timestep: torch.Tensor) -> torch.Tensor:
-        # Same as the base implementation except the timestep is kept float32:
-        # near sigma=1 the model time 1-sigma underflows bf16 resolution.
-        batch = deep_cast_float_dtype(batch, self.dtype)
-        batch = deep_move_to_device(batch, self.device)
-        timestep = timestep.to(device=self.device, dtype=torch.float32)
-        return self._predict_velocity(batch, timestep).float()
+    def _prepare_timestep(self, timestep: torch.Tensor) -> torch.Tensor:
+        # Near sigma=1 the model time 1-sigma underflows bf16 resolution.
+        return timestep.to(device=self.device, dtype=torch.float32)
 
     def _build_sequence(
         self, batch: TBatch, txt_len: int, grid: tuple[int, int]

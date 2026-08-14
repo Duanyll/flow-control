@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PositiveInt
 from rich.progress import Progress, TaskID
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -90,6 +90,17 @@ class RamTrainItem:
     cached_targets: RamCachedTargets | None = None
 
 
+@dataclass(slots=True)
+class _RamLossInput:
+    batch: Any
+    x0: torch.Tensor
+    timestep: torch.Tensor
+    noise: torch.Tensor
+    advantage: torch.Tensor
+    base_prediction: torch.Tensor | None
+    old_prediction: torch.Tensor | None
+
+
 @trainer_registry.register("ram")
 class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
@@ -113,6 +124,8 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     How many (rollout, timestep) items should the optimizer see before each
     update step. Must be divisible by world_size.
     """
+    train_micro_batch_size: PositiveInt = 1
+    """Number of RAM items combined in each per-rank model forward."""
 
     # RAM-specific hyperparameters
     reward_multiplier: float = 100.0
@@ -177,6 +190,16 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     @property
     def grad_acc_steps(self) -> int:
+        local_batch_size = self.local_train_batch_size
+        if local_batch_size % self.train_micro_batch_size != 0:
+            raise ValueError(
+                f"Per-rank train batch ({local_batch_size}) must be divisible by "
+                f"train_micro_batch_size ({self.train_micro_batch_size})."
+            )
+        return local_batch_size // self.train_micro_batch_size
+
+    @property
+    def local_train_batch_size(self) -> int:
         world_size: int = getattr(self, "world_size", 1)
         if self.train_batch_size % world_size != 0:
             raise ValueError(
@@ -307,14 +330,18 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # ---------------------------------- Predict --------------------------------- #
 
-    def _predict(self, batch: Any, t: torch.Tensor) -> torch.Tensor:
+    def _predict_batched(
+        self,
+        batches: list[Any],
+        timesteps: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
         """Plain *conditional* velocity prediction (no CFG).
 
         RAM's loss target is defined against conditional velocities even though
         rollouts are sampled with CFG, so this deliberately bypasses
         ``get_guided_velocity``.
         """
-        return self.model.predict_velocity(batch, t.to(dtype=self.model.dtype)).float()
+        return self.model.predict_velocity_batched(batches, timesteps)
 
     def _sample_timestep(self) -> torch.Tensor:
         t = self.timestep_weighting.sample_timesteps(1)
@@ -322,17 +349,16 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # -------------------------------- RAM loss ---------------------------------- #
 
-    def ram_loss(
+    def _prepare_ram_loss_input(
         self,
         rollout: Rollout,
         rollout_advantages: torch.Tensor,
         cached_targets: RamCachedTargets | None = None,
-    ) -> torch.Tensor:
-        """Compute the RAM regression loss for one (rollout, timestep) item."""
+    ) -> _RamLossInput:
         batch = deep_move_to_device(rollout.batch, self.device)
         x0 = batch["clean_latents"].float()
-        base_prediction = torch.empty_like(x0)
-        old_prediction = torch.empty_like(x0)
+        base_prediction: torch.Tensor | None = None
+        old_prediction: torch.Tensor | None = None
 
         if cached_targets is not None:
             t = cached_targets.timestep.to(device=self.device, dtype=torch.float32)
@@ -347,34 +373,79 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         xt = (1.0 - t_expanded) * x0 + t_expanded * noise
         batch["noisy_latents"] = xt
 
-        if cached_targets is None:
-            with torch.no_grad(), self.reference_model():
-                base_prediction = self._predict(batch, t).detach()
-            with torch.no_grad(), apply_ema_maybe(self._old_ema):
-                old_prediction = self._predict(batch, t).detach()
+        return _RamLossInput(
+            batch=batch,
+            x0=x0,
+            timestep=t,
+            noise=noise,
+            advantage=rollout_advantages.to(device=self.device),
+            base_prediction=base_prediction,
+            old_prediction=old_prediction,
+        )
 
-        # Current policy velocity (with grad)
-        forward_prediction = self._predict(batch, t)
+    def _ram_objective(
+        self,
+        prepared: _RamLossInput,
+        forward_prediction: torch.Tensor,
+    ) -> torch.Tensor:
+        if prepared.base_prediction is None or prepared.old_prediction is None:
+            raise RuntimeError("Missing RAM base/old prediction.")
 
-        # Advantage-scaled reward direction toward the flow-matching target.
-        adv = rollout_advantages.to(device=self.device)
+        adv = prepared.advantage
         if self.adv_clip_max is not None:
             adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
-        scaled_adv = self.reward_multiplier * adv.view(-1, *([1] * (x0.ndim - 1)))
+        scaled_adv = self.reward_multiplier * adv.view(
+            -1, *([1] * (prepared.x0.ndim - 1))
+        )
 
-        reward_direction = noise - x0
-        target = base_prediction + scaled_adv * (reward_direction - old_prediction)
+        reward_direction = prepared.noise - prepared.x0
+        target = prepared.base_prediction + scaled_adv * (
+            reward_direction - prepared.old_prediction
+        )
         loss = ((forward_prediction - target.detach()) ** 2).mean()
 
         metrics: dict[str, torch.Tensor] = {
             "train/loss": loss.detach(),
             "train/target_norm": (target**2).mean().detach(),
-            "train/base_deviate": ((forward_prediction - base_prediction) ** 2)
+            "train/base_deviate": ((forward_prediction - prepared.base_prediction) ** 2)
             .mean()
             .detach(),
         }
         self.log_aggregated_metrics(metrics)
         return loss
+
+    def ram_loss_batched(
+        self,
+        items: list[tuple[Rollout, torch.Tensor, RamCachedTargets | None]],
+    ) -> torch.Tensor:
+        prepared = [
+            self._prepare_ram_loss_input(rollout, advantage, cached_targets)
+            for rollout, advantage, cached_targets in items
+        ]
+        batches = [item.batch for item in prepared]
+        timesteps = [item.timestep for item in prepared]
+
+        if any(item.base_prediction is None for item in prepared):
+            with torch.no_grad(), self.reference_model():
+                predictions = self._predict_batched(batches, timesteps)
+            for item, prediction in zip(prepared, predictions, strict=True):
+                if item.base_prediction is None:
+                    item.base_prediction = prediction.detach()
+
+        if any(item.old_prediction is None for item in prepared):
+            with torch.no_grad(), apply_ema_maybe(self._old_ema):
+                predictions = self._predict_batched(batches, timesteps)
+            for item, prediction in zip(prepared, predictions, strict=True):
+                if item.old_prediction is None:
+                    item.old_prediction = prediction.detach()
+
+        forward_predictions = self._predict_batched(batches, timesteps)
+        return torch.stack(
+            [
+                self._ram_objective(item, prediction)
+                for item, prediction in zip(prepared, forward_predictions, strict=True)
+            ]
+        ).mean()
 
     # ----------------------------- Training phase ------------------------------- #
 
@@ -424,20 +495,34 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         task_id: TaskID,
         field: Literal["base_prediction", "old_prediction"],
     ) -> None:
-        for item in flat_items:
-            rollout = rollouts[item.rollout_idx]
-            batch = deep_move_to_device(rollout.batch, self.device)
-            x0 = batch["clean_latents"].float()
-            cached_targets = item.cached_targets
-            if cached_targets is None:
-                raise RuntimeError("Missing cached RAM targets.")
-            t = cached_targets.timestep.to(device=self.device, dtype=torch.float32)
-            noise = cached_targets.noise.to(device=self.device)
-            t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
-            batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
-            prediction = self._predict(batch, t).detach()
-            setattr(cached_targets, field, prediction)
-            progress.advance(task_id)
+        for start in range(0, len(flat_items), self.train_micro_batch_size):
+            micro_items = flat_items[start : start + self.train_micro_batch_size]
+            batches: list[Any] = []
+            timesteps: list[torch.Tensor] = []
+            cached_targets_list: list[RamCachedTargets] = []
+            for item in micro_items:
+                rollout = rollouts[item.rollout_idx]
+                batch = deep_move_to_device(rollout.batch, self.device)
+                x0 = batch["clean_latents"].float()
+                cached_targets = item.cached_targets
+                if cached_targets is None:
+                    raise RuntimeError("Missing cached RAM targets.")
+                timestep = cached_targets.timestep.to(
+                    device=self.device, dtype=torch.float32
+                )
+                noise = cached_targets.noise.to(device=self.device)
+                t_expanded = timestep.view(-1, *([1] * (x0.ndim - 1)))
+                batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
+                batches.append(batch)
+                timesteps.append(timestep)
+                cached_targets_list.append(cached_targets)
+
+            predictions = self._predict_batched(batches, timesteps)
+            for cached_targets, prediction in zip(
+                cached_targets_list, predictions, strict=True
+            ):
+                setattr(cached_targets, field, prediction.detach())
+            progress.advance(task_id, advance=len(micro_items))
 
     def _precompute_aux_model_outputs_for_plan(
         self,
@@ -519,40 +604,55 @@ class RamTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     )
 
                 if (
-                    len(train_items) % self.grad_acc_steps != 0
+                    len(train_items) % self.local_train_batch_size != 0
                     and self.is_main_process
                     and self._current_epoch == 0
                 ):
                     logger.warning(
                         "Local loss count (%d) is not divisible by "
-                        "grad_acc_steps (%d). The tail update uses a smaller "
+                        "local train batch (%d). The tail update uses a smaller "
                         "effective batch.",
                         len(train_items),
-                        self.grad_acc_steps,
+                        self.local_train_batch_size,
                     )
 
-                for chunk_start in range(0, len(train_items), self.grad_acc_steps):
-                    chunk = train_items[chunk_start : chunk_start + self.grad_acc_steps]
+                for chunk_start in range(
+                    0, len(train_items), self.local_train_batch_size
+                ):
+                    chunk = train_items[
+                        chunk_start : chunk_start + self.local_train_batch_size
+                    ]
                     chunk_size = len(chunk)
 
-                    for micro_idx, item in enumerate(chunk):
-                        is_sync_step = micro_idx == chunk_size - 1
+                    for micro_start in range(
+                        0, chunk_size, self.train_micro_batch_size
+                    ):
+                        micro_items = chunk[
+                            micro_start : micro_start + self.train_micro_batch_size
+                        ]
+                        is_sync_step = micro_start + len(micro_items) == chunk_size
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        loss = self.ram_loss(
-                            rollout=rollouts[item.rollout_idx],
-                            rollout_advantages=advantages[item.rollout_idx],
-                            cached_targets=item.cached_targets,
+                        loss = self.ram_loss_batched(
+                            [
+                                (
+                                    rollouts[item.rollout_idx],
+                                    advantages[item.rollout_idx],
+                                    item.cached_targets,
+                                )
+                                for item in micro_items
+                            ]
                         )
 
                         if not torch.isfinite(loss):
                             raise RuntimeError(
                                 f"Non-finite RAM loss detected: {loss.item()}. "
-                                f"(rollout_idx={item.rollout_idx})"
+                                f"(rollout_indices="
+                                f"{[item.rollout_idx for item in micro_items]})"
                             )
 
-                        (loss / chunk_size).backward()
-                        progress.advance(train_task)
+                        (loss * (len(micro_items) / chunk_size)).backward()
+                        progress.advance(train_task, advance=len(micro_items))
 
                     self._optimizer_step()
                     self._current_step += 1

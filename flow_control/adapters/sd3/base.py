@@ -31,6 +31,13 @@ class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatc
       is applied by the sampler (``cfg_scale > 1`` with a negative batch).
     """
 
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+        "pooled_prompt_embeds",
+    )
     arch: Literal["sd3"] = "sd3"
     type: Literal["base"] = "base"
     hf_model: HfModelLoader[SD3Transformer2DModel] = HfModelLoader(

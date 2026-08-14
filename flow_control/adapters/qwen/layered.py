@@ -134,6 +134,11 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
 @adapter_registry.register("qwen_layered")
 class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
     type: Literal["layered"] = "layered"
+    dense_batch_fields = (
+        *QwenImageAdapter.dense_batch_fields,
+        "num_layers",
+        "image_latents",
+    )
 
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",

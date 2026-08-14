@@ -93,3 +93,12 @@ class LongCatAdapter[TBatch: LongCatBatch](
         )
         img_ids = rearrange(img_ids, "h w c -> (h w) c")
         return img_ids.to(device=self.device)
+
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+        "txt_ids",
+        "img_ids",
+    )

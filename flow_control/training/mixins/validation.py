@@ -2,7 +2,7 @@ from collections.abc import Generator
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -19,7 +19,7 @@ from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import BaseReward
-from flow_control.samplers import Sampler
+from flow_control.samplers import Sampler, SampleRequest
 from flow_control.samplers.sampler import derive_seed
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -48,6 +48,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     # ---------------------------------- Configs --------------------------------- #
     validation_dataset: DatasetConfig | None = None
     validation_num_workers: int = 1
+    validation_micro_batch_size: PositiveInt = 1
     validation_same_seed: bool = True
     validation_log_images: bool | int = True
     validation_annotate_images: bool = True
@@ -94,13 +95,53 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         self._validation_dataloader = StatefulDataLoader(
             dataset,
-            batch_size=1,
+            batch_size=self.validation_micro_batch_size,
             sampler=sampler,
             num_workers=self.validation_num_workers,
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
         )
         logger.info(f"Validation dataloader created with {len(dataset)} samples.")
+
+    def _prepare_validation_requests(
+        self,
+        items: list[Any],
+        model: ModelAdapter,
+        step: int,
+    ) -> tuple[list[Any], list[str], list[SampleRequest]]:
+        batches: list[Any] = []
+        keys: list[str] = []
+        requests: list[SampleRequest] = []
+        base_seed = self.seed if self.validation_same_seed else self.seed + step
+        for item in items:
+            batch = deep_move_to_device(item, self.device)
+            batch = self.preprocess_for_inference(batch)
+            batch = deep_cast_float_dtype(batch, model.dtype)
+            negative_batch: Any = (
+                self.processor.get_negative_batch(batch)
+                if self.validation_sampler.cfg_scale > 1.0
+                else None
+            )
+            key = batch.get("__key__", "unknown")
+            generator = torch.Generator(device=self.device).manual_seed(
+                derive_seed(base_seed, key)
+            )
+            self.processor.initialize_latents(
+                batch,
+                generator=generator,
+                device=self.device,
+                dtype=model.dtype,
+            )
+            batches.append(batch)
+            keys.append(key)
+            requests.append(
+                SampleRequest(
+                    batch=batch,
+                    negative_batch=negative_batch,
+                    generator=generator,
+                )
+            )
+        return batches, keys, requests
 
     @torch.no_grad()
     def validate_and_log(
@@ -140,64 +181,47 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         task = progress.add_task(
             "Validating",
-            total=len(self.validation_dataloader),
+            total=len(self.validation_dataloader.sampler),  # type: ignore[arg-type]
         )
 
         def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:
             image_count = 0
             with progress:
-                for batch in self.validation_dataloader:
-                    batch = deep_move_to_device(batch, self.device)
-                    batch: Any = self.preprocess_for_inference(batch)
-                    batch = deep_cast_float_dtype(batch, model.dtype)
-                    negative_batch: Any = (
-                        self.processor.get_negative_batch(batch)
-                        if self.validation_sampler.cfg_scale > 1.0
-                        else None
+                for items in self.validation_dataloader:
+                    batches, keys, requests = self._prepare_validation_requests(
+                        items, model, step
                     )
-                    base_seed = (
-                        self.seed if self.validation_same_seed else self.seed + step
-                    )
-                    key = batch.get("__key__", "unknown")
-                    seed = derive_seed(base_seed, key)
-                    generator = torch.Generator(device=self.device).manual_seed(seed)
-                    self.processor.initialize_latents(
-                        batch,
-                        generator=generator,
-                        device=self.device,
-                        dtype=model.dtype,
-                    )
-                    sample_output = self.validation_sampler.sample(
-                        model, batch, negative_batch=negative_batch, generator=generator
-                    )
-                    decoded = self.processor.decode_output(
-                        sample_output.final_latents, batch
-                    )
-                    batch.update(decoded)
 
-                    # Log image
-                    if (
-                        self.validation_log_images is True
-                        or image_count < self.validation_log_images
+                    sample_outputs = self.validation_sampler.sample(model, requests)
+                    for batch, key, sample_output in zip(
+                        batches, keys, sample_outputs, strict=True
                     ):
-                        prompt = batch.get("prompt")
-                        image = (
-                            self.processor.annotate_output(decoded, batch)
-                            if self.validation_annotate_images
-                            else batch["clean_image"]
+                        decoded = self.processor.decode_output(
+                            sample_output.final_latents, batch
                         )
-                        self.log_image(
-                            image,
-                            key,
-                            step=step,
-                            name=image_name,
-                            caption=prompt if isinstance(prompt, str) else None,
-                        )
-                        image_count += self.world_size
+                        batch.update(decoded)
 
-                    progress.advance(task)
+                        if (
+                            self.validation_log_images is True
+                            or image_count < self.validation_log_images
+                        ):
+                            prompt = batch.get("prompt")
+                            image = (
+                                self.processor.annotate_output(decoded, batch)
+                                if self.validation_annotate_images
+                                else batch["clean_image"]
+                            )
+                            self.log_image(
+                                image,
+                                key,
+                                step=step,
+                                name=image_name,
+                                caption=prompt if isinstance(prompt, str) else None,
+                            )
+                            image_count += self.world_size
 
-                    yield batch, key
+                        progress.advance(task)
+                        yield batch, key
 
         metric_reward = (
             None

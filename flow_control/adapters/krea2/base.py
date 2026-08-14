@@ -112,3 +112,11 @@ class Krea2Adapter[TBatch: Krea2Batch](
         )[0]
 
         return model_pred
+
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+        "prompt_embeds_mask",
+    )

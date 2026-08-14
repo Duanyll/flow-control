@@ -29,6 +29,15 @@ class Flux1Batch(Batch):
 class Flux1Adapter[TBatch: Flux1Batch](
     BaseModelAdapter[FluxTransformer2DModel, TBatch]
 ):
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "pooled_prompt_embeds",
+        "prompt_embeds",
+        "txt_ids",
+        "img_ids",
+    )
     arch: Literal["flux1"] = "flux1"
     type: Literal["base"] = "base"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(

@@ -113,6 +113,12 @@ class QwenImageBatch(Batch):
 class QwenImageAdapter[TBatch: QwenImageBatch](
     BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
 ):
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+    )
     arch: Literal["qwen"] = "qwen"
     type: Literal["base"] = "base"
 

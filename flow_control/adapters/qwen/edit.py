@@ -22,6 +22,11 @@ class QwenImageEditBatch(QwenImageBatch):
 @adapter_registry.register("qwen_edit")
 class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
     type: Literal["edit"] = "edit"
+    dense_batch_fields = (
+        *QwenImageAdapter.dense_batch_fields,
+        "reference_latents",
+        "reference_sizes",
+    )
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="QwenImageTransformer2DModel",

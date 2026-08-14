@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import TypedDict
+from typing import ClassVar, TypedDict, cast
 
 import torch
+import torch.distributed as dist
 from diffusers import ModelMixin
 from einops import rearrange
 from peft import LoraConfig
@@ -74,6 +75,11 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     patch_size: int = 2
     latent_channels: int = 16
 
+    supports_dense_batching: ClassVar[bool] = False
+    """Whether equal-shaped logical samples may use the default dense collator."""
+    dense_batch_fields: ClassVar[tuple[str, ...]] = ()
+    """Adapter inputs used by the default collator; unrelated metadata is ignored."""
+
     @property
     def dtype(self) -> torch.dtype:
         # Ensure we are getting the correct dtype even after upcasting
@@ -138,30 +144,165 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     ) -> torch.Tensor:
         raise NotImplementedError()
 
-    def predict_velocity(
+    def _prepare_timestep(self, timestep: torch.Tensor) -> torch.Tensor:
+        return timestep.to(device=self.device, dtype=self.dtype)
+
+    @staticmethod
+    def _same_static_value(left: object, right: object) -> bool:
+        if type(left) is not type(right):
+            return False
+        try:
+            equal = left == right
+        except (RuntimeError, TypeError, ValueError):
+            return False
+        return bool(equal) if isinstance(equal, bool) else False
+
+    def _collate_velocity_inputs(
         self,
-        batch: TBatch,
-        timestep: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Predict the velocity for the given batch and timestep. Input batch will be casted
-        to desired dtype and moved to model device before being passed to `_predict_velocity`.
+        batches: list[TBatch],
+        timesteps: list[torch.Tensor],
+    ) -> tuple[TBatch, torch.Tensor] | None:
+        """Densely collate fixed-shape batches, or return ``None`` to fall back."""
+        if not self.supports_dense_batching:
+            return None
 
-        batch: TBatch
-            The input batch containing the noisy latents and any additional information.
-        timestep: torch.Tensor
-            The current timestep for which to predict the velocity.
+        collated: dict[str, object] = {}
+        for key in self.dense_batch_fields:
+            present = [key in batch for batch in batches]
+            if not any(present):
+                continue
+            if not all(present):
+                return None
+            values = [batch[key] for batch in batches]
+            success, value = self._collate_velocity_values(values)
+            if not success:
+                return None
+            collated[key] = value
 
-        Returns: torch.Tensor
-            The predicted velocity for the given batch and timestep. Will be kept on the
-            model device and cast to float32, which is most useful for any conscequent
-            computations.
+        return cast(TBatch, collated), torch.cat(timesteps, dim=0)
+
+    def _collate_velocity_values(
+        self,
+        values: list[object],
+    ) -> tuple[bool, object]:
+        first = values[0]
+        if isinstance(first, torch.Tensor):
+            if not all(isinstance(value, torch.Tensor) for value in values):
+                return False, first
+            tensors = cast(list[torch.Tensor], values)
+            if any(
+                tensor.ndim == 0 or tensor.shape[0] != 1 or tensor.shape != first.shape
+                for tensor in tensors
+            ):
+                return False, first
+            return True, torch.cat(tensors, dim=0)
+
+        if isinstance(first, list):
+            if not all(
+                isinstance(value, list) and len(value) == len(first) for value in values
+            ):
+                return False, first
+            collated_items: list[object] = []
+            lists = cast(list[list[object]], values)
+            for index in range(len(first)):
+                success, item = self._collate_velocity_values(
+                    [value[index] for value in lists]
+                )
+                if not success:
+                    return False, first
+                collated_items.append(item)
+            return True, collated_items
+
+        if all(self._same_static_value(first, value) for value in values[1:]):
+            return True, first
+        return False, first
+
+    def _sync_collation_decision(
+        self,
+        can_collate: bool,
+        logical_batch_size: int,
+    ) -> bool:
+        if not dist.is_initialized():
+            return can_collate
+        # One MIN reduction communicates the decision, min length, and max length.
+        status = torch.tensor(
+            [int(can_collate), logical_batch_size, -logical_batch_size],
+            device=self.device,
+            dtype=torch.int64,
+        )
+        dist.all_reduce(status, op=dist.ReduceOp.MIN)
+        if int(status[1].item()) != -int(status[2].item()):
+            raise ValueError(
+                "All distributed ranks must submit the same number of logical "
+                "samples to predict_velocity_batched."
+            )
+        return bool(status[0].item())
+
+    def predict_velocity_batched(
+        self,
+        batches: list[TBatch],
+        timesteps: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
         """
-        batch = deep_cast_float_dtype(batch, self.dtype)
-        batch = deep_move_to_device(batch, self.device)
-        timestep = timestep.to(device=self.device, dtype=self.dtype)
-        velocity = self._predict_velocity(batch, timestep)
-        return velocity.float()
+        Predict one velocity per logical sample.
+
+        Logical samples retain their leading singleton batch dimension. Adapters that
+        opt into dense batching combine compatible samples into one physical forward;
+        all other inputs use the synchronized sample-at-a-time fallback.
+        """
+        if not batches:
+            raise ValueError("predict_velocity_batched requires at least one batch.")
+        if len(batches) != len(timesteps):
+            raise ValueError(
+                "batches and timesteps must have equal lengths, got "
+                f"{len(batches)} and {len(timesteps)}."
+            )
+        for index, batch in enumerate(batches):
+            if batch["noisy_latents"].shape[0] != 1:
+                raise ValueError(
+                    "Each logical sample must have a singleton leading batch "
+                    f"dimension; sample {index} has shape "
+                    f"{tuple(batch['noisy_latents'].shape)}."
+                )
+
+        prepared_batches = [
+            cast(
+                TBatch,
+                deep_move_to_device(
+                    deep_cast_float_dtype(batch, self.dtype), self.device
+                ),
+            )
+            for batch in batches
+        ]
+        prepared_timesteps = [
+            self._prepare_timestep(timestep) for timestep in timesteps
+        ]
+        collated = self._collate_velocity_inputs(prepared_batches, prepared_timesteps)
+
+        if self._sync_collation_decision(collated is not None, len(batches)):
+            assert collated is not None
+            collated_batch, collated_timestep = collated
+            velocity = self._predict_velocity(collated_batch, collated_timestep).float()
+            if velocity.ndim == 0 or velocity.shape[0] != len(batches):
+                raise ValueError(
+                    "Batched adapter output has the wrong leading dimension: "
+                    f"expected {len(batches)}, got {tuple(velocity.shape)}."
+                )
+            return list(velocity.split(1, dim=0))
+
+        velocities = [
+            self._predict_velocity(batch, timestep).float()
+            for batch, timestep in zip(
+                prepared_batches, prepared_timesteps, strict=True
+            )
+        ]
+        for index, velocity in enumerate(velocities):
+            if velocity.ndim == 0 or velocity.shape[0] != 1:
+                raise ValueError(
+                    "Fallback adapter output must retain a singleton leading "
+                    f"dimension; sample {index} has shape {tuple(velocity.shape)}."
+                )
+        return velocities
 
     def _pack_latents(self, latents):
         return rearrange(

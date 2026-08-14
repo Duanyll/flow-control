@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PositiveInt
 from rich.progress import Progress, TaskID
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -77,6 +77,18 @@ class NftTrainItem:
     cached_targets: NftCachedTargets | None = None
 
 
+@dataclass(slots=True)
+class _NftLossInput:
+    batch: Any
+    negative_batch: Any | None
+    timestep: torch.Tensor
+    x0: torch.Tensor
+    noisy_latents: torch.Tensor
+    advantage: torch.Tensor
+    old_prediction: torch.Tensor | None
+    ref_prediction: torch.Tensor | None
+
+
 @trainer_registry.register("nft")
 class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
@@ -100,6 +112,8 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     How many (rollout, timestep) items should the optimizer see before each
     update step. Must be divisible by world_size.
     """
+    train_micro_batch_size: PositiveInt = 1
+    """Number of NFT items combined in each per-rank model forward."""
 
     # NFT-specific hyperparameters
     beta: float = 1.0
@@ -175,6 +189,16 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     @property
     def grad_acc_steps(self) -> int:
+        local_batch_size = self.local_train_batch_size
+        if local_batch_size % self.train_micro_batch_size != 0:
+            raise ValueError(
+                f"Per-rank train batch ({local_batch_size}) must be divisible by "
+                f"train_micro_batch_size ({self.train_micro_batch_size})."
+            )
+        return local_batch_size // self.train_micro_batch_size
+
+    @property
+    def local_train_batch_size(self) -> int:
         world_size: int = getattr(self, "world_size", 1)
         if self.train_batch_size % world_size != 0:
             raise ValueError(
@@ -325,20 +349,13 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # -------------------------------- NFT loss ---------------------------------- #
 
-    def nft_loss(
+    def _prepare_nft_loss_input(
         self,
         rollout: Rollout,
         rollout_advantages: torch.Tensor,
         timestep_idx: int,
         cached_targets: NftCachedTargets | None = None,
-    ) -> torch.Tensor:
-        """Compute NFT loss for one (rollout, timestep) item.
-
-        1. Select a rollout timestep and sample noise to create the noisy input.
-        2. Get predictions from old-teacher, current model, and reference model.
-        3. Normalise advantages, build positive/negative predictions.
-        4. Compute adaptive-weighted MSE loss + KL regularisation.
-        """
+    ) -> _NftLossInput:
         batch = deep_move_to_device(rollout.batch, self.device)
         negative_batch = (
             deep_move_to_device(rollout.negative_batch, self.device)
@@ -346,7 +363,7 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
             else None
         )
         x0 = batch["clean_latents"].float()
-        old_prediction = torch.empty_like(x0)
+        old_prediction: torch.Tensor | None = None
         ref_prediction: torch.Tensor | None = None
 
         if cached_targets is not None:
@@ -358,31 +375,35 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                 ref_prediction = cached_targets.ref_prediction.to(device=self.device)
         else:
             t = self._resolve_training_timestep(rollout, timestep_idx)
-            xt = torch.empty_like(x0)
-
-        neg_for_cfg = negative_batch if negative_batch is not None else None
-        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
-        if cached_targets is None:
             noise = torch.randn_like(x0)
+            t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
             xt = (1.0 - t_expanded) * x0 + t_expanded * noise
             batch["noisy_latents"] = xt
 
-            # Old-teacher prediction (no grad)
-            with torch.no_grad(), apply_ema_maybe(self._old_ema):
-                old_prediction = self._predict(batch, t, neg_for_cfg).detach()
+        return _NftLossInput(
+            batch=batch,
+            negative_batch=negative_batch,
+            timestep=t,
+            x0=x0,
+            noisy_latents=xt,
+            advantage=rollout_advantages.to(device=self.device),
+            old_prediction=old_prediction,
+            ref_prediction=ref_prediction,
+        )
 
-            # Reference model prediction (no grad)
-            if self.kl_beta > 0:
-                with torch.no_grad(), self.reference_model():
-                    ref_prediction = self._predict(batch, t, neg_for_cfg).detach()
-            else:
-                ref_prediction = None
+    def _nft_objective(
+        self,
+        prepared: _NftLossInput,
+        forward_prediction: torch.Tensor,
+    ) -> torch.Tensor:
+        old_prediction = prepared.old_prediction
+        if old_prediction is None:
+            raise RuntimeError("Missing NFT old-teacher prediction.")
+        x0 = prepared.x0
+        xt = prepared.noisy_latents
+        t_expanded = prepared.timestep.view(-1, *([1] * (x0.ndim - 1)))
 
-        # Current model prediction (with grad)
-        forward_prediction = self._predict(batch, t, neg_for_cfg)
-
-        # Normalise advantages to r in [0, 1]
-        adv = rollout_advantages.to(device=self.device)
+        adv = prepared.advantage
         adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
         if self.adv_mode == "positive_only":
             adv = torch.clamp(adv, 0, self.adv_clip_max)
@@ -432,8 +453,8 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         loss = policy_loss
 
         # KL regularisation (MSE to reference)
-        if ref_prediction is not None:
-            kl_loss = ((forward_prediction - ref_prediction) ** 2).mean(
+        if prepared.ref_prediction is not None:
+            kl_loss = ((forward_prediction - prepared.ref_prediction) ** 2).mean(
                 dim=tuple(range(1, x0.ndim))
             )
             kl_loss = torch.mean(kl_loss)
@@ -452,23 +473,65 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         self.log_aggregated_metrics(metrics)
         return loss
 
-    def _predict(
+    def nft_loss_batched(
         self,
-        batch: Any,
-        t: torch.Tensor,
-        negative_batch: Any | None,
+        items: list[tuple[Rollout, torch.Tensor, int, NftCachedTargets | None]],
     ) -> torch.Tensor:
+        prepared = [
+            self._prepare_nft_loss_input(
+                rollout, advantage, timestep_idx, cached_targets
+            )
+            for rollout, advantage, timestep_idx, cached_targets in items
+        ]
+        batches = [item.batch for item in prepared]
+        timesteps = [item.timestep for item in prepared]
+        negative_batches = [item.negative_batch for item in prepared]
+
+        if any(item.old_prediction is None for item in prepared):
+            with torch.no_grad(), apply_ema_maybe(self._old_ema):
+                old_predictions = self._predict_batched(
+                    batches, timesteps, negative_batches
+                )
+            for item, prediction in zip(prepared, old_predictions, strict=True):
+                if item.old_prediction is None:
+                    item.old_prediction = prediction.detach()
+
+        if self.kl_beta > 0 and any(item.ref_prediction is None for item in prepared):
+            with torch.no_grad(), self.reference_model():
+                ref_predictions = self._predict_batched(
+                    batches, timesteps, negative_batches
+                )
+            for item, prediction in zip(prepared, ref_predictions, strict=True):
+                if item.ref_prediction is None:
+                    item.ref_prediction = prediction.detach()
+
+        forward_predictions = self._predict_batched(
+            batches, timesteps, negative_batches
+        )
+        return torch.stack(
+            [
+                self._nft_objective(item, prediction)
+                for item, prediction in zip(prepared, forward_predictions, strict=True)
+            ]
+        ).mean()
+
+    def _predict_batched(
+        self,
+        batches: list[Any],
+        timesteps: list[torch.Tensor],
+        negative_batches: list[Any | None],
+    ) -> list[torch.Tensor]:
         """Get model velocity prediction, optionally with CFG."""
         sampler = self.rollout_sampler
-        if negative_batch is not None and sampler.cfg_scale > 1.0:
+        if sampler.cfg_scale > 1.0:
             return sampler.get_guided_velocity(
-                self.model,
-                batch["noisy_latents"],
-                t,
-                batch,
-                negative_batch,
+                model=self.model,
+                batches=batches,
+                negative_batches=negative_batches,
+                latents=[batch["noisy_latents"] for batch in batches],
+                timesteps=timesteps,
             )
-        return self.model.predict_velocity(batch, t.to(dtype=self.model.dtype)).float()
+        return self.model.predict_velocity_batched(batches, timesteps)
 
     # ----------------------------- Training phase ------------------------------- #
 
@@ -588,31 +651,35 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         task_id: TaskID,
         field: Literal["old_prediction", "ref_prediction"] = "old_prediction",
     ) -> None:
-        for item in flat_items:
-            rollout = rollouts[item.rollout_idx]
-            batch = deep_move_to_device(rollout.batch, self.device)
-            negative_batch = (
-                deep_move_to_device(rollout.negative_batch, self.device)
-                if rollout.negative_batch is not None
-                else None
-            )
-            cached_targets = item.cached_targets
-            if cached_targets is None:
-                raise RuntimeError("Missing cached NFT targets.")
-            batch["noisy_latents"] = cached_targets.noisy_latents
-            neg_for_cfg = negative_batch if negative_batch is not None else None
-            prediction = self._predict(
-                batch,
-                cached_targets.timestep,
-                neg_for_cfg,
-            ).detach()
-            # Route to the requested cache field. This MUST be parameterised: the
-            # reference pass reuses this method, and writing to ``old_prediction``
-            # unconditionally would overwrite the EMA-teacher output with the
-            # reference output AND leave ``ref_prediction`` unset -> KL term
-            # silently 0 and the NFT teacher corrupted whenever kl_beta > 0.
-            setattr(cached_targets, field, prediction)
-            progress.advance(task_id)
+        for start in range(0, len(flat_items), self.train_micro_batch_size):
+            micro_items = flat_items[start : start + self.train_micro_batch_size]
+            batches: list[Any] = []
+            timesteps: list[torch.Tensor] = []
+            negative_batches: list[Any | None] = []
+            cached_targets_list: list[NftCachedTargets] = []
+            for item in micro_items:
+                rollout = rollouts[item.rollout_idx]
+                batch = deep_move_to_device(rollout.batch, self.device)
+                negative_batch = (
+                    deep_move_to_device(rollout.negative_batch, self.device)
+                    if rollout.negative_batch is not None
+                    else None
+                )
+                cached_targets = item.cached_targets
+                if cached_targets is None:
+                    raise RuntimeError("Missing cached NFT targets.")
+                batch["noisy_latents"] = cached_targets.noisy_latents
+                batches.append(batch)
+                timesteps.append(cached_targets.timestep)
+                negative_batches.append(negative_batch)
+                cached_targets_list.append(cached_targets)
+
+            predictions = self._predict_batched(batches, timesteps, negative_batches)
+            for cached_targets, prediction in zip(
+                cached_targets_list, predictions, strict=True
+            ):
+                setattr(cached_targets, field, prediction.detach())
+            progress.advance(task_id, advance=len(micro_items))
 
     def _precompute_aux_model_outputs_for_plan(
         self,
@@ -700,41 +767,56 @@ class NftTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     )
 
                 if (
-                    len(train_items) % self.grad_acc_steps != 0
+                    len(train_items) % self.local_train_batch_size != 0
                     and self.is_main_process
                     and self._current_epoch == 0
                 ):
                     logger.warning(
                         "Local loss count (%d) is not divisible by "
-                        "grad_acc_steps (%d). The tail update uses a smaller "
+                        "local train batch (%d). The tail update uses a smaller "
                         "effective batch.",
                         len(train_items),
-                        self.grad_acc_steps,
+                        self.local_train_batch_size,
                     )
 
-                for chunk_start in range(0, len(train_items), self.grad_acc_steps):
-                    chunk = train_items[chunk_start : chunk_start + self.grad_acc_steps]
+                for chunk_start in range(
+                    0, len(train_items), self.local_train_batch_size
+                ):
+                    chunk = train_items[
+                        chunk_start : chunk_start + self.local_train_batch_size
+                    ]
                     chunk_size = len(chunk)
 
-                    for micro_idx, item in enumerate(chunk):
-                        is_sync_step = micro_idx == chunk_size - 1
+                    for micro_start in range(
+                        0, chunk_size, self.train_micro_batch_size
+                    ):
+                        micro_items = chunk[
+                            micro_start : micro_start + self.train_micro_batch_size
+                        ]
+                        is_sync_step = micro_start + len(micro_items) == chunk_size
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        loss = self.nft_loss(
-                            rollout=rollouts[item.rollout_idx],
-                            rollout_advantages=advantages[item.rollout_idx],
-                            timestep_idx=item.timestep_idx,
-                            cached_targets=item.cached_targets,
+                        loss = self.nft_loss_batched(
+                            [
+                                (
+                                    rollouts[item.rollout_idx],
+                                    advantages[item.rollout_idx],
+                                    item.timestep_idx,
+                                    item.cached_targets,
+                                )
+                                for item in micro_items
+                            ]
                         )
 
                         if not torch.isfinite(loss):
                             raise RuntimeError(
                                 f"Non-finite NFT loss detected: {loss.item()}. "
-                                f"(rollout_idx={item.rollout_idx})"
+                                f"(rollout_indices="
+                                f"{[item.rollout_idx for item in micro_items]})"
                             )
 
-                        (loss / chunk_size).backward()
-                        progress.advance(train_task)
+                        (loss * (len(micro_items) / chunk_size)).backward()
+                        progress.advance(train_task, advance=len(micro_items))
 
                     self._optimizer_step()
                     self._current_step += 1

@@ -19,6 +19,11 @@ class LongCatEditBatch(LongCatBatch):
 @adapter_registry.register("longcat_edit")
 class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
     type: Literal["edit"] = "edit"
+    dense_batch_fields = (
+        *LongCatAdapter.dense_batch_fields,
+        "reference_latents",
+        "reference_sizes",
+    )
     hf_model: HfModelLoader[LongCatImageTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="LongCatImageTransformer2DModel",

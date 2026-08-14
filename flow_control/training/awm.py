@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PositiveInt
 from rich.progress import Progress, TaskID
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -99,6 +99,17 @@ class AwmTrainItem:
     cached_targets: AwmCachedTargets | None = None
 
 
+@dataclass(slots=True)
+class _AwmLossInput:
+    batch: Any
+    x0: torch.Tensor
+    timestep: torch.Tensor
+    noise: torch.Tensor
+    advantage: torch.Tensor
+    ref_prediction: torch.Tensor | None
+    ema_prediction: torch.Tensor | None
+
+
 @trainer_registry.register("awm")
 class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
@@ -122,6 +133,8 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     How many (rollout, timestep) items should the optimizer see before each
     update step. Must be divisible by world_size.
     """
+    train_micro_batch_size: PositiveInt = 1
+    """Number of AWM items combined in each per-rank model forward."""
 
     # AWM-specific hyperparameters
     beta: float = 0.001
@@ -205,6 +218,16 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     @property
     def grad_acc_steps(self) -> int:
+        local_batch_size = self.local_train_batch_size
+        if local_batch_size % self.train_micro_batch_size != 0:
+            raise ValueError(
+                f"Per-rank train batch ({local_batch_size}) must be divisible by "
+                f"train_micro_batch_size ({self.train_micro_batch_size})."
+            )
+        return local_batch_size // self.train_micro_batch_size
+
+    @property
+    def local_train_batch_size(self) -> int:
         world_size: int = getattr(self, "world_size", 1)
         if self.train_batch_size % world_size != 0:
             raise ValueError(
@@ -337,14 +360,18 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # ---------------------------------- Predict --------------------------------- #
 
-    def _predict(self, batch: Any, t: torch.Tensor) -> torch.Tensor:
+    def _predict_batched(
+        self,
+        batches: list[Any],
+        timesteps: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
         """Plain *conditional* velocity prediction (no CFG).
 
         AWM's flow-matching loss is defined against conditional velocities, so
         this deliberately bypasses ``get_guided_velocity`` even when rollouts use
         CFG (``off_policy`` still samples endpoints via the sampler's CFG path).
         """
-        return self.model.predict_velocity(batch, t.to(dtype=self.model.dtype)).float()
+        return self.model.predict_velocity_batched(batches, timesteps)
 
     # ------------------------------- Loss helpers ------------------------------- #
 
@@ -389,14 +416,13 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # -------------------------------- AWM loss ---------------------------------- #
 
-    def awm_loss(
+    def _prepare_awm_loss_input(
         self,
         rollout: Rollout,
         rollout_advantages: torch.Tensor,
         timestep: torch.Tensor,
         cached_targets: AwmCachedTargets | None = None,
-    ) -> torch.Tensor:
-        """Compute the AWM loss for one (rollout, timestep) item."""
+    ) -> _AwmLossInput:
         batch = deep_move_to_device(rollout.batch, self.device)
         x0 = batch["clean_latents"].float()
         t = timestep.to(device=self.device, dtype=torch.float32)
@@ -422,27 +448,42 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         xt = (1.0 - t_expanded) * x0 + t_expanded * noise
         batch["noisy_latents"] = xt
 
-        if cached_targets is None:
-            if self.beta > 0:
-                with torch.no_grad(), self.reference_model():
-                    ref_prediction = self._predict(batch, t).detach()
-            if self._needs_ema_prediction:
-                with torch.no_grad(), apply_ema_maybe(self._old_ema):
-                    ema_prediction = self._predict(batch, t).detach()
+        return _AwmLossInput(
+            batch=batch,
+            x0=x0,
+            timestep=t,
+            noise=noise,
+            advantage=rollout_advantages.to(device=self.device),
+            ref_prediction=ref_prediction,
+            ema_prediction=ema_prediction,
+        )
 
-        # Current policy velocity (with grad)
-        forward_prediction = self._predict(batch, t)
-        log_prob = self._flow_matching_logp(forward_prediction, noise, x0, t)
+    def _awm_objective(
+        self,
+        prepared: _AwmLossInput,
+        forward_prediction: torch.Tensor,
+    ) -> torch.Tensor:
+        log_prob = self._flow_matching_logp(
+            forward_prediction,
+            prepared.noise,
+            prepared.x0,
+            prepared.timestep,
+        )
 
         if self.off_policy:
-            if ema_prediction is None:
+            if prepared.ema_prediction is None:
                 raise RuntimeError("off_policy requires an EMA prediction.")
-            old_log_prob = self._flow_matching_logp(ema_prediction, noise, x0, t)
+            old_log_prob = self._flow_matching_logp(
+                prepared.ema_prediction,
+                prepared.noise,
+                prepared.x0,
+                prepared.timestep,
+            )
         else:
             old_log_prob = log_prob.detach()
         ratio = torch.exp(log_prob - old_log_prob.detach())
 
-        adv = rollout_advantages.to(device=self.device)
+        adv = prepared.advantage
         adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
         adv = adv / self.adv_clip_max * self.advantage_max
         adv = adv.view(-1)
@@ -457,14 +498,20 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         kl_loss = torch.tensor(0.0, device=self.device)
         ema_kl_loss = torch.tensor(0.0, device=self.device)
 
-        if self.beta > 0 and ref_prediction is not None:
+        if self.beta > 0 and prepared.ref_prediction is not None:
             kl_loss = self._kl_term(
-                forward_prediction, ref_prediction, t, self.kl_weight
+                forward_prediction,
+                prepared.ref_prediction,
+                prepared.timestep,
+                self.kl_weight,
             )
             loss = loss + self.beta * kl_loss
-        if self.ema_beta > 0 and ema_prediction is not None:
+        if self.ema_beta > 0 and prepared.ema_prediction is not None:
             ema_kl_loss = self._kl_term(
-                forward_prediction, ema_prediction, t, self.kl_ema_weight
+                forward_prediction,
+                prepared.ema_prediction,
+                prepared.timestep,
+                self.kl_ema_weight,
             )
             loss = loss + self.ema_beta * ema_kl_loss
 
@@ -481,6 +528,43 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         }
         self.log_aggregated_metrics(metrics)
         return loss
+
+    def awm_loss_batched(
+        self,
+        items: list[
+            tuple[Rollout, torch.Tensor, torch.Tensor, AwmCachedTargets | None]
+        ],
+    ) -> torch.Tensor:
+        prepared = [
+            self._prepare_awm_loss_input(rollout, advantage, timestep, cached_targets)
+            for rollout, advantage, timestep, cached_targets in items
+        ]
+        batches = [item.batch for item in prepared]
+        timesteps = [item.timestep for item in prepared]
+
+        if self.beta > 0 and any(item.ref_prediction is None for item in prepared):
+            with torch.no_grad(), self.reference_model():
+                predictions = self._predict_batched(batches, timesteps)
+            for item, prediction in zip(prepared, predictions, strict=True):
+                if item.ref_prediction is None:
+                    item.ref_prediction = prediction.detach()
+
+        if self._needs_ema_prediction and any(
+            item.ema_prediction is None for item in prepared
+        ):
+            with torch.no_grad(), apply_ema_maybe(self._old_ema):
+                predictions = self._predict_batched(batches, timesteps)
+            for item, prediction in zip(prepared, predictions, strict=True):
+                if item.ema_prediction is None:
+                    item.ema_prediction = prediction.detach()
+
+        forward_predictions = self._predict_batched(batches, timesteps)
+        return torch.stack(
+            [
+                self._awm_objective(item, prediction)
+                for item, prediction in zip(prepared, forward_predictions, strict=True)
+            ]
+        ).mean()
 
     # ----------------------------- Timestep sampling ---------------------------- #
 
@@ -559,20 +643,32 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         task_id: TaskID,
         field: Literal["ref_prediction", "ema_prediction"],
     ) -> None:
-        for item in flat_items:
-            rollout = rollouts[item.rollout_idx]
-            batch = deep_move_to_device(rollout.batch, self.device)
-            x0 = batch["clean_latents"].float()
-            cached_targets = item.cached_targets
-            if cached_targets is None:
-                raise RuntimeError("Missing cached AWM targets.")
-            t = item.timestep.to(device=self.device, dtype=torch.float32)
-            noise = cached_targets.noise.to(device=self.device)
-            t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
-            batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
-            prediction = self._predict(batch, t).detach()
-            setattr(cached_targets, field, prediction)
-            progress.advance(task_id)
+        for start in range(0, len(flat_items), self.train_micro_batch_size):
+            micro_items = flat_items[start : start + self.train_micro_batch_size]
+            batches: list[Any] = []
+            timesteps: list[torch.Tensor] = []
+            cached_targets_list: list[AwmCachedTargets] = []
+            for item in micro_items:
+                rollout = rollouts[item.rollout_idx]
+                batch = deep_move_to_device(rollout.batch, self.device)
+                x0 = batch["clean_latents"].float()
+                cached_targets = item.cached_targets
+                if cached_targets is None:
+                    raise RuntimeError("Missing cached AWM targets.")
+                timestep = item.timestep.to(device=self.device, dtype=torch.float32)
+                noise = cached_targets.noise.to(device=self.device)
+                t_expanded = timestep.view(-1, *([1] * (x0.ndim - 1)))
+                batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
+                batches.append(batch)
+                timesteps.append(timestep)
+                cached_targets_list.append(cached_targets)
+
+            predictions = self._predict_batched(batches, timesteps)
+            for cached_targets, prediction in zip(
+                cached_targets_list, predictions, strict=True
+            ):
+                setattr(cached_targets, field, prediction.detach())
+            progress.advance(task_id, advance=len(micro_items))
 
     def _precompute_aux_model_outputs_for_plan(
         self,
@@ -656,41 +752,56 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     )
 
                 if (
-                    len(train_items) % self.grad_acc_steps != 0
+                    len(train_items) % self.local_train_batch_size != 0
                     and self.is_main_process
                     and self._current_epoch == 0
                 ):
                     logger.warning(
                         "Local loss count (%d) is not divisible by "
-                        "grad_acc_steps (%d). The tail update uses a smaller "
+                        "local train batch (%d). The tail update uses a smaller "
                         "effective batch.",
                         len(train_items),
-                        self.grad_acc_steps,
+                        self.local_train_batch_size,
                     )
 
-                for chunk_start in range(0, len(train_items), self.grad_acc_steps):
-                    chunk = train_items[chunk_start : chunk_start + self.grad_acc_steps]
+                for chunk_start in range(
+                    0, len(train_items), self.local_train_batch_size
+                ):
+                    chunk = train_items[
+                        chunk_start : chunk_start + self.local_train_batch_size
+                    ]
                     chunk_size = len(chunk)
 
-                    for micro_idx, item in enumerate(chunk):
-                        is_sync_step = micro_idx == chunk_size - 1
+                    for micro_start in range(
+                        0, chunk_size, self.train_micro_batch_size
+                    ):
+                        micro_items = chunk[
+                            micro_start : micro_start + self.train_micro_batch_size
+                        ]
+                        is_sync_step = micro_start + len(micro_items) == chunk_size
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        loss = self.awm_loss(
-                            rollout=rollouts[item.rollout_idx],
-                            rollout_advantages=advantages[item.rollout_idx],
-                            timestep=item.timestep,
-                            cached_targets=item.cached_targets,
+                        loss = self.awm_loss_batched(
+                            [
+                                (
+                                    rollouts[item.rollout_idx],
+                                    advantages[item.rollout_idx],
+                                    item.timestep,
+                                    item.cached_targets,
+                                )
+                                for item in micro_items
+                            ]
                         )
 
                         if not torch.isfinite(loss):
                             raise RuntimeError(
                                 f"Non-finite AWM loss detected: {loss.item()}. "
-                                f"(rollout_idx={item.rollout_idx})"
+                                f"(rollout_indices="
+                                f"{[item.rollout_idx for item in micro_items]})"
                             )
 
-                        (loss / chunk_size).backward()
-                        progress.advance(train_task)
+                        (loss * (len(micro_items) / chunk_size)).backward()
+                        progress.advance(train_task, advance=len(micro_items))
 
                     self._optimizer_step()
                     self._current_step += 1

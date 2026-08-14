@@ -25,6 +25,11 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
     """
 
     type: Literal["fill"] = "fill"
+    dense_batch_fields = (
+        *Flux1Adapter.dense_batch_fields,
+        "inpaint_latents",
+        "inpaint_mask",
+    )
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

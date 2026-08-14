@@ -423,13 +423,6 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         self.within_batch_counter = state_dict["within_batch_counter"]
 
 
-# This library is designed to work with batch size 1 datasets.
-# For larger batch sizes, use gradient accumulation.
-# Dataset should return tensors with batch dimension 1.
-def collate_fn(batch: list[dict]) -> dict:
-    if len(batch) != 1:
-        raise ValueError(
-            "Batch size greater than 1 is not supported. Use gradient accumulation instead."
-        )
-    item = batch[0]
-    return item
+def collate_fn(batch: list[dict]) -> list[dict]:
+    """Keep logical samples separate; model adapters own physical collation."""
+    return batch

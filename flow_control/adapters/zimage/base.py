@@ -20,6 +20,12 @@ class ZImageBatch(Batch):
 class ZImageAdapter[TBatch: ZImageBatch](
     BaseModelAdapter[ZImageTransformer2DModel, TBatch]
 ):
+    supports_dense_batching = True
+    dense_batch_fields = (
+        "image_size",
+        "noisy_latents",
+        "prompt_embeds",
+    )
     arch: Literal["zimage"] = "zimage"
     type: Literal["base"] = "base"
 
@@ -42,18 +48,22 @@ class ZImageAdapter[TBatch: ZImageBatch](
         noisy_latents = self._unpack_latents(
             batch["noisy_latents"], h=latent_h, w=latent_w
         )
-        # This is uncommon, but it does require CBHW input.
-        noisy_latents = rearrange(noisy_latents, "b c h w -> c b h w")
+        # The native API accepts one CBHW tensor per logical sample.
+        latent_inputs = [
+            rearrange(latent, "1 c h w -> c 1 h w")
+            for latent in noisy_latents.split(1, dim=0)
+        ]
         # Z-Image use 0 for noise, 1 for clean
         timestep = 1 - timestep
-        # It requires cap_feats to be a list of tensors without batch dimension
-        prompt_embeds = batch["prompt_embeds"].squeeze(0)
-        model_pred = self.transformer(
-            x=[noisy_latents],
+        prompt_embeds = list(batch["prompt_embeds"].unbind(dim=0))
+        model_preds = self.transformer(
+            x=latent_inputs,
             t=timestep,
-            cap_feats=[prompt_embeds],
+            cap_feats=prompt_embeds,
             return_dict=False,
         )[0]
-        model_pred = rearrange(model_pred, "1 c 1 h w -> 1 c h w")
-        model_pred = -model_pred  # Negated!
-        return self._pack_latents(model_pred)
+        packed_predictions = [
+            self._pack_latents(-rearrange(prediction, "c 1 h w -> 1 c h w"))
+            for prediction in model_preds
+        ]
+        return torch.cat(packed_predictions, dim=0)
