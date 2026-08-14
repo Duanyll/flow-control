@@ -176,6 +176,8 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
     # Optimization / training loop
     train_epochs: int = 100
     validation_epochs: int = 20
+    validation_non_ema: bool = False
+    """Also log validation for current weights before applying validation EMA."""
 
     # --------------------------------- Status bar ------------------------------- #
     _status_fields: dict[str, str] = {
@@ -698,6 +700,19 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
 
     # -------------------------------- Main loop --------------------------------- #
 
+    def _validate_current_and_ema(self) -> None:
+        if self.validation_non_ema and self._ema_optimizer is not None:
+            self.validate_and_log(
+                self.model,
+                self._current_step,
+                reward=self.reward,
+                metric_prefix="val/non_ema",
+                image_name="validation_non_ema",
+                profile_prefix="profile/validation_non_ema",
+            )
+        with apply_ema_maybe(self._ema_optimizer):
+            self.validate_and_log(self.model, self._current_step, reward=self.reward)
+
     @distributed_main
     def run(self):
         self.set_seed()
@@ -716,8 +731,7 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
         os.makedirs(self.checkpoint_root, exist_ok=True)
         self.maybe_auto_resume(self.resume_from_dir)
 
-        with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self._current_step, reward=self.reward)
+        self._validate_current_and_ema()
 
         logger.info(
             "AWM rollouts in each epoch will randomly select %d unique prompts "
@@ -780,10 +794,7 @@ class AwmTrainer(RolloutMixin, ValidationMixin, CheckpointingMixin):
                     self.validation_epochs > 0
                     and self._current_epoch % self.validation_epochs == 0
                 ):
-                    with apply_ema_maybe(self._ema_optimizer):
-                        self.validate_and_log(
-                            self.model, self._current_step, reward=self.reward
-                        )
+                    self._validate_current_and_ema()
 
         with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(

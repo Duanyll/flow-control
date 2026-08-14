@@ -108,6 +108,9 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         model: ModelAdapter,
         step: int,
         reward: BaseReward | None = None,
+        metric_prefix: str = "val",
+        image_name: str = "validation",
+        profile_prefix: str = "profile/validation",
     ) -> None:
         """Run validation: sample images and optionally compute reward scores.
 
@@ -187,6 +190,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                             image,
                             key,
                             step=step,
+                            name=image_name,
                             caption=prompt if isinstance(prompt, str) else None,
                         )
                         image_count += self.world_size
@@ -218,16 +222,20 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                 labels = reward_values[0].labels
                 aggregate = (normalized * weights).sum(dim=-1)
                 metrics: dict[str, float] = {
-                    "val/reward_mean": aggregate.mean().item(),
-                    "val/reward_std": aggregate.std(correction=0).item(),
+                    f"{metric_prefix}/reward_mean": aggregate.mean().item(),
+                    f"{metric_prefix}/reward_std": aggregate.std(correction=0).item(),
                 }
                 for i, label in enumerate(labels):
-                    metrics[f"val/raw/{label}_mean"] = raw[:, i].mean().item()
-                    metrics[f"val/raw/{label}_std"] = raw[:, i].std(correction=0).item()
-                    metrics[f"val/normalized/{label}_mean"] = (
+                    metrics[f"{metric_prefix}/raw/{label}_mean"] = (
+                        raw[:, i].mean().item()
+                    )
+                    metrics[f"{metric_prefix}/raw/{label}_std"] = (
+                        raw[:, i].std(correction=0).item()
+                    )
+                    metrics[f"{metric_prefix}/normalized/{label}_mean"] = (
                         normalized[:, i].mean().item()
                     )
-                    metrics[f"val/normalized/{label}_std"] = (
+                    metrics[f"{metric_prefix}/normalized/{label}_std"] = (
                         normalized[:, i].std(correction=0).item()
                     )
                 self.log_metrics(metrics, step=step)
@@ -236,7 +244,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             for _ in sample_submitter():
                 pass
 
-        self.log_progress_timing(progress, step, prefix="profile/validation")
+        self.log_progress_timing(progress, step, prefix=profile_prefix)
 
         model.transformer.train()
         logger.info(f"Completed validation at step {step}.")
