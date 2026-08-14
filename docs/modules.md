@@ -106,7 +106,7 @@
 | `AwmTrainer` | Advantage Weighted Matching（优势加权的 flow-matching 策略梯度）|
 | `RamTrainer` | Reinforce Adjoint Matching（KL 正则最优控制的闭式回归目标）|
 | `VaeTrainer` | VAE 训练 |
-| `Inference` | 推理/生成 pipeline |
+| `Inference` | 批量推理 + 评测（DCP/EMA 权重加载、reward 汇总与逐样本 CSV、datasink/预览输出）。新任务先写 config 走 `launch`，不要另写推理脚本 |
 
 ### Mixin
 
