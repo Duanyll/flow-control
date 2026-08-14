@@ -1,7 +1,7 @@
 import csv
 import os
 from collections.abc import Generator
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -10,8 +10,10 @@ from rich.progress import Progress, TaskID
 from rich.table import Table
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_state_dict,
-    set_state_dict,
+    get_model_state_dict,
+    get_optimizer_state_dict,
+    set_model_state_dict,
+    set_optimizer_state_dict,
 )
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -35,6 +37,7 @@ from .data import (
     collate_fn,
     seed_worker,
 )
+from .ema import EMAConfig, EMAOptimizer
 from .mixins import (
     BaseTrainer,
     DcpMixin,
@@ -60,6 +63,14 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
+    checkpoint_weights: Literal["current", "ema", "ema_old"] = "current"
+    """Which weights to apply from a training DCP checkpoint.
+
+    ``ema`` selects the validation EMA stored as ``optim_ema`` and ``ema_old``
+    selects the lagged rollout EMA stored as ``optim_ema_old``. The EMA options
+    require a checkpoint produced by a trainer that saves the corresponding
+    optimizer state.
+    """
     save_preview_dir: str | None = None
     save_extra: bool = False
     annotate_output_image: bool = False
@@ -76,12 +87,27 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
-        if self.datasink is None and self.save_preview_dir is None:
-            raise ValueError("Either datasink or save_preview_dir must be specified.")
+        if (
+            self.datasink is None
+            and self.save_preview_dir is None
+            and self.reward_csv_path is None
+        ):
+            raise ValueError(
+                "At least one of datasink, save_preview_dir, or reward_csv_path "
+                "must be specified."
+            )
+        if self.reward_csv_path is not None and self.reward is None:
+            raise ValueError("reward_csv_path requires reward to be specified.")
+        if self.checkpoint_weights != "current" and self.checkpoint_dir is None:
+            raise ValueError(
+                f"checkpoint_weights={self.checkpoint_weights!r} requires "
+                "checkpoint_dir to be specified."
+            )
         return self
 
     # ------------------------------- Lazy state --------------------------------- #
     _dataloader: StatefulDataLoader | None = None
+    _checkpoint_ema_optimizer: EMAOptimizer | None = None
 
     @property
     def transformer(self):
@@ -113,25 +139,45 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     # ------------------------------- Checkpointing ------------------------------ #
 
+    def make_checkpoint_ema_optimizer(self) -> None:
+        if self.checkpoint_weights == "current":
+            return
+        params = [p for p in self.transformer.parameters() if p.requires_grad]
+        if not params:
+            raise RuntimeError(
+                f"checkpoint_weights={self.checkpoint_weights!r} requires trainable "
+                "parameters, but none were found."
+            )
+        # The saved optimizer state supplies the EMA buffers. Its configured
+        # decay is irrelevant because inference never steps this optimizer.
+        self._checkpoint_ema_optimizer = EMAOptimizer(params, EMAConfig())
+
     def state_dict(self):
-        transformer_state_dict, optimizer_state_dict = get_state_dict(
-            self.transformer,
-            optimizers=[],
-            options=StateDictOptions(strict=False),
-        )
-        return {
-            "transformer": transformer_state_dict,
-            "optimizer": optimizer_state_dict,
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        state: dict[str, Any] = {
+            "transformer": get_model_state_dict(self.transformer, options=opts),
         }
+        if self._checkpoint_ema_optimizer is not None:
+            key = "optim_ema" if self.checkpoint_weights == "ema" else "optim_ema_old"
+            state[key] = get_optimizer_state_dict(
+                self.transformer,
+                self._checkpoint_ema_optimizer,
+                options=opts,
+            )
+        return state
 
     def load_state_dict(self, state_dict: dict[str, Any]):
-        set_state_dict(
-            self.transformer,
-            [],
-            model_state_dict=state_dict["transformer"],
-            optim_state_dict=state_dict["optimizer"],
-            options=StateDictOptions(strict=False),
-        )
+        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
+        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
+        if self._checkpoint_ema_optimizer is not None:
+            key = "optim_ema" if self.checkpoint_weights == "ema" else "optim_ema_old"
+            set_optimizer_state_dict(
+                self.transformer,
+                self._checkpoint_ema_optimizer,
+                state_dict[key],
+                options=opts,
+            )
+            self._checkpoint_ema_optimizer.coerce_buffer_dtype()
 
     # ---------------------------------- Sampling -------------------------------- #
 
@@ -344,7 +390,14 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
             self.reward.load_model(self.device)
 
         if self.checkpoint_dir is not None:
+            self.make_checkpoint_ema_optimizer()
             self.load_dcp_checkpoint(self.checkpoint_dir)
+            if self._checkpoint_ema_optimizer is not None:
+                self._checkpoint_ema_optimizer.apply_shadow()
+                logger.info(
+                    f"Applied checkpoint {self.checkpoint_weights} weights for "
+                    "inference."
+                )
 
         datasink = parse_datasink(self.datasink) if self.datasink is not None else None
 
