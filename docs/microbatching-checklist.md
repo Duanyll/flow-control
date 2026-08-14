@@ -160,6 +160,11 @@ gradient_accumulation_steps = local_update_batch // M
       (`flow_control/training/mixins/microbatch.py`); trainer loss entry points
       take `(items, rollouts, advantages)` and GRPO caches reference means on
       `GrpoTrainItem` in place of a separate matrix.
+- [x] Unify batch-option naming on the mixin fields: SFT and the VAE trainer
+      now use `train_batch_size` (was `global_batch_size`) and SFT uses
+      `train_micro_batch_size` (was `micro_batch_size`); the VAE trainer's
+      `grad_acc_steps` raises on non-divisible world_size instead of silently
+      truncating. Old field names fail fast via `extra="forbid"`.
 - [x] Preserve independent SFT CFG drop, timestep, noise, target, and weight.
 - [x] Batch GRPO current/reference replay and reference precomputation.
 - [x] Batch NFT current/old/reference prediction, including CFG synchronization.

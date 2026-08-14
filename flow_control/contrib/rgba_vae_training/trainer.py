@@ -85,7 +85,9 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
     random_crop_size: int | None = None
 
     # ------------------------------- Training ------------------------------- #
-    global_batch_size: int = 8
+    train_batch_size: int = 8
+    """Samples per optimizer update across all ranks. Must be divisible by
+    world_size."""
     train_steps: int = 100000
     checkpoint_interval: int = 5000
     """Archival checkpoint cadence in optimizer steps."""
@@ -154,7 +156,12 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
 
     @property
     def grad_acc_steps(self) -> int:
-        return self.global_batch_size // self.world_size
+        if self.train_batch_size % self.world_size != 0:
+            raise ValueError(
+                f"train_batch_size ({self.train_batch_size}) must be divisible "
+                f"by world_size ({self.world_size})."
+            )
+        return self.train_batch_size // self.world_size
 
     @property
     def total_epochs(self) -> int:

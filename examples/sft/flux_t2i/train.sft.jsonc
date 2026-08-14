@@ -10,7 +10,7 @@
   "checkpoint_interval": 20,
 
   "gradient_checkpointing": true,
-  "global_batch_size": 16,
+  "train_batch_size": 16,
   "train_steps": 200,
 
   "ema": {

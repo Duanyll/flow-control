@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 import torch
-from pydantic import ConfigDict, PositiveInt
+from pydantic import ConfigDict
 from rich.panel import Panel
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
@@ -46,6 +46,7 @@ from .data import (
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
+    MicrobatchTrainMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -61,7 +62,7 @@ logger = get_logger(__name__)
 
 
 @trainer_registry.register("sft")
-class SftTrainer(ValidationMixin, CheckpointingMixin):
+class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"
 
@@ -78,9 +79,7 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
 
-    global_batch_size: int = 16
-    micro_batch_size: PositiveInt = 1
-    """Number of logical samples in each per-rank physical forward."""
+    train_batch_size: int = 16
     train_steps: int = 10000
     checkpoint_interval: int = 500
     """Archival checkpoint cadence in optimizer steps."""
@@ -113,21 +112,6 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
         return self.model.transformer
 
     @property
-    def grad_acc_steps(self):
-        if self.global_batch_size % self.world_size != 0:
-            raise ValueError(
-                f"global_batch_size ({self.global_batch_size}) must be divisible "
-                f"by world_size ({self.world_size})."
-            )
-        local_update_batch = self.global_batch_size // self.world_size
-        if local_update_batch % self.micro_batch_size != 0:
-            raise ValueError(
-                f"Per-rank update batch ({local_update_batch}) must be divisible "
-                f"by micro_batch_size ({self.micro_batch_size})."
-            )
-        return local_update_batch // self.micro_batch_size
-
-    @property
     def total_epochs(self):
         return math.ceil(
             self.train_steps / (len(self._dataloader) // self.grad_acc_steps)
@@ -155,7 +139,6 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
     def make_train_dataloader(self):
         # The sampler pads logical items to a complete optimizer update, while
         # the DataLoader groups those items into physical microbatches.
-        physical_grad_acc_steps = self.grad_acc_steps
         dataset = PaddingAwareDatasetWrapper(self.parse_training_dataset(self.dataset))
         sampler = DistributedBucketSampler(
             dataset=dataset,
@@ -163,11 +146,11 @@ class SftTrainer(ValidationMixin, CheckpointingMixin):
             rank=self.rank,
             shuffle=True,
             seed=self.seed,
-            grad_acc_steps=physical_grad_acc_steps * self.micro_batch_size,
+            grad_acc_steps=self.local_train_batch_size,
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=self.micro_batch_size,
+            batch_size=self.train_micro_batch_size,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,

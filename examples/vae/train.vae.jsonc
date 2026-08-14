@@ -3,7 +3,7 @@
   // Matches AlphaVAE reference: https://arxiv.org/abs/2507.09308
   //
   // Reference setup: 8 GPUs, batch_size=1/device, no gradient accumulation
-  // → effective global_batch_size = 8
+  // → effective train_batch_size = 8
 
   // ---- Checkpoint & Logging ----
   "checkpoint_root": "$auto",
@@ -86,8 +86,8 @@
   "resize_pixels": 0,
 
   // ---- Training ----
-  // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = global_batch_size 8
-  "global_batch_size": 8,
+  // Reference: 8 GPUs × batch_size=1 × grad_acc=1 = train_batch_size 8
+  "train_batch_size": 8,
   "train_steps": 30000,
   "checkpoint_interval": 5000,
   "validation_steps": 2000,
