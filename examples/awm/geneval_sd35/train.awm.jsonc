@@ -1,26 +1,36 @@
 {
   "$schema": "../../../schema/awm.schema.json",
 
-  // AWM (Advantage Weighted Matching) SD3.5-Medium GenEval reproduction.
+  // AWM SD3.5-Medium GenEval reproduction of the public author config.
   // Ref: scxue/advantage_weighted_matching config/dgx_awm.py:geneval_sd3_no_cfg_1node
-  //   (14/40 steps, cfg 1.0, SDE noise_level 0.4, G=24, train_timesteps 6,
-  //    beta 1e-3, ema_beta 1, ghuber p=0.25, discrete_wo_init, off-policy off).
+  //   (14-step second-order SA-Solver / 40-step ODE eval, cfg 1.0,
+  //    stochasticity 0.4 on t=[0.3,0.9], G=24, 1728 endpoints,
+  //    train_timesteps 6, beta 1e-3, ema_beta 1, ghuber p=0.25).
   // Reuses the shared ./data/geneval_sd35 caches produced by ../../grpo/geneval_sd35.
   "checkpoint_root": "$auto",
   "auto_resume": true,
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed_sd35_geneval_awm",
   "experiment_name": "sd35_geneval_awm",
 
+  "gradient_checkpointing": false,
+  "torch_compile": {
+    "backend": "inductor",
+    "mode": "default",
+    "fullgraph": false,
+    "dynamic": false,
+    "recompile_limit": 8,
+  },
+
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 
-  // 6 x 8 = 48 unique prompts, x24 rollouts = 1152 rollouts.
-  "num_batches_per_epoch": 6,
+  // 9 x 8 = 72 unique prompts, x24 rollouts = 1728 endpoints.
+  "num_batches_per_epoch": 9,
   "num_prompts_per_batch": 8,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
-  // 1152 rollouts x 6 training timesteps -> 6912 items, 1 optimizer update per epoch.
-  "train_batch_size": 6912,
+  // 1728 endpoints x 6 timesteps -> 10368 items, one optimizer update per epoch.
+  "train_batch_size": 10368,
   "num_train_timesteps": 6,
   "timestep_fraction": 0.9,
   "train_timestep_sampling": "discrete_wo_init",
@@ -38,15 +48,18 @@
   "clip_grad_norm": 1.0,
 
   "train_epochs": 500,
-  "checkpoint_interval": 10,
-  "validation_epochs": 10,
-  "max_checkpoints": 10,
+  "checkpoint_interval": 20,
+  "validation_epochs": 20,
+  "validation_non_ema": true,
+  "validation_log_images": 16,
+  "max_checkpoints": 5,
 
   "model": {
     "arch": "sd3",
     "type": "base",
     "peft_lora_rank": 32,
     "peft_lora_config": {
+      "r": 32,
       "lora_alpha": 64,
       "init_lora_weights": "gaussian",
       "target_modules": [
@@ -70,8 +83,14 @@
   "rollout_sampler": {
     "steps": 14,
     "cfg_scale": 1.0,
+    "sigma_schedule": "diffusers_flow",
     "shift": { "type": "constant", "shift_value": 3.0 },
-    "solver": { "type": "flow", "eta": 0.4 },
+    "solver": {
+      "type": "sa",
+      "eta": 0.4,
+      "stochasticity_start": 0.3,
+      "stochasticity_end": 0.9,
+    },
   },
 
   "ema_old": {
@@ -116,6 +135,7 @@
   "validation_sampler": {
     "steps": 40,
     "cfg_scale": 1.0,
+    "sigma_schedule": "diffusers_flow",
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 
@@ -127,7 +147,7 @@
 
   "launch": {
     "type": "awm",
-    "devices": 8,
+    "devices": 4,
     "generate_dcp_seed": true,
     // "preprocess_config": [
     //   "examples/grpo/geneval_sd35/preprocess.jsonc",
