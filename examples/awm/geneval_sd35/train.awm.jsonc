@@ -18,8 +18,13 @@
     "mode": "default",
     "fullgraph": false,
     "dynamic": false,
-    "recompile_limit": 8,
+    // SD3 shares forward code across block/LoRA/grad variants; 8 falls back to eager.
+    "recompile_limit": 16,
   },
+
+  "rollout_micro_batch_size": 4,
+  "train_micro_batch_size": 4,
+  "validation_micro_batch_size": 4,
 
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,

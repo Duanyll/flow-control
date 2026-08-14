@@ -11,6 +11,20 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed_sd35_pickscore_awm",
   "experiment_name": "sd35_pickscore_awm",
 
+  "gradient_checkpointing": false,
+  "torch_compile": {
+    "backend": "inductor",
+    "mode": "default",
+    "fullgraph": false,
+    "dynamic": false,
+    // SD3 shares forward code across block/LoRA/grad variants; 8 falls back to eager.
+    "recompile_limit": 16,
+  },
+
+  "rollout_micro_batch_size": 4,
+  "train_micro_batch_size": 4,
+  "validation_micro_batch_size": 4,
+
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 

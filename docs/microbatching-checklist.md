@@ -1,7 +1,7 @@
 # Microbatching Implementation Checklist
 
 Status: core implementation complete; focused CPU, distributed, FSDP2, real
-model, and one end-to-end GRPO validation passed. Production RL sweeps remain.
+model, end-to-end GRPO, and a 512x512 SD3.5 AWM throughput sweep passed.
 
 This is the living implementation record for fixed-shape microbatching. It also
 records the stable boundary intended for future padding and sequence packing.
@@ -229,10 +229,60 @@ sampling window, so it is a correctness smoke rather than a utilization result.
 These are adapter/kernel smoke benchmarks, not representative RL throughput
 measurements.
 
+### SD3.5 512x512 AWM throughput
+
+The production-shape controlled sweep used one 48 GB RTX 4090 per run,
+SD3.5-medium with
+LoRA rank 32, fixed 512x512 PickScore caches, 14-step no-CFG AWM rollouts, 16
+endpoints, 6 training timesteps per endpoint, precomputed reference/EMA
+predictions, and gradient checkpointing disabled. Each run completed two
+epochs; the table reports the second epoch after warm-up.
+
+| Microbatch | Rollout items/s | Reference items/s | EMA items/s | Train items/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.568 | 4.804 | 8.738 | 3.583 |
+| 2 | 1.000 | 8.664 | 15.840 | 6.645 |
+| 4 | 1.674 | 17.069 | 32.314 | 12.825 |
+| 8 | 1.681 | 18.100 | 34.029 | 13.398 |
+| 16 | 1.682 | 17.361 | 32.280 | 12.804 |
+
+Microbatch 4 is the default operating point: versus microbatch 1 it delivers
+2.95x rollout and 3.58x training throughput. Microbatch 8 adds only 0.4% rollout
+and 4.5% training throughput in eager mode, while microbatch 16 regresses the
+auxiliary and training paths.
+
+`torch.compile` is worthwhile once its one-time cost is amortized. The initial
+SD3 block, LoRA enable/disable, and grad/no-grad states produce 12 finite
+recompilations of shared forward frames. A limit of 8 makes Dynamo hit its limit
+and locally fall back to eager; a limit of 16 compiles all observed variants.
+The same-card microbatch 4 comparison on a stock 24 GB RTX 4090 was:
+
+| Mode | Rollout items/s | Reference items/s | EMA items/s | Train items/s |
+| --- | ---: | ---: | ---: | ---: |
+| Eager | 1.534 | 15.030 | 27.703 | 12.178 |
+| Compile16 | 1.743 | 19.183 | 36.239 | 15.195 |
+
+That is a 13.6% rollout, 27.6% reference, 30.8% EMA, and 24.8% training
+improvement. At microbatch 8 on the same 48 GB node, compile16 reached 2.110
+rollout and 17.296 training items/s, 25.5% and 29.1% above eager. The first
+compiled epoch is intentionally excluded: compilation made its train phase
+51.2 seconds versus 5.6 seconds at steady state.
+
+The recommended microbatch 4 plus compile16 configuration also completed the
+same two-epoch workload on a stock 24 GB RTX 4090 without OOM or a recompile
+limit hit. Prometheus observed up to 72% GPU utilization and 273 W, but its
+coarse sampling missed some short phases, so these are health checks rather
+than exact sustained averages. Slurm jobs 10908, 10914, 10920, and 10925 retain
+the eager sweep, compile8 sweep, compile16 sweep, and 24 GB compile validation
+logs respectively; job 10926 is the same-card 24 GB eager control.
+
 ## Remaining acceptance work
 
 - [ ] Run complete FLUX.1 and SD3.5 rollout plus optimizer jobs at the actual RL
       resolutions and model/LoRA settings.
+- [x] Run a paired rollout/train microbatch sweep for 512x512 SD3.5 AWM through
+      the eager plateau and validate the selected setting on 24 GB and 48 GB
+      RTX 4090 cards.
 - [ ] Sweep rollout and train microbatch sizes independently until OOM or plateau.
 - [ ] Measure CFG/no-CFG and inline/precomputed auxiliary prediction modes.
 - [ ] Record samples/s, train items/s, VRAM, utilization, and power from cluster

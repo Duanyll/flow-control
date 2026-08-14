@@ -12,6 +12,10 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed_sd35_geneval_ram",
   "experiment_name": "sd35_geneval_ram",
 
+  "rollout_micro_batch_size": 4,
+  "train_micro_batch_size": 4,
+  "validation_micro_batch_size": 4,
+
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 

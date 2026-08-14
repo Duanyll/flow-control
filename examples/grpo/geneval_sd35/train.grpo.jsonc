@@ -8,6 +8,10 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed_sd35_geneval_grpo",
   "experiment_name": "sd35_geneval_grpo",
 
+  "rollout_micro_batch_size": 4,
+  "train_micro_batch_size": 4,
+  "validation_micro_batch_size": 4,
+
   // Per-epoch sample budget: 6 x 8 = 48 unique prompts, x24 rollouts = 1152 rollouts.
   "num_batches_per_epoch": 6,
   "num_prompts_per_batch": 8,
