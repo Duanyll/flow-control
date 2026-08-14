@@ -9,6 +9,7 @@ from .ddim import DDIMSolver
 from .dpm import DPMSolver, DPMSolverState
 from .flash import FlashSolver, FlashSolverState
 from .flow import FlowSolver
+from .sa import SASolver
 from .unipc import FlowUniPCSolver, UniPCSolverState
 
 Solver = Annotated[BaseSolver, RegistryUnion(solver_registry, "type")]
@@ -24,6 +25,7 @@ __all__ = [
     "FlashSolverState",
     "FlowSolver",
     "FlowUniPCSolver",
+    "SASolver",
     "Solver",
     "SolverState",
     "StepResult",

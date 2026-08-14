@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -24,7 +25,7 @@ from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
 
 from .shift import NoShift, Shift
-from .solver import FlowSolver, Solver, SolverState
+from .solver import FlowSolver, SASolver, Solver, SolverState
 
 logger = get_logger(__name__)
 
@@ -74,6 +75,11 @@ class Sampler(BaseModel):
     steps: int = 50
     solver: Solver = Field(default_factory=FlowSolver)
     shift: Shift = Field(default_factory=NoShift)
+    sigma_schedule: Literal["linear", "diffusers_flow"] = "linear"
+    """Sigma-grid construction. ``diffusers_flow`` reproduces
+    ``FlowMatchEulerDiscreteScheduler.set_timesteps`` including its shifted
+    training-grid endpoints."""
+    num_train_timesteps: int = 1000
     custom_sigmas: list[float] | None = None
     """Explicit sigma grid of length ``steps + 1`` (descending, terminal usually
     0.0), e.g. a distilled model's official timestep table. When set it replaces
@@ -122,6 +128,25 @@ class Sampler(BaseModel):
                     f"got {len(self.custom_sigmas)}."
                 )
             sigmas = torch.tensor(self.custom_sigmas, dtype=torch.float32)
+        elif self.sigma_schedule == "diffusers_flow":
+            if t_start != 1.0 or t_end != 0.0:
+                raise ValueError(
+                    "diffusers_flow sigma schedule currently requires "
+                    "t_start=1.0 and t_end=0.0."
+                )
+            training_grid = torch.linspace(
+                1.0,
+                1.0 / self.num_train_timesteps,
+                self.num_train_timesteps,
+            )
+            shifted_training_grid = self.shift.apply(
+                training_grid, batch, self.num_train_timesteps
+            )
+            inference_grid = torch.linspace(
+                shifted_training_grid[0], shifted_training_grid[-1], self.steps
+            )
+            inference_grid = self.shift.apply(inference_grid, batch, self.steps)
+            sigmas = torch.cat([inference_grid, inference_grid.new_zeros(1)])
         else:
             sigmas = torch.linspace(t_start, t_end, self.steps + 1)
             sigmas = self.shift.apply(sigmas, batch, self.steps)
@@ -198,6 +223,44 @@ class Sampler(BaseModel):
 
         sigmas = sigmas.to(device=device, dtype=torch.float32)
         latents = batch["noisy_latents"].float()
+
+        if isinstance(self.solver, SASolver):
+            with make_sample_progress() as progress:
+                task = progress.add_task("Sampling", total=self.steps)
+
+                def model_fn(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+                    # SA-Solver evolves one scalar time for the whole latent batch,
+                    # while DiT timestep embeddings require one value per sample.
+                    timestep = t.reshape(1).expand(x.shape[0])
+                    return self.get_guided_velocity(
+                        model, x, timestep, batch, negative_batch
+                    )
+
+                def report_step(step: int) -> None:
+                    progress.advance(task)
+                    report_progress(
+                        step / self.steps,
+                        f"Sampling {step}/{self.steps}",
+                    )
+
+                final_latents, intermediate_latents = self.solver.sample(
+                    model_fn=model_fn,
+                    latents=latents,
+                    sigmas=sigmas,
+                    generator=generator,
+                    step_callback=report_step,
+                )
+
+            return SampleOutput(
+                final_latents=final_latents.to(dtype),
+                latents=(
+                    torch.stack(intermediate_latents, dim=1)
+                    if return_trajectory
+                    else None
+                ),
+                timesteps=sigmas[:-1].clone(),
+            )
+
         solver_state = self.solver.init_state(self.steps)
 
         train_start, train_end = self._select_trajectory_window(self.steps)
