@@ -1,0 +1,6 @@
+interface:
+  display_name: "Run Experiment"
+  short_description: "Launch and stabilize a Slurm training experiment"
+  default_prompt: "Use $run-exp to launch and monitor this config with its overrides, purpose, machine preference, and early-stop policy until it is stable."
+policy:
+  allow_implicit_invocation: false
