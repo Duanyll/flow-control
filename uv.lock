@@ -877,7 +877,7 @@ dev = [
     { name = "seaborn", specifier = ">=0.13.2" },
 ]
 ocr = [
-    { name = "onnxruntime-gpu", specifier = ">=1.20.0" },
+    { name = "onnxruntime-gpu", specifier = "==1.28.0.dev20260722004", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" },
     { name = "rapidocr", specifier = ">=3.4.0" },
 ]
 
@@ -2070,8 +2070,8 @@ wheels = [
 
 [[package]]
 name = "onnxruntime-gpu"
-version = "1.26.0"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+version = "1.28.0.dev20260722004"
+source = { registry = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" }
 dependencies = [
     { name = "flatbuffers" },
     { name = "numpy" },
@@ -2079,14 +2079,19 @@ dependencies = [
     { name = "protobuf" },
 ]
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/94/fd/59bee7cffaa435da44fefdeb63e29c61de4dbfa4b279852f59cd02c042ae/onnxruntime_gpu-1.26.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3c01119ed4d9449d60367fa8ccffcd02bd3fe736754284e4b198d131f54edad6" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl", hash = "sha256:5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/dd/97/fe8979f44b9275654b42f7bb556e30789b71a1b22998c83b540df2b1b774/onnxruntime_gpu-1.26.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cfda2fad535595bfc3e570eb588092717711dcb2957656d814695e0c9ceb1508" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/67/3f/59f1777a394625ecc9a85636de57dc47c25dbb5f888da050f1463955a0ce/onnxruntime_gpu-1.26.0-cp313-cp313-win_amd64.whl", hash = "sha256:6ab9f9c741d2e239b2e321ab0d389c04329d4ab7f11e3b92dd3aa7db1c59dee4" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/89/96/360328e3c463f7ea08e853c4239c397e83363dd0204de71a710dc1a544bd/onnxruntime_gpu-1.26.0-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bcf6f347cad9f88a9a625c2b352cf9de927528aedb627ebbc089a201f1990b94" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/fd/c8/aa2dc0e79bba577f37d5448bcb32fea79977e07506684d8138c19a0f1077/onnxruntime_gpu-1.26.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9e6e4fb1ec9ae1cf456534d9115f106ab2a1ae96fa513b4ed0f4795302b4a2c6" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/41/e7/923298431e669567d7ccc2a4c898b6534a47641a051569fd97165fe6d9b8/onnxruntime_gpu-1.26.0-cp314-cp314-win_amd64.whl", hash = "sha256:3e592439b0183d303c2374517b5b392599a3d50b2dc9de949b9b15731ac921c9" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/97/91/93ffe5431d154989f5e04864a25a97eea480997d771232bcbbc538188241/onnxruntime_gpu-1.26.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:56dc7b73954ff4bdc71f5b8ab306b6f61be5d007881b6ef423a609e2b9cd088b" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:74be894088f6d09415bc57a7e14a9d18ee013091d42110a075295a01ca167099" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:b71475293b3444885ec17a7124fd5fc3482be608511e90bad8ea63f218fd19e9" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp312-cp312-win_amd64.whl", hash = "sha256:2c6d82059bb0001666c10f129f604a930a4821a6f571636310a431c5b2a51a26" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a080297609858dd17af53ba1cb0941ba3247936a592f036be2a550d730357f39" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:4aa56915d7a99d3214e2911992ccd84d5e1b74d3c9f95242ef4dfacf44a1d406" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp313-cp313-win_amd64.whl", hash = "sha256:37be72c63b34af56deba9ae5cf6d9fb2a53bf8537636ad8a4fd9375493e740e8" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7380966173e140a1cb8c848eedf3f8bbc6691d73500d394a748b21869c169064" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp313-cp313t-manylinux_2_34_aarch64.whl", hash = "sha256:4ef3f5ef55916893a5625c0e2ea8a08329c160f938745ef3a259293582fbb851" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0632941154b9e4f8a088c27534deeaa61fb7e3cd73c9cab18fdd6e83ac7cdb03" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:6b81a31b309256b534696d76320c3f8e20d6d822edd23dba08bfbb38b890808a" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp314-cp314-win_amd64.whl", hash = "sha256:85a952ca81c7fce68856e52dfe57c8e4d790eb4972f7e72ca62d82c370703fd3" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5843d87298f7d21e0e7e32343fb09b6e13005910c05e0f46020ba3fb3eeb1f33" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.28.dev20260722004/onnxruntime_gpu-1.28.0.dev20260722004-cp314-cp314t-manylinux_2_34_aarch64.whl", hash = "sha256:8bbbec3aaebc4f3c93a370fb3521463aabb27624593c918400260bbd56bd37b9" },
 ]
 
 [[package]]
