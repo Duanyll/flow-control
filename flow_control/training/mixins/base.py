@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_state_dict,
@@ -22,6 +22,24 @@ from flow_control.utils.registry import Registry
 from ..launch_config import LaunchConfig
 
 logger = get_logger(__name__)
+
+
+class TorchCompileConfig(BaseModel):
+    """Options passed to :meth:`torch.nn.Module.compile`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str = "inductor"
+    mode: str | None = None
+    fullgraph: bool = False
+    dynamic: bool | None = False
+    options: dict[str, str | int | bool] | None = None
+    recompile_limit: int | None = None
+
+    def apply(self, module: torch.nn.Module) -> None:
+        kwargs = self.model_dump(exclude_none=True)
+        logger.info(f"Compiling {type(module).__name__} with torch.compile: {kwargs}")
+        module.compile(**kwargs)
 
 
 class BaseTrainer(BaseModel):
@@ -39,6 +57,8 @@ class BaseTrainer(BaseModel):
     NUMA nodes or NVLink domain because of the communication overhead.
     """
     gradient_checkpointing: bool = True
+    torch_compile: TorchCompileConfig | None = None
+    """Compile the transformer after FSDP wrapping and checkpoint restoration."""
 
     # ------------------------------ Lifecycle hooks ----------------------------- #
     # The launchable entry points (launch / seed / export) construct a trainer and
@@ -171,6 +191,10 @@ class BaseTrainer(BaseModel):
             devutil.set_rng_state(acc_state, self.device)
         logger.info("Restored RNG state from checkpoint.")
 
+    def compile_transformer(self, model: BaseModelAdapter) -> None:
+        if self.torch_compile is not None:
+            self.torch_compile.apply(model.transformer)
+
     def load_transformer_from_seed(
         self,
         model: BaseModelAdapter,
@@ -239,6 +263,8 @@ class BaseTrainer(BaseModel):
                 planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
             )
             logger.info("Seed checkpoint loaded into transformer.")
+
+        self.compile_transformer(model)
         return model
 
     def save_transformer_to_seed(

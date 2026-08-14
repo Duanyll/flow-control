@@ -1,6 +1,7 @@
 from .base import (
     BaseTrainer,
     LaunchConfig,
+    TorchCompileConfig,
     distributed_main,
     main_process_first,
     main_process_only,
@@ -17,6 +18,7 @@ __all__ = [
     "DcpMixin",
     "BaseTrainer",
     "LaunchConfig",
+    "TorchCompileConfig",
     "LoggingMixin",
     "Rollout",
     "RolloutMixin",
