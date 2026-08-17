@@ -50,7 +50,7 @@ import diffusers
 import torch
 import torch.multiprocessing as mp
 import transformers
-from rich import print
+from rich import print, reconfigure
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -75,6 +75,10 @@ LOG_DIR = Path(os.environ["LOG_DIR"]) if os.getenv("LOG_DIR") else _default_log_
 LOG_FILE_TEMPLATE = "rank{rank:04d}.log"
 TRACEBACK_FILE_TEMPLATE = "rank{rank:04d}.traceback.log"
 TRACEBACK_SEPARATOR = "=" * 80
+# Rich falls back to 80x25 when there is no PTY / TERM is dumb.  80 is too
+# narrow for RichHandler (timestamp + level + logger + path).
+_REDIRECTED_CONSOLE_WIDTH = 160
+_REDIRECTED_CONSOLE_HEIGHT = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,50 @@ def _get_env_int(name: str) -> int | None:
     with contextlib.suppress(ValueError):
         return int(value)
     return None
+
+
+def _is_real_tty() -> bool:
+    """True when stdout is a TTY that Rich will actually query for size."""
+    with contextlib.suppress(Exception):
+        if not sys.stdout.isatty():
+            return False
+        # Rich treats these as dumb terminals and ignores get_terminal_size /
+        # a width-only Console(width=...) unless height is also pinned.
+        return os.getenv("TERM", "").lower() not in ("dumb", "unknown")
+    return False
+
+
+def _console_size_override() -> tuple[int, int] | None:
+    """Fixed (width, height) when Rich cannot see a real terminal.
+
+    Detection order inside ``rich.console.Console.size``:
+
+    1. Both ``width`` and ``height`` were passed to ``Console()``.
+    2. ``TERM`` is ``dumb``/``unknown`` **and** Rich thinks it is a terminal
+       (``FORCE_COLOR`` counts) → hard-coded **80x25**, even if ``width=``
+       or ``$COLUMNS`` was set.  Height must be pinned to escape this.
+    3. ``os.get_terminal_size()`` on stdin/stdout/stderr.
+    4. ``$COLUMNS`` / ``$LINES``.
+    5. Hard-coded 80x25.
+
+    Slurm ``#SBATCH --output=`` jobs have no PTY, so they land in (5) unless
+    we override.  Returns ``None`` on a real TTY so resize still works.
+    """
+    if _is_real_tty():
+        return None
+    columns = os.getenv("COLUMNS")
+    width = (
+        int(columns)
+        if columns is not None and columns.isdigit()
+        else _REDIRECTED_CONSOLE_WIDTH
+    )
+    lines = os.getenv("LINES")
+    height = (
+        int(lines)
+        if lines is not None and lines.isdigit()
+        else _REDIRECTED_CONSOLE_HEIGHT
+    )
+    return width, height
 
 
 def _build_process_context() -> ProcessContext:
@@ -465,7 +513,18 @@ else:
     _reset_traceback_file()
     _configure_record_factory()
 
-    console = Console(quiet=not process_context.console_enabled)
+    override = _console_size_override()
+    width, height = override if override is not None else (None, None)
+    if override is not None:
+        # Both must be set: a width-only Console() is ignored when TERM=dumb.
+        os.environ.setdefault("COLUMNS", str(width))
+        os.environ.setdefault("LINES", str(height))
+        reconfigure(width=width, height=height)
+    console = Console(
+        quiet=not process_context.console_enabled,
+        width=width,
+        height=height,
+    )
     _rich_handler = RichHandler(
         console=console, rich_tracebacks=True, enable_link_path=False
     )
@@ -500,3 +559,11 @@ if __name__ == "__main__":
     print(f"process_type: {process_type}")
     print(f"log file: {log_file_path}")
     print(f"traceback file: {traceback_file_path}")
+    print(f"stdout.isatty: {sys.stdout.isatty()}")
+    print(f"TERM: {os.getenv('TERM')}")
+    print(f"COLUMNS: {os.getenv('COLUMNS')} LINES: {os.getenv('LINES')}")
+    print(f"console.size: {console.size}")
+    logger.info(
+        "Long message to show wrap width: "
+        + "the quick brown fox jumps over the lazy dog. " * 4
+    )
