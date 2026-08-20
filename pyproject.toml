@@ -45,6 +45,9 @@ dev = [
     "py-spy>=0.4.1",
     "scipy>=1.17.1",
 ]
+iqa = [
+    "pyiqa>=0.1.16",
+]
 # OCR reward backend (flow_control/rewards/ocr.py). A dependency-group rather
 # than an extra so `default-groups` can keep it installed across `uv sync`.
 ocr = [

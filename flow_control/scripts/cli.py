@@ -49,6 +49,64 @@ def main():
         help="DCP checkpoint directory. Defaults to latest step.",
     )
 
+    lora_sub = subparsers.add_parser(
+        "lora", help="Offline Diffusers LoRA conversion and fusion."
+    )
+    lora_actions = lora_sub.add_subparsers(dest="lora_action", required=True)
+
+    def add_lora_config(action: argparse.ArgumentParser) -> None:
+        action.add_argument(
+            "config_path", type=str, help="Training/model configuration file."
+        )
+        add_config_patch_arguments(action)
+
+    def add_external_lora(action: argparse.ArgumentParser) -> None:
+        action.add_argument("--lora", required=True, help="LoRA path or Hub id.")
+        action.add_argument(
+            "--weight-name",
+            default=None,
+            help="Specific input weight file inside a directory or Hub repo.",
+        )
+        action.add_argument("--output-dir", required=True)
+
+    lora_export = lora_actions.add_parser(
+        "export", help="Export DCP training weights to Diffusers LoRA."
+    )
+    add_lora_config(lora_export)
+    lora_export.add_argument("--checkpoint-dir", required=True)
+    lora_export.add_argument(
+        "--weights",
+        choices=("current", "ema", "ema_old"),
+        default="current",
+    )
+    lora_export.add_argument("--output-dir", required=True)
+    lora_export.add_argument(
+        "--weight-name", default="pytorch_lora_weights.safetensors"
+    )
+
+    lora_import = lora_actions.add_parser(
+        "import", help="Convert a Diffusers-compatible LoRA to transformer-only DCP."
+    )
+    add_lora_config(lora_import)
+    add_external_lora(lora_import)
+
+    lora_convert = lora_actions.add_parser(
+        "convert",
+        help="Normalize a Diffusers-compatible LoRA through its official loader.",
+    )
+    add_lora_config(lora_convert)
+    add_external_lora(lora_convert)
+    lora_convert.add_argument(
+        "--output-weight-name", default="pytorch_lora_weights.safetensors"
+    )
+
+    lora_fuse = lora_actions.add_parser(
+        "fuse", help="Fuse a LoRA into a fresh Diffusers transformer on CPU."
+    )
+    add_lora_config(lora_fuse)
+    add_external_lora(lora_fuse)
+    lora_fuse.add_argument("--scale", type=float, default=1.0)
+
     report_sub = subparsers.add_parser(
         "report",
         help="Append a Markdown report to an existing trackio run.",
@@ -105,6 +163,49 @@ def main():
     _dispatch(args)
 
 
+def _dispatch_lora(args: argparse.Namespace) -> None:
+    config = load_config_file(
+        args.config_path, args.config_updates, args.config_removes
+    )
+    load_plugins(config.get("imports", []))
+
+    from flow_control.scripts import lora
+
+    if args.lora_action == "export":
+        lora.export_dcp(
+            config,
+            checkpoint_dir=args.checkpoint_dir,
+            output_dir=args.output_dir,
+            checkpoint_weights=args.weights,
+            weight_name=args.weight_name,
+        )
+    elif args.lora_action == "import":
+        lora.import_dcp(
+            config,
+            lora_path=args.lora,
+            output_dir=args.output_dir,
+            weight_name=args.weight_name,
+        )
+    elif args.lora_action == "convert":
+        lora.convert(
+            config,
+            lora_path=args.lora,
+            output_dir=args.output_dir,
+            input_weight_name=args.weight_name,
+            output_weight_name=args.output_weight_name,
+        )
+    elif args.lora_action == "fuse":
+        lora.fuse(
+            config,
+            lora_path=args.lora,
+            output_dir=args.output_dir,
+            scale=args.scale,
+            weight_name=args.weight_name,
+        )
+    else:
+        raise ValueError(f"Unknown LoRA action: {args.lora_action}")
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     """Lazy-import and run the appropriate subcommand."""
     command = args.command
@@ -132,6 +233,10 @@ def _dispatch(args: argparse.Namespace) -> None:
             step=args.step,
             trackio_dir=args.trackio_dir,
         )
+        return
+
+    if command == "lora":
+        _dispatch_lora(args)
         return
 
     # ``launch`` re-spawns subprocesses that re-load the config file themselves,

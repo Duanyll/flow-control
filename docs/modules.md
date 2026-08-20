@@ -165,4 +165,5 @@
 | `reward-server` | 独立奖励计算服务 |
 | `serve` | Gradio 推理 Web UI |
 | `export` | 将 DCP 检查点导出为 HuggingFace 格式 |
+| `lora` | 在独立 CPU 进程中转换 DCP/Diffusers LoRA 或将 LoRA 融合进底模 |
 | `schema` | 生成各 Trainer / Config 的 JSON Schema |
