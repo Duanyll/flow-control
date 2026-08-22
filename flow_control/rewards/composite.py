@@ -33,10 +33,16 @@ class CompositeReward(BaseReward):
         self._reward_instances = []
         total_weight = 0.0
         for reward_conf in self.rewards:
-            if isinstance(reward_conf, dict):
+            if isinstance(reward_conf, dict | str):
                 self._reward_instances.append(parse_reward(reward_conf))
             elif isinstance(reward_conf, BaseReward):
                 self._reward_instances.append(reward_conf)
+            else:
+                raise ValueError(
+                    "CompositeReward children must be reward config dicts, "
+                    "bare tag strings, or BaseReward instances; got "
+                    f"{type(reward_conf).__name__}."
+                )
             total_weight += self._reward_instances[-1].weight
         if not math.isclose(total_weight, 1.0):
             logger.warning(

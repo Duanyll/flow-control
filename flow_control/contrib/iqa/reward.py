@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 from typing import Any, Literal
 
 import torch
@@ -7,12 +9,25 @@ from flow_control.rewards.base import BaseReward, reward_registry
 from flow_control.utils import device as devutil
 
 
+def _import_pyiqa(module: str = "pyiqa") -> Any:
+    """Import the optional IQA backend with an actionable error."""
+    try:
+        return importlib.import_module(module)
+    except ModuleNotFoundError as error:
+        if error.name == "pyiqa":
+            raise ModuleNotFoundError(
+                "PyIQAReward requires the optional iqa dependency group; "
+                "install it with `uv sync --group iqa`."
+            ) from error
+        raise
+
+
 def _default_config(name: str) -> dict[str, Any]:
     """Look up a metric's pyiqa default config, with a clear error for typos."""
-    from pyiqa.default_model_configs import DEFAULT_CONFIGS
+    default_configs = _import_pyiqa("pyiqa.default_model_configs").DEFAULT_CONFIGS
 
     try:
-        return DEFAULT_CONFIGS[name]
+        return default_configs[name]
     except KeyError:
         raise ValueError(
             f"Unknown pyiqa metric {name!r}. "
@@ -104,7 +119,7 @@ class PyIQAReward(BaseReward):
         return fields
 
     def _load_model(self, device: torch.device) -> None:
-        import pyiqa
+        pyiqa = _import_pyiqa()
 
         self._device = device
         self._models = [
@@ -147,6 +162,10 @@ class PyIQAReward(BaseReward):
 
 if __name__ == "__main__":
     from rich import print
+
+    if importlib.util.find_spec("pyiqa") is None:
+        print("[yellow]pyiqa is not installed; skipping IQA self-test.[/yellow]")
+        raise SystemExit(0)
 
     device = devutil.default_device()
     generator = torch.Generator().manual_seed(0)

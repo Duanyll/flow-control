@@ -1,115 +1,104 @@
-import math
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Literal
+from abc import ABC
+from typing import ClassVar, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.utils.registry import Registry
 
-
-class SolverState:
-    """Marker base class for per-solver runtime state."""
-
-
-@dataclass(slots=True)
-class StepResult:
-    next_latents: torch.Tensor
-    log_prob: torch.Tensor
-    mean: torch.Tensor
-    std_dev: torch.Tensor
-    state: SolverState | None = None
+from ..plan import (
+    RecordedStep,
+    ReplayStep,
+    SamplingPlan,
+    StepContext,
+    Transition,
+    TransitionGen,
+)
 
 
 class BaseSolver(BaseModel, ABC):
     type: Literal["base"] = "base"
     model_config = ConfigDict(extra="forbid")
 
+    supports_step_log_prob: ClassVar[bool] = False
+    """Static, config-independent capability: can this solver's stochastic
+    steps be replayed for step-wise log-probs? Whether a given transition is
+    actually stochastic/recorded is decided by its own ``eta`` / ``record``."""
+
     eta: float = 0.0
 
-    def init_state(self, num_steps: int) -> SolverState | None:
-        return None
+    def plan(self, sigmas: list[float]) -> SamplingPlan:
+        """Compile a sigma grid into transitions.
 
-    @property
-    def supports_step_log_prob(self) -> bool:
+        This default is for solvers whose ``eta`` directly expresses per-step
+        stochasticity (flow/ddim/cps/dance); the terminal transition is always
+        deterministic. Other solvers must override and write their actual
+        per-step semantics into the transitions.
+        """
+        return [
+            Transition(
+                solver=self,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=self.eta if i < len(sigmas) - 2 else 0.0,
+            )
+            for i, (sigma, sigma_next) in enumerate(
+                zip(sigmas[:-1], sigmas[1:], strict=True)
+            )
+        ]
+
+    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+        """Generator performing one transition; yields EvalRequests for velocities."""
+        raise NotImplementedError(
+            f"Solver '{self.type}' must implement run_transition()."
+        )
+
+    def make_replay(self, sigma: float, sigma_next: float, eta: float) -> ReplayStep:
+        """Build the pure-float replay descriptor for one transition.
+
+        The default is the null descriptor used when recording steps that have
+        no step-wise transition density (deterministic multistep solvers, SA);
+        its ``logprob`` raises if ever invoked.
+        """
+        return ReplayStep(sigma=sigma, sigma_next=sigma_next)
+
+    def requires_replay_state(self, plan: SamplingPlan, index: int) -> bool:
+        """Whether a recorded transition must snapshot pre-step solver state."""
         return False
 
-    def replay_step(
+    def invert(self, plan: SamplingPlan) -> SamplingPlan:
+        raise NotImplementedError(
+            f"Solver '{self.type}' does not support plan inversion."
+        )
+
+    def _make_recorded_step(
         self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor,
-        state: SolverState | None = None,
-    ) -> StepResult:
-        return self.step(
-            velocity=velocity,
-            latents=latents,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            prev_sample=prev_sample,
-            eta=self.eta,
-            state=state,
+        tr: Transition,
+        ctx: StepContext,
+        next_latents: torch.Tensor,
+        log_prob: torch.Tensor,
+        replay: ReplayStep | None = None,
+    ) -> RecordedStep:
+        """Build the RecordedStep for one recorded transition.
+
+        ``replay`` overrides the default ``make_replay`` descriptor for
+        solvers whose transitions carry extra plan-compiled fields (flash).
+
+        ctx.guidance_state advances per eval, so by the time a transition
+        builds its RecordedStep it may already be post-eval; the executor
+        snapshots the pre-first-eval state at every transition boundary
+        (execution contract rule 7).
+        """
+        return RecordedStep(
+            latent_t=ctx.latents,
+            latent_next=next_latents,
+            log_prob=log_prob,
+            replay=replay
+            if replay is not None
+            else self.make_replay(tr.sigma, tr.sigma_next, tr.eta),
+            solver_state=ctx.solver_state if tr.save_solver_state else None,
+            guidance_state=ctx.pre_transition_guidance_state,
         )
-
-    @abstractmethod
-    def step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor | None = None,
-        eta: float | None = None,
-        state: SolverState | None = None,
-        generator: torch.Generator | None = None,
-    ) -> StepResult:
-        raise NotImplementedError()
-
-    @staticmethod
-    def _deterministic_step(
-        latents: torch.Tensor,
-        velocity: torch.Tensor,
-        dt: torch.Tensor,
-        state: SolverState | None = None,
-    ) -> StepResult:
-        next_latents = latents + velocity * dt
-        return StepResult(
-            next_latents=next_latents,
-            log_prob=torch.zeros(latents.shape[0], device=latents.device),
-            mean=next_latents,
-            std_dev=torch.tensor(0.0, device=latents.device),
-            state=state,
-        )
-
-    @staticmethod
-    def _zero_log_prob(latents: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(latents.shape[0], device=latents.device)
-
-    @staticmethod
-    def _scalar_like(value: torch.Tensor | float, ref: torch.Tensor) -> torch.Tensor:
-        if isinstance(value, torch.Tensor):
-            return value.squeeze() if value.ndim > 0 else value
-        return torch.tensor(value, device=ref.device, dtype=ref.dtype)
-
-    @staticmethod
-    def _normal_log_prob(
-        sample: torch.Tensor,
-        mean: torch.Tensor,
-        scale: torch.Tensor,
-    ) -> torch.Tensor:
-        log_prob = (
-            -((sample.detach() - mean) ** 2) / (2 * scale**2)
-            - torch.log(scale)
-            - torch.log(
-                torch.sqrt(
-                    torch.tensor(2 * math.pi, device=sample.device, dtype=sample.dtype)
-                )
-            )
-        )
-        return log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
 
     @staticmethod
     def _velocity_to_x0(

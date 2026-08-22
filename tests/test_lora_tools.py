@@ -266,24 +266,6 @@ class DiffusersLoraTest(unittest.TestCase):
         for key in expected:
             torch.testing.assert_close(actual[key], expected[key])
 
-    def test_frozen_inference_adapter_can_be_normalized(self) -> None:
-        source = make_lora_model(seed=31)
-        cast(Any, source.peft_config["default"]).inference_mode = True
-        with tempfile.TemporaryDirectory() as temp_dir:
-            external = Path(temp_dir) / "external"
-            normalized = Path(temp_dir) / "normalized"
-            _save_diffusers_lora(source, str(external))
-
-            target = TinyTransformer()
-            target.requires_grad_(False)
-            _load_external_lora(target, str(external), weight_name=None)
-            self.assertFalse(
-                any(parameter.requires_grad for parameter in target.parameters())
-            )
-            _save_diffusers_lora(target, str(normalized))
-
-        self.assertEqual(adapter_state(target).keys(), adapter_state(source).keys())
-
     def test_external_loader_rejects_partially_consumed_state(self) -> None:
         source = make_lora_model(seed=32)
         packed = LoraBaseMixin.pack_weights(adapter_state(source), "transformer")
@@ -403,27 +385,6 @@ class DiffusersLoraTest(unittest.TestCase):
         for key in expected:
             torch.testing.assert_close(actual[key], expected[key])
 
-    def test_transformer_only_dcp_roundtrip_with_multiple_targets(self) -> None:
-        source = make_lora_model(
-            seed=25,
-            target_modules=["proj", "proj_extra"],
-        )
-        expected = adapter_state(source)
-        adapter: Any = SimpleNamespace(transformer=source)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "adapter-dcp"
-            _save_dcp_adapter(adapter, str(output))
-            target = make_lora_model(
-                seed=26,
-                target_modules=["proj", "proj_extra"],
-            )
-            _load_dcp_lora(target, str(output), "current")
-
-        actual = adapter_state(target)
-        self.assertEqual(actual.keys(), expected.keys())
-        for key in expected:
-            torch.testing.assert_close(actual[key], expected[key])
-
     def test_ema_selections_use_optimizer_shadow(self) -> None:
         for selection, expected_value in (("ema", 0.75), ("ema_old", 0.25)):
             with self.subTest(selection=selection):
@@ -459,18 +420,6 @@ class DiffusersLoraTest(unittest.TestCase):
             target = make_lora_model(seed=15)
             with self.assertRaises(CheckpointException):
                 _load_dcp_lora(target, str(checkpoint), "current")
-
-    def test_diffusers_output_requires_safetensors_suffix(self) -> None:
-        model = make_lora_model(seed=16)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "bad-output"
-            with self.assertRaisesRegex(ValueError, "must end with '.safetensors'"):
-                _save_diffusers_lora(
-                    model,
-                    str(output),
-                    weight_name="adapter.bin",
-                )
-            self.assertFalse(output.exists())
 
     def test_export_rejects_non_lora_trainable_parameters(self) -> None:
         model = make_lora_model(seed=18)

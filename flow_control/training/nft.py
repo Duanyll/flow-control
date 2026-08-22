@@ -30,7 +30,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Sampler
+from flow_control.samplers import Phase, Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.tensor import deep_move_to_device
@@ -75,6 +75,7 @@ class NftCachedTargets:
 class NftTrainItem:
     rollout_idx: int
     timestep_idx: int
+    sigma: float
     cached_targets: NftCachedTargets | None = None
 
 
@@ -83,6 +84,7 @@ class _NftLossInput:
     batch: Any
     negative_batch: Any | None
     timestep: torch.Tensor
+    sigma: float
     x0: torch.Tensor
     noisy_latents: torch.Tensor
     advantage: torch.Tensor
@@ -166,7 +168,6 @@ class NftTrainer(
         "train/loss": "Loss: {v:.4f}",
         "val/reward_mean": "Val R̄: {v:.3f}",
     }
-    _rollout_needs_trajectory: bool = False
 
     # ------------------------------- Lazy state --------------------------------- #
     _optimizer: torch.optim.Optimizer
@@ -176,12 +177,40 @@ class NftTrainer(
     _init_backup_optimizer: InitBackupOptimizer | None = None
     _current_step: int = 0
     _current_epoch: int = 0
+    _nft_guidance_checked: bool = False
 
     # ------------------------------- Properties --------------------------------- #
 
     @property
     def transformer(self):
         return self.model.transformer
+
+    def _build_rollout_phases(
+        self,
+        batch: Any,
+        generator: torch.Generator,
+    ) -> tuple[list[Phase], Any]:
+        phases, negative_batch = super()._build_rollout_phases(batch, generator)
+        if not self._nft_guidance_checked:
+            if any(phase.guidance != self.rollout_sampler.guidance for phase in phases):
+                warn_once(
+                    logger,
+                    "NFT rollout_recipe contains a phase-level guidance override, "
+                    "but NFT teacher, reference, and policy predictions use "
+                    "rollout_sampler.guidance. The generated endpoint and training "
+                    "objective therefore use different policies.",
+                )
+            if self.rollout_sampler.guidance.init_state() is not None:
+                warn_once(
+                    logger,
+                    "NFT uses stateful rollout_sampler guidance, but its teacher, "
+                    "reference, and policy predictions evaluate selected timesteps "
+                    "with fresh guidance state rather than the rollout's historical "
+                    "state. The training objective therefore does not exactly match "
+                    "the generated policy.",
+                )
+            self._nft_guidance_checked = True
+        return phases, negative_batch
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -304,24 +333,8 @@ class NftTrainer(
             with apply_init_maybe(self._init_backup_optimizer):
                 yield
 
-    def _resolve_training_timestep(
-        self,
-        rollout: Rollout,
-        timestep_idx: int,
-    ) -> torch.Tensor:
-        rollout_timesteps = rollout.trajectory.timesteps
-        if rollout_timesteps is None:
-            t = self.timestep_weighting.sample_timesteps(1)
-            return t.to(device=self.device, dtype=torch.float32)
-
-        if timestep_idx < 0 or timestep_idx >= rollout_timesteps.shape[0]:
-            raise IndexError(
-                f"Timestep index {timestep_idx} is out of range for rollout "
-                f"with {rollout_timesteps.shape[0]} timesteps."
-            )
-        return rollout_timesteps[timestep_idx : timestep_idx + 1].to(
-            device=self.device, dtype=torch.float32
-        )
+    def _make_training_timestep(self, sigma: float) -> torch.Tensor:
+        return torch.tensor([sigma], device=self.device, dtype=torch.float32)
 
     # -------------------------------- NFT loss ---------------------------------- #
 
@@ -329,7 +342,7 @@ class NftTrainer(
         self,
         rollout: Rollout,
         rollout_advantages: torch.Tensor,
-        timestep_idx: int,
+        sigma: float,
         cached_targets: NftCachedTargets | None = None,
     ) -> _NftLossInput:
         batch = deep_move_to_device(rollout.batch, self.device)
@@ -350,7 +363,7 @@ class NftTrainer(
             if cached_targets.ref_prediction is not None:
                 ref_prediction = cached_targets.ref_prediction.to(device=self.device)
         else:
-            t = self._resolve_training_timestep(rollout, timestep_idx)
+            t = self._make_training_timestep(sigma)
             noise = torch.randn_like(x0)
             t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
             xt = (1.0 - t_expanded) * x0 + t_expanded * noise
@@ -360,6 +373,7 @@ class NftTrainer(
             batch=batch,
             negative_batch=negative_batch,
             timestep=t,
+            sigma=sigma,
             x0=x0,
             noisy_latents=xt,
             advantage=rollout_advantages.to(device=self.device),
@@ -459,19 +473,20 @@ class NftTrainer(
             self._prepare_nft_loss_input(
                 rollouts[item.rollout_idx],
                 advantages[item.rollout_idx],
-                item.timestep_idx,
+                item.sigma,
                 item.cached_targets,
             )
             for item in items
         ]
         batches = [item.batch for item in prepared]
         timesteps = [item.timestep for item in prepared]
+        sigmas = [item.sigma for item in prepared]
         negative_batches = [item.negative_batch for item in prepared]
 
         if any(item.old_prediction is None for item in prepared):
             with torch.no_grad(), apply_ema_maybe(self._old_ema):
                 old_predictions = self._predict_batched(
-                    batches, timesteps, negative_batches
+                    batches, timesteps, sigmas, negative_batches
                 )
             for item, prediction in zip(prepared, old_predictions, strict=True):
                 if item.old_prediction is None:
@@ -480,14 +495,14 @@ class NftTrainer(
         if self.kl_beta > 0 and any(item.ref_prediction is None for item in prepared):
             with torch.no_grad(), self.reference_model():
                 ref_predictions = self._predict_batched(
-                    batches, timesteps, negative_batches
+                    batches, timesteps, sigmas, negative_batches
                 )
             for item, prediction in zip(prepared, ref_predictions, strict=True):
                 if item.ref_prediction is None:
                     item.ref_prediction = prediction.detach()
 
         forward_predictions = self._predict_batched(
-            batches, timesteps, negative_batches
+            batches, timesteps, sigmas, negative_batches
         )
         return torch.stack(
             [
@@ -500,23 +515,26 @@ class NftTrainer(
         self,
         batches: list[Any],
         timesteps: list[torch.Tensor],
+        sigmas: list[float],
         negative_batches: list[Any | None],
     ) -> list[torch.Tensor]:
-        """Get model velocity prediction, optionally with CFG."""
-        sampler = self.rollout_sampler
-        if sampler.cfg_scale > 1.0:
-            return sampler.get_guided_velocity(
-                model=self.model,
-                batches=batches,
-                negative_batches=negative_batches,
-                latents=[batch["noisy_latents"] for batch in batches],
-                timesteps=timesteps,
-            )
-        return self.model.predict_velocity_batched(batches, timesteps)
+        """Get the guided velocity prediction matching the rollout sampler.
+
+        ``get_guided_velocity`` itself skips the negative pass (and returns
+        the conditional velocity) when the guidance needs no negative branch.
+        """
+        return self.rollout_sampler.get_guided_velocity(
+            model=self.model,
+            batches=batches,
+            negative_batches=negative_batches,
+            latents=[batch["noisy_latents"] for batch in batches],
+            timesteps=timesteps,
+            sigmas=sigmas,
+        )
 
     # ----------------------------- Training phase ------------------------------- #
 
-    def _eligible_timestep_indices(self, rollout: Rollout) -> list[int]:
+    def _eligible_timestep_indices(self, sigmas: list[float]) -> list[int]:
         """Rollout-grid indices eligible for NFT training.
 
         ``timestep_range`` keeps only the noisiest fraction of the trajectory
@@ -529,20 +547,17 @@ class NftTrainer(
         ``shift`` makes image-size dependent — mixed-resolution data could then
         skew per-rank totals. Fixed-resolution workloads are unaffected.
         """
-        rollout_timesteps = rollout.trajectory.timesteps
-        if rollout_timesteps is None:
-            return list(range(self.rollout_sampler.steps))
-        total = rollout_timesteps.shape[0]
+        total = len(sigmas)
         if not 0.0 < self.timestep_range <= 1.0:
             raise ValueError(
                 f"timestep_range must be in (0, 1], got {self.timestep_range}."
             )
         if self.timestep_range >= 1.0:
             return list(range(total))
-        threshold = 1.0 - self.timestep_range
-        eligible = (
-            (rollout_timesteps.float() >= threshold).nonzero(as_tuple=True)[0].tolist()
-        )
+        # Match torch's former float32 tensor/scalar comparison at the window
+        # boundary while keeping eligibility entirely on the CPU.
+        threshold = torch.tensor(1.0 - self.timestep_range, dtype=torch.float32).item()
+        eligible = [index for index, sigma in enumerate(sigmas) if sigma >= threshold]
         if not eligible:
             warn_once(
                 logger,
@@ -585,25 +600,35 @@ class NftTrainer(
         return torch.randperm(n)[:k].tolist()
 
     def _build_inner_epoch_train_items(
-        self, rollouts: list[Rollout]
+        self,
+        rollouts: list[Rollout],
+        rollout_sigmas: list[list[float]],
     ) -> list[NftTrainItem]:
         train_items: list[NftTrainItem] = []
         for rollout_idx in torch.randperm(len(rollouts)).tolist():
-            rollout = rollouts[rollout_idx]
-            eligible = self._eligible_timestep_indices(rollout)
+            eligible = self._eligible_timestep_indices(rollout_sigmas[rollout_idx])
             selected_timesteps = self._resolve_num_train_timesteps(len(eligible))
             positions = self._select_timestep_positions(
                 len(eligible), selected_timesteps
             )
             train_items.extend(
-                NftTrainItem(rollout_idx=rollout_idx, timestep_idx=eligible[p])
+                NftTrainItem(
+                    rollout_idx=rollout_idx,
+                    timestep_idx=eligible[p],
+                    sigma=rollout_sigmas[rollout_idx][eligible[p]],
+                )
                 for p in positions
             )
         return train_items
 
     def _build_train_plan(self, rollouts: list[Rollout]) -> list[list[NftTrainItem]]:
+        # Resolve the scalar plan data once per rollout. For device-backed
+        # storage this is one host transfer here, never one sync per model eval.
+        rollout_sigmas = [
+            rollout.trajectory.timesteps.float().tolist() for rollout in rollouts
+        ]
         return [
-            self._build_inner_epoch_train_items(rollouts)
+            self._build_inner_epoch_train_items(rollouts, rollout_sigmas)
             for _ in range(self.num_inner_epochs)
         ]
 
@@ -620,7 +645,7 @@ class NftTrainer(
             rollout = rollouts[item.rollout_idx]
             batch = deep_move_to_device(rollout.batch, self.device)
             x0 = batch["clean_latents"].float()
-            t = self._resolve_training_timestep(rollout, item.timestep_idx)
+            t = self._make_training_timestep(item.sigma)
             t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
             noise = torch.randn_like(x0)
             xt = (1.0 - t_expanded) * x0 + t_expanded * noise
@@ -642,6 +667,7 @@ class NftTrainer(
         for micro_items in self.iter_train_micro_batches(flat_items):
             batches: list[Any] = []
             timesteps: list[torch.Tensor] = []
+            sigmas: list[float] = []
             negative_batches: list[Any | None] = []
             cached_targets_list: list[NftCachedTargets] = []
             for item in micro_items:
@@ -658,10 +684,13 @@ class NftTrainer(
                 batch["noisy_latents"] = cached_targets.noisy_latents
                 batches.append(batch)
                 timesteps.append(cached_targets.timestep)
+                sigmas.append(item.sigma)
                 negative_batches.append(negative_batch)
                 cached_targets_list.append(cached_targets)
 
-            predictions = self._predict_batched(batches, timesteps, negative_batches)
+            predictions = self._predict_batched(
+                batches, timesteps, sigmas, negative_batches
+            )
             for cached_targets, prediction in zip(
                 cached_targets_list, predictions, strict=True
             ):

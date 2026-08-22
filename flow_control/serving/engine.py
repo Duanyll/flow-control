@@ -15,16 +15,22 @@ from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
-from flow_control.samplers import Sampler, SampleRequest
+from flow_control.samplers import ClassifierFreeGuidance, Sampler, SampleRequest
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.logging import get_logger
+from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
 
 from .config import ServeConfig
 
 logger = get_logger(__name__)
+
+
+def cfg_scale_for_display(sampler: Sampler) -> float:
+    """The serving UI's ``cfg_scale`` value; 1.0 for non-CFG guidance."""
+    guidance = sampler.guidance
+    return guidance.scale if isinstance(guidance, ClassifierFreeGuidance) else 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -500,11 +506,18 @@ class ServingEngine:
                     use_ema,
                 )
 
-            # Sampler overrides
+            # Sampler overrides (config mutation at the request boundary)
             if steps is not None:
                 self.sampler.steps = steps
             if cfg_scale is not None:
-                self.sampler.cfg_scale = cfg_scale
+                if isinstance(self.sampler.guidance, ClassifierFreeGuidance):
+                    self.sampler.guidance.scale = cfg_scale
+                else:
+                    warn_once(
+                        logger,
+                        "The request's cfg_scale is ignored: the configured "
+                        "sampler guidance is not classifier-free guidance.",
+                    )
             seed = seed if seed is not None else self.sampler.seed
 
             # --- encode on processor_device (async) ---
@@ -559,7 +572,7 @@ class ServingEngine:
         batch = deep_cast_float_dtype(batch, self.model.dtype)
         negative_batch: Any = (
             self.processor.get_negative_batch(batch)
-            if self.sampler.cfg_scale > 1.0
+            if self.sampler.guidance.needs_negative()
             else None
         )
 
@@ -607,7 +620,7 @@ class ServingEngine:
         info: dict[str, Any] = {
             "seed": seed,
             "steps": self.sampler.steps,
-            "cfg_scale": self.sampler.cfg_scale,
+            "cfg_scale": cfg_scale_for_display(self.sampler),
             "time": f"{elapsed:.1f}s",
         }
         for k, v in batch.items():

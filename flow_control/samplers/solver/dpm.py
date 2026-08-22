@@ -3,18 +3,34 @@ from typing import Literal
 
 import torch
 
-from .base import BaseSolver, SolverState, StepResult, solver_registry
+from ..plan import (
+    EvalRequest,
+    SamplingPlan,
+    SolverRuntimeState,
+    StepContext,
+    Transition,
+    TransitionGen,
+    TransitionResult,
+    zero_log_prob,
+)
+from .base import BaseSolver, solver_registry
 from .ddim import DDIMSolver
 
 
-@dataclass(slots=True)
-class DPMSolverState(SolverState):
-    order: int
-    num_steps: int
-    step_index: int = 0
-    lower_order_nums: int = 0
-    model_outputs: tuple[torch.Tensor | None, ...] = ()
-    sigmas: tuple[torch.Tensor | None, ...] = ()
+@dataclass(frozen=True, slots=True)
+class DpmTransition(Transition):
+    """DPM transition with plan-compiled per-step order metadata."""
+
+    lower_order_final: bool = False
+    """Final grid step: fall back to the deterministic DDIM update."""
+
+
+@dataclass(frozen=True, slots=True)
+class DpmRuntimeState(SolverRuntimeState):
+    """Rolling x0/sigma history (most recent last), rebuilt per transition."""
+
+    x0_history: tuple[torch.Tensor, ...]
+    sigma_history: tuple[float, ...]
 
 
 @solver_registry.register("dpm")
@@ -22,103 +38,74 @@ class DPMSolver(BaseSolver):
     type: Literal["dpm"] = "dpm"
     order: Literal[1, 2]
 
-    @property
-    def supports_step_log_prob(self) -> bool:
-        return False
-
-    def init_state(self, num_steps: int) -> DPMSolverState:
-        return DPMSolverState(
-            order=self.order,
-            num_steps=num_steps,
-            model_outputs=tuple(None for _ in range(self.order)),
-            sigmas=tuple(None for _ in range(self.order)),
-        )
-
-    def step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor | None = None,
-        eta: float | None = None,
-        state: SolverState | None = None,
-        generator: torch.Generator | None = None,
-    ) -> StepResult:
-        if prev_sample is not None:
-            msg = f"{self.type} is deterministic and does not support replay log-prob."
-            raise ValueError(msg)
-        if not isinstance(state, DPMSolverState):
-            msg = f"{self.type} requires DPMSolverState."
-            raise TypeError(msg)
-
-        model_output = self._velocity_to_x0(velocity, latents, sigma)
-        model_outputs = (*state.model_outputs[1:], model_output)
-        sigma_history = (*state.sigmas[1:], sigma)
-
-        lower_order_final = state.step_index == state.num_steps - 1
-        lower_order_second = (
-            state.step_index == state.num_steps - 2 and state.num_steps < 15
-        )
-
-        if self.order == 1 or state.lower_order_nums < 1 or lower_order_final:
-            if state.step_index == 0 or lower_order_final:
-                next_latents, mean, _ = DDIMSolver._ddim_update(
-                    pred_original_sample=model_output,
-                    sample=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                    eta=0.0,
-                    generator=generator,
-                )
-            else:
-                next_latents = self._dpm_solver_first_order_update(
-                    model_output=model_output,
-                    sample=latents,
-                    sigma=sigma,
-                    sigma_next=sigma_next,
-                )
-                mean = next_latents
-        elif self.order == 2 or state.lower_order_nums < 2 or lower_order_second:
-            next_latents = self._multistep_dpm_solver_second_order_update(
-                model_outputs=model_outputs,
-                sample=latents,
+    def plan(self, sigmas: list[float]) -> SamplingPlan:
+        num_steps = len(sigmas) - 1
+        return [
+            DpmTransition(
+                solver=self,
                 sigma=sigma,
                 sigma_next=sigma_next,
-                sigma_prev=sigma_history[-2],
+                eta=0.0,
+                lower_order_final=index == num_steps - 1,
             )
-            mean = next_latents
+            for index, (sigma, sigma_next) in enumerate(
+                zip(sigmas[:-1], sigmas[1:], strict=True)
+            )
+        ]
+
+    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+        assert isinstance(tr, DpmTransition)
+        state = ctx.solver_state
+        assert state is None or isinstance(state, DpmRuntimeState)
+
+        out = yield EvalRequest(latents=ctx.latents, sigma=tr.sigma)
+        latents = ctx.latents
+        sigma_t = latents.new_tensor(tr.sigma)
+        x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
+
+        # Warmup follows the runtime history, so a sliced plan restarts cleanly:
+        # empty history behaves like the first step of a full run.
+        if state is None or tr.lower_order_final:
+            next_latents, _ = DDIMSolver.step_parts(
+                latents, out.velocity, tr.sigma, tr.sigma_next, eta=0.0
+            )
+        elif self.order == 1:
+            next_latents = self._dpm_solver_first_order_update(
+                model_output=x0,
+                sample=latents,
+                sigma=sigma_t,
+                sigma_next=latents.new_tensor(tr.sigma_next),
+            )
         else:
-            msg = f"Unsupported DPM order: {self.order}"
-            raise ValueError(msg)
+            next_latents = self._multistep_dpm_solver_second_order_update(
+                m0=x0,
+                m1=state.x0_history[-1],
+                sample=latents,
+                sigma=sigma_t,
+                sigma_next=latents.new_tensor(tr.sigma_next),
+                sigma_prev=latents.new_tensor(state.sigma_history[-1]),
+            )
 
-        next_state = DPMSolverState(
-            order=state.order,
-            num_steps=state.num_steps,
-            step_index=state.step_index + 1,
-            lower_order_nums=min(state.lower_order_nums + 1, self.order),
-            model_outputs=model_outputs,
-            sigmas=sigma_history,
+        history = state.x0_history if state is not None else ()
+        sigma_history = state.sigma_history if state is not None else ()
+        keep = self.order - 1
+        new_history = (*history, x0)
+        new_sigma_history = (*sigma_history, tr.sigma)
+        next_state = DpmRuntimeState(
+            x0_history=new_history[len(new_history) - keep :],
+            sigma_history=new_sigma_history[len(new_sigma_history) - keep :],
         )
-        return StepResult(
+
+        recorded = (
+            self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
+            if tr.record
+            else None
+        )
+        return TransitionResult(
             next_latents=next_latents,
-            log_prob=self._zero_log_prob(latents),
-            mean=mean,
-            std_dev=torch.tensor(0.0, device=latents.device),
-            state=next_state,
+            recorded=recorded,
+            next_solver_state=next_state,
         )
-
-    def replay_step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor,
-        state: SolverState | None = None,
-    ) -> StepResult:
-        msg = f"{self.type} is deterministic and does not support replay log-prob."
-        raise ValueError(msg)
 
     def _dpm_solver_first_order_update(
         self,
@@ -138,21 +125,13 @@ class DPMSolver(BaseSolver):
 
     def _multistep_dpm_solver_second_order_update(
         self,
-        model_outputs: tuple[torch.Tensor | None, ...],
+        m0: torch.Tensor,
+        m1: torch.Tensor,
         sample: torch.Tensor,
         sigma: torch.Tensor,
         sigma_next: torch.Tensor,
-        sigma_prev: torch.Tensor | None,
+        sigma_prev: torch.Tensor,
     ) -> torch.Tensor:
-        if sigma_prev is None:
-            msg = "DPM2 requires the previous model output in state."
-            raise ValueError(msg)
-        m0 = model_outputs[-1]
-        m1 = model_outputs[-2]
-        if m0 is None or m1 is None:
-            msg = "DPM2 requires two cached model outputs."
-            raise ValueError(msg)
-
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_next)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma)
         alpha_s1, sigma_s1 = self._sigma_to_alpha_sigma_t(sigma_prev)

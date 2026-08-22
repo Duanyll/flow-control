@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
-from pydantic import ConfigDict, PositiveInt, model_validator
+from pydantic import ConfigDict, Field, PositiveInt, model_validator
 from rich.progress import Progress, TaskID
 from rich.table import Table
 from torch.distributed.checkpoint.state_dict import (
@@ -22,8 +22,14 @@ from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import Sampler, SampleRequest
-from flow_control.samplers.sampler import derive_seed
+from flow_control.samplers import (
+    Phase,
+    PhasesRecipe,
+    Recipe,
+    Sampler,
+    derive_seed,
+    run_phases,
+)
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -56,6 +62,11 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     model: ModelAdapter
     sampler: Sampler
+    recipe: Recipe = Field(default_factory=PhasesRecipe)
+    """Recipe building each request's sampling phases from ``sampler``. The
+    default (a single default phase) reproduces plain full-grid sampling. Only
+    the ``"main"`` batch key is provided; phases referencing other keys (e.g.
+    ``"edit"``) fail at build time naming the available keys."""
     processor: Processor
     dataset: DatasetConfig
     datasink: DatasinkConfig | None = None
@@ -187,16 +198,11 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         """Preprocess separately, sample together, then decode separately."""
         batches: list[Any] = []
         keys: list[str] = []
-        requests: list[SampleRequest] = []
+        request_phases: list[list[Phase]] = []
         for item in items:
             batch = deep_move_to_device(item, self.device)
             batch = self.preprocess_for_inference(batch, save_extra=True)
             batch = deep_cast_float_dtype(batch, self.model.dtype)
-            negative_batch: Any = (
-                self.processor.get_negative_batch(batch)
-                if self.sampler.cfg_scale > 1.0
-                else None
-            )
             key = batch.get("__key__", "unknown")
             generator = torch.Generator(device=self.device).manual_seed(
                 derive_seed(self.seed, key)
@@ -207,17 +213,15 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
                 device=self.device,
                 dtype=self.model.dtype,
             )
+
             batches.append(batch)
             keys.append(key)
-            requests.append(
-                SampleRequest(
-                    batch=batch,
-                    negative_batch=negative_batch,
-                    generator=generator,
-                )
+            phases, _ = self.build_recipe_phases(
+                self.recipe, self.sampler, batch, generator
             )
+            request_phases.append(phases)
 
-        outputs = self.sampler.sample(self.model, requests)
+        outputs = run_phases(self.model, request_phases)
         results: list[tuple[Any, Any, str]] = []
         for batch, output, key in zip(batches, outputs, keys, strict=True):
             decoded = self.processor.decode_output(output.final_latents, batch)

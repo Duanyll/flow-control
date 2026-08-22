@@ -13,36 +13,65 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
-def deep_apply_tensor_fn(data: Any, fn: Callable) -> Any:
-    """
-    Recursively apply a function to all tensors in a nested structure.
+def deep_apply_tensor_fn(
+    data: Any,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+    *,
+    preserve_aliases: bool = False,
+) -> Any:
+    """Recursively apply ``fn`` to all tensors in a nested structure.
+
+    When ``preserve_aliases`` is enabled, repeated references to the same
+    input tensor share one transformed tensor. The identity table is local to
+    this call and is released as soon as the object graph has been rebuilt.
+
     Args:
         data: A nested structure (dict, list, tuple, dataclass) containing tensors.
         fn: A function to apply to each tensor.
+        preserve_aliases: Preserve tensor identity within this traversal.
+
     Returns:
         The nested structure with the function applied to all tensors.
     """
-    if isinstance(data, torch.Tensor):
-        return fn(data)
-    elif isinstance(data, dict):
-        return {k: deep_apply_tensor_fn(v, fn) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [deep_apply_tensor_fn(v, fn) for v in data]
-    elif isinstance(data, tuple):
-        return type(data)(deep_apply_tensor_fn(v, fn) for v in data)
-    elif dataclasses.is_dataclass(data) and not isinstance(data, type):
-        updated_fields = {
-            f.name: deep_apply_tensor_fn(getattr(data, f.name), fn)
-            for f in dataclasses.fields(data)
-            if f.init
-        }
-        return dataclasses.replace(data, **updated_fields)
-    else:
-        return data
+    transformed: dict[int, torch.Tensor] | None = {} if preserve_aliases else None
+
+    def apply(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            if transformed is None:
+                return fn(value)
+            key = id(value)
+            if key not in transformed:
+                transformed[key] = fn(value)
+            return transformed[key]
+        if isinstance(value, dict):
+            return {key: apply(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [apply(item) for item in value]
+        if isinstance(value, tuple):
+            return type(value)(apply(item) for item in value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            updated_fields = {
+                field.name: apply(getattr(value, field.name))
+                for field in dataclasses.fields(value)
+                if field.init
+            }
+            return dataclasses.replace(value, **updated_fields)
+        return value
+
+    return apply(data)
 
 
-def deep_move_to_device(data, device: torch.device):
-    return deep_apply_tensor_fn(data, lambda x: x.to(device))
+def deep_move_to_device(
+    data,
+    device: torch.device,
+    *,
+    preserve_aliases: bool = False,
+):
+    return deep_apply_tensor_fn(
+        data,
+        lambda x: x.to(device),
+        preserve_aliases=preserve_aliases,
+    )
 
 
 def deep_move_to_shared_memory(data):

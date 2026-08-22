@@ -1,86 +1,134 @@
-from typing import Literal
+from dataclasses import dataclass
+from typing import ClassVar, Literal
 
 import torch
 
-from .base import BaseSolver, SolverState, StepResult, solver_registry
+from ..plan import (
+    EvalRequest,
+    ReplayStep,
+    SamplingPlan,
+    SolverRuntimeState,
+    StepContext,
+    StepLogProbOutput,
+    Transition,
+    TransitionGen,
+    TransitionResult,
+    euler_step,
+    normal_log_prob,
+    zero_log_prob,
+)
+from ..transforms import invert_first_order
+from .base import BaseSolver, solver_registry
+
+
+@dataclass(frozen=True, slots=True)
+class DdimReplayStep(ReplayStep):
+    eta: float
+
+    def logprob(
+        self,
+        velocity: torch.Tensor,
+        latent_t: torch.Tensor,
+        latent_next: torch.Tensor,
+        solver_state: SolverRuntimeState | None = None,
+    ) -> StepLogProbOutput:
+        if self.eta == 0.0 and self.sigma == 0.0:
+            # Mirrors DDIMSolver.run_transition: only inverted plans record a
+            # step starting at exactly sigma 0, where the DDIM mean formula
+            # divides by sigma; the deterministic update is the Euler step.
+            return self._deterministic(velocity, latent_t)
+        mean, noise_scale = DDIMSolver.step_parts(
+            latent_t, velocity, self.sigma, self.sigma_next, self.eta
+        )
+        if self.eta == 0.0:
+            log_prob = zero_log_prob(latent_t)
+        else:
+            log_prob = normal_log_prob(latent_next, mean, noise_scale)
+        return StepLogProbOutput(log_prob=log_prob, mean=mean, std_dev=noise_scale)
 
 
 @solver_registry.register("ddim")
 class DDIMSolver(BaseSolver):
     type: Literal["ddim"] = "ddim"
 
-    @property
-    def supports_step_log_prob(self) -> bool:
-        return self.eta > 0.0
+    supports_step_log_prob: ClassVar[bool] = True
 
     @staticmethod
-    def _ddim_update(
-        pred_original_sample: torch.Tensor,
-        sample: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
+    def step_parts(
+        latents: torch.Tensor,
+        velocity: torch.Tensor,
+        sigma: float,
+        sigma_next: float,
         eta: float,
-        prev_sample: torch.Tensor | None = None,
-        generator: torch.Generator | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        std_dev_t = eta * sigma_next
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """DDIM update moments: ``(mean, noise_scale)``; ``noise_scale`` is the std."""
+        sigma_t = latents.new_tensor(sigma)
+        sigma_next_t = latents.new_tensor(sigma_next)
+        pred_original_sample = latents - sigma_t * velocity
+        std_dev_t = eta * sigma_next_t
         dt_sqrt = torch.sqrt(
             torch.clamp(
                 1.0
-                - sigma_next**2 * (1 - sigma) ** 2 / (sigma**2 * (1 - sigma_next) ** 2),
+                - sigma_next_t**2
+                * (1 - sigma_t) ** 2
+                / (sigma_t**2 * (1 - sigma_next_t) ** 2),
                 min=0.0,
             )
         )
         noise_scale = std_dev_t * dt_sqrt
-        noise_pred = (sample - (1 - sigma) * pred_original_sample) / sigma
-        mean = (1 - sigma_next) * pred_original_sample + torch.sqrt(
-            torch.clamp(sigma_next**2 - noise_scale**2, min=0.0)
+        noise_pred = (latents - (1 - sigma_t) * pred_original_sample) / sigma_t
+        mean = (1 - sigma_next_t) * pred_original_sample + torch.sqrt(
+            torch.clamp(sigma_next_t**2 - noise_scale**2, min=0.0)
         ) * noise_pred
+        return mean, noise_scale
 
-        next_latents = prev_sample
-        if next_latents is None:
+    def make_replay(self, sigma: float, sigma_next: float, eta: float) -> ReplayStep:
+        return DdimReplayStep(sigma=sigma, sigma_next=sigma_next, eta=eta)
+
+    def invert(self, plan: SamplingPlan) -> SamplingPlan:
+        # Deterministic DDIM on the RF parameterization is algebraically the
+        # Euler step, so the shared first-order mirror applies.
+        return invert_first_order(plan)
+
+    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+        out = yield EvalRequest(latents=ctx.latents, sigma=tr.sigma)
+        latents = ctx.latents
+
+        if tr.eta == 0.0 and tr.sigma == 0.0:
+            # Only inverted plans start a transition at exactly sigma == 0,
+            # where the DDIM mean formula divides by sigma. The deterministic
+            # DDIM update equals the Euler step algebraically; take it
+            # directly (descending plans never hit this branch).
+            next_latents = euler_step(latents, out.velocity, tr.sigma, tr.sigma_next)
+            recorded = (
+                self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
+                if tr.record
+                else None
+            )
+            return TransitionResult(next_latents=next_latents, recorded=recorded)
+
+        mean, noise_scale = self.step_parts(
+            latents, out.velocity, tr.sigma, tr.sigma_next, tr.eta
+        )
+
+        if tr.eta == 0.0:
+            # Deterministic DDIM: the legacy step drew (and zero-multiplied) a
+            # useless randn here; the plan path drops the draw.
+            next_latents = mean
+            log_prob = zero_log_prob(latents)
+        else:
             noise = torch.randn(
-                sample.shape,
-                dtype=sample.dtype,
-                device=sample.device,
-                generator=generator,
+                latents.shape,
+                dtype=latents.dtype,
+                device=latents.device,
+                generator=ctx.generator,
             )
             next_latents = mean + noise_scale * noise
+            log_prob = normal_log_prob(next_latents, mean, noise_scale)
 
-        return next_latents, mean, noise_scale
-
-    def step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor | None = None,
-        eta: float | None = None,
-        state: SolverState | None = None,
-        generator: torch.Generator | None = None,
-    ) -> StepResult:
-        step_eta = self.eta if eta is None else eta
-        pred_original_sample = self._velocity_to_x0(velocity, latents, sigma)
-        next_latents, mean, noise_scale = self._ddim_update(
-            pred_original_sample=pred_original_sample,
-            sample=latents,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            eta=step_eta,
-            prev_sample=prev_sample,
-            generator=generator,
+        recorded = (
+            self._make_recorded_step(tr, ctx, next_latents, log_prob)
+            if tr.record
+            else None
         )
-
-        if step_eta > 0.0:
-            log_prob = self._normal_log_prob(next_latents, mean, noise_scale)
-        else:
-            log_prob = self._zero_log_prob(latents)
-
-        return StepResult(
-            next_latents=next_latents,
-            log_prob=log_prob,
-            mean=mean,
-            std_dev=self._scalar_like(noise_scale, latents),
-            state=state,
-        )
+        return TransitionResult(next_latents=next_latents, recorded=recorded)

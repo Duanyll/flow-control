@@ -33,13 +33,18 @@ from .pickscore import PickScoreReward
 from .rational_rewards import RationalRewardsEditReward, RationalRewardsT2IReward
 from .unified_reward import UnifiedReward
 
-Reward = Annotated[BaseReward, RegistryUnion(reward_registry, "type")]
+# A bare list of reward configs is shorthand for a composite reward:
+# ``"reward": [{...}, {...}]`` == ``{"type": "composite", "rewards": [...]}``.
+Reward = Annotated[
+    BaseReward,
+    RegistryUnion(reward_registry, "type", list_as=("composite", "rewards")),
+]
 
 _reward_ta = TypeAdapter(Reward)
 
 
-def parse_reward(conf: dict[str, Any]) -> BaseReward:
-    """Parse a reward config dict into the appropriate reward instance."""
+def parse_reward(conf: dict[str, Any] | list[Any] | str) -> BaseReward:
+    """Parse a reward config (dict, bare tag, or composite-list shorthand)."""
     return _reward_ta.validate_python(conf)
 
 

@@ -17,8 +17,7 @@ class BaseShift(BaseModel, ABC):
     shift_terminal: float | None = None
 
     def apply(self, sigmas: torch.Tensor, batch: Batch, num_steps: int) -> torch.Tensor:
-        seq_len = self._get_seq_len(batch)
-        shift_factor = self._calculate_shift_factor(seq_len, num_steps)
+        shift_factor = self._shift_factor(batch, num_steps)
         if shift_factor != 1.0:
             sigmas = (shift_factor * sigmas) / (1 + (shift_factor - 1) * sigmas)
 
@@ -28,6 +27,37 @@ class BaseShift(BaseModel, ABC):
             sigmas = 1 - (one_minus_z / scale_factor)
 
         return sigmas
+
+    def inverse_sigma(
+        self,
+        value: float,
+        batch: Batch,
+        num_steps: int,
+        t_end: float = 0.0,
+    ) -> float:
+        """Map an actual (shifted) sigma back to its canonical time.
+
+        Inverse of :meth:`apply` for a full canonical grid ending at ``t_end``,
+        using the same resolution parameters. The ``shift_terminal`` affine
+        post-pass is inverted first (reverse order of ``apply``); its scale
+        depends on the grid's terminal value, recomputed here as the pointwise
+        shift of ``t_end`` so callers need not pass a grid. Then the pointwise
+        ``y = a*x / (1 + (a-1)*x)`` inverts analytically as
+        ``x = y / (a - (a-1)*y)``.
+        """
+        shift_factor = self._shift_factor(batch, num_steps)
+        if self.shift_terminal is not None:
+            terminal = t_end
+            if shift_factor != 1.0:
+                terminal = (shift_factor * t_end) / (1 + (shift_factor - 1) * t_end)
+            scale_factor = (1 - terminal) / (1 - self.shift_terminal)
+            value = 1 - (1 - value) * scale_factor
+        if shift_factor != 1.0:
+            value = value / (shift_factor - (shift_factor - 1) * value)
+        return value
+
+    def _shift_factor(self, batch: Batch, num_steps: int) -> float:
+        return self._calculate_shift_factor(self._get_seq_len(batch), num_steps)
 
     def _get_seq_len(self, batch: Batch) -> int:
         if self.latent_length_from == "actual":
@@ -44,16 +74,10 @@ class BaseShift(BaseModel, ABC):
 shift_registry: Registry[BaseShift] = Registry("shift", base=BaseShift)
 
 
-@shift_registry.register("none")
-class NoShift(BaseShift):
-    type: Literal["none"] = "none"
-
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
-        return 1.0
-
-
 @shift_registry.register("constant")
 class ConstantShift(BaseShift):
+    """Resolution-independent shift factor; the default 1.0 is no shift."""
+
     type: Literal["constant"] = "constant"
     shift_value: float = 1.0
 
@@ -109,4 +133,8 @@ class Flux2Shift(BaseShift):
         return a * num_steps + b
 
 
-Shift = Annotated[BaseShift, RegistryUnion(shift_registry, "type")]
+Shift = Annotated[
+    BaseShift,
+    # A bare number is a constant shift factor: ``"shift": 3.0``.
+    RegistryUnion(shift_registry, "type", number_as=("constant", "shift_value")),
+]

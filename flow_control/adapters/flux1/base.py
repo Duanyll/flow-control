@@ -50,8 +50,9 @@ class Flux1Adapter[TBatch: Flux1Batch](
 
     guidance: float = 3.5
     """
-    Guidance scale for DISTILLED classifier-free guidance as timestep embeddings. To 
-    enforce true classifier-free guidance, set `cfg_scale` in the sampler to value > 1.
+    Guidance scale for DISTILLED classifier-free guidance as timestep embeddings. To
+    enforce true classifier-free guidance, set the sampler's guidance to
+    `{"type": "cfg", "scale": <value greater than 1>}`.
     """
     patch_size: int = 2
     vae_scale_factor: int = 8

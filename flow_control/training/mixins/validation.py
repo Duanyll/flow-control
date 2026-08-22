@@ -19,8 +19,7 @@ from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import BaseReward
-from flow_control.samplers import Sampler, SampleRequest
-from flow_control.samplers.sampler import derive_seed
+from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -119,7 +118,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             batch = deep_cast_float_dtype(batch, model.dtype)
             negative_batch: Any = (
                 self.processor.get_negative_batch(batch)
-                if self.validation_sampler.cfg_scale > 1.0
+                if self.validation_sampler.guidance.needs_negative()
                 else None
             )
             key = batch.get("__key__", "unknown")

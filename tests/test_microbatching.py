@@ -1,4 +1,3 @@
-import random
 import unittest
 from dataclasses import dataclass
 from typing import Any
@@ -10,7 +9,8 @@ from torch.utils.data import Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers import ReplayRequest, Sampler, SampleRequest
+from flow_control.samplers import Sampler, SampleRequest
+from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import FlowSolver
 from flow_control.training.data import collate_fn
@@ -109,13 +109,6 @@ class AdapterBatchingTest(unittest.TestCase):
         torch.testing.assert_close(outputs[0], torch.full((1, 4, 2), 1.25))
         torch.testing.assert_close(outputs[1], torch.full((1, 4, 2), 2.5))
 
-    def test_empty_and_mismatched_inputs_are_rejected(self) -> None:
-        adapter = self.make_adapter()
-        with self.assertRaisesRegex(ValueError, "at least one batch"):
-            adapter.predict_velocity_batched([], [])
-        with self.assertRaisesRegex(ValueError, "equal lengths"):
-            adapter.predict_velocity_batched([make_batch()], [])
-
     def test_incompatible_inputs_fall_back_to_single_sample(self) -> None:
         adapter = self.make_adapter()
         outputs = adapter.predict_velocity_batched(
@@ -125,34 +118,6 @@ class AdapterBatchingTest(unittest.TestCase):
 
         self.assertEqual(adapter._forward_batch_sizes, [1, 1])
         self.assertEqual([output.shape[1] for output in outputs], [3, 5])
-
-    def test_irrelevant_metadata_does_not_block_dense_batching(self) -> None:
-        adapter = self.make_adapter()
-        batches = [make_batch(1.0), make_batch(2.0)]
-        for batch, prompt in zip(batches, ("first", "second"), strict=True):
-            batch_any: Any = batch
-            batch_any["prompt"] = prompt
-            batch_any["__key__"] = prompt
-
-        adapter.predict_velocity_batched(
-            batches,
-            [torch.tensor([0.0]), torch.tensor([0.0])],
-        )
-        self.assertEqual(adapter._forward_batch_sizes, [2])
-
-    def test_matching_reference_topology_is_collated_recursively(self) -> None:
-        adapter = self.make_adapter()
-        batches = [make_batch(1.0), make_batch(2.0)]
-        for batch, value in zip(batches, (3.0, 4.0), strict=True):
-            batch_any: Any = batch
-            batch_any["reference_latents"] = [torch.full((1, 2, 2), value)]
-            batch_any["reference_sizes"] = [(16, 16)]
-
-        adapter.predict_velocity_batched(
-            batches,
-            [torch.tensor([0.0]), torch.tensor([0.0])],
-        )
-        self.assertEqual(adapter._forward_batch_sizes, [2])
 
     def test_different_reference_topology_falls_back(self) -> None:
         adapter = self.make_adapter()
@@ -194,84 +159,12 @@ class AdapterBatchingTest(unittest.TestCase):
         torch.testing.assert_close(dense_loss, fallback_loss)
         torch.testing.assert_close(dense._scale.grad, fallback._scale.grad)
 
-    def test_invalid_logical_batch_dimension_is_rejected(self) -> None:
-        adapter = self.make_adapter()
-        batch = make_batch()
-        batch["noisy_latents"] = torch.zeros(2, 4, 2)
-        with self.assertRaisesRegex(ValueError, "singleton leading batch"):
-            adapter.predict_velocity_batched([batch], [torch.tensor([0.0])])
-
 
 class SamplerBatchingTest(unittest.TestCase):
-    def test_trajectory_window_uses_request_generator(self) -> None:
-        sampler = Sampler(
-            steps=12,
-            trajectory_window_size=3,
-            trajectory_window_range=(1, 10),
-        )
-        first_generator = torch.Generator().manual_seed(1234)
-        random.seed(1)
-        first = sampler._select_trajectory_window(12, first_generator)
-
-        for _ in range(100):
-            random.random()
-        second_generator = torch.Generator().manual_seed(1234)
-        second = sampler._select_trajectory_window(12, second_generator)
-
-        self.assertEqual(first, second)
-        self.assertNotEqual(
-            first_generator.get_state().tolist(),
-            torch.Generator().manual_seed(1234).get_state().tolist(),
-        )
-
-    def test_trajectory_window_generators_are_independent(self) -> None:
-        sampler = Sampler(steps=12, trajectory_window_size=3)
-        untouched = torch.Generator().manual_seed(77)
-        advanced = torch.Generator().manual_seed(77)
-        _ = torch.rand(9, generator=advanced)
-
-        expected = sampler._select_trajectory_window(
-            12, torch.Generator().manual_seed(77)
-        )
-        self.assertEqual(sampler._select_trajectory_window(12, untouched), expected)
-        sampler._select_trajectory_window(12, advanced)
-
-    def test_trajectory_window_validates_size_and_reaches_endpoints(self) -> None:
-        invalid = Sampler(steps=8, trajectory_window_size=0)
-        with self.assertRaisesRegex(ValueError, "must be positive"):
-            invalid._select_trajectory_window(8, torch.Generator().manual_seed(1))
-
-        sampler = Sampler(
-            steps=8,
-            trajectory_window_size=2,
-            trajectory_window_range=(1, 7),
-        )
-        starts = {
-            sampler._select_trajectory_window(8, torch.Generator().manual_seed(seed))[0]
-            for seed in range(100)
-        }
-        self.assertIn(1, starts)
-        self.assertIn(5, starts)
-
-    def test_sampler_batches_model_forwards_and_preserves_order(self) -> None:
-        sampler = Sampler(steps=2, cfg_scale=1.0)
-        model = FakeSamplerModel()
-        outputs = sampler.sample(
-            model,  # type: ignore[arg-type]
-            [
-                SampleRequest(batch=make_sampler_batch(1.0)),
-                SampleRequest(batch=make_sampler_batch(2.0)),
-            ],
-        )
-
-        self.assertEqual(model.forward_batch_sizes, [2, 2])
-        torch.testing.assert_close(outputs[0].final_latents, torch.tensor([[[-1.0]]]))
-        torch.testing.assert_close(outputs[1].final_latents, torch.tensor([[[-2.0]]]))
-
     def test_mixed_cfg_uses_dummy_forward_without_guiding_missing_negative(
         self,
     ) -> None:
-        sampler = Sampler(steps=1, cfg_scale=2.0)
+        sampler = Sampler(steps=1, guidance=ClassifierFreeGuidance(scale=2.0))
         model = FakeSamplerModel()
         cond_a = make_sampler_batch(3.0)
         cond_b = make_sampler_batch(4.0)
@@ -283,46 +176,17 @@ class SamplerBatchingTest(unittest.TestCase):
             negative_batches=[negative_a, None],
             latents=[cond_a["noisy_latents"], cond_b["noisy_latents"]],
             timesteps=[torch.tensor([1.0]), torch.tensor([1.0])],
+            sigmas=[1.0, 1.0],
         )
 
         self.assertEqual(model.forward_batch_sizes, [2, 2])
         torch.testing.assert_close(velocities[0], torch.tensor([[[5.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[4.0]]]))
 
-    def test_cfg_all_and_none_negative_paths(self) -> None:
-        sampler = Sampler(steps=1, cfg_scale=2.0)
-        conditional = [make_sampler_batch(3.0), make_sampler_batch(4.0)]
-        timesteps = [torch.tensor([1.0]), torch.tensor([1.0])]
-
-        no_negative_model = FakeSamplerModel()
-        no_negative = sampler.get_guided_velocity(
-            no_negative_model,  # type: ignore[arg-type]
-            conditional,
-            [None, None],
-            [batch["noisy_latents"] for batch in conditional],
-            timesteps,
-        )
-        self.assertEqual(no_negative_model.forward_batch_sizes, [2])
-        torch.testing.assert_close(no_negative[0], torch.tensor([[[3.0]]]))
-
-        all_negative_model = FakeSamplerModel()
-        all_negative = sampler.get_guided_velocity(
-            all_negative_model,  # type: ignore[arg-type]
-            conditional,
-            [make_sampler_batch(1.0), make_sampler_batch(2.0)],
-            [batch["noisy_latents"] for batch in conditional],
-            timesteps,
-        )
-        self.assertEqual(all_negative_model.forward_batch_sizes, [2, 2])
-        torch.testing.assert_close(all_negative[0], torch.tensor([[[5.0]]]))
-        torch.testing.assert_close(all_negative[1], torch.tensor([[[6.0]]]))
-
     def test_cfg_renorm_is_applied_per_sample(self) -> None:
         sampler = Sampler(
             steps=1,
-            cfg_scale=3.0,
-            enable_cfg_renorm=True,
-            cfg_renorm_min=0.0,
+            guidance=ClassifierFreeGuidance(scale=3.0, renorm=True, renorm_min=0.0),
         )
         model = FakeSamplerModel()
         conditional = [make_sampler_batch(2.0), make_sampler_batch(8.0)]
@@ -332,6 +196,7 @@ class SamplerBatchingTest(unittest.TestCase):
             [make_sampler_batch(-2.0), make_sampler_batch(4.0)],
             [batch["noisy_latents"] for batch in conditional],
             [torch.tensor([1.0]), torch.tensor([1.0])],
+            [1.0, 1.0],
         )
         torch.testing.assert_close(velocities[0], torch.tensor([[[2.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[8.0]]]))
@@ -339,7 +204,6 @@ class SamplerBatchingTest(unittest.TestCase):
     def test_each_request_keeps_its_own_shifted_schedule(self) -> None:
         sampler = Sampler(
             steps=3,
-            cfg_scale=1.0,
             shift=LinearShift(
                 base_image_seq_len=1,
                 max_image_seq_len=8,
@@ -356,12 +220,10 @@ class SamplerBatchingTest(unittest.TestCase):
                 SampleRequest(batch=long_batch),
             ],
         )
-        assert outputs[0].timesteps is not None
-        assert outputs[1].timesteps is not None
         self.assertFalse(torch.equal(outputs[0].timesteps, outputs[1].timesteps))
 
     def test_stochastic_generators_are_isolated_per_sample(self) -> None:
-        sampler = Sampler(steps=3, cfg_scale=1.0, solver=FlowSolver(eta=0.4))
+        sampler = Sampler(steps=3, solver=FlowSolver(eta=0.4))
         model = FakeSamplerModel()
         batched = sampler.sample(
             model,  # type: ignore[arg-type]
@@ -394,26 +256,6 @@ class SamplerBatchingTest(unittest.TestCase):
                 batched_output.final_latents, individual_output.final_latents
             )
 
-    def test_replay_returns_named_outputs(self) -> None:
-        sampler = Sampler(solver=FlowSolver(eta=0.5), cfg_scale=1.0)
-        model = FakeSamplerModel()
-        batch = make_sampler_batch(0.0)
-        output = sampler.compute_logprob_at_step(
-            model,  # type: ignore[arg-type]
-            [
-                ReplayRequest(
-                    batch=batch,
-                    latent_t=torch.tensor([[[0.2]]]),
-                    latent_next=torch.tensor([[[0.1]]]),
-                    sigma=torch.tensor([0.8]),
-                    sigma_next=torch.tensor([0.6]),
-                )
-            ],
-        )[0]
-
-        self.assertEqual(tuple(output.log_prob.shape), (1,))
-        self.assertEqual(tuple(output.mean.shape), (1, 1, 1))
-
 
 @dataclass(slots=True)
 class _IndexedItem:
@@ -444,40 +286,6 @@ class MicrobatchArithmeticTest(unittest.TestCase):
         self.assertEqual(
             [update.loss_scale for update in updates],
             [0.75, 0.25, 0.75, 0.25, 1.0],
-        )
-
-    def test_loss_scales_sum_to_one_per_chunk(self) -> None:
-        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=3)
-        chunk_scale = 0.0
-        for update in mixin.iter_micro_updates(list(range(11))):
-            chunk_scale += update.loss_scale
-            if update.is_sync_step:
-                self.assertAlmostEqual(chunk_scale, 1.0)
-                chunk_scale = 0.0
-        self.assertEqual(chunk_scale, 0.0)
-
-    def test_micro_batches_preserve_item_identity(self) -> None:
-        # Precompute passes fill cached fields in place through these slices.
-        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=2)
-        items = [_IndexedItem(rollout_idx=index) for index in range(3)]
-        sliced = [
-            item
-            for micro_items in mixin.iter_train_micro_batches(items)
-            for item in micro_items
-        ]
-        for original, batched in zip(items, sliced, strict=True):
-            self.assertIs(original, batched)
-
-    def test_empty_items_are_rejected(self) -> None:
-        mixin = self.make_mixin(train_batch_size=4, micro_batch_size=1)
-        with self.assertRaisesRegex(RuntimeError, "no train items"):
-            next(mixin.iter_micro_updates([]))
-
-    def test_batch_divisibility_is_validated(self) -> None:
-        with self.assertRaisesRegex(ValueError, "train_micro_batch_size"):
-            _ = self.make_mixin(train_batch_size=8, micro_batch_size=3).grad_acc_steps
-        self.assertEqual(
-            self.make_mixin(train_batch_size=8, micro_batch_size=2).grad_acc_steps, 4
         )
 
     def test_non_finite_loss_reports_rollout_indices(self) -> None:

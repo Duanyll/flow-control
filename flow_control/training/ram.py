@@ -167,7 +167,6 @@ class RamTrainer(
         "train/loss": "Loss: {v:.4f}",
         "val/reward_mean": "Val R̄: {v:.3f}",
     }
-    _rollout_needs_trajectory: bool = False
 
     # ------------------------------- Lazy state --------------------------------- #
     _optimizer: torch.optim.Optimizer
@@ -647,7 +646,7 @@ class RamTrainer(
             while self._current_epoch < self.train_epochs:
                 logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
                 # Endpoints are sampled by the lagged policy (old-EMA), with CFG
-                # driven by ``rollout_sampler.cfg_scale``.
+                # driven by ``rollout_sampler.guidance``.
                 with apply_ema_maybe(self._old_ema):
                     rollouts = self._collect_rollouts(self._current_epoch)
                 advantages = self._compute_advantages(rollouts, step=self._current_step)

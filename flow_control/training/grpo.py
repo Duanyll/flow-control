@@ -1,10 +1,10 @@
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -17,7 +17,15 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import ReplayRequest, Sampler
+from flow_control.samplers import (
+    PhaseConfig,
+    PhasesRecipe,
+    Recipe,
+    RecordedStep,
+    ReplayItem,
+    Sampler,
+    SdeWindow,
+)
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -67,8 +75,17 @@ class GrpoTrainer(
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
     rollout_sampler: Sampler
+    rollout_recipe: Recipe = Field(
+        default_factory=lambda: PhasesRecipe(
+            phases=[PhaseConfig(transforms=[SdeWindow(record=True)])]
+        )
+    )
+    """GRPO explicitly records the (full, by default) stochastic window for
+    step replay; override size/range via an ``sde_window`` entry in config."""
     processor: Processor
     reward: Reward
+
+    _ROLLOUT_NEEDS_LIKELIHOOD_REPLAY: ClassVar[bool] = True
 
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
@@ -270,44 +287,25 @@ class GrpoTrainer(
         self.log_aggregated_metrics(metrics)
         return loss
 
-    def _make_replay_request(
+    def _make_replay_item(
         self,
         rollout: Rollout,
         timestep_idx: int,
-    ) -> tuple[ReplayRequest, torch.Tensor]:
-        trajectory = rollout.trajectory
+    ) -> tuple[ReplayItem, torch.Tensor]:
+        trajectory = rollout.trajectory.trajectory
+        assert trajectory, "validated by _validate_rollout_trajectories"
+        recorded: RecordedStep = deep_move_to_device(
+            trajectory[timestep_idx], self.device
+        )
         batch = deep_move_to_device(rollout.batch, self.device)
         negative_batch = (
             deep_move_to_device(rollout.negative_batch, self.device)
             if rollout.negative_batch is not None
             else None
         )
-        if trajectory.log_probs is None or trajectory.timesteps is None:
-            raise RuntimeError("Rollout is missing log-prob trajectory data.")
-        if trajectory.latents is None:
-            raise RuntimeError("Rollout is missing latent trajectory data.")
-        solver_state = None
-        if trajectory.solver_states is not None:
-            solver_state = trajectory.solver_states[timestep_idx]
-
-        old_log_probs = trajectory.log_probs[0].to(device=self.device)  # [T]
-        sigmas = trajectory.timesteps.to(device=self.device)  # [T+1]
-
-        latent_t = trajectory.latents[:, timestep_idx].to(device=self.device)
-        latent_next = trajectory.latents[:, timestep_idx + 1].to(device=self.device)
-        sigma = sigmas[timestep_idx : timestep_idx + 1]
-        sigma_next = sigmas[timestep_idx + 1 : timestep_idx + 2]
         return (
-            ReplayRequest(
-                batch=batch,
-                latent_t=latent_t,
-                latent_next=latent_next,
-                sigma=sigma,
-                sigma_next=sigma_next,
-                negative_batch=negative_batch,
-                solver_state=solver_state,
-            ),
-            old_log_probs[timestep_idx : timestep_idx + 1],
+            ReplayItem(batch=batch, recorded=recorded, negative_batch=negative_batch),
+            recorded.log_prob,
         )
 
     def _compute_loss_at_items(
@@ -316,23 +314,23 @@ class GrpoTrainer(
         rollouts: list[Rollout],
         advantages: torch.Tensor,
     ) -> torch.Tensor:
-        requests: list[ReplayRequest] = []
+        replay_items: list[ReplayItem] = []
         old_log_probs: list[torch.Tensor] = []
         for item in items:
-            request, old_log_prob = self._make_replay_request(
+            replay_item, old_log_prob = self._make_replay_item(
                 rollouts[item.rollout_idx], item.timestep_idx
             )
-            requests.append(request)
+            replay_items.append(replay_item)
             old_log_probs.append(old_log_prob)
 
-        replay_outputs = self.rollout_sampler.compute_logprob_at_step(
-            self.model, requests
+        replay_outputs = self.rollout_sampler.replay_recorded_steps(
+            self.model, replay_items
         )
         uncached_reference_outputs = None
         if self.kl_beta > 0 and any(item.cached_ref_mean is None for item in items):
             with torch.no_grad(), self.reference_model():
-                uncached_reference_outputs = (
-                    self.rollout_sampler.compute_logprob_at_step(self.model, requests)
+                uncached_reference_outputs = self.rollout_sampler.replay_recorded_steps(
+                    self.model, replay_items
                 )
 
         losses: list[torch.Tensor] = []
@@ -380,14 +378,14 @@ class GrpoTrainer(
 
         with progress, torch.no_grad(), self.reference_model():
             for micro_items in self.iter_train_micro_batches(items):
-                requests = [
-                    self._make_replay_request(
+                replay_items = [
+                    self._make_replay_item(
                         rollouts[item.rollout_idx], item.timestep_idx
                     )[0]
                     for item in micro_items
                 ]
-                outputs = self.rollout_sampler.compute_logprob_at_step(
-                    self.model, requests
+                outputs = self.rollout_sampler.replay_recorded_steps(
+                    self.model, replay_items
                 )
                 for item, output in zip(micro_items, outputs, strict=True):
                     item.cached_ref_mean = output.mean.detach()
@@ -404,16 +402,34 @@ class GrpoTrainer(
         """One item group per rollout, in trajectory timestep order."""
         item_groups: list[list[GrpoTrainItem]] = []
         for rollout_idx, rollout in enumerate(rollouts):
-            latents = rollout.trajectory.latents
-            if latents is None:
-                raise RuntimeError("Rollout is missing latent trajectory data.")
+            trajectory = rollout.trajectory.trajectory
+            assert trajectory, "validated by _validate_rollout_trajectories"
             item_groups.append(
                 [
                     GrpoTrainItem(rollout_idx=rollout_idx, timestep_idx=timestep_idx)
-                    for timestep_idx in range(latents.shape[1] - 1)
+                    for timestep_idx in range(len(trajectory))
                 ]
             )
         return item_groups
+
+    def _validate_rollout_trajectories(self, rollouts: list[Rollout]) -> None:
+        """Fail fast on rollouts that GRPO's step replay cannot train on."""
+        for rollout in rollouts:
+            trajectory = rollout.trajectory.trajectory
+            if not trajectory:
+                raise RuntimeError(
+                    "GRPO rollout produced no recorded trajectory steps; step "
+                    "replay needs at least one recorded transition. Check the "
+                    "rollout_recipe sde_window transform (record must be true)."
+                )
+            if not any(bool((step.log_prob != 0).any()) for step in trajectory):
+                raise RuntimeError(
+                    "GRPO rollout recorded only deterministic steps (all step "
+                    "log-probs are zero), which cannot train a policy ratio. "
+                    f"Solver '{self.rollout_sampler.solver.type}' ran with "
+                    f"eta={self.rollout_sampler.solver.eta}; set eta > 0 and "
+                    "make sure the sde_window covers stochastic steps."
+                )
 
     # --- Core training phases ---
 
@@ -523,6 +539,7 @@ class GrpoTrainer(
             while self._current_epoch < self.train_epochs:
                 logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
                 rollouts = self._collect_rollouts(self._current_epoch)
+                self._validate_rollout_trajectories(rollouts)
 
                 advantages = self._compute_advantages(rollouts, step=self._current_step)
 

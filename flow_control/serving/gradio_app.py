@@ -18,7 +18,7 @@ from flow_control.utils.tensor import (
     tensor_to_pil,
 )
 
-from .engine import ServingEngine
+from .engine import ServingEngine, cfg_scale_for_display
 from .tasks import task_template_registry
 
 logger = get_logger(__name__)
@@ -300,7 +300,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         minimum=1.0,
                         maximum=20.0,
                         step=0.1,
-                        value=engine.sampler.cfg_scale,
+                        value=cfg_scale_for_display(engine.sampler),
                     )
                     seed_input = gr.Number(
                         label="Seed",

@@ -28,7 +28,8 @@ class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatc
       whereas the framework carries pre-packed ``[B, N, D]`` latents. So we unpack
       before the forward pass and re-pack the predicted velocity.
     - SD3 is **not** guidance-distilled: there is no ``guidance`` embedding and true CFG
-      is applied by the sampler (``cfg_scale > 1`` with a negative batch).
+      is applied by the sampler (a ``cfg`` guidance with ``scale > 1`` and a
+      negative batch).
     """
 
     supports_dense_batching = True

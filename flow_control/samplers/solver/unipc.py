@@ -3,22 +3,38 @@ from typing import Literal
 
 import torch
 
-from .base import BaseSolver, SolverState, StepResult, solver_registry
+from ..plan import (
+    EvalRequest,
+    SamplingPlan,
+    SolverRuntimeState,
+    StepContext,
+    Transition,
+    TransitionGen,
+    TransitionResult,
+    zero_log_prob,
+)
+from .base import BaseSolver, solver_registry
 
 
-@dataclass(slots=True)
-class UniPCSolverState(SolverState):
-    order: int
-    num_steps: int
-    step_index: int = 0
-    lower_order_nums: int = 0
-    this_order: int = 1
-    """Predictor order used at the previous step; the corrector reuses it."""
-    model_outputs: tuple[torch.Tensor | None, ...] = ()
-    """x0 history (computed on pre-corrector samples), most recent last."""
-    sigmas: tuple[torch.Tensor | None, ...] = ()
-    last_sample: torch.Tensor | None = None
+@dataclass(frozen=True, slots=True)
+class UniPCTransition(Transition):
+    """UniPC transition with the plan-compiled predictor order cap."""
+
+    order_cap: int = 1
+    """``lower_order_final`` cap near the grid end; warmup happens at runtime."""
+
+
+@dataclass(frozen=True, slots=True)
+class UniPCRuntimeState(SolverRuntimeState):
+    """Rolling multistep history (most recent last), rebuilt per transition."""
+
+    x0_history: tuple[torch.Tensor, ...]
+    """x0 predictions evaluated on pre-corrector samples."""
+    sigma_history: tuple[float, ...]
+    last_sample: torch.Tensor
     """The (corrected) sample the previous predictor stepped from."""
+    prev_order: int
+    """Predictor order used at the previous step; the corrector reuses it."""
 
 
 @solver_registry.register("flow_unipc")
@@ -26,7 +42,7 @@ class FlowUniPCSolver(BaseSolver):
     """Deterministic UniPC multistep solver for flow matching (predict-x0, B(h)).
 
     Native port of HiDream-O1's ``FlowUniPCMultistepScheduler`` (the diffusers
-    UniPC adapted to flow-matching sigmas) onto the stateless-step interface:
+    UniPC adapted to flow-matching sigmas) onto the plan-as-data interface:
     predict-x0 with the UniC corrector enabled, so the effective accuracy is
     ``order + 1``. Per reference defaults: ``order=2``, ``solver_type="bh2"``,
     ``lower_order_final=True``. Works with a zero-terminal sigma grid (the final
@@ -42,95 +58,82 @@ class FlowUniPCSolver(BaseSolver):
     use_corrector: bool = True
     lower_order_final: bool = True
 
-    @property
-    def supports_step_log_prob(self) -> bool:
-        return False
+    def plan(self, sigmas: list[float]) -> SamplingPlan:
+        num_steps = len(sigmas) - 1
+        return [
+            UniPCTransition(
+                solver=self,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=0.0,
+                order_cap=(
+                    min(self.order, num_steps - index)
+                    if self.lower_order_final
+                    else self.order
+                ),
+            )
+            for index, (sigma, sigma_next) in enumerate(
+                zip(sigmas[:-1], sigmas[1:], strict=True)
+            )
+        ]
 
-    def init_state(self, num_steps: int) -> UniPCSolverState:
-        return UniPCSolverState(
-            order=self.order,
-            num_steps=num_steps,
-            model_outputs=tuple(None for _ in range(self.order)),
-            sigmas=tuple(None for _ in range(self.order)),
-        )
+    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+        assert isinstance(tr, UniPCTransition)
+        state = ctx.solver_state
+        assert state is None or isinstance(state, UniPCRuntimeState)
 
-    def step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor | None = None,
-        eta: float | None = None,
-        state: SolverState | None = None,
-        generator: torch.Generator | None = None,
-    ) -> StepResult:
-        if prev_sample is not None:
-            msg = f"{self.type} is deterministic and does not support replay log-prob."
-            raise ValueError(msg)
-        if not isinstance(state, UniPCSolverState):
-            msg = f"{self.type} requires UniPCSolverState."
-            raise TypeError(msg)
+        out = yield EvalRequest(latents=ctx.latents, sigma=tr.sigma)
+        latents = ctx.latents
+        sigma_t = latents.new_tensor(tr.sigma)
+        x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
 
-        x0 = self._velocity_to_x0(velocity, latents, sigma)
-
+        # Reference semantics: the corrector for the previous step runs first,
+        # before the history shift, reusing the previous predictor order and
+        # this transition's fresh model evaluation.
         sample = latents
-        if (
-            self.use_corrector
-            and state.step_index > 0
-            and state.last_sample is not None
-        ):
+        if self.use_corrector and state is not None:
             sample = self._multistep_uni_c_bh_update(
-                this_x0=x0, sigma=sigma, state=state
+                this_x0=x0,
+                sigma=sigma_t,
+                x0_history=state.x0_history,
+                sigma_history=tuple(
+                    latents.new_tensor(value) for value in state.sigma_history
+                ),
+                last_sample=state.last_sample,
+                order=state.prev_order,
             )
 
-        model_outputs = (*state.model_outputs[1:], x0)
-        sigma_history = (*state.sigmas[1:], sigma)
-
-        if self.lower_order_final:
-            this_order = min(self.order, state.num_steps - state.step_index)
-        else:
-            this_order = self.order
-        this_order = min(this_order, state.lower_order_nums + 1)  # multistep warmup
+        x0_history = (*(state.x0_history if state is not None else ()), x0)
+        sigma_history = (*(state.sigma_history if state is not None else ()), tr.sigma)
+        # Multistep warmup from the runtime history length, so a sliced plan
+        # restarts cleanly from an empty history.
+        this_order = min(tr.order_cap, len(x0_history))
 
         next_latents = self._multistep_uni_p_bh_update(
             sample=sample,
-            sigma=sigma,
-            sigma_next=sigma_next,
-            model_outputs=model_outputs,
-            sigma_history=sigma_history,
+            sigma=sigma_t,
+            sigma_next=latents.new_tensor(tr.sigma_next),
+            x0_history=x0_history,
+            sigma_history=tuple(latents.new_tensor(value) for value in sigma_history),
             order=this_order,
         )
 
-        next_state = UniPCSolverState(
-            order=state.order,
-            num_steps=state.num_steps,
-            step_index=state.step_index + 1,
-            lower_order_nums=min(state.lower_order_nums + 1, self.order),
-            this_order=this_order,
-            model_outputs=model_outputs,
-            sigmas=sigma_history,
+        next_state = UniPCRuntimeState(
+            x0_history=x0_history[-self.order :],
+            sigma_history=sigma_history[-self.order :],
             last_sample=sample,
+            prev_order=this_order,
         )
-        return StepResult(
+        recorded = (
+            self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
+            if tr.record
+            else None
+        )
+        return TransitionResult(
             next_latents=next_latents,
-            log_prob=self._zero_log_prob(latents),
-            mean=next_latents,
-            std_dev=torch.tensor(0.0, device=latents.device),
-            state=next_state,
+            recorded=recorded,
+            next_solver_state=next_state,
         )
-
-    def replay_step(
-        self,
-        velocity: torch.Tensor,
-        latents: torch.Tensor,
-        sigma: torch.Tensor,
-        sigma_next: torch.Tensor,
-        prev_sample: torch.Tensor,
-        state: SolverState | None = None,
-    ) -> StepResult:
-        msg = f"{self.type} is deterministic and does not support replay log-prob."
-        raise ValueError(msg)
 
     @staticmethod
     def _log_snr(sigma: torch.Tensor) -> torch.Tensor:
@@ -145,26 +148,19 @@ class FlowUniPCSolver(BaseSolver):
         sample: torch.Tensor,
         sigma: torch.Tensor,
         sigma_next: torch.Tensor,
-        model_outputs: tuple[torch.Tensor | None, ...],
-        sigma_history: tuple[torch.Tensor | None, ...],
+        x0_history: tuple[torch.Tensor, ...],
+        sigma_history: tuple[torch.Tensor, ...],
         order: int,
     ) -> torch.Tensor:
-        m0 = model_outputs[-1]
-        assert m0 is not None
+        m0 = x0_history[-1]
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_next)
-        lambda_t = self._log_snr(sigma_next)
         lambda_s0 = self._log_snr(sigma)
-        h = lambda_t - lambda_s0
+        h = self._log_snr(sigma_next) - lambda_s0
 
         d1s: list[torch.Tensor] = []
         for i in range(1, order):
-            sigma_si = sigma_history[-(i + 1)]
-            mi = model_outputs[-(i + 1)]
-            if sigma_si is None or mi is None:
-                msg = "UniPC predictor is missing multistep history."
-                raise ValueError(msg)
-            rk = (self._log_snr(sigma_si) - lambda_s0) / h
-            d1s.append((mi - m0) / rk)
+            rk = (self._log_snr(sigma_history[-(i + 1)]) - lambda_s0) / h
+            d1s.append((x0_history[-(i + 1)] - m0) / rk)
 
         hh = -h  # predict_x0
         h_phi_1 = torch.expm1(hh)
@@ -179,39 +175,32 @@ class FlowUniPCSolver(BaseSolver):
         self,
         this_x0: torch.Tensor,
         sigma: torch.Tensor,
-        state: UniPCSolverState,
+        x0_history: tuple[torch.Tensor, ...],
+        sigma_history: tuple[torch.Tensor, ...],
+        last_sample: torch.Tensor,
+        order: int,
     ) -> torch.Tensor:
         """Correct the current sample using the fresh model output.
 
         Reference semantics: runs *before* the history shift with the previous
         step's predictor order, stepping again from ``last_sample`` over
-        ``[sigmas[-1], sigma]`` with the extra ``D1_t = x0(z_i) - x0(z_{i-1})``
-        difference term.
+        ``[sigma_history[-1], sigma]`` with the extra
+        ``D1_t = x0(z_i) - x0(z_{i-1})`` difference term.
         """
-        m0 = state.model_outputs[-1]
-        x = state.last_sample
-        sigma_s0 = state.sigmas[-1]
-        order = state.this_order
-        if m0 is None or x is None or sigma_s0 is None:
-            msg = "UniPC corrector is missing multistep history."
-            raise ValueError(msg)
+        m0 = x0_history[-1]
+        x = last_sample
+        sigma_s0 = sigma_history[-1]
 
         alpha_t, _ = self._sigma_to_alpha_sigma_t(sigma)
-        lambda_t = self._log_snr(sigma)
         lambda_s0 = self._log_snr(sigma_s0)
-        h = lambda_t - lambda_s0
+        h = self._log_snr(sigma) - lambda_s0
 
         rks: list[torch.Tensor] = []
         d1s: list[torch.Tensor] = []
         for i in range(1, order):
-            sigma_si = state.sigmas[-(i + 1)]
-            mi = state.model_outputs[-(i + 1)]
-            if sigma_si is None or mi is None:
-                msg = "UniPC corrector is missing multistep history."
-                raise ValueError(msg)
-            rk = (self._log_snr(sigma_si) - lambda_s0) / h
+            rk = (self._log_snr(sigma_history[-(i + 1)]) - lambda_s0) / h
             rks.append(rk)
-            d1s.append((mi - m0) / rk)
+            d1s.append((x0_history[-(i + 1)] - m0) / rk)
 
         hh = -h  # predict_x0
         h_phi_1 = torch.expm1(hh)

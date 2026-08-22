@@ -52,7 +52,7 @@ from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
-from flow_control.utils.logging import console, get_logger, warn_once
+from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
 from flow_control.utils.types import (
     OptimizerConfig,
@@ -195,7 +195,6 @@ class AwmTrainer(
         "train/loss": "Loss: {v:.4f}",
         "val/reward_mean": "Val R̄: {v:.3f}",
     }
-    _rollout_needs_trajectory: bool = False
 
     # ------------------------------- Lazy state --------------------------------- #
     _optimizer: torch.optim.Optimizer
@@ -557,17 +556,7 @@ class AwmTrainer(
                 device=self.device, dtype=torch.float32
             )
 
-        grid = rollout.trajectory.timesteps
-        if grid is None:
-            warn_once(
-                logger,
-                "Rollout sigma grid unavailable; falling back to timestep_weighting.",
-            )
-            return self.timestep_weighting.sample_timesteps(T).to(
-                device=self.device, dtype=torch.float32
-            )
-
-        grid = grid.to(device=self.device, dtype=torch.float32)
+        grid = rollout.trajectory.timesteps.to(device=self.device, dtype=torch.float32)
         steps = grid.shape[0]
         lo = 1 if self.train_timestep_sampling == "discrete_wo_init" else 0
         hi = max(lo + 1, int(steps * self.timestep_fraction))
