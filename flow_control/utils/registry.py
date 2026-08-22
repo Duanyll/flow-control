@@ -138,6 +138,21 @@ class RegistryUnion:
     discriminator + shared ``$defs``) comes for free. Runtime validation is wrapped
     to dispatch through the registry *lazily*, so a member registered after this
     schema was built still validates with no ``model_rebuild``.
+
+    Unions whose discriminator is a plain string field additionally accept three
+    unambiguous shorthands (the full dict spelling always stays valid):
+
+    - a bare string is the tag with all-default fields:
+      ``"flow"`` == ``{"type": "flow"}``;
+    - with ``list_as=(tag, field)``, a bare list is that container member:
+      ``[a, b]`` == ``{"type": tag, field: [a, b]}``;
+    - with ``number_as=(tag, field)``, a bare number is that member's single
+      scalar knob: ``4.5`` == ``{"type": tag, field: 4.5}``. ``bool`` is
+      excluded -- it is an ``int`` subclass but never a scalar knob.
+
+    Callable/composite discriminators and unions with a custom ``parser=`` do
+    not take any shorthand. Deliberately NOT added: guessing the member of a
+    tag-less dict, or unwrapping a single-element list -- both are ambiguous.
     """
 
     def __init__(
@@ -146,6 +161,8 @@ class RegistryUnion:
         discriminator: str | Callable[[Any], str],
         *,
         parser: Callable[[dict[str, Any]], Any] | None = None,
+        list_as: tuple[str, str] | None = None,
+        number_as: tuple[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self._discriminator = discriminator
@@ -154,6 +171,37 @@ class RegistryUnion:
         # registry dispatch is used. Either way runtime validation reads the
         # registry at validation time, never the union baked into the core schema.
         self._parser = parser
+        for name, shorthand in (("list_as", list_as), ("number_as", number_as)):
+            if shorthand is not None and not (
+                isinstance(discriminator, str) and parser is None
+            ):
+                raise ValueError(
+                    f"{name} shorthand requires a plain string-field "
+                    "discriminator without a custom parser."
+                )
+        self._list_as = list_as
+        self._number_as = number_as
+
+    def _accepts_shorthand(self) -> bool:
+        return isinstance(self._discriminator, str) and self._parser is None
+
+    def _shorthand_field_annotation(self, kind: str, shorthand: tuple[str, str]) -> Any:
+        """The annotation of the field a value shorthand writes into."""
+        tag, field_name = shorthand
+        member = self._registry.get(tag)
+        if member is None:
+            raise ValueError(
+                f"{kind} tag {tag!r} is not registered in registry "
+                f"{self._registry.name!r}; registered: "
+                f"{sorted(self._registry.members())}"
+            )
+        field = member.model_fields.get(field_name)
+        if field is None:
+            raise ValueError(
+                f"{kind} field {field_name!r} does not exist on "
+                f"{member.__name__} (registry {self._registry.name!r})."
+            )
+        return field.annotation
 
     def _build_annotated_union(self) -> Any:
         members = self._registry.members()
@@ -173,12 +221,47 @@ class RegistryUnion:
         # generated through ``handler`` so all ``$defs`` land in the parent
         # context (shared, deduplicated, recursion-safe).
         union_schema = handler.generate_schema(self._build_annotated_union())
+        schema: CoreSchema = union_schema
+        if self._accepts_shorthand():
+            # The shorthands never reach this schema at runtime (``_validate``
+            # rewrites them into dicts first); the extra branches exist so the
+            # JSON schema advertises them -- anyOf[union, enum-of-tags(, array)
+            # (, number)] keeps IDE completion working for every spelling.
+            alternatives: list[CoreSchema] = [
+                core_schema.literal_schema(list(self._registry.members()))
+            ]
+            for kind, shorthand in (
+                ("list_as", self._list_as),
+                ("number_as", self._number_as),
+            ):
+                if shorthand is not None:
+                    alternatives.append(
+                        handler.generate_schema(
+                            self._shorthand_field_annotation(kind, shorthand)
+                        )
+                    )
+            schema = core_schema.union_schema([union_schema, *alternatives])
         # ...but runtime validation dispatches through the registry lazily.
-        return core_schema.with_info_wrap_validator_function(
-            self._validate, union_schema
-        )
+        return core_schema.with_info_wrap_validator_function(self._validate, schema)
 
     def _validate(self, value: Any, handler: Any, info: Any) -> Any:
+        if self._accepts_shorthand():
+            if isinstance(value, str):
+                value = {self._discriminator: value}
+            elif isinstance(value, list) and self._list_as is not None:
+                tag, field_name = self._list_as
+                value = {self._discriminator: tag, field_name: value}
+            elif self._number_as is not None and isinstance(value, int | float):
+                tag, field_name = self._number_as
+                if isinstance(value, bool):
+                    # bool is an int subclass, and the number branch advertised
+                    # in the schema would happily coerce it to 1.0/0.0 -- reject
+                    # it here rather than let a bare `true` mean a scalar knob.
+                    raise ValueError(
+                        f"Registry {self._registry.name!r} accepts a number "
+                        f"shorthand for tag {tag!r} ({field_name}), not a bool."
+                    )
+                value = {self._discriminator: tag, field_name: value}
         if isinstance(value, dict):
             return (self._parser or self._default_dispatch)(value)
         if isinstance(value, BaseModel):
@@ -265,8 +348,15 @@ if __name__ == "__main__":
     parsed = cfg.thing
     assert isinstance(parsed, _A) and parsed.gain == 2.0
     schema = _Cfg.model_json_schema()
-    mapping = schema["properties"]["thing"]["discriminator"]["mapping"]
+    # Shorthand-capable unions advertise anyOf[tagged union, enum-of-tags].
+    thing_schema = schema["properties"]["thing"]["anyOf"]
+    mapping = thing_schema[0]["discriminator"]["mapping"]
     assert set(mapping) == {"a", "b"}, mapping
+    assert set(thing_schema[1]["enum"]) == {"a", "b"}, thing_schema[1]
+
+    # Bare-string shorthand: tag with all-default fields.
+    short = _Cfg.model_validate({"thing": "b"})
+    assert isinstance(short.thing, _B) and short.thing.width == 3
 
     # Late registration validates at runtime with no model_rebuild.
     @smoke_registry.register("c")
@@ -275,6 +365,82 @@ if __name__ == "__main__":
 
     late = _Cfg.model_validate({"thing": {"type": "c"}})
     assert isinstance(late.thing, _C)
+    assert isinstance(_Cfg.model_validate({"thing": "c"}).thing, _C)
+
+    # list_as shorthand: a bare list is the declared container member.
+    @smoke_registry.register("many")
+    class _Many(_Base):
+        type: Literal["many"] = "many"
+        items: list[_A] = []
+
+    ManyThing = Annotated[
+        _Base, RegistryUnion(smoke_registry, "type", list_as=("many", "items"))
+    ]
+
+    class _ManyCfg(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        thing: ManyThing
+
+    packed = _ManyCfg.model_validate({"thing": [{"type": "a", "gain": 3.0}]})
+    assert isinstance(packed.thing, _Many) and packed.thing.items[0].gain == 3.0
+    many_schema = _ManyCfg.model_json_schema()["properties"]["thing"]["anyOf"]
+    assert many_schema[2]["type"] == "array", many_schema[2]
+
+    # A bare list stays rejected on unions without list_as.
+    try:
+        _Cfg.model_validate({"thing": [{"type": "a"}]})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bare list must not validate without list_as")
+
+    # number_as shorthand: a bare number is the declared member's scalar knob.
+    ScaledThing = Annotated[
+        _Base, RegistryUnion(smoke_registry, "type", number_as=("a", "gain"))
+    ]
+
+    class _ScaledCfg(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        thing: ScaledThing
+
+    for value in (4.5, 4):
+        scaled = _ScaledCfg.model_validate({"thing": value})
+        assert isinstance(scaled.thing, _A) and scaled.thing.gain == float(value)
+    scaled_schema = _ScaledCfg.model_json_schema()["properties"]["thing"]["anyOf"]
+    assert scaled_schema[2]["type"] == "number", scaled_schema[2]
+
+    # bool is an int subclass but never a scalar knob.
+    try:
+        _ScaledCfg.model_validate({"thing": True})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bare bool must not validate as a number shorthand")
+
+    # A bare number stays rejected on unions without number_as.
+    try:
+        _Cfg.model_validate({"thing": 4.5})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bare number must not validate without number_as")
+
+    # Callable discriminators take no shorthand.
+    CallableThing = Annotated[
+        _Base, RegistryUnion(smoke_registry, lambda value: value["type"])
+    ]
+
+    class _CallableCfg(BaseModel):
+        thing: CallableThing
+
+    try:
+        _CallableCfg.model_validate({"thing": "a"})
+    # The uncoerced string reaches the callable discriminator, which only
+    # understands dicts/models (same failure mode as the adapter union).
+    except (ValueError, TypeError, AttributeError):
+        pass
+    else:
+        raise AssertionError("bare str must not validate on callable discriminator")
 
     print("[green]registry smoke test passed[/green]")
     print(json.dumps(mapping, indent=2))
