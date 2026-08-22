@@ -58,7 +58,7 @@
 
   "rollout_sampler": {
     "steps": 10,
-    "cfg_scale": 4.5,
+    "guidance": { "type": "cfg", "scale": 4.5 },
     "shift": { "type": "constant", "shift_value": 3.0 },
     "solver": { "type": "flow", "eta": 0.7 },
   },
@@ -98,7 +98,7 @@
 
   "validation_sampler": {
     "steps": 40,
-    "cfg_scale": 4.5,
+    "guidance": { "type": "cfg", "scale": 4.5 },
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 

@@ -5,7 +5,8 @@
   // The AWM paper reports FLUX OCR 0.95; the released repo ships only SD3.5-M
   // configs, so the AWM knobs follow dgx_awm.py:ocr_sd3 (beta 3e-3) and the FLUX
   // model/sampler blocks follow examples/grpo/ocr_flux. FLUX is guidance-
-  // distilled -> rollout cfg_scale 1.0 (distilled guidance embedding in adapter).
+  // distilled -> rollouts use the default guidance (cfg scale 1.0; the
+  // distilled guidance embedding lives in the adapter).
   // Reuses the shared ./data/ocr_flux_grpo caches produced by ../../grpo/ocr_flux.
   "checkpoint_root": "$auto",
   "auto_resume": true,
@@ -74,7 +75,6 @@
 
   "rollout_sampler": {
     "steps": 14,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
     "solver": { "type": "flow", "eta": 0.4 },
   },
@@ -118,7 +118,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
   },
 

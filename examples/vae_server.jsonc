@@ -3,6 +3,6 @@
   "port": 30133,
   "device": "cuda:3",
   "vae": {
-    "type": "qwen_image"
+    "type": "qwen"
   }
 }

@@ -14,11 +14,10 @@
     // Official Dev recipe: 28 hardcoded timesteps (DEFAULT_TIMESTEPS / 1000 with
     // a zero terminal) and the "flash" full-re-noise sampler (fresh noise every
     // step, scale 7.5/8 = 0.9375 in latent space, clipped at 2.5 std). The model
-    // is guidance-distilled: no true CFG (cfg_scale 1.0, preset saves no
-    // negative). For the official dev *editing* scheduler (flow_match) use
+    // is guidance-distilled: no true CFG (default guidance scale 1.0, preset
+    // saves no negative). For the official dev *editing* scheduler (flow_match) use
     // {"solver": {"type": "flow"}} instead — a plain deterministic Euler.
     "steps": 28,
-    "cfg_scale": 1.0,
     "solver": {
       "type": "flash",
       "eta": 1.0,

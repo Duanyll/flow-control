@@ -58,7 +58,6 @@
 
   "rollout_sampler": {
     "steps": 6,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
     // Full-trajectory Flow-SDE rollout, not the fast CPS windowed setting.
     // The OCR SD3.5 setting used noise_level=0.7; start there for OCR stability.
@@ -99,7 +98,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
   },
 

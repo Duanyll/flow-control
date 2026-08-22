@@ -12,7 +12,6 @@
   },
   "sampler": {
     "steps": 20,
-    "cfg_scale": 1.0,
     "shift": {
       "type": "linear"
     }

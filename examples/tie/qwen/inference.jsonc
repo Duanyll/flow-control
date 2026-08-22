@@ -12,8 +12,7 @@
   },
   "sampler": {
     "steps": 28,
-    "cfg_scale": 4.0,
-    "enable_cfg_renorm": true,
+    "guidance": { "type": "cfg", "scale": 4.0, "renorm": true },
     "shift": {
       "type": "linear",
       "max_image_seq_len": 8192,

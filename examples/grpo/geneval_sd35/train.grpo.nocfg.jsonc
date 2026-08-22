@@ -60,12 +60,13 @@
 
   "rollout_sampler": {
     "steps": 10,
-    "cfg_scale": 1.0,
-    "trajectory_window_size": 3,
-    // omit trajectory_window_range -> defaults to (0, steps-1); range_end must be < steps.
     "shift": { "type": "constant", "shift_value": 3.0 },
     "solver": { "type": "cps", "eta": 0.8 },
   },
+  // Random 3-step recorded SDE window; omit "range" -> anywhere in (0, steps-1).
+  "rollout_recipe": [ { "transforms": [
+    { "type": "sde_window", "size": 3, "record": true },
+  ] } ],
 
   "ema": {
     "decay": 0.9,
@@ -102,7 +103,6 @@
 
   "validation_sampler": {
     "steps": 40,
-    "cfg_scale": 1.0,
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 

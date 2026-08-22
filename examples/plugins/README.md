@@ -43,7 +43,6 @@ imports = ["examples.plugins.toy"]
 
 [sampler]
 steps = 20
-cfg_scale = 1.0
 
 [sampler.shift]
 type = "toy_constant"

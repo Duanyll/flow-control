@@ -4,9 +4,10 @@
   // RAM (Reinforce Adjoint Matching) FLUX.1-dev PickScore run -- EXPERIMENTAL.
   // RAM's official repo has NO FLUX experiments: it is built for SD3.5-M and
   // samples endpoints with TRUE CFG=2.0. FLUX is guidance-distilled and does not
-  // take a true CFG pass, so this config sets cfg_scale 1.0 (distilled guidance
-  // embedding in the adapter). This deviates from the paper and is provided for
-  // exploration only -- expect it to behave differently from the SD3.5-M runs.
+  // take a true CFG pass, so this config keeps the default guidance scale 1.0
+  // (distilled guidance embedding in the adapter). This deviates from the paper
+  // and is provided for exploration only -- expect it to behave differently
+  // from the SD3.5-M runs.
   // Reuses the shared ./data/pickscore_flux caches produced by ../../grpo/pickscore_flux.
   "checkpoint_root": "$auto",
   "auto_resume": true,
@@ -66,9 +67,8 @@
   },
 
   "rollout_sampler": {
-    // FLUX distilled: no true CFG. cfg_scale 1.0 (vs RAM's SD3 CFG 2.0).
+    // FLUX distilled: no true CFG -> default guidance (vs RAM's SD3 CFG 2.0).
     "steps": 20,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
     "solver": { "type": "flow", "eta": 0.0 },
   },
@@ -114,7 +114,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
   },
 

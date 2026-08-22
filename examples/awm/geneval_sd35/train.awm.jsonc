@@ -87,7 +87,6 @@
 
   "rollout_sampler": {
     "steps": 14,
-    "cfg_scale": 1.0,
     "sigma_schedule": "diffusers_flow",
     "shift": { "type": "constant", "shift_value": 3.0 },
     "solver": {
@@ -139,7 +138,6 @@
 
   "validation_sampler": {
     "steps": 40,
-    "cfg_scale": 1.0,
     "sigma_schedule": "diffusers_flow",
     "shift": { "type": "constant", "shift_value": 3.0 },
   },

@@ -52,7 +52,6 @@
 
   "rollout_sampler": {
     "steps": 6,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
     "solver": { "type": "flow", "eta": 0.7 },
   },
@@ -91,7 +90,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
   },
 

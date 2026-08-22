@@ -60,7 +60,6 @@
 
   "rollout_sampler": {
     "steps": 8,
-    "cfg_scale": 1.0,
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 
@@ -113,7 +112,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 

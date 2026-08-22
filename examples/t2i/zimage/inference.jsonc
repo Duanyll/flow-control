@@ -13,8 +13,7 @@
   },
   "sampler": {
     "steps": 30,
-    "cfg_scale": 4.0,
-    "enable_cfg_renorm": true,
+    "guidance": { "type": "cfg", "scale": 4.0, "renorm": true },
     "shift": {
       "type": "linear"
     }

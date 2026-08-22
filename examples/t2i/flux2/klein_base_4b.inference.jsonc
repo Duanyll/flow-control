@@ -20,7 +20,7 @@
   },
   "sampler": {
     "steps": 50,
-    "cfg_scale": 3.5,
+    "guidance": { "type": "cfg", "scale": 3.5 },
     "shift": {
       "type": "flux2"
     }

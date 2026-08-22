@@ -19,7 +19,7 @@
     // {"type": "constant", "shift_value": 3.0} shift is only a ~0.03%
     // approximation of it (fine for training configs).
     "steps": 50,
-    "cfg_scale": 5.0,
+    "guidance": { "type": "cfg", "scale": 5.0 },
     "solver": {
       "type": "flow_unipc",
       "order": 2

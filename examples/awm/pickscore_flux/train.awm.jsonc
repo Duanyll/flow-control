@@ -5,8 +5,9 @@
   // The AWM paper reports FLUX results, but the released repo ships only SD3.5-M
   // configs; the AWM knobs below follow dgx_awm.py and the FLUX model/sampler
   // blocks follow this repo's examples/{grpo,nft}/pickscore_flux. FLUX is
-  // guidance-distilled, so rollouts use cfg_scale 1.0 (the distilled guidance
-  // embedding lives in the adapter) instead of AWM's SD3 true-CFG-off setting.
+  // guidance-distilled, so rollouts use the default guidance (cfg scale 1.0;
+  // the distilled guidance embedding lives in the adapter) instead of AWM's
+  // SD3 true-CFG-off setting.
   // Reuses the shared ./data/pickscore_flux caches produced by ../../grpo/pickscore_flux.
   "checkpoint_root": "$auto",
   "auto_resume": true,
@@ -76,7 +77,6 @@
 
   "rollout_sampler": {
     "steps": 14,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
     "solver": { "type": "flow", "eta": 0.4 },
   },
@@ -121,7 +121,6 @@
 
   "validation_sampler": {
     "steps": 28,
-    "cfg_scale": 1.0,
     "shift": { "type": "linear" },
   },
 

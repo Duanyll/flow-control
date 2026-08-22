@@ -16,9 +16,10 @@ records the stable boundary intended for future padding and sequence packing.
 - [x] Fall back to one forward per logical sample when inputs are incompatible.
 - [x] Synchronize dense/fallback and CFG decisions across distributed ranks.
 - [x] Preserve independent per-request sigma grids, solver states, generators,
-      trajectory windows, and outputs.
+      recipe-built plans (SDE windows), and outputs.
 - [x] Keep processor encode/decode, reward evaluation, and annotation per sample.
-- [x] Keep SA-Solver sequential until it exposes a step-wise state API.
+- [x] (superseded by plan-as-data) SA-Solver now batches across requests through
+      the plan executor's rendezvous loop; no sequential special case remains.
 - [x] Do not implement padding or true sequence packing in this change.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
 
@@ -64,39 +65,53 @@ def sample(
     self,
     model: BaseModelAdapter,
     requests: list[SampleRequest],
-    t_start: float = 1.0,
-    t_end: float = 0.0,
-    return_trajectory: bool = False,
 ) -> list[SampleOutput]:
     ...
 ```
 
+`sample()` is plain full-grid sampling; trajectory recording, SDE windows and
+multi-phase flows (SDEdit, inversion) go through the recipe runner instead:
+each request builds its own `list[Phase]` (`PhasesRecipe.build`) and
+`run_phases(model, requests)` executes phase `i` of all requests in one
+`execute()` call, preserving cross-request batching and FSDP alignment.
+
 - [x] Return one `SampleOutput` per request without stacking logical outputs.
 - [x] Build one shifted/custom sigma schedule per request.
-- [x] Keep one solver state and trajectory window per request.
-- [x] Batch the expensive conditional model forward once per denoising step.
+- [x] Keep one solver/guidance runtime state (`StepContext`) per request; SDE
+      windows and recording are per-request plan data, not sampler state.
+- [x] Batch the expensive conditional model forward once per rendezvous round.
 - [x] Run solver math independently per request.
 - [x] Support no-negative, all-negative, and mixed CFG request lists.
 - [x] Globally synchronize whether the unconditional pass is required.
 - [x] Use conditional dummy inputs where a rank/request lacks a negative batch.
-- [x] Apply CFG renormalization per logical sample.
-- [x] Reject different request counts across distributed ranks before sampling.
-- [x] Run SA-Solver requests sequentially with a visible warn-once message.
+- [x] Apply CFG renormalization per logical sample (`ClassifierFreeGuidance`).
+- [x] Reject different request counts across distributed ranks before sampling
+      (`executor.validate_distributed_request_count`, shared by `sample`,
+      `run_phases` and `replay_recorded_steps`).
+- [x] Batch SA-Solver across requests through the executor (its PEC transition
+      yields multiple evals; heterogeneous plans fall back to grouped
+      execution with a warn-once).
 
-Replay uses list-only `ReplayRequest` and returns named
+Replay uses list-only `Sampler.replay_recorded_steps` over `ReplayItem`s (each
+carrying a rollout `RecordedStep`, whose pure-float `ReplayStep` stores the
+ACTUAL per-step eta/noise scale) and returns named
 `StepLogProbOutput(log_prob, mean, std_dev)` values.
 
-## Trajectory RNG fix
+## Window RNG (recipe layer)
 
-- [x] Remove trajectory-window selection from Python's global `random` state.
-- [x] Draw the inclusive window start with the request's `torch.Generator`.
+- [x] Window selection never touches Python's global `random` state.
+- [x] `transforms.select_sde_window` draws the inclusive window start with the
+      per-request `torch.Generator` (the `sde_window` transform's generator
+      comes from `RecipeBuildContext`).
 - [x] Use the generator's device for `torch.randint`.
 - [x] Validate positive window size, valid range, and window fit.
-- [x] Preserve the half-open runtime window `[train_start, train_end)`.
-- [x] Test Python-RNG independence, generator isolation, and both endpoints.
+- [x] Preserve the half-open runtime window `[train_start, train_end)`;
+      `with_sde_window` gates eta and (optionally) marks the record range.
+- [x] Test Python-RNG independence, generator isolation, and both endpoints
+      (`tests/test_recipe_build.py::SelectSdeWindowTest`).
 
-The same request generator now drives initial latent creation, trajectory-window
-selection, and stochastic solver draws.
+The same request generator drives initial latent creation, window selection at
+recipe build, and stochastic solver draws — one per-request RNG stream.
 
 ## Adapter support matrix
 
@@ -324,7 +339,7 @@ list of [1, N_i, D] outputs
       topology rather than packing tensors independently.
 - [ ] Split packed/padded outputs back to logical samples inside the adapter.
 
-The sampler, solvers, replay requests, trainers, and losses already operate on
+The sampler, solvers, replay items, trainers, and losses already operate on
 logical lists, so future packing is localized to adapter collation, model
 attention/position handling, and output splitting. Z-Image is the first native
 ragged example. FLUX and Qwen still require architecture-specific masks and

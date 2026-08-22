@@ -70,7 +70,7 @@
 
   "rollout_sampler": {
     "steps": 20, // FF num_inference_steps
-    "cfg_scale": 1.0, // FF guidance_scale
+    // FF guidance_scale = 1.0 -> the default guidance (cfg scale 1.0), omitted.
     "shift": { "type": "constant", "shift_value": 3.0 }, // FF time_shift
   },
 
@@ -129,7 +129,6 @@
 
   "validation_sampler": {
     "steps": 28, // FF eval num_inference_steps
-    "cfg_scale": 1.0,
     "shift": { "type": "constant", "shift_value": 3.0 },
   },
 

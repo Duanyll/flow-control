@@ -15,7 +15,7 @@
     // same 50-step UniPC + CFG 5.0 recipe as t2i (the unconditional pass keeps
     // the reference images — the preset sets negative_with_images).
     "steps": 50,
-    "cfg_scale": 5.0,
+    "guidance": { "type": "cfg", "scale": 5.0 },
     "solver": {
       "type": "flow_unipc",
       "order": 2
