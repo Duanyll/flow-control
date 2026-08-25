@@ -1,9 +1,14 @@
-"""Semantics harness for the plan-as-data sampler refactor (Phase 1).
+"""Plan/transform/executor semantics for the plan-as-data sampler.
 
-Fixture-backed tests compare the refactored implementation against baselines
-captured from the pre-refactor code by ``tests/sampler_baseline_capture.py``
-(they skip cleanly when the baselines are absent). Fixture-free tests assert
-the plan/transform/executor invariants that do not need the old code.
+Two kinds of test live here:
+
+* **Parity** (``BaselineParityTest``) replays the numeric fixtures under
+  ``tests/fixtures/sampler_baselines/`` — first captured from the pre
+  plan-as-data implementation — so accidental numeric drift in any solver
+  surfaces as a bitwise mismatch. Regenerate with
+  ``tests/sampler_baseline_capture.py`` only when behaviour changes on purpose.
+* **Invariants** assert properties of the plan data or compare two executions
+  of the current code; they need no fixtures.
 """
 
 import importlib
@@ -11,6 +16,7 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -63,11 +69,22 @@ capture = importlib.import_module("sampler_baseline_capture")
 microbatching = importlib.import_module("test_microbatching")
 
 BASELINE_DIR = capture.BASELINE_DIR
-HAVE_BASELINES = BASELINE_DIR.exists() and any(BASELINE_DIR.glob("e2e_*.pt"))
-SKIP_REASON = (
-    "baselines missing; run `uv run python tests/sampler_baseline_capture.py` "
-    "on the pre-refactor implementation first"
-)
+RecordingModel = capture.RecordingModel
+make_request_batch = capture.make_request_batch
+drive_single_eval_transition = capture.drive_single_eval_transition
+
+MIGRATED_STEP_FIXTURES = {
+    # Each solver exposes its step moments as ``step_parts(latents, velocity,
+    # sigma, sigma_next, eta) -> (mean, std_dev, ...)``.
+    "step_flow_eta07.pt": FlowSolver,
+    "step_ddim_eta07.pt": DDIMSolver,
+    "step_cps_eta07.pt": CPSSolver,
+    "step_dance_eta07.pt": DanceSolver,
+}
+
+
+def load_fixture(name: str) -> dict:
+    return torch.load(BASELINE_DIR / name, weights_only=True)
 
 
 def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
@@ -100,18 +117,6 @@ def run_recipe(
     return run_phases(model, [phases])[0]
 
 
-def stack_trajectory(output: SampleOutput) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rebuild the legacy stacked ``(latents, log_probs)`` fixture views."""
-    trajectory = output.trajectory
-    assert trajectory
-    latents = torch.stack(
-        [trajectory[0].latent_t] + [step.latent_next for step in trajectory],
-        dim=1,
-    )
-    log_probs = torch.stack([step.log_prob for step in trajectory], dim=1)
-    return latents, log_probs
-
-
 class ConstVelocityModel:
     """Duck-typed model returning a fixed velocity for every sample."""
 
@@ -129,57 +134,25 @@ class ConstVelocityModel:
         return [self.velocity for _ in batches]
 
 
-def drive_single_eval_transition(
-    tr: Transition,
-    ctx: StepContext,
-    velocity: torch.Tensor,
-) -> TransitionResult:
-    """Manually run a single-eval run_transition generator with a fixed velocity."""
-    gen = tr.run(ctx)
-    request = next(gen)
-    assert request.sigma == tr.sigma
-    try:
-        gen.send(GuidanceOutput(velocity=velocity))
-    except StopIteration as stop:
-        assert isinstance(stop.value, TransitionResult)
-        return stop.value
-    raise AssertionError("expected a single-eval transition")
-
-
-def drive_transition(
-    tr: Transition,
-    ctx: StepContext,
-    velocity_fn,
-) -> tuple[TransitionResult, list[EvalRequest]]:
-    """Drive a run_transition generator, answering evals via ``velocity_fn``."""
-    gen = tr.run(ctx)
-    requests: list[EvalRequest] = []
-    try:
-        request = next(gen)
-        while True:
-            requests.append(request)
-            request = gen.send(GuidanceOutput(velocity=velocity_fn(request)))
-    except StopIteration as stop:
-        assert isinstance(stop.value, TransitionResult)
-        return stop.value, requests
-
-
-MIGRATED_STEP_FIXTURES = {
-    # Each solver exposes its step moments as ``step_parts(latents, velocity,
-    # sigma, sigma_next, eta) -> (mean, std_dev, ...)``.
-    "step_flow_eta07.pt": FlowSolver,
-    "step_ddim_eta07.pt": DDIMSolver,
-    "step_cps_eta07.pt": CPSSolver,
-    "step_dance_eta07.pt": DanceSolver,
-}
+def stack_trajectory(output: SampleOutput) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rebuild the stacked ``(latents, log_probs)`` fixture views."""
+    trajectory = output.trajectory
+    assert trajectory
+    latents = torch.stack(
+        [trajectory[0].latent_t] + [step.latent_next for step in trajectory],
+        dim=1,
+    )
+    log_probs = torch.stack([step.log_prob for step in trajectory], dim=1)
+    return latents, log_probs
 
 
 def sampler_from_fixture(fixture: dict) -> Sampler:
-    """Rebuild the Sampler from a frozen pre-refactor config dump.
+    """Rebuild the Sampler from a frozen config dump.
 
-    The fixtures store ``sampler.model_dump()`` as it was spelled by the old
-    implementation; retired spellings are migrated here exactly as a user
-    would have to edit an old config.
+    Fixtures captured before the guidance/recipe rename store the retired
+    spellings; they are migrated here exactly as a user would have to edit an
+    old config. Regenerating a fixture writes the current spelling and makes
+    the corresponding branch a no-op.
     """
     config = dict(fixture["sampler_config"])
     if "cfg_scale" in config:
@@ -201,44 +174,85 @@ def sampler_from_fixture(fixture: dict) -> Sampler:
     return Sampler.model_validate(config)
 
 
-@unittest.skipUnless(HAVE_BASELINES, SKIP_REASON)
+def run_e2e_fixture(fixture: dict) -> tuple[SampleOutput, Any]:
+    """Re-run a captured end-to-end config through the current recipe runner.
+
+    The second element is the ``RecordingModel`` that answered the evals; it is
+    untyped because the capture module is imported dynamically (see above).
+    """
+    model = RecordingModel()
+    output = run_recipe(
+        model,
+        sampler_from_fixture(fixture),
+        make_request_batch(fixture["initial_latents"]),
+        torch.Generator().manual_seed(777),
+    )
+    return output, model
+
+
+def e2e_fixtures() -> list[Path]:
+    return sorted(BASELINE_DIR.glob("e2e_*.pt"))
+
+
+def drive_transition(
+    tr: Transition,
+    ctx: StepContext,
+    velocity_fn,
+) -> tuple[TransitionResult, list[EvalRequest]]:
+    """Drive a run_transition generator, answering evals via ``velocity_fn``."""
+    gen = tr.run(ctx)
+    requests: list[EvalRequest] = []
+    try:
+        request = next(gen)
+        while True:
+            requests.append(request)
+            request = gen.send(GuidanceOutput(velocity=velocity_fn(request)))
+    except StopIteration as stop:
+        assert isinstance(stop.value, TransitionResult)
+        return stop.value, requests
+
+
 class BaselineParityTest(unittest.TestCase):
-    def test_e2e_trajectories_and_eval_topology_match_baselines(self) -> None:
-        for fixture_path in sorted(BASELINE_DIR.glob("e2e_*.pt")):
+    """Bitwise parity against the checked-in numeric baselines.
+
+    A failure here means a solver's numerics moved. If that was intentional,
+    regenerate the fixtures (see ``tests/sampler_baseline_capture.py``) and
+    commit them with the change; if not, it is the regression these exist for.
+    """
+
+    def test_e2e_trajectories_match_baselines(self) -> None:
+        for fixture_path in e2e_fixtures():
             with self.subTest(fixture=fixture_path.stem):
-                fixture = torch.load(fixture_path, weights_only=False)
-                sampler = sampler_from_fixture(fixture)
-                model = capture.RecordingModel()
-                output = run_recipe(
-                    model,
-                    sampler,
-                    capture.make_request_batch(fixture["initial_latents"]),
-                    torch.Generator().manual_seed(777),
-                )
+                fixture = load_fixture(fixture_path.name)
+                output, _ = run_e2e_fixture(fixture)
 
                 assert_bitwise(output.final_latents, fixture["final_latents"])
                 traj_latents, log_probs = stack_trajectory(output)
-                if fixture["sampler_config"]["solver"]["type"] == "sa":
-                    # run_phases reports the plan-compiled grid; SA's planner
-                    # adjusts the head (initial_time) and the penultimate
-                    # sigma (both pinned by the sa_internals tests), while
-                    # the legacy fixture stored the raw config grid.
+                if fixture["log_probs"] is None:
+                    # Captured by the legacy SA loop, which stored every
+                    # intermediate latent, produced no log-probs, and reported
+                    # the raw config grid rather than SA's adjusted one (its
+                    # head/penultimate rewrites are pinned by the sa_internals
+                    # tests). Regenerating this fixture retires the branch.
                     assert_bitwise(output.timesteps[1:-1], fixture["timesteps"][1:-1])
-                    # The legacy SA loop stored every intermediate latent and
-                    # produced no log-probs; the unified plan path records the
-                    # default window, which excludes the terminal transition.
                     window = traj_latents.shape[1]
                     assert_bitwise(traj_latents, fixture["traj_latents"][:, :window])
                     assert_bitwise(output.final_latents, fixture["traj_latents"][:, -1])
                     self.assertTrue((log_probs == 0).all())
                 else:
-                    # Captured with the default full window, whose executed
-                    # grid equals the raw config grid for non-SA planners.
                     assert_bitwise(output.timesteps, fixture["timesteps"])
-                    if fixture["traj_latents"] is not None:
-                        assert_bitwise(traj_latents, fixture["traj_latents"])
-                    if fixture["log_probs"] is not None:
-                        assert_bitwise(log_probs, fixture["log_probs"])
+                    assert_bitwise(traj_latents, fixture["traj_latents"])
+                    assert_bitwise(log_probs, fixture["log_probs"])
+
+    def test_e2e_eval_topology_matches_baselines(self) -> None:
+        # Separate from the numerics: *where* and in what order the model is
+        # queried is a property of the plan, and can change (extra warmup eval,
+        # reordered rendezvous) while the final latents still land correctly.
+        for fixture_path in e2e_fixtures():
+            with self.subTest(fixture=fixture_path.stem):
+                fixture = load_fixture(fixture_path.name)
+                _, model = run_e2e_fixture(fixture)
+
                 self.assertEqual(model.eval_sigmas, fixture["eval_sigmas"])
                 for actual, expected in zip(
                     model.eval_latents, fixture["eval_latents"], strict=True
@@ -247,7 +261,7 @@ class BaselineParityTest(unittest.TestCase):
 
     def test_migrated_transitions_match_stochastic_step_baselines(self) -> None:
         for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = torch.load(BASELINE_DIR / fixture_name, weights_only=False)
+            fixture = load_fixture(fixture_name)
             solver = solver_cls.model_validate(fixture["solver_config"])
             latents = fixture["latents"]
             velocity = fixture["velocity"]
@@ -281,7 +295,7 @@ class BaselineParityTest(unittest.TestCase):
 
     def test_replay_steps_match_replay_baselines(self) -> None:
         for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = torch.load(BASELINE_DIR / fixture_name, weights_only=False)
+            fixture = load_fixture(fixture_name)
             solver = solver_cls.model_validate(fixture["solver_config"])
             for entry in fixture["entries"]:
                 with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
@@ -299,7 +313,7 @@ class BaselineParityTest(unittest.TestCase):
 
     def test_replay_recorded_steps_matches_replay_baselines(self) -> None:
         for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = torch.load(BASELINE_DIR / fixture_name, weights_only=False)
+            fixture = load_fixture(fixture_name)
             solver_type = solver_registry.get(fixture["solver_config"]["type"])
             self.assertIs(solver_type, solver_cls)
             solver = solver_cls.model_validate(fixture["solver_config"])
@@ -307,7 +321,7 @@ class BaselineParityTest(unittest.TestCase):
             model = ConstVelocityModel(fixture["velocity"])
             items = [
                 ReplayItem(
-                    batch=capture.make_request_batch(fixture["latents"]),
+                    batch=make_request_batch(fixture["latents"]),
                     recorded=RecordedStep(
                         latent_t=fixture["latents"],
                         latent_next=fixture["prev_sample"],
@@ -327,7 +341,7 @@ class BaselineParityTest(unittest.TestCase):
                     assert_bitwise(output.std_dev, entry["replay_std_dev"])
 
     def test_flash_transitions_match_step_baselines(self) -> None:
-        fixture = torch.load(BASELINE_DIR / "step_flash_eta1.pt", weights_only=False)
+        fixture = load_fixture("step_flash_eta1.pt")
         solver = FlashSolver.model_validate(fixture["solver_config"])
         latents = fixture["latents"]
         velocity = fixture["velocity"]
@@ -385,13 +399,13 @@ class BaselineParityTest(unittest.TestCase):
     def test_flash_public_replay_matches_step_baselines(self) -> None:
         # The recorded FlashReplayStep carries the plan-compiled noise scale;
         # no runtime state is needed at replay time.
-        fixture = torch.load(BASELINE_DIR / "step_flash_eta1.pt", weights_only=False)
+        fixture = load_fixture("step_flash_eta1.pt")
         solver = FlashSolver.model_validate(fixture["solver_config"])
         sampler = Sampler(steps=8, solver=solver)
         model = ConstVelocityModel(fixture["velocity"])
         items = [
             ReplayItem(
-                batch=capture.make_request_batch(fixture["latents"]),
+                batch=make_request_batch(fixture["latents"]),
                 recorded=RecordedStep(
                     latent_t=fixture["latents"],
                     latent_next=fixture["prev_sample"],
@@ -414,7 +428,10 @@ class BaselineParityTest(unittest.TestCase):
                 assert_bitwise(output.std_dev, entry["replay_std_dev"])
 
     def test_sa_plan_compiles_adjusted_grid_and_taus(self) -> None:
-        fixture = torch.load(BASELINE_DIR / "sa_internals.pt", weights_only=False)
+        # The self-contained companion in PlanInvariantsTest derives the same
+        # grid from SA's documented rules; this one pins it against the numbers
+        # the pre-refactor planner actually produced.
+        fixture = load_fixture("sa_internals.pt")
         solver = SASolver.model_validate(fixture["solver_config"])
         plan = [
             item
@@ -444,7 +461,7 @@ class BaselineParityTest(unittest.TestCase):
 
     def test_sa_internal_updates_still_match_baselines(self) -> None:
         # The shared AB/AM math is unchanged; pin it against the old fixtures.
-        fixture = torch.load(BASELINE_DIR / "sa_internals.pt", weights_only=False)
+        fixture = load_fixture("sa_internals.pt")
         solver = SASolver.model_validate(fixture["solver_config"])
         times = fixture["times"]
         x = fixture["x"]
@@ -495,7 +512,7 @@ class BaselineParityTest(unittest.TestCase):
     def test_sa_run_transition_drives_pec_through_internal_updates(self) -> None:
         # Drive run_transition generators with the fixture histories and check
         # the PEC control flow reproduces the pinned AB/AM outputs.
-        fixture = torch.load(BASELINE_DIR / "sa_internals.pt", weights_only=False)
+        fixture = load_fixture("sa_internals.pt")
         solver = SASolver.model_validate(fixture["solver_config"])
         times = fixture["times"]
         x = fixture["x"]
@@ -608,6 +625,32 @@ class PlanInvariantsTest(unittest.TestCase):
         unrecorded = with_sde_window(plan, 1, 3, record=False)
         self.assertFalse(
             any(item.record for item in unrecorded if isinstance(item, Transition))
+        )
+
+    def test_sa_plan_compiles_the_adjusted_grid_and_frozen_tau(self) -> None:
+        # SA does not run on the grid it is handed: the head is capped at
+        # initial_time (the reference never evaluates at pure noise) and the
+        # penultimate time is halved. Both rewrites are invisible on a uniform
+        # grid, hence the uneven sigmas here. ``eta`` is tau(sigma_next) frozen
+        # at plan time -- zero below the stochasticity band, and zero on the
+        # terminal step, which collapses to the previous x0 prediction.
+        solver = SASolver()  # eta 0.4 inside [0.3, 0.9]
+        transitions = [
+            item
+            for item in solver.plan([1.0, 0.9, 0.5, 0.2, 0.0])
+            if isinstance(item, SaTransition)
+        ]
+
+        self.assertEqual(
+            [item.sigma for item in transitions],
+            [solver.initial_time, 0.9, 0.5, 0.25],
+        )
+        self.assertEqual(
+            [item.sigma_next for item in transitions], [0.9, 0.5, 0.25, 0.0]
+        )
+        self.assertEqual([item.eta for item in transitions], [0.4, 0.4, 0.0, 0.0])
+        self.assertEqual(
+            [item.final for item in transitions], [False, False, False, True]
         )
 
 
@@ -829,12 +872,10 @@ class ExecutorSemanticsTest(unittest.TestCase):
                             solver_state=None,
                             guidance_state=None,
                         ),
-                        batch=capture.make_request_batch(initial),
+                        batch=make_request_batch(initial),
                         negative_batch=None,
                     )
-                    events = list(
-                        execute(capture.RecordingModel(), [run], sampler.guidance)
-                    )
+                    events = list(execute(RecordingModel(), [run], sampler.guidance))
                     self.assertEqual(len(events), len(plan))
                     self.assertTrue(torch.isfinite(run.ctx.latents).all())
                     results.append(run.ctx.latents)
@@ -861,10 +902,10 @@ class ExecutorSemanticsTest(unittest.TestCase):
                     solver_state=None,
                     guidance_state=None,
                 ),
-                batch=capture.make_request_batch(initial),
+                batch=make_request_batch(initial),
                 negative_batch=None,
             )
-            events = list(execute(capture.RecordingModel(), [run], sampler.guidance))
+            events = list(execute(RecordingModel(), [run], sampler.guidance))
             self.assertEqual(len(events), len(plan))
             return run.ctx.latents, torch.equal(generator.get_state(), state_before)
 
@@ -877,10 +918,10 @@ class ExecutorSemanticsTest(unittest.TestCase):
         # actually stochastic (different seeds diverge).
         def sample_full(seed: int) -> torch.Tensor:
             request = SampleRequest(
-                batch=capture.make_request_batch(initial),
+                batch=make_request_batch(initial),
                 generator=torch.Generator().manual_seed(seed),
             )
-            model = capture.RecordingModel()
+            model = RecordingModel()
             return sampler.sample(model, [request])[0].final_latents
 
         self.assertFalse(torch.equal(sample_full(3), sample_full(19)))

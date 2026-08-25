@@ -1,26 +1,21 @@
-"""Capture numeric baselines of the pre-refactor sampler implementation.
+"""Regenerate the sampler numeric baselines under ``tests/fixtures/``.
 
-The fixtures under ``draft/sampler_migration/baselines/`` were captured from
-the OLD (pre plan-as-data) implementation and are replayed by
-``tests/test_sampler_semantics.py`` against the refactored code. Fixtures are
-gitignored (``draft/``).
+The checked-in fixtures were first captured from the pre plan-as-data sampler
+(before 164e5a9). ``tests/test_sampler_semantics.py`` replays them against the
+current code, so a solver whose numerics drift *accidentally* — a refactor, a
+reordered expression, a dependency upgrade — shows up as a bitwise mismatch.
 
-The legacy ``step``/``replay_step`` API was deleted in Phase 1b, the
-stacked-trajectory ``SampleOutput`` fields in Phase 2 and
-``sample(return_trajectory=True)`` in Phase 5; the per-step ``step_*.pt``
-fixtures can only be regenerated from the pre-refactor revision of this script
-(``git log`` for "baseline capture script"). ``capture_e2e`` still runs on the
-current tree — it records the full window through the recipe runner and
-reconstructs the legacy stacked fixture layout from ``SampleOutput.trajectory``
-(note: for SA the recaptured ``timesteps`` are the plan-compiled grid, whose
-adjusted head/penultimate entries the harness skips) — and the harness imports
-the shared fixture-path/model/batch helpers from here.
+Regenerate only when the algorithm behaviour is changed **on purpose**: run
+this script, review what moved, and commit the new fixtures together with the
+change that caused them. A fixture diff with no intended algorithm change is a
+bug report, not a rebase chore.
 
 Usage: ``uv run python tests/sampler_baseline_capture.py``
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +30,12 @@ from flow_control.samplers import (
     SdeWindow,
     run_phases,
 )
+from flow_control.samplers.plan import (
+    GuidanceOutput,
+    StepContext,
+    Transition,
+    TransitionResult,
+)
 from flow_control.samplers.sampler import Sampler
 from flow_control.samplers.shift import ConstantShift, LinearShift
 from flow_control.samplers.solver import (
@@ -47,13 +48,15 @@ from flow_control.samplers.solver import (
     FlowUniPCSolver,
     SASolver,
 )
+from flow_control.samplers.solver.flash import FlashTransition
 from flow_control.utils.logging import console
 
-BASELINE_DIR = Path(__file__).resolve().parent.parent / (
-    "draft/sampler_migration/baselines"
-)
+BASELINE_DIR = Path(__file__).resolve().parent / "fixtures/sampler_baselines"
 
 LATENT_SHAPE = (1, 16, 8)
+
+STEP_GRID = torch.linspace(1.0, 0.0, 9).tolist()
+"""Sigma grid the per-step sweeps were captured on (8 uniform steps)."""
 
 
 def dummy_velocity(latents: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
@@ -99,11 +102,38 @@ def make_initial_latents() -> torch.Tensor:
     return torch.randn(LATENT_SHAPE, generator=generator)
 
 
+def make_step_tensors() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The (latents, velocity, prev_sample) triple every step sweep runs on."""
+
+    def seeded(seed: int) -> torch.Tensor:
+        return torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(seed))
+
+    return seeded(21), seeded(22), seeded(23)
+
+
+def drive_single_eval_transition(
+    tr: Transition,
+    ctx: StepContext,
+    velocity: torch.Tensor,
+) -> TransitionResult:
+    """Manually run a single-eval run_transition generator with a fixed velocity."""
+    gen = tr.run(ctx)
+    request = next(gen)
+    assert request.sigma == tr.sigma
+    try:
+        gen.send(GuidanceOutput(velocity=velocity))
+    except StopIteration as stop:
+        assert isinstance(stop.value, TransitionResult)
+        return stop.value
+    raise AssertionError("expected a single-eval transition")
+
+
 def e2e_configs() -> dict[str, Sampler]:
     common: dict[str, Any] = {
         "guidance": ClassifierFreeGuidance(scale=1.0),
         "steps": 8,
     }
+    common18: dict[str, Any] = {**common, "steps": 18}
     return {
         "flow_eta0": Sampler(**common, solver=FlowSolver()),
         "ddim_eta0": Sampler(**common, solver=DDIMSolver()),
@@ -111,14 +141,12 @@ def e2e_configs() -> dict[str, Sampler]:
         "dance_eta0": Sampler(**common, solver=DanceSolver()),
         "dpm_order1": Sampler(**common, solver=DPMSolver(order=1)),
         "dpm_order2": Sampler(**common, solver=DPMSolver(order=2)),
-        "dpm_order2_steps18": Sampler(
-            **{**common, "steps": 18}, solver=DPMSolver(order=2)
-        ),
+        "dpm_order2_steps18": Sampler(**common18, solver=DPMSolver(order=2)),
         "unipc_corrector_on": Sampler(**common, solver=FlowUniPCSolver()),
         "unipc_corrector_off": Sampler(
             **common, solver=FlowUniPCSolver(use_corrector=False)
         ),
-        "unipc_steps18": Sampler(**{**common, "steps": 18}, solver=FlowUniPCSolver()),
+        "unipc_steps18": Sampler(**common18, solver=FlowUniPCSolver()),
         "sa_eta0": Sampler(**common, solver=SASolver(eta=0.0)),
         "flash_eta0": Sampler(**common, solver=FlashSolver(eta=0.0)),
         "flow_eta0_linear_shift": Sampler(
@@ -138,6 +166,20 @@ def e2e_configs() -> dict[str, Sampler]:
     }
 
 
+def step_configs() -> dict[str, FlowSolver | DDIMSolver | CPSSolver | DanceSolver]:
+    """Stochastic single-eval solvers, swept step by step over ``STEP_GRID``.
+
+    The union is what makes ``step_parts`` visible: it is declared per solver,
+    not on ``BaseSolver``, because multi-eval solvers have no such moments.
+    """
+    return {
+        "flow_eta07": FlowSolver(eta=0.7),
+        "ddim_eta07": DDIMSolver(eta=0.7),
+        "cps_eta07": CPSSolver(eta=0.7),
+        "dance_eta07": DanceSolver(eta=0.7),
+    }
+
+
 def capture_e2e() -> None:
     initial_latents = make_initial_latents()
     recipe = PhasesRecipe(phases=[PhaseConfig(transforms=[SdeWindow(record=True)])])
@@ -151,10 +193,7 @@ def capture_e2e() -> None:
                 generator=torch.Generator().manual_seed(777),
             )
         )
-        output = run_phases(model, [phases])[0]  # type: ignore[arg-type]
-        # Reconstruct the legacy stacked fixture layout from the recorded
-        # trajectory (with the default full window this matches the old
-        # SampleOutput.latents / log_probs / timesteps fields bitwise).
+        output = run_phases(model, [phases])[0]
         trajectory = output.trajectory or []
         fixture = {
             "sampler_config": sampler.model_dump(),
@@ -173,13 +212,125 @@ def capture_e2e() -> None:
         console.print(f"captured e2e_{name}: {len(model.eval_sigmas)} evals")
 
 
+def capture_steps() -> None:
+    """Per-step moments and replay densities of the stochastic solvers.
+
+    Originally captured through the ``step``/``replay_step`` API deleted in the
+    plan-as-data refactor; this reproduces the same fixture layout by driving
+    the current ``Transition``/``make_replay`` path, which is exactly what the
+    harness asserts against.
+    """
+    latents, velocity, prev_sample = make_step_tensors()
+    for name, solver in step_configs().items():
+        entries: list[dict[str, Any]] = []
+        # The terminal step lands on sigma_next == 0, where every solver is
+        # deterministic regardless of eta; the sweep stops before it.
+        for index, (sigma, sigma_next) in enumerate(
+            zip(STEP_GRID[:-2], STEP_GRID[1:-1], strict=True)
+        ):
+            tr = Transition(
+                solver=solver,
+                sigma=sigma,
+                sigma_next=sigma_next,
+                eta=solver.eta,
+                record=True,
+            )
+            ctx = StepContext(
+                latents=latents,
+                generator=torch.Generator().manual_seed(5000 + index),
+                solver_state=None,
+                guidance_state=None,
+            )
+            result = drive_single_eval_transition(tr, ctx, velocity)
+            assert result.recorded is not None
+            mean, std_dev = type(solver).step_parts(
+                latents, velocity, sigma, sigma_next, solver.eta
+            )[:2]
+            replay = solver.make_replay(sigma, sigma_next, solver.eta).logprob(
+                velocity, latents, prev_sample
+            )
+            entries.append(
+                {
+                    "step_index": index,
+                    "sigma": sigma,
+                    "sigma_next": sigma_next,
+                    "next_latents": result.next_latents,
+                    "log_prob": result.recorded.log_prob,
+                    "mean": mean,
+                    "std_dev": std_dev,
+                    "replay_log_prob": replay.log_prob,
+                    "replay_mean": replay.mean,
+                    "replay_std_dev": replay.std_dev,
+                }
+            )
+        fixture = {
+            "solver_config": solver.model_dump(),
+            "latents": latents,
+            "velocity": velocity,
+            "prev_sample": prev_sample,
+            "entries": entries,
+        }
+        torch.save(fixture, BASELINE_DIR / f"step_{name}.pt")
+        console.print(f"captured step_{name}: {len(entries)} steps")
+
+
+def capture_flash_steps() -> None:
+    """Flash sweeps the full grid: its terminal step is deterministic anyway.
+
+    Flash has no ``step_parts``; its moments come from ``renoise_parts`` and the
+    plan-compiled per-step ``noise_scale``, so it needs its own sweep.
+    """
+    latents, velocity, prev_sample = make_step_tensors()
+    # Non-default scales, and start != end, so the per-step lerp is visible.
+    solver = FlashSolver(eta=1.0, noise_scale_start=0.9, noise_scale_end=0.8)
+    plan = [
+        item for item in solver.plan(STEP_GRID) if isinstance(item, FlashTransition)
+    ]
+    entries: list[dict[str, Any]] = []
+    for index, tr in enumerate(plan):
+        ctx = StepContext(
+            latents=latents,
+            generator=torch.Generator().manual_seed(5000 + index),
+            solver_state=None,
+            guidance_state=None,
+        )
+        result = drive_single_eval_transition(replace(tr, record=True), ctx, velocity)
+        assert result.recorded is not None
+        mean = FlashSolver.renoise_parts(
+            latents, velocity, tr.sigma, tr.sigma_next, tr.noise_scale
+        )[0]
+        replay = result.recorded.replay.logprob(velocity, latents, prev_sample)
+        entries.append(
+            {
+                "step_index": index,
+                "sigma": tr.sigma,
+                "sigma_next": tr.sigma_next,
+                "next_latents": result.next_latents,
+                "log_prob": result.recorded.log_prob,
+                "mean": mean,
+                "std_dev": latents.new_tensor(tr.sigma_next) * tr.noise_scale,
+                "replay_log_prob": replay.log_prob,
+                "replay_mean": replay.mean,
+                "replay_std_dev": replay.std_dev,
+            }
+        )
+    fixture = {
+        "solver_config": solver.model_dump(),
+        "latents": latents,
+        "velocity": velocity,
+        "prev_sample": prev_sample,
+        "entries": entries,
+    }
+    torch.save(fixture, BASELINE_DIR / "step_flash_eta1.pt")
+    console.print(f"captured step_flash_eta1: {len(entries)} steps")
+
+
 def capture_sa_internals() -> None:
     solver = SASolver()  # default eta=0.4 > 0
     sigmas = torch.linspace(1.0, 0.0, 9)
     times = sigmas.clone()
     times[0] = solver.initial_time
     times[-2] = times[-3] / 2.0
-
     x = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(31))
     noise = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(32))
     m0 = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(33))
@@ -231,11 +382,11 @@ def capture_sa_internals() -> None:
 
 
 def main() -> None:
-    # step_*.pt fixtures are regenerable only from the pre-refactor revision
-    # of this script (they pinned the deleted step/replay_step API).
     BASELINE_DIR.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(0)
     capture_e2e()
+    capture_steps()
+    capture_flash_steps()
     capture_sa_internals()
     console.print(f"baselines written to {BASELINE_DIR}")
 
