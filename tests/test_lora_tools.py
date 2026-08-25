@@ -389,7 +389,7 @@ class DiffusersLoraTest(unittest.TestCase):
         for selection, expected_value in (("ema", 0.75), ("ema_old", 0.25)):
             with self.subTest(selection=selection):
                 source = make_lora_model(seed=3)
-                stateful = _DcpLoraState(source, selection)  # type: ignore[arg-type]
+                stateful = _DcpLoraState(source, selection)
                 assert stateful.ema_optimizer is not None
                 for parameter_state in stateful.ema_optimizer.state.values():
                     parameter_state["ema_buffer"].fill_(expected_value)
@@ -401,7 +401,7 @@ class DiffusersLoraTest(unittest.TestCase):
                     _load_dcp_lora(
                         target,
                         str(checkpoint),
-                        selection,  # type: ignore[arg-type]
+                        selection,
                     )
 
                 for value in adapter_state(target).values():

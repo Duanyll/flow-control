@@ -22,7 +22,7 @@ uv run ruff check --fix <path_to_check>
 1. Always try to maintain type hints in the code. We use Python 3.12, so prefer using `dict`, `list`, `|`, etc. over `Dict`, `List`, `Union` from `typing`.
 2. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
 3. The automated diagnostics from IDE after you edit the code may be stale or incorrect. Call above CLI commands to get accurate diagnostics.
-4. Silence a diagnostic only when the code is right and the checker cannot see why, and say why in a comment. `# ty: ignore[rule]` is ty's spelling; the existing `# type: ignore[...]` comments belong to pyright, which is still configured for the IDE — leave them alone.
+4. Silence a diagnostic only when the code is right and ty cannot see why, and say why in a comment. Use `# ty: ignore[rule]`, never a bare `# type: ignore` — ty reports suppressions that no longer suppress anything, and only its own spelling names the rule.
 
 ## Code structure
 

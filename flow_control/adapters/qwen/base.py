@@ -90,7 +90,13 @@ class PatchedQwenEmbedRope(nn.Module):
 
         vid_freqs = torch.cat(vid_freqs_list, dim=0)
 
-        max_len = max_txt_seq_len if max_txt_seq_len is not None else max(txt_seq_lens)  # type: ignore
+        if max_txt_seq_len is not None:
+            max_len = max_txt_seq_len
+        else:
+            assert txt_seq_lens is not None, (
+                "pos_embed needs txt_seq_lens when max_txt_seq_len is not given"
+            )
+            max_len = max(txt_seq_lens)
         txt_idx = torch.arange(max_vid_index, max_vid_index + max_len, device=device)
         txt_freqs = torch.cat(
             [
@@ -159,7 +165,8 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
         super().load_transformer(device=device)
         # Replace self.transformer.pos_embed with the above impl
         orig_module = self.transformer.pos_embed
-        self.transformer.pos_embed = PatchedQwenEmbedRope(  # type: ignore
+        # Swapping in a drop-in replacement module, hence the type mismatch.
+        self.transformer.pos_embed = PatchedQwenEmbedRope(  # ty: ignore[invalid-assignment]
             theta=orig_module.theta,
             axes_dim=orig_module.axes_dim,
             scale_rope=orig_module.scale_rope,
@@ -205,14 +212,14 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
                 "clean_latents": torch.randn(
                     1,
                     img_len,
-                    self.transformer.config.in_channels,  # type: ignore
+                    self.transformer.config.in_channels,  # ty: ignore[unresolved-attribute]
                     device=self.device,
                     dtype=self.dtype,
                 ),
                 "prompt_embeds": torch.randn(
                     1,
                     text_length,
-                    self.transformer.config.joint_attention_dim,  # type: ignore
+                    self.transformer.config.joint_attention_dim,  # ty: ignore[unresolved-attribute]
                     device=self.device,
                     dtype=self.dtype,
                 ),

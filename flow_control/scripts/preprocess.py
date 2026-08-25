@@ -19,6 +19,7 @@ from flow_control.processors.base import task_registry
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
+    DataSink,
     DataSource,
     Pipeline,
     PipelineStage,
@@ -117,7 +118,7 @@ class ProcessorStage(PipelineStage):
                 item.update(output)
                 output = item
             if "__key__" not in output:
-                output["__key__"] = item.get("__key__", None)  # type: ignore
+                output["__key__"] = item.get("__key__", None)
             output = deep_move_to_device(output, torch.device("cpu"))
         return [output]
 
@@ -157,6 +158,16 @@ class PreprocessConfig(BaseModel):
     Whether to reassign keys to numeric indices in the loader stage. This can be useful when the original keys are not
     unique or not suitable for tracking.
     """
+
+
+def resolve_datasink(tag: str) -> type[DataSink]:
+    sink = datasink_registry.get(tag)
+    if sink is None:
+        raise ValueError(
+            f"Unknown datasink type {tag!r}. "
+            f"Available: {sorted(datasink_registry.members())}"
+        )
+    return sink
 
 
 def run(config_data: dict) -> None:
@@ -215,7 +226,7 @@ def run(config_data: dict) -> None:
             ),
         ],
         sink=SinkConfig(
-            sink=datasink_registry.get(datasink_type),  # type: ignore
+            sink=resolve_datasink(datasink_type),
             name="Saving",
             num_workers=config.num_sink_workers,
             queue_size=config.queue_size,

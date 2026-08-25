@@ -210,7 +210,8 @@ def _describe_dataframe(
             for i, row_tuple in enumerate(value.head(max_items).itertuples()):
                 if i >= max_items:
                     break
-                row_dict = row_tuple._asdict()  # type: ignore
+                # pandas yields namedtuples here; its stub says plain tuple.
+                row_dict = row_tuple._asdict()  # ty: ignore[unresolved-attribute]
                 index_val = row_dict.pop("Index")
                 row_desc = recurse_fn(
                     row_dict,

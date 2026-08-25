@@ -296,7 +296,7 @@ class HfModelLoader[T](BaseModel):
                 f"Reusing cached {self.class_name} ({self.pretrained_model_id})"
             )
             if hasattr(self._model, "requires_grad_"):
-                self._model.requires_grad_(not frozen)  # type: ignore
+                self._model.requires_grad_(not frozen)
             return False
 
         # Fresh load from pretrained
@@ -309,8 +309,9 @@ class HfModelLoader[T](BaseModel):
         else:
             self._load_with_from_pretrained(model_cls, device)
 
-        if hasattr(self.model, "requires_grad_"):
-            self.model.requires_grad_(not frozen)  # type: ignore
+        requires_grad_ = getattr(self.model, "requires_grad_", None)
+        if requires_grad_ is not None:
+            requires_grad_(not frozen)
 
         self._model_cache[key] = self._model
         return True

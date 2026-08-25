@@ -35,7 +35,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "lefthook>=2.0.9",
-    "pyright>=1.1.407",
     "ruff>=0.14.8",
     "ipykernel>=7.1.0",
     "ipywidgets>=8.1.8",
@@ -142,20 +141,6 @@ exclude = [
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
-[tool.pyright]
-typeCheckingMode = "standard"
-# HuggingFace officially uses private imports a lot, so we disable the check here.
-reportPrivateImportUsage = "none"
-# Pydantic discriminated unions require Literal overrides of `type` fields in subclasses.
-reportIncompatibleVariableOverride = "none"
-reportUnnecessaryTypeIgnoreComment = "error"
-ignore = [
-  ".venv/**",
-  "**/sites-packages/**",
-  "flow_control/third_party/**",
-  "notebooks/**",
-]
-
 [tool.ty.src]
 include = ["flow_control", "tests", "examples", "docs"]
 exclude = ["flow_control/third_party"]
@@ -163,16 +148,15 @@ exclude = ["flow_control/third_party"]
 [tool.ty.analysis]
 # Torch is required here, so Diffusers' no-Torch fallback module is unreachable.
 replace-imports-with-any = ["diffusers.utils.dummy_pt_objects"]
-# Keep Pyright-like gradual narrowing for bare generic runtime checks.
+# Gradual narrowing for bare generic runtime checks.
 strict-generic-narrowing = false
 
 [tool.ty.rules]
-# Match the intentional exceptions in the Pyright configuration above.
+# Pydantic discriminated unions require Literal overrides of `type` fields in subclasses.
 invalid-attribute-override = "ignore"
-# Pyright owns its existing type-ignore comments; ty owns ty-ignore comments.
-unused-type-ignore-comment = "ignore"
+# A suppression that no longer suppresses anything is dead weight; report it.
 unused-ignore-comment = "error"
-# Match Pyright standard without adding import/cast diagnostics it leaves disabled.
+# HuggingFace officially uses private imports a lot, so we don't flag them.
 possibly-missing-submodule = "ignore"
 possibly-unresolved-reference = "error"
 redundant-cast = "ignore"

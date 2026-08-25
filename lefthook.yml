@@ -19,5 +19,10 @@ pre-commit:
       run: uv run ruff check --fix {staged_files}
       stage_fixed: true
 
-    # ty:
-    #   run: uv run ty check
+    # Whole-project, not {staged_files}: type errors cross file boundaries.
+    ty:
+      glob: "*.py"
+      exclude:
+        - "flow_control/third_party/**"
+        - "notebooks/**"
+      run: uv run ty check

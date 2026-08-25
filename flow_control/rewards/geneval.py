@@ -8,7 +8,7 @@ relative positions.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import numpy as np
 import torch
@@ -438,13 +438,14 @@ class GenevalReward(BaseReward):
         result = results[0]
 
         # Group detections by class
-        detected = self._postprocess_detections(result, batch)  # type: ignore
+        metadata = cast(GenEvalMetadata, batch)
+        detected = self._postprocess_detections(result, metadata)
 
         # Convert to PIL for color classification
         image_pil = ImageOps.exif_transpose(tensor_to_pil(image[0]))
 
         # Evaluate
-        _, score, _ = self._evaluate_reward(image_pil, detected, batch)  # type: ignore
+        _, score, _ = self._evaluate_reward(image_pil, detected, metadata)
 
         # Clamp score to [0, 1], return [1] tensor
         score = max(0.0, min(1.0, score))

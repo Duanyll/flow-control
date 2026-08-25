@@ -24,18 +24,26 @@ from .components.vae import VAE, Flux1VAE, PosteriorMode
 
 
 class InputBatch(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
+    # Pydantic reads this out of the class body; ty only expects annotations.
+    __pydantic_config__ = ConfigDict(  # ty: ignore[invalid-typed-dict-statement]
+        extra="allow", arbitrary_types_allowed=True
+    )
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
 class TrainInputBatch(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
+    # Pydantic reads this out of the class body; ty only expects annotations.
+    __pydantic_config__ = ConfigDict(  # ty: ignore[invalid-typed-dict-statement]
+        extra="allow", arbitrary_types_allowed=True
+    )
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
 class ProcessedBatch(TypedDict):
     image_size: tuple[int, int]
     """Height and width of the images in the batch in pixels. Used for initializing latents."""
+    __key__: NotRequired[str]
+    """Sample identifier carried over from the source dataset, used to name outputs."""
     latent_length: NotRequired[int]
     """Length of the latents in the batch. Used for bucket samplers."""
     noisy_latents: NotRequired[torch.Tensor]

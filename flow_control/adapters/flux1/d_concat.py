@@ -41,7 +41,8 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
         transformer = self.transformer
         # Change shape of x_embedder layer before loading LoRA
         with torch.no_grad():
-            initial_input_channels: int = transformer.config.in_channels  # type: ignore
+            # diffusers' FrozenDict config exposes fields as attributes.
+            initial_input_channels: int = transformer.config.in_channels  # ty: ignore[unresolved-attribute]
             new_linear = torch.nn.Linear(
                 self.input_dimension,
                 transformer.x_embedder.out_features,

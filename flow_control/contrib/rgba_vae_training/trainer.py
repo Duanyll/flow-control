@@ -61,7 +61,10 @@ logger = get_logger(__name__)
 
 
 class VaeTrainInput(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # type: ignore
+    # Pydantic reads this out of the class body; ty only expects annotations.
+    __pydantic_config__ = ConfigDict(  # ty: ignore[invalid-typed-dict-statement]
+        extra="allow", arbitrary_types_allowed=True
+    )
     clean_image: ImageTensor
 
 

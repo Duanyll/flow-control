@@ -78,7 +78,7 @@ class ResizeMaxSize(nn.Module):
             # Assuming NCHW or CHW; take H, W from the last two dims.
             height, width = img.shape[-2:]
         else:
-            width, height = img.size  # type: ignore[attr-defined]
+            width, height = img.size
         scale = self.max_size / float(max(height, width))
         if scale != 1.0:
             new_size = tuple(round(dim * scale) for dim in (height, width))

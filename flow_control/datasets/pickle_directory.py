@@ -1,6 +1,7 @@
 import gzip
 import os
 import uuid
+from typing import IO, cast
 
 import torch
 from torch.utils.data import Dataset
@@ -35,7 +36,7 @@ class PickleDirectoryDataset(Dataset):
         file_path = os.path.join(self.path, file_name)
         if file_name.endswith(".gz"):
             with gzip.open(file_path, "rb") as f:
-                sample = torch.load(f)  # type: ignore
+                sample = torch.load(cast(IO[bytes], f))
         else:
             sample = torch.load(file_path)
         if "__key__" not in sample:
@@ -61,7 +62,7 @@ class PickleDirectoryDataSink(DataSink):
         )
         if self.use_compression:
             with gzip.open(file_path, "wb") as f:
-                torch.save(item, f)  # type: ignore
+                torch.save(item, cast(IO[bytes], f))
         else:
             torch.save(item, file_path)
         return True

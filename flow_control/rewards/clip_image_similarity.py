@@ -44,7 +44,7 @@ class CLIPImageSimilarityReward(BaseReward):
         model.eval()
         # transformers wraps `to()` in functools.wraps, so both checkers read the
         # decorated signature as unbound and take `device` for `self`.
-        self._model = model.to(device)  # type: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
+        self._model = model.to(device)  # ty: ignore[invalid-argument-type]
         self._processor = CLIPProcessor.from_pretrained(self.model_name)
 
         # Build image transform from processor config (same logic as
