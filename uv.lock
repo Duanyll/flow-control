@@ -893,6 +893,8 @@ dev = [
     { name = "matplotlib" },
     { name = "py-spy" },
     { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-subtests" },
     { name = "ruff" },
     { name = "scipy" },
     { name = "seaborn" },
@@ -945,6 +947,8 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "py-spy", specifier = ">=0.4.1" },
     { name = "pyright", specifier = ">=1.1.407" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-subtests", specifier = ">=0.15.0" },
     { name = "ruff", specifier = ">=0.14.8" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
@@ -3110,6 +3114,19 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c" },
+]
+
+[[package]]
+name = "pytest-subtests"
+version = "0.15.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "attrs" },
+    { name = "pytest" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/bb/d9/20097971a8d315e011e055d512fa120fd6be3bdb8f4b3aa3e3c6bf77bebc/pytest_subtests-0.15.0.tar.gz", hash = "sha256:cb495bde05551b784b8f0b8adfaa27edb4131469a27c339b80fd8d6ba33f887c" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/23/64/bba465299b37448b4c1b84c7a04178399ac22d47b3dc5db1874fe55a2bd3/pytest_subtests-0.15.0-py3-none-any.whl", hash = "sha256:da2d0ce348e1f8d831d5a40d81e3aeac439fec50bd5251cbb7791402696a9493" },
 ]
 
 [[package]]

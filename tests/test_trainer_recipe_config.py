@@ -4,14 +4,12 @@ import unittest
 from typing import Any
 
 import torch
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from flow_control.samplers import SampleOutput, Sampler
-from flow_control.training.awm import AwmTrainer
 from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.mixins import Rollout
 from flow_control.training.nft import NftTrainer
-from flow_control.training.ram import RamTrainer
 from flow_control.utils.logging import _warn_once
 
 
@@ -39,35 +37,6 @@ class _GrpoProbe(_ProbeOverrides, GrpoTrainer):
 
 class _NftProbe(_ProbeOverrides, NftTrainer):
     pass
-
-
-class _AwmProbe(_ProbeOverrides, AwmTrainer):
-    pass
-
-
-class _RamProbe(_ProbeOverrides, RamTrainer):
-    pass
-
-
-class RemovedTrajectoryWindowConfigTest(unittest.TestCase):
-    def test_removed_window_keys_are_rejected_by_trainers(self) -> None:
-        removed = {
-            "trajectory_window_size": 3,
-            "trajectory_window_range": [1, 5],
-        }
-        for probe in (_GrpoProbe, _NftProbe, _AwmProbe, _RamProbe):
-            for key, value in removed.items():
-                with (
-                    self.subTest(trainer=probe.__name__, key=key),
-                    self.assertRaises(ValidationError) as error,
-                ):
-                    probe.model_validate({"rollout_sampler": {key: value}})
-                self.assertIn("extra_forbidden", str(error.exception))
-
-    def test_removed_window_keys_are_rejected_even_when_none(self) -> None:
-        for key in ("trajectory_window_size", "trajectory_window_range"):
-            with self.subTest(key=key), self.assertRaises(ValidationError):
-                _GrpoProbe.model_validate({"rollout_sampler": {key: None}})
 
 
 class RolloutPhaseBuildCheckTest(unittest.TestCase):

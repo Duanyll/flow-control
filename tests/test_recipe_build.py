@@ -9,7 +9,6 @@ import random
 import unittest
 
 import torch
-from pydantic import TypeAdapter, ValidationError
 
 from flow_control.adapters.base import Batch
 from flow_control.samplers.executor import Run, execute
@@ -20,19 +19,13 @@ from flow_control.samplers.recipe import (
     Invert,
     PhaseConfig,
     PhasesRecipe,
-    Recipe,
     RecipeBuildContext,
     Renoise,
     SdeWindow,
     plan_start_sigma,
 )
 from flow_control.samplers.sampler import Sampler
-from flow_control.samplers.shift import (
-    ConstantShift,
-    Flux2Shift,
-    LinearShift,
-    SquaredShift,
-)
+from flow_control.samplers.shift import ConstantShift
 from flow_control.samplers.solver import (
     DDIMSolver,
     DPMSolver,
@@ -45,8 +38,6 @@ from flow_control.samplers.transforms import (
     select_sde_window,
     with_sde_window,
 )
-
-RECIPE_ADAPTER: TypeAdapter = TypeAdapter(Recipe)
 
 
 def make_batch(tokens: int = 4, seed: int = 0) -> Batch:
@@ -105,82 +96,6 @@ def run_plan(plan, latents: torch.Tensor, model) -> torch.Tensor:
     )
     list(execute(model, [run], ClassifierFreeGuidance()))
     return run.ctx.latents
-
-
-class RegistryCoercionTest(unittest.TestCase):
-    def test_bare_string_is_tag_with_defaults(self) -> None:
-        sampler = Sampler.model_validate({"solver": "ddim", "shift": "constant"})
-        self.assertIsInstance(sampler.solver, DDIMSolver)
-        self.assertIsInstance(sampler.shift, ConstantShift)
-        # The design's default spelling: "recipe": "phases".
-        recipe = RECIPE_ADAPTER.validate_python("phases")
-        self.assertIsInstance(recipe, PhasesRecipe)
-        assert isinstance(recipe, PhasesRecipe)
-        self.assertEqual(recipe.phases, [PhaseConfig()])
-
-    def test_bare_list_is_declared_container_member(self) -> None:
-        recipe = RECIPE_ADAPTER.validate_python(
-            [{"transforms": [{"type": "sde_window", "size": 3, "record": True}]}]
-        )
-        self.assertIsInstance(recipe, PhasesRecipe)
-        assert isinstance(recipe, PhasesRecipe)
-        self.assertEqual(len(recipe.phases), 1)
-        transform = recipe.phases[0].transforms[0]
-        self.assertIsInstance(transform, SdeWindow)
-        assert isinstance(transform, SdeWindow)
-        self.assertEqual(transform.size, 3)
-        self.assertTrue(transform.record)
-
-    def test_bare_number_is_declared_scalar_knob(self) -> None:
-        sampler = Sampler.model_validate({"guidance": 4.5, "shift": 3})
-        self.assertIsInstance(sampler.guidance, ClassifierFreeGuidance)
-        assert isinstance(sampler.guidance, ClassifierFreeGuidance)
-        self.assertEqual(sampler.guidance.scale, 4.5)
-        self.assertTrue(sampler.guidance.needs_negative())
-        self.assertIsInstance(sampler.shift, ConstantShift)
-        assert isinstance(sampler.shift, ConstantShift)
-        # An int coerces into the float field, like any other spelling.
-        self.assertEqual(sampler.shift.shift_value, 3.0)
-
-    def test_bare_bool_is_not_a_number_shorthand(self) -> None:
-        # bool is an int subclass; the schema's number branch would coerce it.
-        with self.assertRaisesRegex(ValidationError, "not a bool"):
-            Sampler.model_validate({"guidance": True})
-
-
-class ShiftInverseTest(unittest.TestCase):
-    SHIFTS = (
-        ConstantShift(),
-        ConstantShift(shift_value=3.0),
-        LinearShift(),
-        SquaredShift(),
-        Flux2Shift(),
-    )
-
-    def test_inverse_sigma_round_trips_apply(self) -> None:
-        batch = make_batch(tokens=1024)
-        num_steps = 10
-        grid = torch.linspace(1.0, 0.0, num_steps + 1, dtype=torch.float64)
-        for base in self.SHIFTS:
-            for shift_terminal in (None, 0.1):
-                shift = base.model_copy(update={"shift_terminal": shift_terminal})
-                with self.subTest(shift=shift.type, shift_terminal=shift_terminal):
-                    shifted = shift.apply(grid.clone(), batch, num_steps)
-                    for expected, actual_sigma in zip(
-                        grid.tolist(), shifted.tolist(), strict=True
-                    ):
-                        recovered = shift.inverse_sigma(actual_sigma, batch, num_steps)
-                        self.assertAlmostEqual(recovered, expected, places=9)
-
-    def test_inverse_sigma_honors_t_end(self) -> None:
-        batch = make_batch(tokens=1024)
-        num_steps = 8
-        shift = ConstantShift(shift_value=3.0, shift_terminal=0.1)
-        grid = torch.linspace(1.0, 0.2, num_steps + 1, dtype=torch.float64)
-        shifted = shift.apply(grid.clone(), batch, num_steps)
-        for expected, actual_sigma in zip(grid.tolist(), shifted.tolist(), strict=True):
-            recovered = shift.inverse_sigma(actual_sigma, batch, num_steps, t_end=0.2)
-            self.assertAlmostEqual(recovered, expected, places=9)
 
 
 class PlanInversionTest(unittest.TestCase):

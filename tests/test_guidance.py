@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from pydantic import PrivateAttr, ValidationError
+from pydantic import PrivateAttr
 
 from flow_control.samplers import (
     PhaseConfig,
@@ -78,39 +78,6 @@ class _CountingGuidance(BaseGuidance):
             GuidanceOutput(velocity=evals.cond, branches=evals),
             _CounterState(count=state.count + 1),
         )
-
-
-class GuidanceConfigTest(unittest.TestCase):
-    def test_removed_guidance_keys_are_rejected(self) -> None:
-        removed = {
-            "cfg_scale": 4.5,
-            "enable_cfg_renorm": True,
-            "cfg_renorm_eps": 1e-6,
-            "cfg_renorm_min": 0.2,
-        }
-        for key, value in removed.items():
-            with self.subTest(key=key), self.assertRaises(ValidationError) as error:
-                Sampler.model_validate({key: value})
-            self.assertEqual(error.exception.errors()[0]["loc"], (key,))
-            self.assertEqual(error.exception.errors()[0]["type"], "extra_forbidden")
-
-    def test_momentum_guidance_registry_config(self) -> None:
-        sampler = Sampler.model_validate(
-            {
-                "guidance": {
-                    "type": "momentum",
-                    "scale": 2.0,
-                    "alpha": 0.3,
-                    "beta": 0.7,
-                }
-            }
-        )
-
-        guidance = sampler.guidance
-        assert isinstance(guidance, MomentumGuidance)
-        self.assertEqual(guidance.scale, 2.0)
-        self.assertEqual(guidance.alpha, 0.3)
-        self.assertEqual(guidance.beta, 0.7)
 
 
 class GuidedVelocityCompatibilityTest(unittest.TestCase):

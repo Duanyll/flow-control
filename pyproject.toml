@@ -44,6 +44,8 @@ dev = [
     "seaborn>=0.13.2",
     "py-spy>=0.4.1",
     "scipy>=1.17.1",
+    "pytest>=9.1.1",
+    "pytest-subtests>=0.15.0",
 ]
 iqa = [
     "pyiqa>=0.1.16",
@@ -152,3 +154,4 @@ ignore = [
   "flow_control/third_party/**",
   "notebooks/**",
 ]
+

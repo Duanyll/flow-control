@@ -138,3 +138,57 @@ Shift = Annotated[
     # A bare number is a constant shift factor: ``"shift": 3.0``.
     RegistryUnion(shift_registry, "type", number_as=("constant", "shift_value")),
 ]
+
+
+if __name__ == "__main__":
+    from rich import print
+
+    def _batch(tokens: int) -> Batch:
+        latents = torch.zeros(1, tokens, 2)
+        return {
+            "image_size": (32, 32),
+            "clean_latents": latents,
+            "noisy_latents": latents,
+        }
+
+    # Every shift must be exactly invertible: `inverse_sigma` maps an actual
+    # (shifted) sigma back to the canonical time `apply` produced it from.
+    # Recipe slicing relies on this to locate a strength on the shifted grid.
+    batch = _batch(1024)
+    steps = 10
+    grid = torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float64)
+
+    for base in (
+        ConstantShift(),
+        ConstantShift(shift_value=3.0),
+        LinearShift(),
+        SquaredShift(),
+        Flux2Shift(),
+    ):
+        for shift_terminal in (None, 0.1):
+            shift = base.model_copy(update={"shift_terminal": shift_terminal})
+            shifted = shift.apply(grid.clone(), batch, steps)
+            error = max(
+                abs(shift.inverse_sigma(actual, batch, steps) - expected)
+                for expected, actual in zip(
+                    grid.tolist(), shifted.tolist(), strict=True
+                )
+            )
+            print(
+                f"{shift.type:9} terminal={str(shift_terminal):5}"
+                f" factor={shift._shift_factor(batch, steps):7.4f}"
+                f" round-trip err={error:.2e}"
+            )
+            assert error < 1e-9, (shift.type, shift_terminal, error)
+
+    # A grid that stops short of zero: the `shift_terminal` rescaling is
+    # relative to the grid's own end, so the inverse needs the same `t_end`.
+    partial = torch.linspace(1.0, 0.2, 9, dtype=torch.float64)
+    terminal_shift = ConstantShift(shift_value=3.0, shift_terminal=0.1)
+    shifted = terminal_shift.apply(partial.clone(), batch, 8)
+    error = max(
+        abs(terminal_shift.inverse_sigma(actual, batch, 8, t_end=0.2) - expected)
+        for expected, actual in zip(partial.tolist(), shifted.tolist(), strict=True)
+    )
+    assert error < 1e-9, error
+    print(f"[green]shift round-trip ok[/green] (t_end=0.2 err={error:.2e})")

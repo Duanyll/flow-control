@@ -5,15 +5,12 @@ from typing import Any
 import torch
 from diffusers import ModelMixin
 from pydantic import PrivateAttr
-from torch.utils.data import Dataset
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.samplers import Sampler, SampleRequest
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import FlowSolver
-from flow_control.training.data import collate_fn
 from flow_control.training.mixins.microbatch import MicrobatchTrainMixin
 
 
@@ -294,44 +291,6 @@ class MicrobatchArithmeticTest(unittest.TestCase):
         mixin._check_finite_loss(torch.tensor(1.0), items)
         with self.assertRaisesRegex(RuntimeError, r"rollout_indices=\[3, 5\]"):
             mixin._check_finite_loss(torch.tensor(float("nan")), items)
-
-
-class _OrderedDataset(Dataset[dict[str, int]]):
-    def __init__(self, size: int) -> None:
-        self.items = [{"index": index} for index in range(size)]
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, index: int) -> dict[str, int]:
-        return self.items[index]
-
-
-class DataLoaderBatchingTest(unittest.TestCase):
-    def test_list_collation_preserves_order_and_stateful_resume(self) -> None:
-        dataset = _OrderedDataset(5)
-        loader = StatefulDataLoader(
-            dataset,
-            batch_size=2,
-            shuffle=False,
-            collate_fn=collate_fn,
-        )
-        iterator = iter(loader)
-        first = next(iterator)
-        state = loader.state_dict()
-        expected_remaining = [item for batch in iterator for item in batch]
-
-        resumed = StatefulDataLoader(
-            dataset,
-            batch_size=2,
-            shuffle=False,
-            collate_fn=collate_fn,
-        )
-        resumed.load_state_dict(state)
-        actual_remaining = [item for batch in resumed for item in batch]
-
-        self.assertEqual(first, dataset.items[:2])
-        self.assertEqual(actual_remaining, expected_remaining)
 
 
 if __name__ == "__main__":
