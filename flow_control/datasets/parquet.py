@@ -38,8 +38,8 @@ class ParquetDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx) -> dict[str, Any]:
-        row = self.data[idx].copy()
+    def __getitem__(self, index) -> dict[str, Any]:
+        row = self.data[index].copy()
         if "__key__" not in row:
-            row["__key__"] = str(idx)
+            row["__key__"] = str(index)
         return row

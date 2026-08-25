@@ -1,6 +1,7 @@
 import argparse
 import time
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -29,11 +30,12 @@ def make_batch(
     generator = torch.Generator(device=device).manual_seed(seed)
     image_size = (256, 256)
     dtype = adapter.dtype
+    batch: dict[str, object]
     if adapter_name == "flux1":
         latents = torch.randn(
             1, 256, 64, generator=generator, device=device, dtype=dtype
         )
-        batch: dict = {
+        batch = {
             "image_size": image_size,
             "clean_latents": torch.zeros_like(latents),
             "noisy_latents": latents,
@@ -61,7 +63,7 @@ def make_batch(
         }
     batch["prompt"] = f"ignored metadata {seed}"
     batch["__key__"] = str(seed)
-    return batch  # type: ignore[return-value]
+    return cast(Batch, batch)
 
 
 def timed_forward(

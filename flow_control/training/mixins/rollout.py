@@ -6,7 +6,7 @@ rollout / reward / advantage pipeline.
 
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -218,7 +218,8 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         rollout_task = progress.add_task("Rollout", total=total_rollouts)
 
-        dataloader.sampler.set_epoch(epoch)  # type: ignore[union-attr]
+        # ``make_rollout_dataloader`` above always builds this sampler.
+        cast(DistributedKRepeatSampler, dataloader.sampler).set_epoch(epoch)
 
         def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
             rollout_ordinal = 0

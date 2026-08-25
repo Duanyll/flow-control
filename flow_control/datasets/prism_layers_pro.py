@@ -35,8 +35,8 @@ class PrismLayersProDataset(Dataset):
     def __len__(self):
         return len(self.index)
 
-    def __getitem__(self, idx: int) -> dict:
-        record = self.index[idx]
+    def __getitem__(self, index: int) -> dict:
+        record = self.index[index]
         file = record["file"]
         row = record["row"]
 

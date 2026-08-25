@@ -1,10 +1,11 @@
 import asyncio
-from typing import cast
+from typing import Any, TypedDict, cast
 
 import torch
 import uvicorn
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -18,6 +19,20 @@ from flow_control.utils.types import TorchDevice
 logger = get_logger(__name__)
 
 _vae_ta = TypeAdapter(VAE)
+
+
+class _ServerState(TypedDict):
+    vae: BaseVAE | None
+    config_json: dict[str, Any] | None
+
+
+def _parse_posterior(value: str) -> PosteriorMode:
+    if value not in ("mode", "sample", "distribution"):
+        raise HTTPException(
+            status_code=400,
+            detail="posterior must be one of: mode, sample, distribution",
+        )
+    return cast(PosteriorMode, value)
 
 
 class VAEServerConfig(BaseModel):
@@ -38,7 +53,7 @@ def create_app(config: VAEServerConfig) -> Starlette:
     gpu_lock = asyncio.Lock()
     model_lock = asyncio.Lock()
 
-    state: dict[str, BaseVAE | dict | None] = {
+    state: _ServerState = {
         "vae": None,
         "config_json": None,
     }
@@ -53,7 +68,7 @@ def create_app(config: VAEServerConfig) -> Starlette:
         vae = state["vae"]
         if vae is None:
             raise RuntimeError("No VAE model loaded. POST to /load first.")
-        return vae  # type: ignore[return-value]
+        return vae
 
     async def load(request: Request) -> Response:
         body = await request.json()
@@ -71,7 +86,7 @@ def create_app(config: VAEServerConfig) -> Starlette:
 
     async def encode(request: Request) -> Response:
         vae = _get_vae()
-        posterior: PosteriorMode = request.query_params.get("posterior", "sample")  # type: ignore[assignment]
+        posterior = _parse_posterior(request.query_params.get("posterior", "sample"))
         body = await request.body()
         images = deserialize_tensor(body, config.device, torch.bfloat16)
         logger.info(f"Encoding images with shape {images.shape}, posterior={posterior}")

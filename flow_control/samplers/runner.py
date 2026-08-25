@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from flow_control.adapters.base import BaseModelAdapter
+from flow_control.adapters.base import SamplerModel
 from flow_control.utils.progress import report_progress
 
 from .executor import Run, execute, validate_distributed_request_count
@@ -62,7 +62,7 @@ def _phase_run(
 
 
 def run_phases(
-    model: BaseModelAdapter,
+    model: SamplerModel,
     requests: list[list[Phase]],
 ) -> list[SampleOutput]:
     """Execute every request's built phases in cross-request lockstep.

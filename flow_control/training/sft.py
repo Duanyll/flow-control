@@ -322,8 +322,9 @@ class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
             starting_epoch = self.current_epoch
             accumulated_loss = 0.0
             for _ in range(starting_epoch, self.total_epochs):
-                if hasattr(self._dataloader.sampler, "set_epoch"):
-                    self._dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
+                set_epoch = getattr(self._dataloader.sampler, "set_epoch", None)
+                if set_epoch is not None:
+                    set_epoch(self.current_epoch)
                 for i, items in enumerate(self._dataloader):
                     with dump_if_failed(logger, items):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0

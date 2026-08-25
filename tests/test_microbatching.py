@@ -168,7 +168,7 @@ class SamplerBatchingTest(unittest.TestCase):
         negative_a = make_sampler_batch(1.0)
 
         velocities = sampler.get_guided_velocity(
-            model,  # type: ignore[arg-type]
+            model,
             batches=[cond_a, cond_b],
             negative_batches=[negative_a, None],
             latents=[cond_a["noisy_latents"], cond_b["noisy_latents"]],
@@ -188,7 +188,7 @@ class SamplerBatchingTest(unittest.TestCase):
         model = FakeSamplerModel()
         conditional = [make_sampler_batch(2.0), make_sampler_batch(8.0)]
         velocities = sampler.get_guided_velocity(
-            model,  # type: ignore[arg-type]
+            model,
             conditional,
             [make_sampler_batch(-2.0), make_sampler_batch(4.0)],
             [batch["noisy_latents"] for batch in conditional],
@@ -211,7 +211,7 @@ class SamplerBatchingTest(unittest.TestCase):
         long_batch = make_batch(tokens=8)
         long_batch["clean_latents"] = torch.tensor(0.0)
         outputs = sampler.sample(
-            FakeSamplerModel(),  # type: ignore[arg-type]
+            FakeSamplerModel(),
             [
                 SampleRequest(batch=make_sampler_batch(0.0)),
                 SampleRequest(batch=long_batch),
@@ -223,7 +223,7 @@ class SamplerBatchingTest(unittest.TestCase):
         sampler = Sampler(steps=3, solver=FlowSolver(eta=0.4))
         model = FakeSamplerModel()
         batched = sampler.sample(
-            model,  # type: ignore[arg-type]
+            model,
             [
                 SampleRequest(
                     batch=make_sampler_batch(0.0),
@@ -238,7 +238,7 @@ class SamplerBatchingTest(unittest.TestCase):
 
         individual = [
             sampler.sample(
-                FakeSamplerModel(),  # type: ignore[arg-type]
+                FakeSamplerModel(),
                 [
                     SampleRequest(
                         batch=make_sampler_batch(0.0),

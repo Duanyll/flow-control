@@ -1,7 +1,7 @@
 import csv
 import os
 from collections.abc import Generator
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -426,7 +426,8 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         )
         task = progress.add_task(
             "Inference",
-            total=len(self.dataloader.sampler),  # type: ignore[arg-type]
+            # ``make_dataloader`` above builds this sampler, and it is Sized.
+            total=len(cast(DistributedBucketSampler, self.dataloader.sampler)),
         )
 
         with progress:

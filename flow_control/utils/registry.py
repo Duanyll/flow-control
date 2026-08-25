@@ -37,7 +37,7 @@ import importlib
 import operator
 from collections.abc import Callable, Iterable, Mapping
 from functools import cache, reduce
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from pydantic import BaseModel, Discriminator, GetCoreSchemaHandler, Tag
 from pydantic_core import CoreSchema, core_schema
@@ -210,7 +210,12 @@ class RegistryUnion:
                 f"Registry {self._registry.name!r} is empty; import a member "
                 "module (or a plugin) before building this union's schema."
             )
-        tagged = [Annotated[cls, Tag(tag)] for tag, cls in members.items()]
+        # The union is built at runtime, so `cls` is a variable here rather
+        # than the static type Annotated[] wants.
+        tagged = [
+            Annotated[cls, Tag(tag)]  # ty: ignore[invalid-type-form]
+            for tag, cls in members.items()
+        ]
         union: Any = tagged[0] if len(tagged) == 1 else reduce(operator.or_, tagged)
         return Annotated[union, Discriminator(self._discriminator)]
 
@@ -263,7 +268,7 @@ class RegistryUnion:
                     )
                 value = {self._discriminator: tag, field_name: value}
         if isinstance(value, dict):
-            return (self._parser or self._default_dispatch)(value)
+            return (self._parser or self._default_dispatch)(cast(dict[str, Any], value))
         if isinstance(value, BaseModel):
             return value  # already-constructed instance; trust it
         return handler(value)

@@ -1,7 +1,7 @@
 import io
 import uuid
 import zlib
-from typing import Any
+from typing import Any, cast
 
 import lmdb
 import torch
@@ -60,7 +60,7 @@ class LMDBDataset(BaseModel, Dataset):
             for i, key in enumerate(cursor.iternext(values=False)):
                 if self.max_items > 0 and i >= self.max_items:
                     break
-                keys.append(key)
+                keys.append(cast(bytes, key))
             return keys
 
     def __len__(self) -> int:
@@ -68,12 +68,12 @@ class LMDBDataset(BaseModel, Dataset):
         assert self._keys is not None
         return len(self._keys)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, index: int) -> dict:
         self._ensure_open()
         assert self._keys is not None and self._env is not None and self._db is not None
-        if idx >= len(self._keys):
-            raise IndexError(f"Index {idx} out of range.")
-        key = self._keys[idx]
+        if index >= len(self._keys):
+            raise IndexError(f"Index {index} out of range.")
+        key = self._keys[index]
         with self._env.begin(write=False) as txn:
             value = txn.get(key, db=self._db)
             if value is None:

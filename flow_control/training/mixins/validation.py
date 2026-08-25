@@ -1,5 +1,5 @@
 from collections.abc import Generator
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 from pydantic import BaseModel, PositiveInt
@@ -180,7 +180,10 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         task = progress.add_task(
             "Validating",
-            total=len(self.validation_dataloader.sampler),  # type: ignore[arg-type]
+            # ``make_validation_dataloader`` builds this sampler, and it is Sized.
+            total=len(
+                cast(DistributedBucketSampler, self.validation_dataloader.sampler)
+            ),
         )
 
         def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:

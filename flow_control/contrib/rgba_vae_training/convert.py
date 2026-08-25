@@ -5,7 +5,7 @@ has ``encoder.conv_in`` (3 → N) and ``decoder.conv_out`` (N → 3) layers,
 including ``AutoencoderKL`` and ``AutoencoderKLFlux2``.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -39,9 +39,11 @@ def convert_to_rgba[T: ModelMixin](model: T) -> T:
         conv_in_new = nn.Conv2d(
             4,
             conv_in.out_channels,
-            kernel_size=conv_in.kernel_size,  # type: ignore[arg-type]
-            stride=conv_in.stride,  # type: ignore[arg-type]
-            padding=conv_in.padding,  # type: ignore[arg-type]
+            # Conv2d widens these to `tuple[int, ...]` on the instance but only
+            # accepts the 2D spelling back as an argument.
+            kernel_size=cast(tuple[int, int], conv_in.kernel_size),
+            stride=cast(tuple[int, int], conv_in.stride),
+            padding=cast(tuple[int, int], conv_in.padding),
             device=conv_in.weight.device,
             dtype=conv_in.weight.dtype,
         )
@@ -66,9 +68,9 @@ def convert_to_rgba[T: ModelMixin](model: T) -> T:
         conv_out_new = nn.Conv2d(
             conv_out.in_channels,
             4,
-            kernel_size=conv_out.kernel_size,  # type: ignore[arg-type]
-            stride=conv_out.stride,  # type: ignore[arg-type]
-            padding=conv_out.padding,  # type: ignore[arg-type]
+            kernel_size=cast(tuple[int, int], conv_out.kernel_size),
+            stride=cast(tuple[int, int], conv_out.stride),
+            padding=cast(tuple[int, int], conv_out.padding),
             device=conv_out.weight.device,
             dtype=conv_out.weight.dtype,
         )

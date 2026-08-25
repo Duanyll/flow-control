@@ -7,7 +7,7 @@ training, gradient accumulation, and optional PatchGAN discriminator.
 import math
 import os
 from contextlib import nullcontext
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -22,7 +22,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.datasets import DatasetConfig, parse_dataset
@@ -683,7 +683,10 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         """Run discriminator forward+backward for one micro-batch (if active)."""
         if self.gan_start_step is None or self._current_step < self.gan_start_step:
             return
-        self._loss_module.discriminator.set_requires_gradient_sync(is_sync_step)  # type: ignore[union-attr]
+        # ``set_requires_gradient_sync`` is grafted on by fully_shard(), so it is
+        # invisible on the plain nn.Module the loss module declares.
+        discriminator = cast(FSDPModule, self._loss_module.discriminator)
+        discriminator.set_requires_gradient_sync(is_sync_step)
         with self._autocast_context():
             d_loss = self._loss_module.discriminator_loss(target, pred)
         d_loss = d_loss * self.discriminator_loss_weight
@@ -800,8 +803,9 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         with self.status_bar("VAE Training"), progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
-                if hasattr(self._dataloader.sampler, "set_epoch"):
-                    self._dataloader.sampler.set_epoch(self.current_epoch)  # type: ignore[union-attr]
+                set_epoch = getattr(self._dataloader.sampler, "set_epoch", None)
+                if set_epoch is not None:
+                    set_epoch(self.current_epoch)
 
                 for i, batch in enumerate(self._dataloader):
                     with dump_if_failed(logger, batch):

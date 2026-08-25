@@ -333,7 +333,7 @@ class BaselineParityTest(unittest.TestCase):
                 )
                 for entry in fixture["entries"]
             ]
-            outputs = sampler.replay_recorded_steps(model, items)  # type: ignore[arg-type]
+            outputs = sampler.replay_recorded_steps(model, items)
             for entry, output in zip(fixture["entries"], outputs, strict=True):
                 with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
                     assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -420,7 +420,7 @@ class BaselineParityTest(unittest.TestCase):
             )
             for entry in fixture["entries"]
         ]
-        outputs = sampler.replay_recorded_steps(model, items)  # type: ignore[arg-type]
+        outputs = sampler.replay_recorded_steps(model, items)
         for entry, output in zip(fixture["entries"], outputs, strict=True):
             with self.subTest(sigma=entry["sigma"]):
                 assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -727,7 +727,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 self.assertTrue(all((step.log_prob != 0).all() for step in trajectory))
 
                 items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-                replayed = sampler.replay_recorded_steps(model, items)  # type: ignore[arg-type]
+                replayed = sampler.replay_recorded_steps(model, items)
                 for step, replay in zip(trajectory, replayed, strict=True):
                     assert_bitwise(replay.log_prob, step.log_prob)
 
@@ -735,7 +735,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 # sampler's live solver config.
                 retuned = Sampler(steps=4, solver=type(solver)(eta=0.123))
                 for output_now, output_then in zip(
-                    retuned.replay_recorded_steps(model, items),  # type: ignore[arg-type]
+                    retuned.replay_recorded_steps(model, items),
                     replayed,
                     strict=True,
                 ):
@@ -767,7 +767,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
             self.assertIs(previous.latent_next, following.latent_t)
 
         items = [ReplayItem(batch=batch, recorded=step) for step in moved.trajectory]
-        replayed = sampler.replay_recorded_steps(model, items)  # type: ignore[arg-type]
+        replayed = sampler.replay_recorded_steps(model, items)
         for step, replay in zip(output.trajectory, replayed, strict=True):
             assert_bitwise(replay.log_prob, step.log_prob)
 
@@ -824,7 +824,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
             )
 
         items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-        replayed = sampler.replay_recorded_steps(model, items)  # type: ignore[arg-type]
+        replayed = sampler.replay_recorded_steps(model, items)
         for step, replay_output in zip(trajectory, replayed, strict=True):
             assert_bitwise(replay_output.log_prob, step.log_prob)
 
@@ -842,7 +842,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 ),
             ),
         )
-        wrong = sampler.replay_recorded_steps(model, [corrupted])[0]  # type: ignore[arg-type]
+        wrong = sampler.replay_recorded_steps(model, [corrupted])[0]
         self.assertFalse(torch.equal(wrong.log_prob, first.log_prob))
 
     def test_sliced_plans_warm_up_from_empty_history(self) -> None:

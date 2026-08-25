@@ -130,7 +130,7 @@ def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
     batch = make_batch(1, value=3.0)
     negative_batch = make_batch(1, value=1.0) if rank == 0 else None
     sampler.get_guided_velocity(
-        model,  # type: ignore[arg-type]
+        model,
         batches=[batch],
         negative_batches=[negative_batch],
         latents=[batch["noisy_latents"]],
@@ -146,7 +146,7 @@ def test_sampler_request_count_mismatch_is_rejected(rank: int) -> None:
     request_count = 2 if rank == 0 else 1
     try:
         sampler.sample(
-            model,  # type: ignore[arg-type]
+            model,
             [SampleRequest(batch=make_batch(1)) for _ in range(request_count)],
         )
     except ValueError as error:
@@ -216,7 +216,7 @@ class _TinyDataset:
 
 
 def test_final_padded_microbatch(rank: int) -> None:
-    dataset = PaddingAwareDatasetWrapper(_TinyDataset())  # type: ignore[arg-type]
+    dataset = PaddingAwareDatasetWrapper(_TinyDataset())
     sampler = DistributedBucketSampler(
         dataset,
         num_replicas=dist.get_world_size(),

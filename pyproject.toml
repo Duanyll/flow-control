@@ -44,6 +44,7 @@ dev = [
     "seaborn>=0.13.2",
     "py-spy>=0.4.1",
     "scipy>=1.17.1",
+    "ty==0.0.74",
     "pytest>=9.1.1",
     "pytest-subtests>=0.15.0",
 ]
@@ -155,3 +156,23 @@ ignore = [
   "notebooks/**",
 ]
 
+[tool.ty.src]
+include = ["flow_control", "tests", "examples", "docs"]
+exclude = ["flow_control/third_party"]
+
+[tool.ty.analysis]
+# Torch is required here, so Diffusers' no-Torch fallback module is unreachable.
+replace-imports-with-any = ["diffusers.utils.dummy_pt_objects"]
+# Keep Pyright-like gradual narrowing for bare generic runtime checks.
+strict-generic-narrowing = false
+
+[tool.ty.rules]
+# Match the intentional exceptions in the Pyright configuration above.
+invalid-attribute-override = "ignore"
+# Pyright owns its existing type-ignore comments; ty owns ty-ignore comments.
+unused-type-ignore-comment = "ignore"
+unused-ignore-comment = "error"
+# Match Pyright standard without adding import/cast diagnostics it leaves disabled.
+possibly-missing-submodule = "ignore"
+possibly-unresolved-reference = "error"
+redundant-cast = "ignore"

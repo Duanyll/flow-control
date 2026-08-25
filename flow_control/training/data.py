@@ -9,7 +9,6 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import Dataset
 from torch.utils.data import Sampler as TorchSampler
 
-from flow_control.datasets import MapDataset
 from flow_control.datasets.bucket_directory import BucketDataset
 from flow_control.utils.logging import get_logger
 from flow_control.utils.resize import (
@@ -37,7 +36,7 @@ class SizedMapDataset(Protocol):
 
 
 class PaddingAwareDatasetWrapper(Dataset):
-    def __init__(self, dataset: MapDataset):
+    def __init__(self, dataset: SizedMapDataset):
         self.dataset = dataset
         if isinstance(dataset, BucketDataset):
             self.bucket_lengths = dataset.bucket_lengths
@@ -45,11 +44,11 @@ class PaddingAwareDatasetWrapper(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, item):
-        real_index = item
+    def __getitem__(self, index):
+        real_index = index
         is_padding = False
-        if isinstance(item, tuple):
-            real_index, is_padding = item
+        if isinstance(index, tuple):
+            real_index, is_padding = index
 
         data = self.dataset[real_index]
         if is_padding and isinstance(data, dict):
@@ -122,8 +121,8 @@ class VaeTargetDatasetWrapper(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, item):
-        data = self.dataset[item]
+    def __getitem__(self, index):
+        data = self.dataset[index]
         if not isinstance(data, dict):
             return data
 
@@ -161,7 +160,7 @@ class DistributedBucketSampler(TorchSampler, Stateful):
         seed=0,
         grad_acc_steps=1,
     ):
-        super().__init__(None)  # type: ignore[arg-type]
+        super().__init__()
         if num_replicas is None:
             num_replicas = dist.get_world_size()
         if rank is None:
@@ -315,7 +314,7 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         seed: int = 0,
         keep_prompt_local: bool = False,
     ):
-        super().__init__(None)  # type: ignore[arg-type]
+        super().__init__()
         if num_replicas is None:
             num_replicas = dist.get_world_size()
         if rank is None:

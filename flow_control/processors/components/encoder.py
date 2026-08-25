@@ -337,7 +337,9 @@ class Qwen25VLEncoder(
         self.tokenizer.load_model(device)
         self.vl_processor.load_model(device, frozen)
         # Patch to a no-op for _check_special_mm_tokens
-        self.vl_processor.model._check_special_mm_tokens = lambda *args, **kwargs: None
+        self.vl_processor.model._check_special_mm_tokens = (  # ty: ignore[invalid-assignment]
+            lambda *args, **kwargs: None
+        )
         return super().load_model(device)
 
     def encode(self, prompt, images=None, system_prompt: str | None = None):

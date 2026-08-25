@@ -17,7 +17,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import Batch, SamplerModel
 from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
@@ -217,7 +217,7 @@ class Sampler(BaseModel):
 
     def sample(
         self,
-        model: BaseModelAdapter,
+        model: SamplerModel,
         requests: list[SampleRequest],
     ) -> list[SampleOutput]:
         """Plain full-grid sampling: base plan, no recording, no transforms.
@@ -310,7 +310,7 @@ class Sampler(BaseModel):
 
     def get_guided_velocity(
         self,
-        model: BaseModelAdapter,
+        model: SamplerModel,
         batches: list[Batch],
         negative_batches: list[Batch | None],
         latents: list[torch.Tensor],
@@ -339,7 +339,7 @@ class Sampler(BaseModel):
 
     def replay_recorded_steps(
         self,
-        model: BaseModelAdapter,
+        model: SamplerModel,
         items: list[ReplayItem],
     ) -> list[StepLogProbOutput]:
         """Recompute transition log-probs for recorded rollout steps.

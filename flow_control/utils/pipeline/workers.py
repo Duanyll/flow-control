@@ -346,7 +346,7 @@ async def _async_process_item(
         if shutdown_event.is_set():
             return
         try:
-            results = await _NoGradCoroutine(stage.process(item))  # type: ignore[misc]
+            results = await _NoGradCoroutine(stage.process(item))  # type: ignore[misc]  # ty: ignore[invalid-argument-type]
             _report_stage_output(
                 results,
                 stage_index,

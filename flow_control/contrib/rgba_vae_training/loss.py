@@ -149,7 +149,8 @@ class RGBAVAELoss(nn.Module):
         ref: DiagonalGaussianDistribution | None = None,
     ) -> torch.Tensor:
         """KL divergence loss — vs N(0, I) when *ref* is ``None``."""
-        loss = pred_posterior.kl(ref)  # type: ignore[arg-type]  # diffusers kl() accepts None
+        # diffusers types `other` as required, but defaults it to None itself.
+        loss = pred_posterior.kl(ref) if ref is not None else pred_posterior.kl()
         return self._reduce(loss)
 
     # --------------------------------------------------------------------- #

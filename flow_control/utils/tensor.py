@@ -207,11 +207,11 @@ def ensure_compiled_flex_attention():
     if not _flex_attention_compiled:
         import torch.nn.attention.flex_attention as flex_attention
 
-        flex_attention.flex_attention = torch.compile(
+        flex_attention.flex_attention = torch.compile(  # ty: ignore[invalid-assignment]
             functools.partial(
                 flex_attention.flex_attention,
                 # These options are required for poor consumer grade GPUs like RTX 3090 and 4090
-                kernel_options={
+                kernel_options={  # ty: ignore[invalid-argument-type]
                     "BLOCK_M": 64,
                     "BLOCK_N": 64,
                     "BLOCK_M1": 32,
@@ -222,7 +222,7 @@ def ensure_compiled_flex_attention():
             )
         )
 
-        flex_attention.create_block_mask = torch.compile(
+        flex_attention.create_block_mask = torch.compile(  # ty: ignore[invalid-assignment]
             flex_attention.create_block_mask
         )
 

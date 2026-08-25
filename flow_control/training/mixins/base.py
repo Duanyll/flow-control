@@ -78,9 +78,9 @@ class BaseTrainer(BaseModel):
         """
         # ``model`` / ``seed_checkpoint_dir`` are declared by the diffusion
         # trainers that use this default; the VAE trainer overrides instead.
-        model = self.model  # type: ignore[attr-defined]
+        model = self.model  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
         model.load_transformer(device=torch.device("cpu"))
-        self.save_transformer_to_seed(model, self.seed_checkpoint_dir)  # type: ignore[attr-defined]
+        self.save_transformer_to_seed(model, self.seed_checkpoint_dir)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
 
     def export_checkpoint(self, checkpoint_dir: str, output_dir: str) -> None:
         """Export a trained DCP checkpoint to HuggingFace format (``export``).

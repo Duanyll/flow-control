@@ -89,7 +89,7 @@ def _render_checkpoint_input(engine: ServingEngine) -> gr.Dropdown | gr.Textbox:
             )
             refresh_btn = gr.Button("🔄", scale=0, min_width=40)
 
-        def on_refresh() -> gr.update:  # type: ignore[type-arg]
+        def on_refresh() -> dict[str, Any]:  # what gr.update() returns
             return gr.update(choices=[""] + engine.list_checkpoints())
 
         refresh_btn.click(fn=on_refresh, inputs=[], outputs=[dropdown])
@@ -208,7 +208,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                     ) -> tuple[
                         list[tuple[Image.Image, str]],
                         list[tuple[str, Image.Image]],
-                        gr.update,  # type: ignore[type-arg]
+                        dict[str, Any],  # what gr.update() returns
                         str,
                     ]:
                         n_task = len(task_components)

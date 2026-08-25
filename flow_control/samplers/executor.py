@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as dist
 
-from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.base import Batch, SamplerModel
 from flow_control.utils.logging import get_logger, warn_once
 
 from .guidance import BaseGuidance
@@ -97,7 +97,7 @@ def _sync_negative_pass(negative_pass: bool, device: torch.device) -> bool:
 
 
 def evaluate_branches(
-    model: BaseModelAdapter,
+    model: SamplerModel,
     guidance: BaseGuidance,
     batches: list[Batch],
     negative_batches: list[Batch | None],
@@ -290,7 +290,7 @@ def _drive(
 
 
 def _eval_round(
-    model: BaseModelAdapter,
+    model: SamplerModel,
     guidance: BaseGuidance,
     eval_round: _EvalRound,
     *,
@@ -332,7 +332,7 @@ def _eval_round(
 
 
 def _distributed_rendezvous_eval(
-    model: BaseModelAdapter,
+    model: SamplerModel,
     guidance: BaseGuidance,
     eval_round: _EvalRound | None,
     dummy_run: Run,
@@ -392,7 +392,7 @@ def _drive_groups(
 
 
 def execute(
-    model: BaseModelAdapter,
+    model: SamplerModel,
     runs: list[Run],
     guidance: BaseGuidance,
 ) -> Iterator[StepEvent]:

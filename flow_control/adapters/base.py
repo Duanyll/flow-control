@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import ClassVar, TypedDict, cast
+from typing import Any, ClassVar, Protocol, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -31,6 +31,22 @@ class Batch(TypedDict):
     """`[B, N, D]` The noisy latents to denoise."""
 
 
+class SamplerModel(Protocol):
+    """Minimal model interface consumed by sampling and replay."""
+
+    @property
+    def device(self) -> torch.device: ...
+
+    @property
+    def dtype(self) -> torch.dtype: ...
+
+    def predict_velocity_batched(
+        self,
+        batches: list[Any],
+        timesteps: list[torch.Tensor],
+    ) -> list[torch.Tensor]: ...
+
+
 class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     BaseModel, ABC
 ):
@@ -53,7 +69,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     @property
     def device(self) -> torch.device:
-        return self.transformer.device
+        # Both bounds define `.device`, but ty checks the property descriptor
+        # against the whole `ModelMixin | PreTrainedModel` receiver at once.
+        return self.transformer.device  # ty: ignore[invalid-attribute-access]
 
     hf_model: HfModelLoader[TModel]
     storage_dtype: TorchDType | None = None
@@ -108,7 +126,11 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                         if isinstance(v, torch.nn.Linear)
                     }
                 )
-            self.transformer.add_adapter(self.peft_lora_config)
+            # Configuring LoRA at all requires a PeftAdapterMixin transformer,
+            # which neither bound guarantees.
+            self.transformer.add_adapter(  # ty: ignore[invalid-argument-type]
+                self.peft_lora_config
+            )
 
         for name, param in self.transformer.named_parameters():
             if any(k in name for k in self.extra_trainable_modules):
