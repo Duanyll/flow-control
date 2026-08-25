@@ -23,7 +23,7 @@
 1. Specification tests for shallow behaviour — getters, Pydantic field
    validation, enum members.
 2. Shotgun coverage for hypothetical failures. Nail down the bugs that bit us.
-3. Anything `uv run pyright` already proves.
+3. Anything `uv run ty check` already proves.
 4. Single-module checks — put those in an `if __name__ == "__main__":` block
    next to the code, as the root `CLAUDE.md` requires. Promote to `tests/` only
    once the behaviour proves fragile across modules or processes.

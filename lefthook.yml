@@ -19,5 +19,5 @@ pre-commit:
       run: uv run ruff check --fix {staged_files}
       stage_fixed: true
 
-    # pyright:
-    #   run: uvx pyright
+    # ty:
+    #   run: uv run ty check
