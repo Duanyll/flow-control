@@ -3,7 +3,9 @@ import base64
 import contextlib
 import io
 import json
+import random
 import re
+import time
 from typing import Any, Literal, TypedDict
 
 import aiohttp
@@ -20,6 +22,9 @@ from flow_control.utils.tensor import (
 )
 
 logger = get_logger(__name__)
+
+
+RETRY_STATUS = frozenset({408, 409, 425, 429})
 
 
 Role = Literal["system", "user", "assistant"]
@@ -44,12 +49,35 @@ class Message(TypedDict):
     content: str | list[TextContent | ImageContent]
 
 
+def _gateway_retry_after(
+    status: int, retry_after: str | None, body: str
+) -> float | None:
+    if status not in (429, 503) or retry_after is None:
+        return None
+    try:
+        error = json.loads(body).get("error") or {}
+    except (AttributeError, json.JSONDecodeError):
+        return None
+    if error.get("type") != "capacity" or error.get("code") != "capacity_unavailable":
+        return None
+    try:
+        return max(0.5, float(retry_after))
+    except ValueError:
+        return 5.0
+
+
+def _retryable_status(status: int) -> bool:
+    return status in RETRY_STATUS or 500 <= status < 600
+
+
 class LLMClient(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     timeout: int = 120
+    retries: int = 2  # connection errors and ordinary retryable HTTP responses
+    capacity_wait_timeout: float = 30 * 60  # gateway 429/503 wall-clock bound
     model: str = "auto"
     max_tokens: int = 2048
     temperature: float | None = None
@@ -215,6 +243,63 @@ class LLMClient(BaseModel):
 
         return payload
 
+    async def _post_completion(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        errors = 0
+        failure_delay = 1.0
+        capacity_deadline = time.monotonic() + self.capacity_wait_timeout
+
+        while True:
+            capacity_delay: float | None = None
+            try:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        capacity_delay = _gateway_retry_after(
+                            resp.status,
+                            resp.headers.get("Retry-After"),
+                            body,
+                        )
+                        if capacity_delay is None:
+                            resp.raise_for_status()
+                    else:
+                        return await resp.json()
+            except aiohttp.ClientResponseError as exc:
+                if not _retryable_status(exc.status):
+                    raise
+                errors += 1
+                if errors > self.retries:
+                    raise
+                await asyncio.sleep(failure_delay * (0.5 + random.random()))
+                failure_delay = min(30.0, failure_delay * 2)
+                continue
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                TimeoutError,
+            ):
+                errors += 1
+                if errors > self.retries:
+                    raise
+                await asyncio.sleep(failure_delay * (0.5 + random.random()))
+                failure_delay = min(30.0, failure_delay * 2)
+                continue
+
+            assert capacity_delay is not None
+            remaining = capacity_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "LLM gateway still had no capacity after "
+                    f"{self.capacity_wait_timeout:.0f}s"
+                )
+            wait = min(capacity_delay * (0.5 + random.random()), remaining)
+            logger.info(f"LLM gateway has no capacity; retrying in {wait:.1f}s")
+            await asyncio.sleep(wait)
+
     async def generate(
         self,
         user_prompt: str | list[TextContent | ImageContent],
@@ -263,21 +348,18 @@ class LLMClient(BaseModel):
                 messages.append({"role": "user", "content": user_prompt})
 
             payload = self._build_payload(model_name, messages)
+            data = await self._post_completion(session, url, payload)
+            choices = data.get("choices", [])
+            if not choices:
+                raise ValueError("No choices returned from LLM API")
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
 
-            async with session.post(url, json=payload) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                choices = data.get("choices", [])
-                if not choices:
-                    raise ValueError("No choices returned from LLM API")
-                message = choices[0].get("message", {})
-                content = message.get("content", "")
+            if strip_think and "</think>" in content:
+                content = content.split("</think>")[-1].strip()
 
-                if strip_think and "</think>" in content:
-                    content = content.split("</think>")[-1].strip()
-
-                messages.append({"role": "assistant", "content": content})
-                return content, messages
+            messages.append({"role": "assistant", "content": content})
+            return content, messages
 
         if semaphore is not None:
             async with semaphore:
