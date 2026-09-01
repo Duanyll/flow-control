@@ -53,8 +53,8 @@ iqa = [
 # OCR reward backend (flow_control/rewards/ocr.py). A dependency-group rather
 # than an extra so `default-groups` can keep it installed across `uv sync`.
 ocr = [
-    "onnxruntime-gpu==1.28.0.dev20260722004",
-    "rapidocr>=3.4.0",
+    "onnxruntime-gpu>=1.29.0",
+    "rapidocr>=3.9.2",
 ]
 
 [project.scripts]
@@ -92,7 +92,6 @@ xformers = [
   { index = "pytorch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 diffusers = { git = "https://github.com/huggingface/diffusers.git" }
-onnxruntime-gpu = { index = "ort-nightly" }
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
@@ -101,11 +100,6 @@ default = true
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-[[tool.uv.index]]
-name = "ort-nightly"
-url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
 explicit = true
 
 [tool.ruff.lint]
