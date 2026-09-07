@@ -1,4 +1,9 @@
-from .guidance import ClassifierFreeGuidance, Guidance, MomentumGuidance
+from .guidance import (
+    ClassifierFreeGuidance,
+    DifferentialDiffusionGuidance,
+    Guidance,
+    MomentumGuidance,
+)
 from .plan import RecordedStep, StepLogProbOutput
 from .recipe import (
     Phase,
@@ -20,6 +25,7 @@ from .sampler import (
 
 __all__ = [
     "ClassifierFreeGuidance",
+    "DifferentialDiffusionGuidance",
     "Guidance",
     "MomentumGuidance",
     "Phase",

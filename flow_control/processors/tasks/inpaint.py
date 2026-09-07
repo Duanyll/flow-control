@@ -1,6 +1,7 @@
 from typing import Literal, NotRequired
 
 import torch
+import torch.nn.functional as F
 
 from flow_control.datasets.coercion import ImageTensor
 from flow_control.utils.resize import resize_to_resolution
@@ -33,6 +34,9 @@ class InpaintProcessedBatch(ProcessedBatch):
     pooled_prompt_embeds: torch.Tensor | None
     inpaint_latents: torch.Tensor
     inpaint_mask: torch.Tensor
+    """`[B, H, W]` Luminance mask, where white is the editable region."""
+    inpaint_mask_latents: torch.Tensor
+    """`[B, N, P]` Mask packed like latents, with `P = patch_size ** 2`."""
 
 
 @task_registry.register("inpaint")
@@ -45,14 +49,45 @@ class InpaintProcessor(
     default_negative_prompt: str = " "
     save_negative: bool = False
 
+    def _prepare_inpaint_mask(
+        self,
+        mask: torch.Tensor,
+        image_size: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize an image mask and preserve its intra-token spatial detail."""
+        mask = resize_to_resolution(mask, image_size)
+        channels = mask.shape[1]
+        if channels in (1, 2):
+            luminance = mask[:, 0]
+        elif channels in (3, 4):
+            luminance = mask[:, :3].mean(dim=1)
+        else:
+            raise ValueError(
+                "Inpaint masks must have 1 (L), 2 (LA), 3 (RGB), or 4 (RGBA) "
+                f"channels, got shape {tuple(mask.shape)}."
+            )
+
+        latent_size = (
+            image_size[0] // self.vae_scale_factor,
+            image_size[1] // self.vae_scale_factor,
+        )
+        latent_mask = F.interpolate(
+            luminance.unsqueeze(1),
+            size=latent_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        return luminance, self._pack_latents(latent_mask)
+
     async def prepare_inference_batch(
         self, batch: InpaintInputBatch
     ) -> InpaintProcessedBatch:
         inpaint_image = batch["clean_image"] = self.resize_image(batch["clean_image"])
         image_size = (inpaint_image.shape[2], inpaint_image.shape[3])
-        inpaint_mask = batch["inpaint_mask"] = resize_to_resolution(
+        inpaint_mask, inpaint_mask_latents = self._prepare_inpaint_mask(
             batch["inpaint_mask"], image_size
         )
+        batch["inpaint_mask"] = inpaint_mask
         inpaint_latents = self.encode_latents(
             inpaint_image, posterior=self.condition_posterior
         )
@@ -60,6 +95,7 @@ class InpaintProcessor(
             image_size=image_size,
             inpaint_latents=inpaint_latents,
             inpaint_mask=inpaint_mask,
+            inpaint_mask_latents=inpaint_mask_latents,
             **self.encode_prompt(batch["prompt"], system_prompt=self.encoder_prompt),
         )
 
@@ -86,15 +122,17 @@ class InpaintProcessor(
         inpaint_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
-        inpaint_mask = batch["inpaint_mask"] = resize_to_resolution(
+        inpaint_mask, inpaint_mask_latents = self._prepare_inpaint_mask(
             batch["inpaint_mask"], image_size
         )
+        batch["inpaint_mask"] = inpaint_mask
 
         result = InpaintProcessedBatch(
             image_size=image_size,
             clean_latents=clean_latents,
             inpaint_latents=inpaint_latents,
             inpaint_mask=inpaint_mask,
+            inpaint_mask_latents=inpaint_mask_latents,
             **self.encode_prompt(prompt, system_prompt=self.encoder_prompt),
         )
 

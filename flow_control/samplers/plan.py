@@ -175,7 +175,12 @@ class ReplayStep:
 
 @dataclass(slots=True)
 class RecordedStep:
-    """One recorded transition of a rollout trajectory (RL consumption)."""
+    """One recorded transition of a rollout trajectory (RL consumption).
+
+    Guidance middleware may project the sample between transitions, so one
+    step's ``latent_next`` need not equal the following step's ``latent_t``.
+    Each record remains independently replayable from its own ``latent_t``.
+    """
 
     latent_t: torch.Tensor
     latent_next: torch.Tensor

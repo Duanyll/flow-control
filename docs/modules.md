@@ -84,10 +84,10 @@ Plan-as-data 架构（设计见 `docs/sampler-plan-design.md`）：sampler/solve
 
 | 接口 | 说明 |
 |------|------|
-| `Sampler` | 配置 + 规划面：`make_sigmas()` / `plan()` / `plan_from_sigma()`；`sample()` 执行普通 full-grid 采样（无记录、无变换）；`replay_recorded_steps()` 对 `ReplayItem` 批量重算逐步 log-prob（GRPO replay）。`guidance` 字段（registry union，内置 `cfg` 含 renorm，默认 scale 1.0）取代已删除的 `cfg_scale` 一族，裸数字即 CFG scale（`"guidance": 4.5`）；是否需要 negative batch 由 `guidance.needs_negative()` 判定。`shift` 同理支持裸数字（`"shift": 3.0` ≡ constant shift），默认 `ConstantShift` 因子 1.0 即不 shift（已删除与其完全等价的 `none` 成员） |
+| `Sampler` | 配置 + 规划面：`make_sigmas()` / `plan()` / `plan_from_sigma()`；`sample()` 执行普通 full-grid 采样（无记录、无变换）；`replay_recorded_steps()` 对 `ReplayItem` 批量重算逐步 log-prob（GRPO replay）。`guidance` 字段是 sampling middleware registry union：内置 `cfg`（含 renorm，默认 scale 1.0）、`momentum` 和包装另一 guidance 的 `differential`（消费 inpaint batch，在每个 transition 前投影 latent）；裸数字即 CFG scale（`"guidance": 4.5`），是否需要 negative batch 由 `guidance.needs_negative()` 判定。`shift` 同理支持裸数字（`"shift": 3.0` ≡ constant shift），默认 `ConstantShift` 因子 1.0 即不 shift（已删除与其完全等价的 `none` 成员） |
 | `SampleOutput` | 最终 latent、执行的 sigma 网格（`timesteps`，plan 元数据）、可选 `trajectory: list[RecordedStep]`（仅 recipe runner 在 plan 标记 `record=True` 时产出） |
 | Recipe 层（`recipe.py`） | `PhasesRecipe`（唯一内置 recipe，phase 顺序拼接 × transform 列表复合）+ `PhaseConfig`（`init` / `transforms` / `batch` / 可选 `sampler` 覆写）+ `runner.py::run_phases`（跨 request lockstep 逐 phase 执行）。InitOp：`pure_noise` / `renoise`（SDEdit）/ `from_latents` / `from_previous`；PlanTransform：`sde_window`（eta 门控 + 可选 `record`，取代已删除的 `trajectory_window_*`）、`invert`（DDIM/Euler inversion，必须列首） |
-| `RecordedStep` | RL replay 的逐步记录（latent_t / latent_next / log_prob / 纯 float `ReplayStep` / guidance_state），rollout 存下即按步组织 |
+| `RecordedStep` | RL replay 的逐步记录（latent_t / latent_next / log_prob / 纯 float `ReplayStep` / guidance_state），rollout 存下即按步组织；guidance 可在 transition 间投影 latent，因此相邻记录允许不连续，但每一步都可从自身 `latent_t` 独立 replay |
 | `derive_seed()` | 确定性种子派生 |
 
 `plan.py` 只放 solver 无关的协议类型与共用原语（`euler_step` / `zero_log_prob` / `normal_log_prob`）；每个 solver 的 transition 子类、runtime state、逐步公式（`XxxSolver.step_parts` 等 `@staticmethod`）和 `ReplayStep` 子类都在 `solver/<name>.py` 里自包含。

@@ -259,9 +259,14 @@ def _drive(
     assert all(len(run.plan) == num_items for run in runs)
     for item_idx in range(num_items):
         for run in runs:
+            latents, guidance_state = guidance.prepare_transition(run, item_idx)
+            run.ctx.latents = latents
+            run.ctx.guidance_state = guidance_state
             # Contract rule 7: guidance state advances per eval, but recorded
-            # steps capture the state as of before the transition's first eval.
-            run.ctx.pre_transition_guidance_state = run.ctx.guidance_state
+            # steps capture the post-preparation state as of immediately before
+            # the transition's first eval. Replay starts from the already
+            # prepared latent and therefore does not repeat this hook.
+            run.ctx.pre_transition_guidance_state = guidance_state
         gens = [run.plan[item_idx].run(run.ctx) for run in runs]
         results: list[TransitionResult | None] = [None] * len(runs)
         pending: dict[int, EvalRequest] = {}

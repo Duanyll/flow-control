@@ -14,8 +14,7 @@ class Flux1FillBatch(Flux1Batch):
     inpaint_latents: torch.Tensor
     """`[B, N, D]` The latents of the inpainted image."""
     inpaint_mask: torch.Tensor
-    """`[B, 1, H, W]` The inpainting mask. Can be a boolean tensor or a tuple of
-        (indices, values) for sparse representation."""
+    """`[B, H, W]` The luminance inpainting mask (white is editable)."""
 
 
 @adapter_registry.register("flux1_fill")

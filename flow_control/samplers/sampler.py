@@ -98,8 +98,8 @@ class Sampler(BaseModel):
 
     seed: int = 42
     guidance: Guidance = Field(default_factory=ClassifierFreeGuidance)
-    """Branch-combination rule; the default is ``ClassifierFreeGuidance``
-    with ``scale=1.0`` (no negative pass)."""
+    """Sampling middleware; the default is ``ClassifierFreeGuidance`` with
+    ``scale=1.0`` (no negative pass)."""
 
     steps: int = 50
     solver: Solver = Field(default_factory=FlowSolver)

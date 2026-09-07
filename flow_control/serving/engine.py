@@ -15,7 +15,12 @@ from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
-from flow_control.samplers import ClassifierFreeGuidance, Sampler, SampleRequest
+from flow_control.samplers import (
+    ClassifierFreeGuidance,
+    DifferentialDiffusionGuidance,
+    Sampler,
+    SampleRequest,
+)
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
@@ -27,10 +32,19 @@ from .config import ServeConfig
 logger = get_logger(__name__)
 
 
+def _classifier_free_guidance(
+    sampler: Sampler,
+) -> ClassifierFreeGuidance | None:
+    guidance = sampler.guidance
+    while isinstance(guidance, DifferentialDiffusionGuidance):
+        guidance = guidance.inner
+    return guidance if isinstance(guidance, ClassifierFreeGuidance) else None
+
+
 def cfg_scale_for_display(sampler: Sampler) -> float:
     """The serving UI's ``cfg_scale`` value; 1.0 for non-CFG guidance."""
-    guidance = sampler.guidance
-    return guidance.scale if isinstance(guidance, ClassifierFreeGuidance) else 1.0
+    guidance = _classifier_free_guidance(sampler)
+    return guidance.scale if guidance is not None else 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -510,8 +524,9 @@ class ServingEngine:
             if steps is not None:
                 self.sampler.steps = steps
             if cfg_scale is not None:
-                if isinstance(self.sampler.guidance, ClassifierFreeGuidance):
-                    self.sampler.guidance.scale = cfg_scale
+                guidance = _classifier_free_guidance(self.sampler)
+                if guidance is not None:
+                    guidance.scale = cfg_scale
                 else:
                     warn_once(
                         logger,

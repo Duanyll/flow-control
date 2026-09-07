@@ -184,6 +184,9 @@ yield 的 `EvalRequest`，合并成一次批量求值，再 `send` 回去：
 # samplers/executor.py
 def execute(model, runs: list[Run], guidance: BaseGuidance) -> Iterator[StepEvent]:
     for step_idx in range(num_steps):
+        for run in runs:
+            run.ctx.latents, run.ctx.guidance_state = \
+                guidance.prepare_transition(run, step_idx)
         gens = [run.plan[step_idx].run(run.ctx) for run in runs]
         pending, results = prime(gens)  # 同时接住零求值 transition 的返回值
         while pending:
@@ -225,8 +228,13 @@ capability 检查。
    `RecordedStep` 捕获。
 7. guidance state 以 **eval** 为粒度推进：每次 `combine` 返回的 state 立即生效
    （SA 类多次 yield 的 transition，中间 eval 同样推进）。`RecordedStep` 捕获的是
-   该 transition **首次 eval 前**的 guidance state——与 replay 单次求值的语义自洽
-   （当前支持 replay 的 solver 都是单 eval transition）。
+   `prepare_transition` 之后、该 transition **首次 eval 前**的 guidance state；记录的
+   `latent_t` 已经完成同一次 preparation，replay 只重做 `combine`，不重复投影。
+8. `Guidance.prepare_transition` 以 **plan item** 为粒度推进且每项恰好调用一次，不以
+   model eval 为粒度；因此 SA 类单 transition 多次 yield 不会错误推进空间 mask。
+   hook 不隐式清除 solver/guidance history；相邻两个 `RecordedStep` 之间可以有确定性的
+   projection gap（`previous.latent_next != next.latent_t`），每项仍从自身记录的
+   `latent_t` 独立 replay。
 
 > **已定**（Phase 4b 实现）：规则 2 中 guidance live state 的"清空"实现为用当前
 > `execute()` 调用的 guidance 重新 `init_state()`——与 run/phase 开始时的初始化
@@ -265,6 +273,8 @@ capability 检查。
 ```python
 class BaseGuidance(BaseModel):          # 注册表模式，同 solver_registry
     def init_state(self) -> GuidanceState | None: ...
+    def prepare_transition(self, run: Run, item_index: int
+                           ) -> tuple[Tensor, GuidanceState | None]: ...
     def needs_negative(self) -> bool: ...
     def combine(self, evals: BranchEvals, ctx: StepContext,
                 state: GuidanceState | None) -> tuple[GuidanceOutput, GuidanceState | None]: ...
@@ -292,6 +302,7 @@ class GuidanceOutput:
 |---|---|---|
 | CFG（+renorm） | 无 | — |
 | MomentumGuidance（在审） | EMA buffer，per-run | 状态归 `StepContext`，多 request 各自独立——旧实现的 bug 结构性消失 |
+| DifferentialDiffusionGuidance | 复用 inner guidance state | 组合包装另一个 inner guidance；消费 inpaint batch 的 `inpaint_latents` / `noisy_latents` / `inpaint_mask_latents`，transition 前按 denoise step 比例和区域强度投影 latent，使普通 T2I 模型可执行 soft inpaint；processor 以模型自身 patch geometry 打包 mask，保留 token 内空间细节 |
 | Signed RF（`draft/Signed_RF.pdf`） | 在线 ratio 追踪 uₜ | 同时拿两支 velocity；可持有辅助 classifier（本地小模型，无 collective 问题）；Hutchinson 路线需 `wants_grad` 求值 |
 | CFG++ | 无 | solver 从 `branches` 取 uncond 做 renoise——两轴交汇处 |
 
