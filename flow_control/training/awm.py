@@ -324,11 +324,8 @@ class AwmTrainer(
     def reference_model(self):
         """Temporarily switch to reference (frozen base) model weights."""
         if self.model.peft_lora_rank > 0:
-            self.transformer.disable_adapters()
-            try:
+            with self.model.use_variant("base"):
                 yield
-            finally:
-                self.transformer.enable_adapters()
         else:
             with apply_init_maybe(self._init_backup_optimizer):
                 yield

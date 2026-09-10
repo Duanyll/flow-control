@@ -52,6 +52,8 @@ class ProcessedBatch(TypedDict):
     """Clean latents corresponding to the images in the batch, as training targets."""
 
     negative: NotRequired[Mapping[str, Any]]
+    tiles: NotRequired[list["ProcessedBatch"]]
+    """Complete per-tile conditioning batches in row-major order, when sampling tiled."""
 
 
 class DecodedBatch(TypedDict):
@@ -114,7 +116,7 @@ class BaseProcessor[
         """
         raise NotImplementedError()
 
-    def get_negative_batch(self, batch: TProcessed) -> ProcessedBatch | None:
+    def get_negative_batch(self, batch: ProcessedBatch) -> ProcessedBatch | None:
         """
         Retrieves the negative batch from the processed batch if it exists.
 
@@ -126,6 +128,14 @@ class BaseProcessor[
             batch = batch.copy()
             batch.pop("negative")
             batch.update(negative)
+            if "tiles" in batch:
+                tiles = [self.get_negative_batch(tile) for tile in batch["tiles"]]
+                if any(tile is None for tile in tiles):
+                    raise ValueError(
+                        "Each tile needs its own negative conditioning when the full image uses a negative branch."
+                    )
+                # Every tile was checked above; keep the processor's recursive contract.
+                batch["tiles"] = [tile for tile in tiles if tile is not None]
             return batch
         else:
             return None

@@ -118,7 +118,9 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             batch = deep_cast_float_dtype(batch, model.dtype)
             negative_batch: Any = (
                 self.processor.get_negative_batch(batch)
-                if self.validation_sampler.guidance.needs_negative()
+                if self.validation_sampler.guidance.requires_negative(
+                    self.validation_sampler.steps
+                )
                 else None
             )
             key = batch.get("__key__", "unknown")

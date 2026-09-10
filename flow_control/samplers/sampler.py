@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,24 +22,15 @@ from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.progress import report_progress
 from flow_control.utils.tensor import deep_move_to_device
 
-from .executor import (
-    Run,
-    evaluate_branches,
-    execute,
-    validate_distributed_request_count,
-)
+from .evaluation import evaluate
+from .executor import Run, StepObserver, execute, validate_distributed_request_count
 from .guidance import ClassifierFreeGuidance, Guidance
-from .plan import (
-    BranchEvals,
-    GuidanceState,
-    RecordedStep,
-    SamplingPlan,
-    StepContext,
-    StepLogProbOutput,
-)
+from .plan import EvalRequest, SamplingPlan, StepContext
+from .projectors import Projector
 from .shift import ConstantShift, Shift
 from .solver import FlowSolver, Solver
-from .transforms import finalize_replay_state
+from .tiled import Tiled
+from .transforms import PlanTransform
 
 logger = get_logger(__name__)
 
@@ -74,34 +65,59 @@ class SampleRequest:
 class SampleOutput:
     final_latents: torch.Tensor
     timesteps: torch.Tensor
-    """The executed sigma grid, independent of trajectory recording.
-    ``Sampler.sample`` reports the raw config grid ``sigmas[:-1]``;
-    ``run_phases`` reports the plan-compiled grid (each plan item's start
-    sigma — for SA this includes the adjusted head/penultimate values)."""
-    trajectory: list[RecordedStep] | None = None
-    """Recorded steps for RL replay; populated by the recipe runner
-    (``run_phases``) when the plan marks transitions with ``record=True``.
-    ``Sampler.sample`` never records."""
+    """Executed plan-item start sigmas on the model device."""
 
 
-@dataclass(slots=True)
-class ReplayItem:
-    """One recorded rollout step plus the conditioning needed to replay it."""
+class Start(BaseModel):
+    """Read a source unchanged, or re-noise it at an aligned SDEdit strength."""
 
-    batch: Batch
-    recorded: RecordedStep
-    negative_batch: Batch | None = None
+    model_config = ConfigDict(extra="forbid")
+    source: str = "noisy_latents"
+    strength: float | None = Field(default=None, gt=0.0, le=1.0)
+
+    def slice(self, plan: SamplingPlan) -> SamplingPlan:
+        if self.strength is None:
+            return plan
+        for index, item in enumerate(plan):
+            if item.sigma <= self.strength or math.isclose(
+                item.sigma, self.strength, rel_tol=1e-6, abs_tol=1e-6
+            ):
+                return plan[index:]
+        raise ValueError(
+            f"SDEdit strength={self.strength} is below every denoising grid point."
+        )
+
+    def latents(
+        self, batch: Batch, sigma: float, generator: torch.Generator | None
+    ) -> torch.Tensor:
+        source = cast("dict[str, Any]", batch).get(self.source)
+        if not isinstance(source, torch.Tensor):
+            raise ValueError(
+                f"Start source {self.source!r} must name a tensor in the batch."
+            )
+        source = source.float()
+        if self.strength is None:
+            return source
+        noise = torch.randn(
+            source.shape, dtype=source.dtype, device=source.device, generator=generator
+        )
+        return (1.0 - sigma) * source + sigma * noise
 
 
 class Sampler(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    start: Start = Field(default_factory=Start)
+    transforms: list[PlanTransform] = Field(default_factory=list)
+    projectors: list[Projector] = Field(default_factory=list)
+    tiled: Tiled | None = None
 
     seed: int = 42
     guidance: Guidance = Field(default_factory=ClassifierFreeGuidance)
     """Sampling middleware; the default is ``ClassifierFreeGuidance`` with
     ``scale=1.0`` (no negative pass)."""
 
-    steps: int = 50
+    steps: int = Field(default=50, gt=0)
     solver: Solver = Field(default_factory=FlowSolver)
     shift: Shift = Field(default_factory=ConstantShift)
     """Sigma-grid shift; the default ``ConstantShift`` factor of 1.0 is no
@@ -116,14 +132,6 @@ class Sampler(BaseModel):
     0.0), e.g. a distilled model's official timestep table. When set it replaces
     the linspace grid and *bypasses* ``shift`` (and the ``t_start``/``t_end``
     arguments of :meth:`make_sigmas`)."""
-
-    @staticmethod
-    def _validate_distributed_request_count(
-        count: int,
-        device: torch.device,
-        operation: str,
-    ) -> None:
-        validate_distributed_request_count(count, device, f"Sampler.{operation}")
 
     def _make_sigmas(
         self,
@@ -172,66 +180,34 @@ class Sampler(BaseModel):
         """The actual (shifted) sigma grid for one batch; canonical-time args."""
         return self._make_sigmas(batch, t_start, t_end).tolist()
 
-    def plan(self, batch: Batch) -> SamplingPlan:
-        """Compile the full base plan for one batch (not yet finalized)."""
-        return self.solver.plan(self.make_sigmas(batch))
-
-    def plan_from_sigma(self, batch: Batch, sigma_start: float) -> SamplingPlan:
-        """Compile a partial plan whose grid starts at an actual sigma.
-
-        Only defined for the analytic ``linear`` schedule: the actual sigma is
-        pulled back through ``shift.inverse_sigma`` to a canonical ``t_start``
-        and a fresh partial grid is built from there.
-        """
-        if self.custom_sigmas is not None:
-            raise NotImplementedError(
-                "plan_from_sigma is not supported with custom_sigmas: an "
-                "explicit sigma table has no canonical-time inverse to rebuild "
-                "a partial grid from."
-            )
-        if self.sigma_schedule != "linear":
-            raise NotImplementedError(
-                f"plan_from_sigma is not supported with sigma_schedule="
-                f"{self.sigma_schedule!r}; only the analytic 'linear' schedule "
-                "can be inverted to a partial grid."
-            )
-        if sigma_start <= 0.0:
-            raise ValueError(
-                f"plan_from_sigma requires sigma_start > 0, got {sigma_start} "
-                "(there is nothing left to denoise from sigma 0)."
-            )
-        t_start = self.shift.inverse_sigma(sigma_start, batch, self.steps)
-        plan = self.solver.plan(self.make_sigmas(batch, t_start=t_start))
-        if not plan or not math.isclose(
-            plan[0].sigma,
-            sigma_start,
-            rel_tol=1e-6,
-            abs_tol=1e-7,
-        ):
-            actual = plan[0].sigma if plan else None
-            raise ValueError(
-                f"{type(self.solver).__name__} cannot start a partial plan at "
-                f"sigma {sigma_start}; it produced {actual}."
-            )
+    def plan(
+        self, batch: Batch, generator: torch.Generator | None = None
+    ) -> SamplingPlan:
+        plan = self.start.slice(self.solver.plan(self.make_sigmas(batch)))
+        for transform in self.transforms:
+            plan = transform.apply(plan, generator)
         return plan
+
+    def wrap_model(self, model: SamplerModel) -> SamplerModel:
+        return self.tiled.wrap(model) if self.tiled is not None else model
 
     def sample(
         self,
         model: SamplerModel,
         requests: list[SampleRequest],
+        *,
+        observer: StepObserver | None = None,
     ) -> list[SampleOutput]:
-        """Plain full-grid sampling: base plan, no recording, no transforms.
-
-        Consumers that need trajectory recording, SDE windows, SDEdit or
-        inversion phases build a recipe instead (``PhasesRecipe`` +
-        ``run_phases``).
-        """
         if not requests:
             raise ValueError("sample requires at least one request.")
-        self._validate_distributed_request_count(len(requests), model.device, "sample")
-
-        if self.guidance.needs_negative() and any(
-            request.negative_batch is None for request in requests
+        model = self.wrap_model(model)
+        validate_distributed_request_count(
+            len(requests), model.device, "Sampler.sample"
+        )
+        if (
+            isinstance(self.guidance, ClassifierFreeGuidance)
+            and self.guidance.requires_negative(self.steps)
+            and any(request.negative_batch is None for request in requests)
         ):
             warn_once(
                 logger,
@@ -239,9 +215,7 @@ class Sampler(BaseModel):
                 "one request has no negative_batch; those samples fall back to "
                 "the conditional velocity.",
             )
-
-        runs: list[Run] = []
-        request_sigmas: list[list[float]] = []
+        runs = []
         for request in requests:
             batch = deep_move_to_device(request.batch, model.device)
             negative_batch = (
@@ -249,64 +223,43 @@ class Sampler(BaseModel):
                 if request.negative_batch is not None
                 else None
             )
-            sigmas = self.make_sigmas(batch)
-            plan = finalize_replay_state(self.solver.plan(sigmas))
-            request_sigmas.append(sigmas)
+            # Window selection precedes start noise, preserving per-sample RNG order.
+            plan = self.plan(batch, request.generator)
             runs.append(
                 Run(
                     plan=plan,
                     ctx=StepContext(
-                        latents=batch["noisy_latents"].float(),
+                        latents=self.start.latents(
+                            batch, plan[0].sigma, request.generator
+                        ),
                         generator=request.generator,
                         solver_state=None,
                         guidance_state=self.guidance.init_state(),
+                        num_items=len(plan),
                     ),
                     batch=batch,
                     negative_batch=negative_batch,
                 )
             )
-
         with make_sample_progress() as progress:
-            task = progress.add_task("Sampling", total=self.steps)
-            for event in execute(model, runs, self.guidance):
+            task = progress.add_task("Sampling", total=len(runs[0].plan))
+            for event in execute(model, runs, self.guidance, self.projectors, observer):
                 progress.update(task, total=event.total_steps, advance=1)
                 report_progress(
                     (event.step_idx + 1) / event.total_steps,
                     f"Sampling {event.step_idx + 1}/{event.total_steps}",
                 )
-
         return [
             SampleOutput(
                 final_latents=run.ctx.latents.to(model.dtype),
                 timesteps=torch.tensor(
-                    sigmas[:-1], dtype=torch.float32, device=model.device
+                    [item.sigma for item in run.plan],
+                    dtype=torch.float32,
+                    device=model.device,
                 ),
             )
-            for run, sigmas in zip(runs, request_sigmas, strict=True)
+            for run in runs
         ]
-
-    def _combine_with_states(
-        self,
-        evals: list[BranchEvals],
-        states: list[GuidanceState | None],
-    ) -> list[torch.Tensor]:
-        """Combine evaluated branches outside the executor loop.
-
-        Each sample gets a transient ``StepContext`` around the provided
-        state; the post-combine state is discarded (single-eval semantics).
-        """
-        velocities: list[torch.Tensor] = []
-        for branch_evals, state in zip(evals, states, strict=True):
-            ctx = StepContext(
-                latents=branch_evals.latents,
-                generator=None,
-                solver_state=None,
-                guidance_state=state,
-                pre_transition_guidance_state=state,
-            )
-            output, _ = self.guidance.combine(branch_evals, ctx, state)
-            velocities.append(output.velocity)
-        return velocities
 
     def get_guided_velocity(
         self,
@@ -316,68 +269,43 @@ class Sampler(BaseModel):
         latents: list[torch.Tensor],
         timesteps: list[torch.Tensor],
         sigmas: list[float],
+        *,
+        sigma_nexts: list[float | None] | None = None,
+        etas: list[float] | None = None,
+        item_indices: list[int] | None = None,
     ) -> list[torch.Tensor]:
-        """One batched branch eval plus guidance combine with fresh state.
-
-        Thin public wrapper over the split internals for consumers that need
-        a guided velocity outside the executor loop (NFT's
-        ``_predict_batched``). Stateful guidance sees a fresh ``init_state()``
-        per sample; for stateless CFG this is a no-op.
-        """
-        evals = evaluate_branches(
-            model=model,
+        """Evaluate guidance and whole-image projections with fresh per-item state."""
+        if len(timesteps) != len(sigmas):
+            raise ValueError("timesteps and sigmas must have equal lengths.")
+        requests = [
+            EvalRequest(
+                latent,
+                sigma,
+                sigma_next=sigma_nexts[index] if sigma_nexts is not None else None,
+                eta=etas[index] if etas is not None else 0.0,
+                solver=self.solver,
+            )
+            for index, (latent, sigma) in enumerate(zip(latents, sigmas, strict=True))
+        ]
+        contexts = [
+            StepContext(
+                latents=latent,
+                generator=None,
+                solver_state=None,
+                guidance_state=self.guidance.init_state(),
+                item_index=item_indices[index] if item_indices is not None else 0,
+                num_items=self.steps,
+            )
+            for index, latent in enumerate(latents)
+        ]
+        outputs = evaluate(
+            model=self.wrap_model(model),
             guidance=self.guidance,
             batches=batches,
             negative_batches=negative_batches,
-            latents=latents,
-            sigmas=sigmas,
+            requests=requests,
+            contexts=contexts,
+            projectors=self.projectors,
             timesteps=timesteps,
         )
-        return self._combine_with_states(
-            evals, [self.guidance.init_state() for _ in evals]
-        )
-
-    def replay_recorded_steps(
-        self,
-        model: SamplerModel,
-        items: list[ReplayItem],
-    ) -> list[StepLogProbOutput]:
-        """Recompute transition log-probs for recorded rollout steps.
-
-        One batched branch eval at every item's recorded pre-step inputs
-        ``(latent_t, replay.sigma)``, combined by the guidance with the
-        recorded pre-eval ``guidance_state`` (``None`` in/out for stateless
-        CFG), then each pure-float :class:`ReplayStep` rebuilds the transition
-        moments with the ACTUAL eta it stored at rollout time (never
-        re-reading ``solver.eta``).
-        """
-        if not items:
-            raise ValueError("replay_recorded_steps requires at least one item.")
-        self._validate_distributed_request_count(
-            len(items), model.device, "replay_recorded_steps"
-        )
-
-        evals = evaluate_branches(
-            model=model,
-            guidance=self.guidance,
-            batches=[item.batch for item in items],
-            negative_batches=[item.negative_batch for item in items],
-            latents=[item.recorded.latent_t for item in items],
-            sigmas=[item.recorded.replay.sigma for item in items],
-            timesteps=[
-                item.recorded.latent_t.new_full((1,), item.recorded.replay.sigma)
-                for item in items
-            ],
-        )
-        velocities = self._combine_with_states(
-            evals, [item.recorded.guidance_state for item in items]
-        )
-        return [
-            item.recorded.replay.logprob(
-                velocity,
-                item.recorded.latent_t,
-                item.recorded.latent_next,
-                solver_state=item.recorded.solver_state,
-            )
-            for item, velocity in zip(items, velocities, strict=True)
-        ]
+        return [output.velocity for output in outputs]

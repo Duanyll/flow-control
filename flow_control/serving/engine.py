@@ -17,10 +17,10 @@ from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
 from flow_control.samplers import (
     ClassifierFreeGuidance,
-    DifferentialDiffusionGuidance,
     Sampler,
     SampleRequest,
 )
+from flow_control.samplers.guidance import CfgPlusPlusGuidance
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
@@ -36,7 +36,7 @@ def _classifier_free_guidance(
     sampler: Sampler,
 ) -> ClassifierFreeGuidance | None:
     guidance = sampler.guidance
-    while isinstance(guidance, DifferentialDiffusionGuidance):
+    while isinstance(guidance, CfgPlusPlusGuidance):
         guidance = guidance.inner
     return guidance if isinstance(guidance, ClassifierFreeGuidance) else None
 
@@ -587,7 +587,7 @@ class ServingEngine:
         batch = deep_cast_float_dtype(batch, self.model.dtype)
         negative_batch: Any = (
             self.processor.get_negative_batch(batch)
-            if self.sampler.guidance.needs_negative()
+            if self.sampler.guidance.requires_negative(self.sampler.steps)
             else None
         )
 

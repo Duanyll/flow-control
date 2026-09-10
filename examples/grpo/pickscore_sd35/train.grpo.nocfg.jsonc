@@ -58,11 +58,11 @@
     "steps": 10,
     "shift": { "type": "constant", "shift_value": 3.0 },
     "solver": { "type": "cps", "eta": 0.8 },
+    "transforms": [
+      { "type": "sde_window", "size": 3 },
+    ],
   },
   // Random 3-step recorded SDE window; omit "range" -> anywhere in (0, steps-1).
-  "rollout_recipe": [ { "transforms": [
-    { "type": "sde_window", "size": 3, "record": true },
-  ] } ],
 
   "ema": {
     "decay": 0.9,

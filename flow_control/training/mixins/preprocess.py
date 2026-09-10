@@ -7,8 +7,7 @@ from flow_control.adapters.base import Batch
 from flow_control.datasets import DatasetConfig, parse_dataset
 from flow_control.processors import Processor, get_processor_input_typeddict
 from flow_control.processors.base import ProcessedBatch
-from flow_control.samplers import Phase, RecipeBuildContext, Sampler
-from flow_control.samplers.recipe import BaseRecipe
+from flow_control.samplers import Sampler, SampleRequest
 
 from .base import BaseTrainer
 
@@ -108,39 +107,19 @@ class PreprocessMixin(BaseTrainer):
             res = batch
         return self._finalize_processed_batch(batch, res, save_extra=save_extra)
 
-    def build_recipe_phases(
+    def build_sample_request(
         self,
-        recipe: BaseRecipe,
         sampler: Sampler,
         batch: Batch,
         generator: torch.Generator,
-    ) -> tuple[list[Phase], Batch | None]:
-        """Build one request's phases with the standard single-``"main"`` batch.
-
-        The negative batch is resolved lazily through the processor: only a
-        phase whose guidance actually needs a negative branch triggers the
-        construction. Returns the built phases together with the resolved
-        ``"main"`` negative batch (``None`` when no phase needed one), so
-        callers that replay against it later (rollout storage) can keep it.
-        """
-        # ProcessedBatch and Batch are duck-typed dicts throughout the
-        # consumers, so the cache is deliberately Any-typed (same as the
-        # RecipeBuildContext callback it feeds).
-        negative_cache: dict[str, Any] = {}
-
-        def negative_batch_for(name: str) -> Any:
-            if name != "main":
-                return None
-            if "main" not in negative_cache:
-                negative_cache["main"] = self.processor.get_negative_batch(batch)
-            return negative_cache["main"]
-
-        phases = recipe.build(
-            RecipeBuildContext(
-                default_sampler=sampler,
-                batches={"main": batch},
-                negative_batch_for=negative_batch_for,
-                generator=generator,
-            )
+    ) -> SampleRequest:
+        negative_batch = (
+            self.processor.get_negative_batch(cast(ProcessedBatch, batch))
+            if sampler.guidance.requires_negative(sampler.steps)
+            else None
         )
-        return phases, negative_cache.get("main")
+        return SampleRequest(
+            batch=batch,
+            negative_batch=cast(Batch | None, negative_batch),
+            generator=generator,
+        )

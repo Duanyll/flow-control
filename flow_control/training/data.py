@@ -328,6 +328,17 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
         self.rank = rank
         self.seed = seed
         self.keep_prompt_local = keep_prompt_local
+        self.lengths: list[int] = getattr(dataset, "bucket_lengths", [len(dataset)])
+
+        if not 0 < num_prompts_per_batch <= len(dataset):
+            raise ValueError(
+                f"num_prompts_per_batch ({num_prompts_per_batch}) must be between "
+                f"1 and the dataset size ({len(dataset)}); prompts cannot be padded."
+            )
+        if num_rollouts_per_prompt < 1 or num_replicas < 1:
+            raise ValueError(
+                "num_rollouts_per_prompt and num_replicas must be positive."
+            )
 
         self.total_samples = self.num_prompts_per_batch * self.num_rollouts_per_prompt
         if self.total_samples % self.num_replicas != 0:
@@ -344,6 +355,20 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
                 f"to be divisible by num_replicas ({num_replicas})."
             )
 
+        # Each selected group must fill complete, single-resolution rank blocks.
+        self.prompts_per_block = num_replicas // (
+            1 if keep_prompt_local else math.gcd(num_replicas, num_rollouts_per_prompt)
+        )
+        available = sum(length // self.prompts_per_block for length in self.lengths)
+        if available * self.prompts_per_block < num_prompts_per_batch:
+            raise ValueError(
+                f"Bucket sizes {self.lengths} cannot supply {num_prompts_per_batch} "
+                f"unique prompts in same-resolution groups of {self.prompts_per_block} "
+                f"for {num_replicas} ranks and {num_rollouts_per_prompt} rollouts "
+                f"(keep_prompt_local={keep_prompt_local}); reduce ranks/prompts or "
+                "change rollout multiplicity. Rollouts are never padded."
+            )
+
         self.epoch = 0
         self.batch_counter = 0
         self.within_batch_counter = 0
@@ -355,44 +380,44 @@ class DistributedKRepeatSampler(TorchSampler, Stateful):
                 self.seed + self.epoch * self.num_batches_per_epoch + batch_idx
             )
 
-            # Select m unique prompts
-            dataset_size = len(self.dataset)
-            indices = torch.randperm(dataset_size, generator=g)[
-                : self.num_prompts_per_batch
-            ].tolist()
-
-            if self.keep_prompt_local:
-                # Assign prompts to ranks round-robin, yield contiguously
-                # per prompt (K rollouts grouped together)
-                prompts_per_rank = self.num_prompts_per_batch // self.num_replicas
-                rank_prompts = indices[
-                    self.rank * prompts_per_rank : (self.rank + 1) * prompts_per_rank
-                ]
-                rank_indices = [
-                    idx
-                    for idx in rank_prompts
-                    for _ in range(self.num_rollouts_per_prompt)
-                ]
-            else:
-                # Repeat each K times
-                repeated = [
-                    idx for idx in indices for _ in range(self.num_rollouts_per_prompt)
-                ]
-
-                # Shuffle
-                perm = torch.randperm(len(repeated), generator=g).tolist()
-                shuffled = [repeated[i] for i in perm]
-
-                # Split to ranks
-                rank_indices = shuffled[
-                    self.rank * self.per_rank : (self.rank + 1) * self.per_rank
-                ]
+            groups: list[list[int]] = []
+            offset = 0
+            for length in self.lengths:
+                indices = (torch.randperm(length, generator=g) + offset).tolist()
+                # A fresh permutation rotates any incomplete candidate group; only
+                # selected prompts count toward M, and each still gets exactly K.
+                for start in range(
+                    0, length - self.prompts_per_block + 1, self.prompts_per_block
+                ):
+                    groups.append(indices[start : start + self.prompts_per_block])
+                offset += length
+            selected = torch.randperm(len(groups), generator=g).tolist()[
+                : self.num_prompts_per_batch // self.prompts_per_block
+            ]
+            rank_indices: list[int] = []
+            for index in selected:
+                prompts = groups[index]
+                if self.keep_prompt_local:
+                    rank_indices.extend(
+                        [prompts[self.rank]] * self.num_rollouts_per_prompt
+                    )
+                else:
+                    repeated = [
+                        prompt
+                        for prompt in prompts
+                        for _ in range(self.num_rollouts_per_prompt)
+                    ]
+                    order = torch.randperm(len(repeated), generator=g).tolist()
+                    rank_indices.extend(
+                        repeated[order[i]]
+                        for i in range(self.rank, len(order), self.num_replicas)
+                    )
 
             # Yield one at a time, resuming from within_batch_counter
             start = self.within_batch_counter if batch_idx == self.batch_counter else 0
             for i in range(start, len(rank_indices)):
-                yield rank_indices[i]
                 self.within_batch_counter = i + 1
+                yield rank_indices[i]
 
             self.within_batch_counter = 0
             self.batch_counter = batch_idx + 1

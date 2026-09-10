@@ -30,7 +30,8 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Phase, Sampler
+from flow_control.samplers import Sampler
+from flow_control.samplers.plan import Transition
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger, warn_once
 from flow_control.utils.tensor import deep_move_to_device
@@ -177,40 +178,12 @@ class NftTrainer(
     _init_backup_optimizer: InitBackupOptimizer | None = None
     _current_step: int = 0
     _current_epoch: int = 0
-    _nft_guidance_checked: bool = False
 
     # ------------------------------- Properties --------------------------------- #
 
     @property
     def transformer(self):
         return self.model.transformer
-
-    def _build_rollout_phases(
-        self,
-        batch: Any,
-        generator: torch.Generator,
-    ) -> tuple[list[Phase], Any]:
-        phases, negative_batch = super()._build_rollout_phases(batch, generator)
-        if not self._nft_guidance_checked:
-            if any(phase.guidance != self.rollout_sampler.guidance for phase in phases):
-                warn_once(
-                    logger,
-                    "NFT rollout_recipe contains a phase-level guidance override, "
-                    "but NFT teacher, reference, and policy predictions use "
-                    "rollout_sampler.guidance. The generated endpoint and training "
-                    "objective therefore use different policies.",
-                )
-            if self.rollout_sampler.guidance.init_state() is not None:
-                warn_once(
-                    logger,
-                    "NFT uses stateful rollout_sampler guidance, but its teacher, "
-                    "reference, and policy predictions evaluate selected timesteps "
-                    "with fresh guidance state rather than the rollout's historical "
-                    "state. The training objective therefore does not exactly match "
-                    "the generated policy.",
-                )
-            self._nft_guidance_checked = True
-        return phases, negative_batch
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -321,14 +294,8 @@ class NftTrainer(
     def reference_model(self):
         """Temporarily switch to reference model weights."""
         if self.model.peft_lora_rank > 0:
-            # diffusers LoRA models expose enable/disable_adapters() toggles;
-            # PEFT's disable_adapter() context manager is PeftModel-only and is
-            # absent on the FSDP-wrapped diffusers transformer.
-            self.transformer.disable_adapters()
-            try:
+            with self.model.use_variant("base"):
                 yield
-            finally:
-                self.transformer.enable_adapters()
         else:
             with apply_init_maybe(self._init_backup_optimizer):
                 yield
@@ -482,11 +449,21 @@ class NftTrainer(
         timesteps = [item.timestep for item in prepared]
         sigmas = [item.sigma for item in prepared]
         negative_batches = [item.negative_batch for item in prepared]
+        transitions = [
+            rollouts[item.rollout_idx].sampling_plan[item.timestep_idx]
+            for item in items
+        ]
+        item_indices = [item.timestep_idx for item in items]
 
         if any(item.old_prediction is None for item in prepared):
             with torch.no_grad(), apply_ema_maybe(self._old_ema):
                 old_predictions = self._predict_batched(
-                    batches, timesteps, sigmas, negative_batches
+                    batches,
+                    timesteps,
+                    sigmas,
+                    negative_batches,
+                    transitions,
+                    item_indices,
                 )
             for item, prediction in zip(prepared, old_predictions, strict=True):
                 if item.old_prediction is None:
@@ -495,14 +472,19 @@ class NftTrainer(
         if self.kl_beta > 0 and any(item.ref_prediction is None for item in prepared):
             with torch.no_grad(), self.reference_model():
                 ref_predictions = self._predict_batched(
-                    batches, timesteps, sigmas, negative_batches
+                    batches,
+                    timesteps,
+                    sigmas,
+                    negative_batches,
+                    transitions,
+                    item_indices,
                 )
             for item, prediction in zip(prepared, ref_predictions, strict=True):
                 if item.ref_prediction is None:
                     item.ref_prediction = prediction.detach()
 
         forward_predictions = self._predict_batched(
-            batches, timesteps, sigmas, negative_batches
+            batches, timesteps, sigmas, negative_batches, transitions, item_indices
         )
         return torch.stack(
             [
@@ -517,6 +499,8 @@ class NftTrainer(
         timesteps: list[torch.Tensor],
         sigmas: list[float],
         negative_batches: list[Any | None],
+        transitions: list[Transition],
+        item_indices: list[int],
     ) -> list[torch.Tensor]:
         """Get the guided velocity prediction matching the rollout sampler.
 
@@ -530,6 +514,9 @@ class NftTrainer(
             latents=[batch["noisy_latents"] for batch in batches],
             timesteps=timesteps,
             sigmas=sigmas,
+            sigma_nexts=[transition.sigma_next for transition in transitions],
+            etas=[transition.eta for transition in transitions],
+            item_indices=item_indices,
         )
 
     # ----------------------------- Training phase ------------------------------- #
@@ -689,7 +676,15 @@ class NftTrainer(
                 cached_targets_list.append(cached_targets)
 
             predictions = self._predict_batched(
-                batches, timesteps, sigmas, negative_batches
+                batches,
+                timesteps,
+                sigmas,
+                negative_batches,
+                [
+                    rollouts[item.rollout_idx].sampling_plan[item.timestep_idx]
+                    for item in micro_items
+                ],
+                [item.timestep_idx for item in micro_items],
             )
             for cached_targets, prediction in zip(
                 cached_targets_list, predictions, strict=True

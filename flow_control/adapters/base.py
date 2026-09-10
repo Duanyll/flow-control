@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, ClassVar, Protocol, TypedDict, cast
 
 import torch
@@ -6,7 +8,8 @@ import torch.distributed as dist
 from diffusers import ModelMixin
 from einops import rearrange
 from peft import LoraConfig
-from pydantic import BaseModel, ConfigDict
+from peft.tuners.tuners_utils import BaseTunerLayer
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 from transformers import PreTrainedModel
 
 from flow_control.utils.hf_model import HfModelLoader
@@ -40,6 +43,8 @@ class SamplerModel(Protocol):
     @property
     def dtype(self) -> torch.dtype: ...
 
+    def use_variant(self, variant: str | None) -> AbstractContextManager[None]: ...
+
     def predict_velocity_batched(
         self,
         batches: list[Any],
@@ -58,6 +63,93 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     type: str
 
     model_config = ConfigDict(extra="forbid")
+    _base_variant_depth: int = PrivateAttr(default=0)
+    _active_variant: str | None = PrivateAttr(default=None)
+
+    @contextmanager
+    def use_variant(self, variant: str | None) -> Iterator[None]:
+        """Select loaded LoRA weights, restoring selection and trainability.
+
+        A surrounding base/reference context dominates branch-level choices.
+        PEFT's public toggles change requires_grad, so restore those flags
+        before forward too: FSDP's parameter membership must remain fixed.
+        """
+        if (
+            variant is None
+            or self._base_variant_depth
+            or variant == self._active_variant
+        ):
+            yield
+            return
+        transformer = self.transformer
+        if variant != "base" and variant not in getattr(transformer, "peft_config", {}):
+            raise ValueError(f"Model variant {variant!r} is not a loaded LoRA adapter.")
+        layers = [
+            module
+            for module in transformer.modules()
+            if isinstance(module, BaseTunerLayer)
+        ]
+        selections = [
+            (layer, list(layer.active_adapters), layer.disable_adapters)
+            for layer in layers
+        ]
+        trainability = [
+            (parameter, parameter.requires_grad)
+            for parameter in transformer.parameters()
+        ]
+        previous_variant = self._active_variant
+        self._active_variant = variant
+        if variant == "base":
+            self._base_variant_depth += 1
+        try:
+            for layer in layers:
+                if variant != "base":
+                    layer.set_adapter(variant)
+                layer.enable_adapters(variant != "base")
+            for parameter, requires_grad in trainability:
+                parameter.requires_grad_(requires_grad)
+            with self._checkpoint_variant(variant):
+                yield
+        finally:
+            for layer, names, disabled in selections:
+                layer.set_adapter(names)
+                layer.enable_adapters(not disabled)
+            for parameter, requires_grad in trainability:
+                parameter.requires_grad_(requires_grad)
+            if variant == "base":
+                self._base_variant_depth -= 1
+            self._active_variant = previous_variant
+
+    @contextmanager
+    def _checkpoint_variant(self, variant: str) -> Iterator[None]:
+        checkpoints = [
+            (module, checkpoint)
+            for module in self.transformer.modules()
+            if callable(
+                checkpoint := getattr(module, "_gradient_checkpointing_func", None)
+            )
+        ]
+
+        def capture(checkpoint: Callable[..., Any]) -> Callable[..., Any]:
+            def checkpoint_with_variant(
+                function: Callable[..., Any], *args: Any, **kwargs: Any
+            ) -> Any:
+                def call_with_variant(*inputs: Any, **call_kwargs: Any) -> Any:
+                    # Checkpoint recomputation runs after the selecting context exits.
+                    with self.use_variant(variant):
+                        return function(*inputs, **call_kwargs)
+
+                return checkpoint(call_with_variant, *args, **kwargs)
+
+            return checkpoint_with_variant
+
+        try:
+            for module, checkpoint in checkpoints:
+                cast(Any, module)._gradient_checkpointing_func = capture(checkpoint)
+            yield
+        finally:
+            for module, checkpoint in checkpoints:
+                cast(Any, module)._gradient_checkpointing_func = checkpoint
 
     @property
     def transformer(self) -> TModel:
@@ -91,6 +183,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     """
 
     patch_size: int = 2
+    vae_scale_factor: int = 8
     latent_channels: int = 16
 
     supports_dense_batching: ClassVar[bool] = False
@@ -325,6 +418,54 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                     f"dimension; sample {index} has shape {tuple(velocity.shape)}."
                 )
         return velocities
+
+    def prepare_tile_batch(
+        self,
+        batch: dict[str, Any],
+        origin: tuple[int, int],
+        size: tuple[int, int],
+        position: str,
+    ) -> dict[str, Any]:
+        """Crop spatial conditioning; reference images remain independent context.
+
+        The wrapper supplies noisy latents separately. Explicit per-tile batches
+        already have ``size``; otherwise conditioning uses the full image grid.
+        Architectures must opt into global positional coordinates explicitly.
+        """
+        if position != "local":
+            raise ValueError(
+                f"{self.arch}/{self.type} does not support global tile positions; "
+                "use tiled.position='local'."
+            )
+        result = batch.copy()
+        height, width = batch["image_size"]
+        top, left = (0, 0) if (height, width) == size else origin
+        tile_h, tile_w = size
+        scale = self.patch_size * self.vae_scale_factor
+        for key in ("control_latents", "inpaint_latents"):
+            if key in batch:
+                grid = rearrange(
+                    batch[key],
+                    "b (h w) d -> b h w d",
+                    h=height // scale,
+                    w=width // scale,
+                )
+                result[key] = rearrange(
+                    grid[
+                        :,
+                        top // scale : (top + tile_h) // scale,
+                        left // scale : (left + tile_w) // scale,
+                    ],
+                    "b h w d -> b (h w) d",
+                )
+        if "inpaint_mask" in batch:
+            result["inpaint_mask"] = batch["inpaint_mask"][
+                ..., top : top + tile_h, left : left + tile_w
+            ]
+        for key in ("tiles", "negative", "clean_latents", "img_ids"):
+            result.pop(key, None)
+        result["image_size"] = size
+        return result
 
     def _pack_latents(self, latents):
         return rearrange(

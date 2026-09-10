@@ -11,17 +11,8 @@ from ..plan import (
     Transition,
     TransitionGen,
     TransitionResult,
-    zero_log_prob,
 )
 from .base import BaseSolver, solver_registry
-
-
-@dataclass(frozen=True, slots=True)
-class UniPCTransition(Transition):
-    """UniPC transition with the plan-compiled predictor order cap."""
-
-    order_cap: int = 1
-    """``lower_order_final`` cap near the grid end; warmup happens at runtime."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,30 +50,23 @@ class FlowUniPCSolver(BaseSolver):
     lower_order_final: bool = True
 
     def plan(self, sigmas: list[float]) -> SamplingPlan:
-        num_steps = len(sigmas) - 1
         return [
-            UniPCTransition(
+            Transition(
                 solver=self,
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=0.0,
-                order_cap=(
-                    min(self.order, num_steps - index)
-                    if self.lower_order_final
-                    else self.order
-                ),
             )
-            for index, (sigma, sigma_next) in enumerate(
-                zip(sigmas[:-1], sigmas[1:], strict=True)
-            )
+            for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:], strict=True)
         ]
 
     def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        assert isinstance(tr, UniPCTransition)
         state = ctx.solver_state
         assert state is None or isinstance(state, UniPCRuntimeState)
 
-        out = yield EvalRequest(latents=ctx.latents, sigma=tr.sigma)
+        out = yield EvalRequest(
+            latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self
+        )
         latents = ctx.latents
         sigma_t = latents.new_tensor(tr.sigma)
         x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
@@ -107,7 +91,12 @@ class FlowUniPCSolver(BaseSolver):
         sigma_history = (*(state.sigma_history if state is not None else ()), tr.sigma)
         # Multistep warmup from the runtime history length, so a sliced plan
         # restarts cleanly from an empty history.
-        this_order = min(tr.order_cap, len(x0_history))
+        order_cap = (
+            min(self.order, ctx.num_items - ctx.item_index)
+            if self.lower_order_final
+            else self.order
+        )
+        this_order = min(order_cap, len(x0_history))
 
         next_latents = self._multistep_uni_p_bh_update(
             sample=sample,
@@ -124,14 +113,8 @@ class FlowUniPCSolver(BaseSolver):
             last_sample=sample,
             prev_order=this_order,
         )
-        recorded = (
-            self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
-            if tr.record
-            else None
-        )
         return TransitionResult(
             next_latents=next_latents,
-            recorded=recorded,
             next_solver_state=next_state,
         )
 

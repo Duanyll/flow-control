@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import torch
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -17,15 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import (
-    PhaseConfig,
-    PhasesRecipe,
-    Recipe,
-    RecordedStep,
-    ReplayItem,
-    Sampler,
-    SdeWindow,
-)
+from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -45,6 +37,7 @@ from .ema import (
     apply_ema_maybe,
     apply_init_maybe,
 )
+from .grpo_sampling import RecordedStep, ReplayItem, replay_steps
 from .mixins import (
     CheckpointingMixin,
     MicrobatchTrainMixin,
@@ -75,13 +68,6 @@ class GrpoTrainer(
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
     rollout_sampler: Sampler
-    rollout_recipe: Recipe = Field(
-        default_factory=lambda: PhasesRecipe(
-            phases=[PhaseConfig(transforms=[SdeWindow(record=True)])]
-        )
-    )
-    """GRPO explicitly records the (full, by default) stochastic window for
-    step replay; override size/range via an ``sde_window`` entry in config."""
     processor: Processor
     reward: Reward
 
@@ -217,14 +203,8 @@ class GrpoTrainer(
     def reference_model(self):
         """Temporarily switch to reference model weights."""
         if self.model.peft_lora_rank > 0:
-            # diffusers LoRA models expose enable/disable_adapters() toggles;
-            # PEFT's disable_adapter() context manager is PeftModel-only and is
-            # absent on the FSDP-wrapped diffusers transformer.
-            self.transformer.disable_adapters()
-            try:
+            with self.model.use_variant("base"):
                 yield
-            finally:
-                self.transformer.enable_adapters()
         else:
             with apply_init_maybe(self._init_backup_optimizer):
                 yield
@@ -292,7 +272,7 @@ class GrpoTrainer(
         rollout: Rollout,
         timestep_idx: int,
     ) -> tuple[ReplayItem, torch.Tensor]:
-        trajectory = rollout.trajectory.trajectory
+        trajectory = rollout.recorded_steps
         assert trajectory, "validated by _validate_rollout_trajectories"
         recorded: RecordedStep = deep_move_to_device(
             trajectory[timestep_idx], self.device
@@ -323,14 +303,12 @@ class GrpoTrainer(
             replay_items.append(replay_item)
             old_log_probs.append(old_log_prob)
 
-        replay_outputs = self.rollout_sampler.replay_recorded_steps(
-            self.model, replay_items
-        )
+        replay_outputs = replay_steps(self.rollout_sampler, self.model, replay_items)
         uncached_reference_outputs = None
         if self.kl_beta > 0 and any(item.cached_ref_mean is None for item in items):
             with torch.no_grad(), self.reference_model():
-                uncached_reference_outputs = self.rollout_sampler.replay_recorded_steps(
-                    self.model, replay_items
+                uncached_reference_outputs = replay_steps(
+                    self.rollout_sampler, self.model, replay_items
                 )
 
         losses: list[torch.Tensor] = []
@@ -384,9 +362,7 @@ class GrpoTrainer(
                     )[0]
                     for item in micro_items
                 ]
-                outputs = self.rollout_sampler.replay_recorded_steps(
-                    self.model, replay_items
-                )
+                outputs = replay_steps(self.rollout_sampler, self.model, replay_items)
                 for item, output in zip(micro_items, outputs, strict=True):
                     item.cached_ref_mean = output.mean.detach()
                 progress.advance(precompute_task, advance=len(micro_items))
@@ -402,7 +378,7 @@ class GrpoTrainer(
         """One item group per rollout, in trajectory timestep order."""
         item_groups: list[list[GrpoTrainItem]] = []
         for rollout_idx, rollout in enumerate(rollouts):
-            trajectory = rollout.trajectory.trajectory
+            trajectory = rollout.recorded_steps
             assert trajectory, "validated by _validate_rollout_trajectories"
             item_groups.append(
                 [
@@ -415,12 +391,12 @@ class GrpoTrainer(
     def _validate_rollout_trajectories(self, rollouts: list[Rollout]) -> None:
         """Fail fast on rollouts that GRPO's step replay cannot train on."""
         for rollout in rollouts:
-            trajectory = rollout.trajectory.trajectory
+            trajectory = rollout.recorded_steps
             if not trajectory:
                 raise RuntimeError(
                     "GRPO rollout produced no recorded trajectory steps; step "
                     "replay needs at least one recorded transition. Check the "
-                    "rollout_recipe sde_window transform (record must be true)."
+                    "rollout_sampler solver eta and sde_window transforms."
                 )
             if not any(bool((step.log_prob != 0).any()) for step in trajectory):
                 raise RuntimeError(

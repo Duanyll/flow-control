@@ -5,12 +5,12 @@ rollout / reward / advantage pipeline.
 """
 
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, cast
 
 import torch
 import torch.distributed as dist
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import BaseModel, PositiveInt
 from rich.progress import Progress
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -27,17 +27,8 @@ from flow_control.rewards import (
     reduce_reward_profiles,
 )
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import (
-    Phase,
-    PhasesRecipe,
-    Recipe,
-    SampleOutput,
-    Sampler,
-    derive_seed,
-    plan_has_recordable_stochastic_step,
-    run_phases,
-)
-from flow_control.samplers.plan import Transition
+from flow_control.samplers import SampleOutput, Sampler, SampleRequest, derive_seed
+from flow_control.samplers.plan import StepContext, Transition
 from flow_control.utils.logging import console
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -51,6 +42,7 @@ from ..data import (
     collate_fn,
     seed_worker,
 )
+from ..grpo_sampling import RecordedStep, collect_samples
 from .base import BaseTrainer
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
@@ -66,6 +58,8 @@ class Rollout:
     key: str
     batch: Batch
     negative_batch: Batch | None
+    recorded_steps: list[RecordedStep] | None = None
+    sampling_plan: list[Transition] = field(default_factory=list)
 
 
 class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
@@ -108,13 +102,6 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     processor: Processor
     reward: Reward
     rollout_sampler: Sampler
-    rollout_recipe: Recipe = Field(default_factory=PhasesRecipe)
-    """How rollout trajectories are produced from ``rollout_sampler``: a
-    phases recipe built per request (per-sample generators may pick random
-    windows). The default (a single default phase) reproduces plain full-grid
-    sampling without trajectory recording; trainers that need likelihood
-    replay (GRPO) override the default with a recording ``sde_window``."""
-
     _ROLLOUT_NEEDS_LIKELIHOOD_REPLAY: ClassVar[bool] = False
     """Whether this trainer requires recorded stochastic steps for replay."""
 
@@ -158,39 +145,6 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             worker_init_fn=seed_worker,
         )
 
-    def _build_rollout_phases(
-        self,
-        batch: Batch,
-        generator: torch.Generator,
-    ) -> tuple[list[Phase], Any]:
-        """Build one request's phases; returns them with the resolved negative
-        batch (``None`` unless some phase's guidance actually needed one)."""
-        phases, negative_batch = self.build_recipe_phases(
-            self.rollout_recipe, self.rollout_sampler, batch, generator
-        )
-        if self._ROLLOUT_NEEDS_LIKELIHOOD_REPLAY:
-            if not plan_has_recordable_stochastic_step(phases):
-                raise ValueError(
-                    f"{type(self).__name__} needs likelihood replay, but the "
-                    "built rollout recipe records no stochastic step; add "
-                    '{"type": "sde_window", "record": true} to rollout_recipe '
-                    "and use a solver with eta > 0."
-                )
-            for phase in phases:
-                records = any(
-                    isinstance(item, Transition) and item.record for item in phase.plan
-                )
-                if records and phase.guidance != self.rollout_sampler.guidance:
-                    raise NotImplementedError(
-                        f"{type(self).__name__} replays recorded steps with "
-                        "the trainer-level rollout_sampler guidance, but a "
-                        "recording phase overrides it with a different "
-                        "guidance config; drop the phase-level sampler "
-                        "override on the recording phase or make its guidance "
-                        "match rollout_sampler.guidance."
-                    )
-        return phases, negative_batch
-
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
         """Rollout phase: generate images, decode, then score rewards concurrently."""
         rollouts: list[Rollout] = []
@@ -227,7 +181,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                 for items in dataloader:
                     batches: list[Any] = []
                     negative_batches: list[Any] = []
-                    request_phases: list[list[Phase]] = []
+                    requests: list[SampleRequest] = []
                     for item in items:
                         batch = deep_move_to_device(item, device)
                         batch = self.preprocess_for_inference(batch, save_extra=True)
@@ -246,20 +200,53 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                             generator=generator,
                             device=device,
                         )
-                        phases, negative_batch = self._build_rollout_phases(
-                            batch, generator
+                        request = self.build_sample_request(
+                            self.rollout_sampler, batch, generator
                         )
                         batches.append(batch)
-                        negative_batches.append(negative_batch)
-                        request_phases.append(phases)
+                        negative_batches.append(request.negative_batch)
+                        requests.append(request)
+
+                    sampling_plans: list[list[Transition]] = [[] for _ in requests]
+
+                    def observe_plan(
+                        run_index: int,
+                        transition: Transition,
+                        ctx: StepContext,
+                        velocity: torch.Tensor | None,
+                        next_latents: torch.Tensor,
+                        plans: list[list[Transition]] = sampling_plans,
+                    ) -> None:
+                        plans[run_index].append(transition)
 
                     with torch.no_grad():
-                        rollout_outputs = run_phases(model, request_phases)
+                        recorded: list[list[RecordedStep] | None]
+                        if self._ROLLOUT_NEEDS_LIKELIHOOD_REPLAY:
+                            rollout_outputs, trajectories = collect_samples(
+                                self.rollout_sampler,
+                                model,
+                                requests,
+                                observer=observe_plan,
+                            )
+                            recorded = list(trajectories)
+                        else:
+                            rollout_outputs = self.rollout_sampler.sample(
+                                model, requests, observer=observe_plan
+                            )
+                            recorded = [None] * len(rollout_outputs)
 
-                    for batch, negative_batch, rollout_out in zip(
+                    for (
+                        batch,
+                        negative_batch,
+                        rollout_out,
+                        recorded_steps,
+                        sampling_plan,
+                    ) in zip(
                         batches,
                         negative_batches,
                         rollout_outputs,
+                        recorded,
+                        sampling_plans,
                         strict=True,
                     ):
                         batch["clean_latents"] = rollout_out.final_latents
@@ -273,6 +260,12 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                             Rollout(
                                 trajectory=deep_move_to_device(
                                     rollout_out,
+                                    rollout_storage,
+                                    preserve_aliases=True,
+                                ),
+                                sampling_plan=sampling_plan,
+                                recorded_steps=deep_move_to_device(
+                                    recorded_steps,
                                     rollout_storage,
                                     preserve_aliases=True,
                                 ),

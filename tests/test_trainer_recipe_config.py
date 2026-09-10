@@ -1,7 +1,9 @@
-"""Config-level trainer tests for rollout recipes and replay requirements."""
+"""Trainer config, rollout metadata and GRPO replay integration tests."""
 
 import unittest
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import torch
 from pydantic import BaseModel, Field
@@ -10,7 +12,6 @@ from flow_control.samplers import SampleOutput, Sampler
 from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.mixins import Rollout
 from flow_control.training.nft import NftTrainer
-from flow_control.utils.logging import _warn_once
 
 
 class _ProbeOverrides(BaseModel):
@@ -36,7 +37,9 @@ class _GrpoProbe(_ProbeOverrides, GrpoTrainer):
 
 
 class _NftProbe(_ProbeOverrides, NftTrainer):
-    pass
+    @property
+    def device(self):
+        return torch.device("cpu")
 
 
 class RolloutPhaseBuildCheckTest(unittest.TestCase):
@@ -50,81 +53,36 @@ class RolloutPhaseBuildCheckTest(unittest.TestCase):
     }
 
     def test_grpo_rejects_recipes_without_recordable_stochastic_step(self) -> None:
-        deterministic = _GrpoProbe.model_validate(
-            {"rollout_sampler": {"steps": 4, "solver": {"type": "flow", "eta": 0.0}}}
-        )
-        with self.assertRaisesRegex(ValueError, "sde_window"):
-            deterministic._build_rollout_phases(self.BATCH, torch.Generator())
+        from test_microbatching import FakeSamplerModel
 
-        stochastic = _GrpoProbe.model_validate(
-            {"rollout_sampler": {"steps": 4, "solver": {"type": "flow", "eta": 0.7}}}
-        )
-        phases, negative = stochastic._build_rollout_phases(
-            self.BATCH, torch.Generator()
-        )
-        self.assertEqual(len(phases), 1)
-        # Default guidance (scale 1.0) never resolves a negative batch.
-        self.assertIsNone(negative)
+        from flow_control.samplers import SampleRequest
+        from flow_control.training.grpo_sampling import collect_samples
 
-    def test_grpo_rejects_recording_phase_with_overridden_guidance(self) -> None:
-        # GRPO replay reconstructs velocities with rollout_sampler.guidance;
-        # a recording phase whose sampler override changes the guidance would
-        # silently produce wrong policy ratios.
-        trainer = _GrpoProbe.model_validate(
-            {
-                "rollout_recipe": [
-                    {
-                        "sampler": {
-                            "steps": 4,
-                            "solver": {"type": "flow", "eta": 0.7},
-                            "guidance": {"type": "cfg", "scale": 1.0, "renorm": True},
-                        },
-                        "transforms": [{"type": "sde_window", "record": True}],
-                    }
-                ]
-            }
-        )
-        with self.assertRaisesRegex(NotImplementedError, "guidance"):
-            trainer._build_rollout_phases(self.BATCH, torch.Generator())
-
-    def test_nft_warns_about_phase_guidance_override(self) -> None:
-        trainer = _NftProbe.model_validate(
-            {
-                "rollout_recipe": [
-                    {
-                        "sampler": {
-                            "steps": 4,
-                            "guidance": {"type": "cfg", "renorm": True},
-                        }
-                    }
-                ]
-            }
-        )
-        _warn_once.cache_clear()
-
-        with self.assertLogs("flow_control.training.nft", "WARNING") as logs:
-            trainer._build_rollout_phases(self.BATCH, torch.Generator())
-
-        self.assertIn("different policies", "\n".join(logs.output))
-
-    def test_nft_warns_about_stateful_guidance(self) -> None:
-        trainer = _NftProbe.model_validate(
-            {
-                "rollout_sampler": {
-                    "guidance": {
-                        "type": "momentum",
-                        "alpha": 0.3,
-                        "beta": 0.7,
+        for eta in (0.0, 0.7):
+            trainer = _GrpoProbe.model_validate(
+                {
+                    "rollout_sampler": {
+                        "steps": 4,
+                        "solver": {"type": "flow", "eta": eta},
                     }
                 }
-            }
-        )
-        _warn_once.cache_clear()
-
-        with self.assertLogs("flow_control.training.nft", "WARNING") as logs:
-            trainer._build_rollout_phases(self.BATCH, torch.Generator())
-
-        self.assertIn("fresh guidance state", "\n".join(logs.output))
+            )
+            if eta == 0:
+                with self.assertRaisesRegex(ValueError, "stochastic"):
+                    collect_samples(
+                        trainer.rollout_sampler,
+                        FakeSamplerModel(),
+                        [SampleRequest(batch=self.BATCH)],
+                    )
+            else:
+                outputs, records = collect_samples(
+                    trainer.rollout_sampler,
+                    FakeSamplerModel(),
+                    [SampleRequest(batch=self.BATCH)],
+                )
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(len(records[0]), 3)
+                self.assertNotIn("rollout_recipe", trainer.model_dump())
 
     def test_nft_train_plan_carries_cpu_sigma_values(self) -> None:
         trainer = _NftProbe.model_validate({"num_inner_epochs": 2})
@@ -151,6 +109,70 @@ class RolloutPhaseBuildCheckTest(unittest.TestCase):
             for item in epoch:
                 self.assertIsInstance(item.sigma, float)
                 self.assertEqual(item.sigma, float(timesteps[item.timestep_idx]))
+
+        # The R3/R4 observer migration initially left ordinary NFT rollouts
+        # without a plan, so per-step variants and CFG++ failed during training.
+        # Exercise real collection with only reward/decode/logging stubbed out.
+        from test_microbatching import FakeSamplerModel, make_sampler_batch
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        from flow_control.training.data import (
+            DistributedKRepeatSampler,
+            PaddingAwareDatasetWrapper,
+            collate_fn,
+        )
+
+        model: Any = FakeSamplerModel()
+        model.transformer = torch.nn.Identity()
+        trainer.model = model
+        trainer.rollout_sampler = Sampler.model_validate(
+            {
+                "steps": 4,
+                "solver": {"type": "flow", "eta": 0.7},
+                "guidance": {"type": "cfg_pp", "inner": 2.0},
+                "transforms": [{"type": "sde_window", "size": 1, "range": [1, 3]}],
+            }
+        )
+        trainer.processor = SimpleNamespace(
+            initialize_latents=lambda batch, **kwargs: None,
+            decode_output=lambda latents, batch: {},
+            get_negative_batch=lambda batch: make_sampler_batch(-0.2),
+        )
+        dataset = PaddingAwareDatasetWrapper([make_sampler_batch(0.3, 0.9)])
+        trainer._dataloader = StatefulDataLoader(
+            dataset,
+            batch_size=1,
+            collate_fn=collate_fn,
+            sampler=DistributedKRepeatSampler(dataset, 1, 1, 1, num_replicas=1, rank=0),
+        )
+
+        def drain(reward, submitter, handler, profile):
+            list(submitter)
+
+        with (
+            patch(
+                "flow_control.training.mixins.rollout.execute_reward", side_effect=drain
+            ),
+            patch.object(_NftProbe, "log_progress_timing"),
+            patch.object(_NftProbe, "log_reduced_metrics"),
+        ):
+            collected = trainer._collect_rollouts(0)[0]
+        self.assertIsNone(collected.recorded_steps)
+        self.assertEqual(len(collected.sampling_plan), 4)
+        self.assertEqual(sum(step.eta > 0 for step in collected.sampling_plan), 1)
+        for index, transition in enumerate(collected.sampling_plan):
+            self.assertEqual(
+                transition.sigma, float(collected.trajectory.timesteps[index])
+            )
+        predictions = trainer._predict_batched(
+            [collected.batch],
+            [collected.trajectory.timesteps[1:2]],
+            [float(collected.trajectory.timesteps[1])],
+            [collected.negative_batch],
+            [collected.sampling_plan[1]],
+            [1],
+        )
+        self.assertTrue(torch.isfinite(predictions[0]).all())
 
     def test_nft_timestep_range_keeps_float32_boundary(self) -> None:
         trainer = _NftProbe.model_validate({"timestep_range": 0.3})

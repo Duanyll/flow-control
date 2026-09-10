@@ -16,11 +16,12 @@ records the stable boundary intended for future padding and sequence packing.
 - [x] Fall back to one forward per logical sample when inputs are incompatible.
 - [x] Synchronize dense/fallback and CFG decisions across distributed ranks.
 - [x] Preserve independent per-request sigma grids, solver states, generators,
-      recipe-built plans (SDE windows), and outputs.
+      transformed plans (SDE windows), and outputs.
 - [x] Keep processor encode/decode, reward evaluation, and annotation per sample.
 - [x] (superseded by plan-as-data) SA-Solver now batches across requests through
       the plan executor's rendezvous loop; no sequential special case remains.
-- [x] Do not implement padding or true sequence packing in this change.
+- [x] Keep sequence packing out of the original microbatching change. Sampler-rethink
+      adds tile-count padding inside the tiled model wrapper.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
 
 ## Stable APIs
@@ -63,55 +64,62 @@ class SampleRequest:
 
 def sample(
     self,
-    model: BaseModelAdapter,
+    model: SamplerModel,
     requests: list[SampleRequest],
+    *,
+    observer: StepObserver | None = None,
 ) -> list[SampleOutput]:
     ...
 ```
 
-`sample()` is plain full-grid sampling; trajectory recording, SDE windows and
-multi-phase flows (SDEdit, inversion) go through the recipe runner instead:
-each request builds its own `list[Phase]` (`PhasesRecipe.build`) and
-`run_phases(model, requests)` executes phase `i` of all requests in one
-`execute()` call, preserving cross-request batching and FSDP alignment.
+`sample()` executes all sampling configurations through one path. `start`
+handles direct latent initialization and SDEdit; `transforms` applies SDE
+windows to each request's plan. Named branch evaluation, optional tile forwards,
+whole-image guidance/projectors, and solver steps preserve cross-request batching
+and FSDP alignment. `SampleOutput` contains final latents and the executed sigma
+grid; training-specific records are collected through the step observer.
 
 - [x] Return one `SampleOutput` per request without stacking logical outputs.
 - [x] Build one shifted/custom sigma schedule per request.
 - [x] Keep one solver/guidance runtime state (`StepContext`) per request; SDE
-      windows and recording are per-request plan data, not sampler state.
+      windows are per-request plan data and GRPO recording is an observer.
 - [x] Batch the expensive conditional model forward once per rendezvous round.
 - [x] Run solver math independently per request.
 - [x] Support no-negative, all-negative, and mixed CFG request lists.
 - [x] Globally synchronize whether the unconditional pass is required.
-- [x] Use conditional dummy inputs where a rank/request lacks a negative batch.
+- [x] Use conditional dummy inputs for missing optional CFG negatives. Required
+      branches, including CFG++ negatives, are validated collectively before
+      any model forward; dummy outputs retain zero-valued backward dependencies.
 - [x] Apply CFG renormalization per logical sample (`ClassifierFreeGuidance`).
 - [x] Reject different request counts across distributed ranks before sampling
-      (`executor.validate_distributed_request_count`, shared by `sample`,
-      `run_phases` and `replay_recorded_steps`).
-- [x] Batch SA-Solver across requests through the executor (its PEC transition
-      yields multiple evals; heterogeneous plans fall back to grouped
-      execution with a warn-once).
+      (`executor.validate_distributed_request_count`, shared by `sample` and
+      `training.grpo_sampling.replay_steps`).
+- [x] Batch SA-Solver across requests through the executor's multi-evaluation
+      rendezvous. Unequal plan lengths or solver/guidance configurations raise;
+      requests with matching topology retain independent shifted sigma grids.
 
-Replay uses list-only `Sampler.replay_recorded_steps` over `ReplayItem`s (each
-carrying a rollout `RecordedStep`, whose pure-float `ReplayStep` stores the
-ACTUAL per-step eta/noise scale) and returns named
-`StepLogProbOutput(log_prob, mean, std_dev)` values.
+Replay uses list-only `training.grpo_sampling.replay_steps(sampler, model, items)`.
+Each `ReplayItem` carries a plugin-owned `RecordedStep` with its executed
+transition, step index/count and optional Flash noise ramp snapshot. The plugin
+returns `StepLogProbOutput(log_prob, mean, std_dev)`; `collect_samples()` records
+supported stochastic steps automatically. NFT stores the actual executed plan
+on `Rollout` so selected training timesteps keep their branch schedule, successor
+sigma and transformed eta.
 
-## Window RNG (recipe layer)
+## Window RNG (plan transforms)
 
 - [x] Window selection never touches Python's global `random` state.
 - [x] `transforms.select_sde_window` draws the inclusive window start with the
-      per-request `torch.Generator` (the `sde_window` transform's generator
-      comes from `RecipeBuildContext`).
+      per-request `SampleRequest.generator`, before start noise or solver noise.
 - [x] Use the generator's device for `torch.randint`.
 - [x] Validate positive window size, valid range, and window fit.
 - [x] Preserve the half-open runtime window `[train_start, train_end)`;
-      `with_sde_window` gates eta and (optionally) marks the record range.
+      `with_sde_window` gates eta; the GRPO observer records stochastic steps.
 - [x] Test Python-RNG independence, generator isolation, and both endpoints
       (`tests/test_recipe_build.py::SelectSdeWindowTest`).
 
 The same request generator drives initial latent creation, window selection at
-recipe build, and stochastic solver draws — one per-request RNG stream.
+plan construction, SDEdit start noise, and stochastic solver draws — one per-request RNG stream.
 
 ## Adapter support matrix
 
@@ -214,7 +222,7 @@ gradient_accumulation_steps = local_update_batch // M
 
 - [x] `uv run ruff format flow_control tests`
 - [x] `uv run ruff check --fix flow_control tests`
-- [x] `uv run pyright flow_control tests`
+- [x] `uv run ty check flow_control tests`
 - [x] 25 focused unit tests pass (19 original plus microbatch-arithmetic tests).
 - [x] Two-rank Gloo distributed worker passes.
 - [x] JSON schemas regenerate successfully.

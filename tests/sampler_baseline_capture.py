@@ -15,21 +15,15 @@ Usage: ``uv run python tests/sampler_baseline_capture.py``
 
 from __future__ import annotations
 
-from dataclasses import replace
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from flow_control.adapters.base import Batch
-from flow_control.samplers import (
-    ClassifierFreeGuidance,
-    PhaseConfig,
-    PhasesRecipe,
-    RecipeBuildContext,
-    SdeWindow,
-    run_phases,
-)
+from flow_control.samplers import ClassifierFreeGuidance, SampleOutput, SampleRequest
 from flow_control.samplers.plan import (
     GuidanceOutput,
     StepContext,
@@ -48,7 +42,7 @@ from flow_control.samplers.solver import (
     FlowUniPCSolver,
     SASolver,
 )
-from flow_control.samplers.solver.flash import FlashTransition
+from flow_control.training.grpo_sampling import RecordedStep, step_log_prob
 from flow_control.utils.logging import console
 
 BASELINE_DIR = Path(__file__).resolve().parent / "fixtures/sampler_baselines"
@@ -74,6 +68,11 @@ class RecordingModel:
     def __init__(self) -> None:
         self.eval_sigmas: list[float] = []
         self.eval_latents: list[torch.Tensor] = []
+
+    def use_variant(self, variant: str | None):
+        if variant is not None:
+            raise ValueError(f"Test model has no variant {variant!r}.")
+        return nullcontext()
 
     def predict_velocity_batched(
         self,
@@ -180,21 +179,55 @@ def step_configs() -> dict[str, FlowSolver | DDIMSolver | CPSSolver | DanceSolve
     }
 
 
+@dataclass
+class TraceOutput(SampleOutput):
+    trajectory: list[RecordedStep]
+
+
+def recorded_step(
+    transition: Transition,
+    ctx: StepContext,
+    velocity: torch.Tensor | None,
+    next_latents: torch.Tensor,
+) -> RecordedStep:
+    step = RecordedStep(
+        latent_t=ctx.latents,
+        latent_next=next_latents,
+        log_prob=torch.zeros(ctx.latents.shape[0]),
+        transition=transition,
+        item_index=ctx.item_index,
+        num_items=ctx.num_items,
+    )
+    if velocity is not None:
+        step.log_prob = step_log_prob(step, velocity).log_prob
+    return step
+
+
+def trace_sample(model: Any, sampler: Sampler, request: SampleRequest) -> TraceOutput:
+    """Observe the legacy nonterminal window without adding recording to core."""
+    trajectory: list[RecordedStep] = []
+
+    def observer(run_index, transition, ctx, velocity, next_latents):
+        if ctx.item_index < ctx.num_items - 1:
+            trajectory.append(recorded_step(transition, ctx, velocity, next_latents))
+
+    output = sampler.sample(model, [request], observer=observer)[0]
+    return TraceOutput(output.final_latents, output.timesteps, trajectory)
+
+
 def capture_e2e() -> None:
     initial_latents = make_initial_latents()
-    recipe = PhasesRecipe(phases=[PhaseConfig(transforms=[SdeWindow(record=True)])])
     for name, sampler in e2e_configs().items():
         model = RecordingModel()
-        phases = recipe.build(
-            RecipeBuildContext(
-                default_sampler=sampler,
-                batches={"main": make_request_batch(initial_latents)},
-                negative_batch_for=lambda name: None,
+        output = trace_sample(
+            model,
+            sampler,
+            SampleRequest(
+                batch=make_request_batch(initial_latents),
                 generator=torch.Generator().manual_seed(777),
-            )
+            ),
         )
-        output = run_phases(model, [phases])[0]
-        trajectory = output.trajectory or []
+        trajectory = output.trajectory
         fixture = {
             "sampler_config": sampler.model_dump(),
             "initial_latents": initial_latents,
@@ -217,7 +250,7 @@ def capture_steps() -> None:
 
     Originally captured through the ``step``/``replay_step`` API deleted in the
     plan-as-data refactor; this reproduces the same fixture layout by driving
-    the current ``Transition``/``make_replay`` path, which is exactly what the
+    the current ``Transition``/GRPO plugin path, which is exactly what the
     harness asserts against.
     """
     latents, velocity, prev_sample = make_step_tensors()
@@ -233,7 +266,6 @@ def capture_steps() -> None:
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=solver.eta,
-                record=True,
             )
             ctx = StepContext(
                 latents=latents,
@@ -242,20 +274,18 @@ def capture_steps() -> None:
                 guidance_state=None,
             )
             result = drive_single_eval_transition(tr, ctx, velocity)
-            assert result.recorded is not None
+            recorded = recorded_step(tr, ctx, velocity, result.next_latents)
             mean, std_dev = type(solver).step_parts(
                 latents, velocity, sigma, sigma_next, solver.eta
             )[:2]
-            replay = solver.make_replay(sigma, sigma_next, solver.eta).logprob(
-                velocity, latents, prev_sample
-            )
+            replay = step_log_prob(replace(recorded, latent_next=prev_sample), velocity)
             entries.append(
                 {
                     "step_index": index,
                     "sigma": sigma,
                     "sigma_next": sigma_next,
                     "next_latents": result.next_latents,
-                    "log_prob": result.recorded.log_prob,
+                    "log_prob": recorded.log_prob,
                     "mean": mean,
                     "std_dev": std_dev,
                     "replay_log_prob": replay.log_prob,
@@ -283,9 +313,7 @@ def capture_flash_steps() -> None:
     latents, velocity, prev_sample = make_step_tensors()
     # Non-default scales, and start != end, so the per-step lerp is visible.
     solver = FlashSolver(eta=1.0, noise_scale_start=0.9, noise_scale_end=0.8)
-    plan = [
-        item for item in solver.plan(STEP_GRID) if isinstance(item, FlashTransition)
-    ]
+    plan = solver.plan(STEP_GRID)
     entries: list[dict[str, Any]] = []
     for index, tr in enumerate(plan):
         ctx = StepContext(
@@ -294,21 +322,23 @@ def capture_flash_steps() -> None:
             solver_state=None,
             guidance_state=None,
         )
-        result = drive_single_eval_transition(replace(tr, record=True), ctx, velocity)
-        assert result.recorded is not None
+        ctx.item_index, ctx.num_items = index, len(plan)
+        result = drive_single_eval_transition(tr, ctx, velocity)
+        recorded = recorded_step(tr, ctx, velocity, result.next_latents)
+        noise_scale = solver.noise_scale_at(index, len(plan))
         mean = FlashSolver.renoise_parts(
-            latents, velocity, tr.sigma, tr.sigma_next, tr.noise_scale
+            latents, velocity, tr.sigma, tr.sigma_next, noise_scale
         )[0]
-        replay = result.recorded.replay.logprob(velocity, latents, prev_sample)
+        replay = step_log_prob(replace(recorded, latent_next=prev_sample), velocity)
         entries.append(
             {
                 "step_index": index,
                 "sigma": tr.sigma,
                 "sigma_next": tr.sigma_next,
                 "next_latents": result.next_latents,
-                "log_prob": result.recorded.log_prob,
+                "log_prob": recorded.log_prob,
                 "mean": mean,
-                "std_dev": latents.new_tensor(tr.sigma_next) * tr.noise_scale,
+                "std_dev": latents.new_tensor(tr.sigma_next) * noise_scale,
                 "replay_log_prob": replay.log_prob,
                 "replay_mean": replay.mean,
                 "replay_std_dev": replay.std_dev,

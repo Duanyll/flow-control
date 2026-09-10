@@ -80,19 +80,23 @@
 
 ## samplers — 采样器
 
-Plan-as-data 架构（设计见 `docs/sampler-plan-design.md`）：sampler/solver 是编译器，产出纯数据 `SamplingPlan`（`plan.py` 的 `Transition` 列表）；执行循环在独立 executor（`executor.py::execute`，rendezvous 保跨 request batching 与 FSDP 对齐）；采样 trick 是 plan 变换（`transforms.py`）或 guidance 中间件，不再往 `Sampler` 开洞。
+配置与执行流程见 [采样器设计](sampler-plan-design.md)。`Sampler` 构造纯数据 `SamplingPlan`，所有请求通过同一条 `sample()` 路径执行。executor 在每轮模型求值时同步各请求和分布式 rank；整幅投影、命名分支、tile 前向、guidance 组合和 solver 更新各有明确的执行位置。
 
 | 接口 | 说明 |
 |------|------|
-| `Sampler` | 配置 + 规划面：`make_sigmas()` / `plan()` / `plan_from_sigma()`；`sample()` 执行普通 full-grid 采样（无记录、无变换）；`replay_recorded_steps()` 对 `ReplayItem` 批量重算逐步 log-prob（GRPO replay）。`guidance` 字段是 sampling middleware registry union：内置 `cfg`（含 renorm，默认 scale 1.0）、`momentum` 和包装另一 guidance 的 `differential`（消费 inpaint batch，在每个 transition 前投影 latent）；裸数字即 CFG scale（`"guidance": 4.5`），是否需要 negative batch 由 `guidance.needs_negative()` 判定。`shift` 同理支持裸数字（`"shift": 3.0` ≡ constant shift），默认 `ConstantShift` 因子 1.0 即不 shift（已删除与其完全等价的 `none` 成员） |
-| `SampleOutput` | 最终 latent、执行的 sigma 网格（`timesteps`，plan 元数据）、可选 `trajectory: list[RecordedStep]`（仅 recipe runner 在 plan 标记 `record=True` 时产出） |
-| Recipe 层（`recipe.py`） | `PhasesRecipe`（唯一内置 recipe，phase 顺序拼接 × transform 列表复合）+ `PhaseConfig`（`init` / `transforms` / `batch` / 可选 `sampler` 覆写）+ `runner.py::run_phases`（跨 request lockstep 逐 phase 执行）。InitOp：`pure_noise` / `renoise`（SDEdit）/ `from_latents` / `from_previous`；PlanTransform：`sde_window`（eta 门控 + 可选 `record`，取代已删除的 `trajectory_window_*`）、`invert`（DDIM/Euler inversion，必须列首） |
-| `RecordedStep` | RL replay 的逐步记录（latent_t / latent_next / log_prob / 纯 float `ReplayStep` / guidance_state），rollout 存下即按步组织；guidance 可在 transition 间投影 latent，因此相邻记录允许不连续，但每一步都可从自身 `latent_t` 独立 replay |
+| `Sampler` | 持有 solver、sigma grid、`start`、`transforms`、`guidance`、`projectors` 和可选 `tiled`；`plan()` 生成当前请求的执行计划，`sample(model, requests, observer=...)` 批量采样，`get_guided_velocity()` 与采样和 GRPO replay 共用分支求值路径 |
+| `Start` / `SdeWindow` | `start.source` 选择初始 tensor；设置 `strength` 时按 at-or-below 规则切片，并用切片点 sigma 重加噪。`sde_window` 按请求 RNG 选择窗口，仅保留窗口内的 eta |
+| `SampleOutput` | `final_latents` 与实际执行的起始 sigma 网格 `timesteps`；逐步记录由 observer 消费 |
+| `BranchSpec` / `BaseGuidance` | `branches(item_index)` 声明分支名字、condition 和模型 variant；`combine()` 在整幅分支结果上组合 velocity。内置 `cfg`（含 renorm，支持按步 LoRA variant）与一阶 Flow/DDIM `cfg_pp`；裸数字如 `"guidance": 4.5` 表示 CFG scale。`requires_negative(num_items)` 判断是否需要 processor 构造负条件 |
+| `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 reference latent 的释放时机 |
+| `Tiled` | 在模型边界展开 packed BND tiles，按分支拼回整幅 velocity 后再组合 guidance；整幅抽样 solver 噪声，跨 rank tile 数量差异在 wrapper 内补齐 |
 | `derive_seed()` | 确定性种子派生 |
 
-`plan.py` 只放 solver 无关的协议类型与共用原语（`euler_step` / `zero_log_prob` / `normal_log_prob`）；每个 solver 的 transition 子类、runtime state、逐步公式（`XxxSolver.step_parts` 等 `@staticmethod`）和 `ReplayStep` 子类都在 `solver/<name>.py` 里自包含。
+`plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。
 
-**Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正，HiDream-O1 full 官方采样）, `sa`（SA-Solver 随机 PEC）, `flash`（每步全量重加噪 + 噪声截断，HiDream-O1 Dev 官方采样）。逐步 log-prob replay（`supports_step_log_prob`，类级静态能力）：flow / ddim / cps / dance / flash 支持；dpm / flow_unipc / sa 不支持。
+**Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正）, `sa`（SA-Solver 随机 PEC）, `flash`（逐步重加噪与可选噪声截断）。
+
+GRPO 的 `training/grpo_sampling.py` 提供 `collect_samples()` 与 `replay_steps()`：自动记录具有逐步密度且 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；stateful guidance 与多步 solver replay 不支持。Momentum guidance 位于 `flow_control/contrib/momentum_guidance.py`。
 
 ---
 

@@ -11,18 +11,9 @@ from ..plan import (
     Transition,
     TransitionGen,
     TransitionResult,
-    zero_log_prob,
 )
 from .base import BaseSolver, solver_registry
 from .ddim import DDIMSolver
-
-
-@dataclass(frozen=True, slots=True)
-class DpmTransition(Transition):
-    """DPM transition with plan-compiled per-step order metadata."""
-
-    lower_order_final: bool = False
-    """Final grid step: fall back to the deterministic DDIM update."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,33 +30,30 @@ class DPMSolver(BaseSolver):
     order: Literal[1, 2]
 
     def plan(self, sigmas: list[float]) -> SamplingPlan:
-        num_steps = len(sigmas) - 1
         return [
-            DpmTransition(
+            Transition(
                 solver=self,
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=0.0,
-                lower_order_final=index == num_steps - 1,
             )
-            for index, (sigma, sigma_next) in enumerate(
-                zip(sigmas[:-1], sigmas[1:], strict=True)
-            )
+            for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:], strict=True)
         ]
 
     def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        assert isinstance(tr, DpmTransition)
         state = ctx.solver_state
         assert state is None or isinstance(state, DpmRuntimeState)
 
-        out = yield EvalRequest(latents=ctx.latents, sigma=tr.sigma)
+        out = yield EvalRequest(
+            latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self
+        )
         latents = ctx.latents
         sigma_t = latents.new_tensor(tr.sigma)
         x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
 
         # Warmup follows the runtime history, so a sliced plan restarts cleanly:
         # empty history behaves like the first step of a full run.
-        if state is None or tr.lower_order_final:
+        if state is None or ctx.item_index == ctx.num_items - 1:
             next_latents, _ = DDIMSolver.step_parts(
                 latents, out.velocity, tr.sigma, tr.sigma_next, eta=0.0
             )
@@ -96,14 +84,8 @@ class DPMSolver(BaseSolver):
             sigma_history=new_sigma_history[len(new_sigma_history) - keep :],
         )
 
-        recorded = (
-            self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
-            if tr.record
-            else None
-        )
         return TransitionResult(
             next_latents=next_latents,
-            recorded=recorded,
             next_solver_state=next_state,
         )
 

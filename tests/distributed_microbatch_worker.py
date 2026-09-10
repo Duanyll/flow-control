@@ -1,5 +1,4 @@
-from dataclasses import dataclass
-from typing import Literal
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -9,16 +8,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.samplers import Sampler, SampleRequest
-from flow_control.samplers.executor import Run, execute
-from flow_control.samplers.guidance import BaseGuidance, ClassifierFreeGuidance
-from flow_control.samplers.plan import (
-    BranchEvals,
-    GuidanceOutput,
-    GuidanceState,
-    StepContext,
-)
-from flow_control.samplers.solver import FlowSolver
-from flow_control.samplers.transforms import finalize_replay_state
+from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
 from flow_control.training.data import (
     DistributedBucketSampler,
     PaddingAwareDatasetWrapper,
@@ -64,6 +54,11 @@ class DistributedSamplerModel:
     def __init__(self) -> None:
         self.calls: list[int] = []
 
+    def use_variant(self, variant: str | None):
+        if variant is not None:
+            raise ValueError(f"Test model has no variant {variant!r}.")
+        return nullcontext()
+
     def predict_velocity_batched(
         self,
         batches: list[Batch],
@@ -71,33 +66,6 @@ class DistributedSamplerModel:
     ) -> list[torch.Tensor]:
         self.calls.append(len(batches))
         return [batch["clean_latents"] for batch in batches]
-
-
-@dataclass(frozen=True, slots=True)
-class _CountState(GuidanceState):
-    count: int = 0
-
-
-class _CountingGuidance(BaseGuidance):
-    type: Literal["distributed_counting"] = "distributed_counting"
-
-    def init_state(self) -> GuidanceState | None:
-        return _CountState()
-
-    def needs_negative(self) -> bool:
-        return False
-
-    def combine(
-        self,
-        evals: BranchEvals,
-        ctx: StepContext,
-        state: GuidanceState | None,
-    ) -> tuple[GuidanceOutput, GuidanceState | None]:
-        assert isinstance(state, _CountState)
-        return (
-            GuidanceOutput(velocity=evals.cond, branches=evals),
-            _CountState(count=state.count + 1),
-        )
 
 
 def test_synchronized_fallback(rank: int) -> None:
@@ -139,6 +107,28 @@ def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
     )
     assert model.calls == [1, 1]
 
+    # CFG++ cannot fall back to a conditional-only velocity. If only one rank
+    # lacks its negative batch, every rank must fail before model collectives.
+    sampler = Sampler(guidance=CfgPlusPlusGuidance(), steps=1)
+    model = DistributedSamplerModel()
+    try:
+        sampler.get_guided_velocity(
+            model,
+            batches=[batch],
+            negative_batches=[negative_batch],
+            latents=[batch["noisy_latents"]],
+            timesteps=[torch.tensor([1.0])],
+            sigmas=[1.0],
+            sigma_nexts=[0.0],
+        )
+    except ValueError as error:
+        assert "required guidance branch" in str(error)
+    else:
+        raise AssertionError(
+            "Missing CFG++ negative batch was not rejected on every rank."
+        )
+    assert model.calls == []
+
 
 def test_sampler_request_count_mismatch_is_rejected(rank: int) -> None:
     sampler = Sampler(steps=1)
@@ -153,58 +143,6 @@ def test_sampler_request_count_mismatch_is_rejected(rank: int) -> None:
         assert "same number of requests" in str(error)
     else:
         raise AssertionError("Distributed sampler request mismatch was not rejected.")
-
-
-def _make_run(steps: int, value: float) -> Run:
-    solver = FlowSolver()
-    batch = make_batch(1, value=value)
-    return Run(
-        plan=finalize_replay_state(
-            solver.plan(torch.linspace(1.0, 0.0, steps + 1).tolist())
-        ),
-        ctx=StepContext(
-            latents=batch["noisy_latents"].float(),
-            generator=None,
-            solver_state=None,
-            guidance_state=None,
-        ),
-        batch=batch,
-        negative_batch=None,
-    )
-
-
-def test_heterogeneous_executor_pads_each_rendezvous(rank: int) -> None:
-    adapter = DistributedFakeAdapter.model_construct(arch="fake", type="fake")
-    guidance = _CountingGuidance()
-    runs = (
-        [_make_run(4, 1.0), _make_run(4, 2.0)]
-        if rank == 0
-        else [_make_run(4, 1.0), _make_run(6, 2.0)]
-    )
-    for run in runs:
-        run.ctx.guidance_state = guidance.init_state()
-
-    list(execute(adapter, runs, guidance))
-
-    # Rank 1 pads its one-request A group while rank 0 evaluates [A, A]; once
-    # rank 0 drains, it submits one dummy request for rank 1's B group.
-    assert adapter._forward_batch_sizes == [2, 2, 2, 2, 1, 1, 1, 1, 1, 1]
-    assert all(torch.isfinite(run.ctx.latents).all() for run in runs)
-    expected_counts = (4, 4) if rank == 0 else (4, 6)
-    for run, expected_count in zip(runs, expected_counts, strict=True):
-        state = run.ctx.guidance_state
-        assert isinstance(state, _CountState)
-        assert state.count == expected_count
-
-
-def test_heterogeneous_executor_handles_early_rank_drain(rank: int) -> None:
-    adapter = DistributedFakeAdapter.model_construct(arch="fake", type="fake")
-    run = _make_run(4 if rank == 0 else 6, 1.0)
-
-    list(execute(adapter, [run], ClassifierFreeGuidance()))
-
-    assert adapter._forward_batch_sizes == [1, 1, 1, 1, 1, 1]
-    assert torch.isfinite(run.ctx.latents).all()
 
 
 class _TinyDataset:
@@ -250,8 +188,6 @@ def main() -> None:
         test_length_mismatch_is_rejected(rank)
         test_mixed_cfg_is_globally_synchronized(rank)
         test_sampler_request_count_mismatch_is_rejected(rank)
-        test_heterogeneous_executor_pads_each_rendezvous(rank)
-        test_heterogeneous_executor_handles_early_rank_drain(rank)
         test_final_padded_microbatch(rank)
     finally:
         dist.destroy_process_group()

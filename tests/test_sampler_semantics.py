@@ -14,31 +14,23 @@ Two kinds of test live here:
 import importlib
 import sys
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from flow_control.samplers import (
-    PhaseConfig,
-    PhasesRecipe,
-    RecipeBuildContext,
-    SdeWindow,
-    run_phases,
-)
+from flow_control.samplers import SdeWindow
 from flow_control.samplers.executor import Run, execute
 from flow_control.samplers.plan import (
     EvalRequest,
     GuidanceOutput,
-    RecordedStep,
     StepContext,
     Transition,
     TransitionResult,
 )
 from flow_control.samplers.sampler import (
-    ReplayItem,
-    SampleOutput,
     Sampler,
     SampleRequest,
 )
@@ -53,12 +45,17 @@ from flow_control.samplers.solver import (
     SASolver,
     solver_registry,
 )
-from flow_control.samplers.solver.flash import FlashReplayStep, FlashTransition
-from flow_control.samplers.solver.sa import SaRuntimeState, SaTransition
+from flow_control.samplers.solver.sa import SaRuntimeState
 from flow_control.samplers.transforms import (
-    finalize_replay_state,
     select_sde_window,
     with_sde_window,
+)
+from flow_control.training.grpo_sampling import (
+    RecordedStep,
+    ReplayItem,
+    collect_samples,
+    replay_steps,
+    step_log_prob,
 )
 from flow_control.utils.tensor import deep_apply_tensor_fn, deep_move_to_device
 
@@ -91,30 +88,14 @@ def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
     torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-def recording_recipe(**window_kwargs) -> PhasesRecipe:
-    """A single-phase recipe recording the (default: full) SDE window."""
-    return PhasesRecipe(
-        phases=[PhaseConfig(transforms=[SdeWindow(record=True, **window_kwargs)])]
+def run_recorded(model, sampler, batch, generator, transforms=None):
+    if transforms is not None:
+        sampler = sampler.model_copy(update={"transforms": transforms})
+    outputs, trajectories = collect_samples(
+        sampler, model, [SampleRequest(batch=batch, generator=generator)]
     )
-
-
-def run_recipe(
-    model,
-    sampler: Sampler,
-    batch,
-    generator: torch.Generator | None,
-    recipe: PhasesRecipe | None = None,
-) -> SampleOutput:
-    """Recipe-runner replacement for the deleted sample(return_trajectory=True)."""
-    phases = (recipe or recording_recipe()).build(
-        RecipeBuildContext(
-            default_sampler=sampler,
-            batches={"main": batch},
-            negative_batch_for=lambda name: None,
-            generator=generator,
-        )
-    )
-    return run_phases(model, [phases])[0]
+    output = outputs[0]
+    return capture.TraceOutput(output.final_latents, output.timesteps, trajectories[0])
 
 
 class ConstVelocityModel:
@@ -126,6 +107,11 @@ class ConstVelocityModel:
     def __init__(self, velocity: torch.Tensor) -> None:
         self.velocity = velocity
 
+    def use_variant(self, variant: str | None):
+        if variant is not None:
+            raise ValueError(f"Test model has no variant {variant!r}.")
+        return nullcontext()
+
     def predict_velocity_batched(
         self,
         batches: list,
@@ -134,7 +120,7 @@ class ConstVelocityModel:
         return [self.velocity for _ in batches]
 
 
-def stack_trajectory(output: SampleOutput) -> tuple[torch.Tensor, torch.Tensor]:
+def stack_trajectory(output: capture.TraceOutput) -> tuple[torch.Tensor, torch.Tensor]:
     """Rebuild the stacked ``(latents, log_probs)`` fixture views."""
     trajectory = output.trajectory
     assert trajectory
@@ -174,18 +160,20 @@ def sampler_from_fixture(fixture: dict) -> Sampler:
     return Sampler.model_validate(config)
 
 
-def run_e2e_fixture(fixture: dict) -> tuple[SampleOutput, Any]:
-    """Re-run a captured end-to-end config through the current recipe runner.
+def run_e2e_fixture(fixture: dict) -> tuple[capture.TraceOutput, Any]:
+    """Re-run a captured end-to-end config through the public sampler and test observer.
 
     The second element is the ``RecordingModel`` that answered the evals; it is
     untyped because the capture module is imported dynamically (see above).
     """
     model = RecordingModel()
-    output = run_recipe(
+    output = capture.trace_sample(
         model,
         sampler_from_fixture(fixture),
-        make_request_batch(fixture["initial_latents"]),
-        torch.Generator().manual_seed(777),
+        SampleRequest(
+            batch=make_request_batch(fixture["initial_latents"]),
+            generator=torch.Generator().manual_seed(777),
+        ),
     )
     return output, model
 
@@ -272,7 +260,6 @@ class BaselineParityTest(unittest.TestCase):
                         sigma=entry["sigma"],
                         sigma_next=entry["sigma_next"],
                         eta=solver.eta,
-                        record=True,
                     )
                     ctx = StepContext(
                         latents=latents,
@@ -284,8 +271,10 @@ class BaselineParityTest(unittest.TestCase):
                     )
                     result = drive_single_eval_transition(tr, ctx, velocity)
                     assert_bitwise(result.next_latents, entry["next_latents"])
-                    assert result.recorded is not None
-                    assert_bitwise(result.recorded.log_prob, entry["log_prob"])
+                    recorded = capture.recorded_step(
+                        tr, ctx, velocity, result.next_latents
+                    )
+                    assert_bitwise(recorded.log_prob, entry["log_prob"])
 
                     parts = solver_cls.step_parts(
                         latents, velocity, tr.sigma, tr.sigma_next, tr.eta
@@ -299,14 +288,17 @@ class BaselineParityTest(unittest.TestCase):
             solver = solver_cls.model_validate(fixture["solver_config"])
             for entry in fixture["entries"]:
                 with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
-                    replay = solver.make_replay(
-                        entry["sigma"], entry["sigma_next"], solver.eta
+                    recorded = RecordedStep(
+                        latent_t=fixture["latents"],
+                        latent_next=fixture["prev_sample"],
+                        log_prob=torch.zeros(1),
+                        item_index=entry["step_index"],
+                        num_items=8,
+                        transition=Transition(
+                            solver, entry["sigma"], entry["sigma_next"], solver.eta
+                        ),
                     )
-                    output = replay.logprob(
-                        fixture["velocity"],
-                        fixture["latents"],
-                        fixture["prev_sample"],
-                    )
+                    output = step_log_prob(recorded, fixture["velocity"])
                     assert_bitwise(output.log_prob, entry["replay_log_prob"])
                     assert_bitwise(output.mean, entry["replay_mean"])
                     assert_bitwise(output.std_dev, entry["replay_std_dev"])
@@ -326,14 +318,16 @@ class BaselineParityTest(unittest.TestCase):
                         latent_t=fixture["latents"],
                         latent_next=fixture["prev_sample"],
                         log_prob=torch.zeros(1),
-                        replay=solver.make_replay(
-                            entry["sigma"], entry["sigma_next"], solver.eta
+                        transition=Transition(
+                            solver, entry["sigma"], entry["sigma_next"], solver.eta
                         ),
+                        item_index=entry["step_index"],
+                        num_items=8,
                     ),
                 )
                 for entry in fixture["entries"]
             ]
-            outputs = sampler.replay_recorded_steps(model, items)
+            outputs = replay_steps(sampler, model, items)
             for entry, output in zip(fixture["entries"], outputs, strict=True):
                 with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
                     assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -350,7 +344,7 @@ class BaselineParityTest(unittest.TestCase):
         plan = [
             item
             for item in solver.plan(torch.linspace(1.0, 0.0, 9).tolist())
-            if isinstance(item, FlashTransition)
+            if isinstance(item, Transition)
         ]
         self.assertEqual(len(plan), len(fixture["entries"]))
         self.assertEqual(plan[-1].eta, 0.0)
@@ -360,16 +354,17 @@ class BaselineParityTest(unittest.TestCase):
                 index = entry["step_index"]
                 self.assertEqual(tr.sigma, entry["sigma"])
                 self.assertEqual(tr.sigma_next, entry["sigma_next"])
+                noise_scale = solver.noise_scale_at(index, len(plan))
                 deterministic = tr.eta == 0.0 or tr.sigma_next <= 0.0
                 if not deterministic:
                     # std_dev pins the compiled noise scale against the sweep.
                     assert_bitwise(
-                        latents.new_tensor(tr.sigma_next) * tr.noise_scale,
+                        latents.new_tensor(tr.sigma_next) * noise_scale,
                         entry["std_dev"],
                     )
                     assert_bitwise(
                         FlashSolver.renoise_parts(
-                            latents, velocity, tr.sigma, tr.sigma_next, tr.noise_scale
+                            latents, velocity, tr.sigma, tr.sigma_next, noise_scale
                         )[0],
                         entry["mean"],
                     )
@@ -381,23 +376,20 @@ class BaselineParityTest(unittest.TestCase):
                     solver_state=None,
                     guidance_state=None,
                 )
-                result = drive_single_eval_transition(
-                    replace(tr, record=True), ctx, velocity
-                )
+                ctx.item_index, ctx.num_items = index, len(plan)
+                result = drive_single_eval_transition(tr, ctx, velocity)
                 assert_bitwise(result.next_latents, entry["next_latents"])
-                assert result.recorded is not None
-                assert_bitwise(result.recorded.log_prob, entry["log_prob"])
-
-                replay = result.recorded.replay
-                assert isinstance(replay, FlashReplayStep)
-                self.assertEqual(replay.noise_scale, tr.noise_scale)
-                output = replay.logprob(velocity, latents, fixture["prev_sample"])
+                recorded = capture.recorded_step(tr, ctx, velocity, result.next_latents)
+                assert_bitwise(recorded.log_prob, entry["log_prob"])
+                output = step_log_prob(
+                    replace(recorded, latent_next=fixture["prev_sample"]), velocity
+                )
                 assert_bitwise(output.log_prob, entry["replay_log_prob"])
                 assert_bitwise(output.mean, entry["replay_mean"])
                 assert_bitwise(output.std_dev, entry["replay_std_dev"])
 
     def test_flash_public_replay_matches_step_baselines(self) -> None:
-        # The recorded FlashReplayStep carries the plan-compiled noise scale;
+        # The recorded Flash step carries the executed ramp position;
         # no runtime state is needed at replay time.
         fixture = load_fixture("step_flash_eta1.pt")
         solver = FlashSolver.model_validate(fixture["solver_config"])
@@ -410,17 +402,16 @@ class BaselineParityTest(unittest.TestCase):
                     latent_t=fixture["latents"],
                     latent_next=fixture["prev_sample"],
                     log_prob=torch.zeros(1),
-                    replay=FlashReplayStep(
-                        sigma=entry["sigma"],
-                        sigma_next=entry["sigma_next"],
-                        eta=solver.eta,
-                        noise_scale=solver._noise_scale_at(entry["step_index"], 8),
+                    transition=Transition(
+                        solver, entry["sigma"], entry["sigma_next"], solver.eta
                     ),
+                    item_index=entry["step_index"],
+                    num_items=8,
                 ),
             )
             for entry in fixture["entries"]
         ]
-        outputs = sampler.replay_recorded_steps(model, items)
+        outputs = replay_steps(sampler, model, items)
         for entry, output in zip(fixture["entries"], outputs, strict=True):
             with self.subTest(sigma=entry["sigma"]):
                 assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -436,7 +427,7 @@ class BaselineParityTest(unittest.TestCase):
         plan = [
             item
             for item in solver.plan(fixture["sigmas"].tolist())
-            if isinstance(item, SaTransition)
+            if isinstance(item, Transition)
         ]
         times = fixture["times"]
         self.assertEqual(len(plan), times.numel() - 1)
@@ -456,8 +447,6 @@ class BaselineParityTest(unittest.TestCase):
             fixture["tau_values"][1:-1],
         )
         self.assertEqual(plan[-1].eta, 0.0)
-        self.assertTrue(plan[-1].final)
-        self.assertFalse(any(item.final for item in plan[:-1]))
 
     def test_sa_internal_updates_still_match_baselines(self) -> None:
         # The shared AB/AM math is unchanged; pin it against the old fixtures.
@@ -520,7 +509,7 @@ class BaselineParityTest(unittest.TestCase):
 
         # First executed transition with a seeded one-entry history: order-1
         # AB predictor, eval at the predicted point, no corrector.
-        tr = SaTransition(
+        tr = Transition(
             solver=solver,
             sigma=float(times[0]),
             sigma_next=float(times[1]),
@@ -534,6 +523,7 @@ class BaselineParityTest(unittest.TestCase):
                 model_history=(m0,), time_history=(float(times[0]),)
             ),
             guidance_state=None,
+            num_items=len(times) - 1,
         )
         result, requests = drive_transition(tr, ctx, lambda request: sent_velocity)
         self.assertEqual(len(requests), 1)
@@ -553,7 +543,7 @@ class BaselineParityTest(unittest.TestCase):
         for entry in fixture["entries"]:
             with self.subTest(t_index=entry["t_index"]):
                 t_index = entry["t_index"]
-                tr = SaTransition(
+                tr = Transition(
                     solver=solver,
                     sigma=float(times[t_index - 1]),
                     sigma_next=float(times[t_index]),
@@ -571,6 +561,8 @@ class BaselineParityTest(unittest.TestCase):
                         ),
                     ),
                     guidance_state=None,
+                    item_index=t_index - 1,
+                    num_items=len(times) - 1,
                 )
                 result, requests = drive_transition(
                     tr, ctx, lambda request: sent_velocity
@@ -612,20 +604,8 @@ class BaselineParityTest(unittest.TestCase):
 class PlanInvariantsTest(unittest.TestCase):
     def test_with_sde_window_gates_eta_and_marks_record(self) -> None:
         plan = FlowSolver(eta=0.7).plan([1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
-        windowed = [
-            item
-            for item in with_sde_window(plan, 1, 3, record=True)
-            if isinstance(item, Transition)
-        ]
+        windowed = with_sde_window(plan, 1, 3)
         self.assertEqual([item.eta for item in windowed], [0.0, 0.7, 0.7, 0.0, 0.0])
-        self.assertEqual(
-            [item.record for item in windowed],
-            [False, True, True, False, False],
-        )
-        unrecorded = with_sde_window(plan, 1, 3, record=False)
-        self.assertFalse(
-            any(item.record for item in unrecorded if isinstance(item, Transition))
-        )
 
     def test_sa_plan_compiles_the_adjusted_grid_and_frozen_tau(self) -> None:
         # SA does not run on the grid it is handed: the head is capped at
@@ -638,7 +618,7 @@ class PlanInvariantsTest(unittest.TestCase):
         transitions = [
             item
             for item in solver.plan([1.0, 0.9, 0.5, 0.2, 0.0])
-            if isinstance(item, SaTransition)
+            if isinstance(item, Transition)
         ]
 
         self.assertEqual(
@@ -649,9 +629,6 @@ class PlanInvariantsTest(unittest.TestCase):
             [item.sigma_next for item in transitions], [0.9, 0.5, 0.25, 0.0]
         )
         self.assertEqual([item.eta for item in transitions], [0.4, 0.4, 0.0, 0.0])
-        self.assertEqual(
-            [item.final for item in transitions], [False, False, False, True]
-        )
 
 
 class ExecutorSemanticsTest(unittest.TestCase):
@@ -674,27 +651,27 @@ class ExecutorSemanticsTest(unittest.TestCase):
         # sde_window gates eta whether or not it records: recording must not
         # change the sampled path (same RNG consumption), and the executed
         # sigma grid is plan metadata (full sigmas[:-1], never window-sliced).
-        def run(record: bool) -> SampleOutput:
-            return run_recipe(
-                microbatching.FakeSamplerModel(),
-                Sampler(steps=6, solver=FlowSolver(eta=0.7)),
-                microbatching.make_sampler_batch(0.4),
-                torch.Generator().manual_seed(11),
-                recipe=PhasesRecipe(
-                    phases=[
-                        PhaseConfig(
-                            transforms=[SdeWindow(size=2, range=(1, 5), record=record)]
-                        )
-                    ]
-                ),
+        def run(record: bool):
+            sampler = Sampler(
+                steps=6,
+                solver=FlowSolver(eta=0.7),
+                transforms=[SdeWindow(size=2, range=(1, 5))],
             )
+            model = microbatching.FakeSamplerModel()
+            batch = microbatching.make_sampler_batch(0.4)
+            generator = torch.Generator().manual_seed(11)
+            if record:
+                return run_recorded(model, sampler, batch, generator)
+            return sampler.sample(
+                model, [SampleRequest(batch=batch, generator=generator)]
+            )[0]
 
         recorded = run(True)
         plain = run(False)
         assert_bitwise(recorded.final_latents, plain.final_latents)
         self.assertEqual(recorded.timesteps.numel(), 6)
         assert_bitwise(recorded.timesteps, plain.timesteps)
-        self.assertIsNone(plain.trajectory)
+        self.assertFalse(hasattr(plain, "trajectory"))
         # Recorded steps chain: each latent_next is the next step's latent_t.
         trajectory = recorded.trajectory
         assert trajectory is not None
@@ -718,7 +695,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 sampler = Sampler(steps=4, solver=solver)
                 batch = microbatching.make_batch(0.9)
                 model = ConstVelocityModel(velocity)
-                output = run_recipe(
+                output = run_recorded(
                     model, sampler, batch, torch.Generator().manual_seed(3)
                 )
                 trajectory = output.trajectory
@@ -727,15 +704,15 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 self.assertTrue(all((step.log_prob != 0).all() for step in trajectory))
 
                 items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-                replayed = sampler.replay_recorded_steps(model, items)
+                replayed = replay_steps(sampler, model, items)
                 for step, replay in zip(trajectory, replayed, strict=True):
                     assert_bitwise(replay.log_prob, step.log_prob)
 
-                # Replay reads the ReplayStep's stored ACTUAL eta, never the
+                # Replay reads the recorded transition's ACTUAL eta, never the
                 # sampler's live solver config.
                 retuned = Sampler(steps=4, solver=type(solver)(eta=0.123))
                 for output_now, output_then in zip(
-                    retuned.replay_recorded_steps(model, items),
+                    replay_steps(retuned, model, items),
                     replayed,
                     strict=True,
                 ):
@@ -746,19 +723,19 @@ class ExecutorSemanticsTest(unittest.TestCase):
         sampler = Sampler(steps=4, solver=FlowSolver(eta=0.5))
         batch = microbatching.make_batch(0.9)
         model = ConstVelocityModel(velocity)
-        output = run_recipe(model, sampler, batch, torch.Generator().manual_seed(3))
+        output = run_recorded(model, sampler, batch, torch.Generator().manual_seed(3))
         assert output.trajectory is not None
 
         # CPU rollout storage round-trips the whole SampleOutput dataclass,
-        # rebuilding fresh RecordedStep/ReplayStep instances along the way.
-        moved: SampleOutput = deep_move_to_device(
+        # rebuilding fresh RecordedStep/Transition instances along the way.
+        moved: capture.TraceOutput = deep_move_to_device(
             output, torch.device("cpu"), preserve_aliases=True
         )
         self.assertIsNot(moved, output)
         assert moved.trajectory is not None
         for original, restored in zip(output.trajectory, moved.trajectory, strict=True):
             self.assertIsNot(restored, original)
-            self.assertEqual(restored.replay, original.replay)
+            self.assertEqual(restored.transition, original.transition)
             assert_bitwise(restored.latent_t, original.latent_t)
             assert_bitwise(restored.latent_next, original.latent_next)
         for previous, following in zip(
@@ -767,7 +744,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
             self.assertIs(previous.latent_next, following.latent_t)
 
         items = [ReplayItem(batch=batch, recorded=step) for step in moved.trajectory]
-        replayed = sampler.replay_recorded_steps(model, items)
+        replayed = replay_steps(sampler, model, items)
         for step, replay in zip(output.trajectory, replayed, strict=True):
             assert_bitwise(replay.log_prob, step.log_prob)
 
@@ -790,7 +767,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
 
     def test_flash_windowed_recording_stores_offset_noise_scales(self) -> None:
         # With an sde_window the recorded steps start at train_start > 0; each
-        # FlashReplayStep must carry the plan-compiled noise scale of its
+        # record must retain the executed noise scale of its
         # plan-level step index (which varies per step here, so an offset bug
         # would change the numbers).
         velocity = torch.full((1, 4, 2), 0.3)
@@ -798,12 +775,12 @@ class ExecutorSemanticsTest(unittest.TestCase):
         sampler = Sampler(steps=8, solver=solver)
         batch = microbatching.make_batch(0.9)
         model = ConstVelocityModel(velocity)
-        output = run_recipe(
+        output = run_recorded(
             model,
             sampler,
             batch,
             torch.Generator().manual_seed(3),
-            recipe=recording_recipe(size=3, range=(2, 7)),
+            transforms=[SdeWindow(size=3, range=(2, 7))],
         )
         trajectory = output.trajectory
         assert trajectory is not None
@@ -816,33 +793,23 @@ class ExecutorSemanticsTest(unittest.TestCase):
         self.assertGreater(train_start, 0)
         self.assertEqual(len(trajectory), train_end - train_start)
         for index, step in enumerate(trajectory):
-            replay = step.replay
-            assert isinstance(replay, FlashReplayStep)
-            self.assertEqual(
-                replay.noise_scale,
-                solver._noise_scale_at(train_start + index, sampler.steps),
-            )
+            self.assertEqual(step.item_index, train_start + index)
+            self.assertEqual(step.num_items, sampler.steps)
 
         items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-        replayed = sampler.replay_recorded_steps(model, items)
+        replayed = replay_steps(sampler, model, items)
         for step, replay_output in zip(trajectory, replayed, strict=True):
             assert_bitwise(replay_output.log_prob, step.log_prob)
 
         # A wrong noise scale must change the replayed log-prob.
         first = trajectory[0]
-        first_replay = first.replay
-        assert isinstance(first_replay, FlashReplayStep)
         corrupted = ReplayItem(
             batch=batch,
             recorded=replace(
-                first,
-                replay=replace(
-                    first_replay,
-                    noise_scale=solver._noise_scale_at(0, sampler.steps),
-                ),
+                first, noise_scale=solver.noise_scale_at(0, sampler.steps)
             ),
         )
-        wrong = sampler.replay_recorded_steps(model, [corrupted])[0]
+        wrong = replay_steps(sampler, model, [corrupted])[0]
         self.assertFalse(torch.equal(wrong.log_prob, first.log_prob))
 
     def test_sliced_plans_warm_up_from_empty_history(self) -> None:
@@ -856,10 +823,8 @@ class ExecutorSemanticsTest(unittest.TestCase):
             with self.subTest(solver=solver.type):
                 sampler = Sampler(steps=8, solver=solver)
                 full = solver.plan(sigmas)
-                tail_sliced = finalize_replay_state(full[len(full) // 2 :])
-                tail_fresh = finalize_replay_state(
-                    solver.plan(sigmas[len(full) // 2 :])
-                )
+                tail_sliced = full[len(full) // 2 :]
+                tail_fresh = solver.plan(sigmas[len(full) // 2 :])
                 self.assertEqual(tail_sliced, tail_fresh)
 
                 results: list[torch.Tensor] = []
@@ -887,9 +852,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
         initial = torch.randn(1, 4, 2, generator=torch.Generator().manual_seed(1))
 
         # eta gated to zero everywhere: deterministic PEC, no generator draws.
-        plan = finalize_replay_state(
-            with_sde_window(solver.plan(torch.linspace(1.0, 0.0, 7).tolist()), 0, 0)
-        )
+        plan = with_sde_window(solver.plan(torch.linspace(1.0, 0.0, 7).tolist()), 0, 0)
 
         def run_gated(seed: int) -> tuple[torch.Tensor, bool]:
             generator = torch.Generator().manual_seed(seed)
@@ -941,50 +904,6 @@ class ExecutorSemanticsTest(unittest.TestCase):
         # 4 eval rounds (seed + 3 PEC target evals; terminal evaluates nothing),
         # each a single batched forward over both requests.
         self.assertEqual(model.forward_batch_sizes, [2, 2, 2, 2])
-
-    def test_heterogeneous_plans_fall_back_to_grouped_execution(self) -> None:
-        # Runs with different plan topologies in one execute() call take the
-        # grouped-sequential fallback: same-topology runs still batch together,
-        # every run finishes, and results match the homogeneous fast path.
-        sampler = Sampler(solver=FlowSolver())
-        solver = sampler.solver
-
-        def make_run(steps: int, value: float) -> Run:
-            plan = finalize_replay_state(
-                solver.plan(torch.linspace(1.0, 0.0, steps + 1).tolist())
-            )
-            batch = microbatching.make_sampler_batch(value)
-            return Run(
-                plan=plan,
-                ctx=StepContext(
-                    latents=batch["noisy_latents"].float(),
-                    generator=None,
-                    solver_state=None,
-                    guidance_state=None,
-                ),
-                batch=batch,
-                negative_batch=None,
-            )
-
-        model = microbatching.FakeSamplerModel()
-        runs = [make_run(4, 1.0), make_run(6, 2.0), make_run(4, 3.0)]
-        events = list(execute(model, runs, sampler.guidance))
-        # Groups execute sequentially (4-step group of two runs, then the
-        # 6-step run); step indices stay contiguous over the combined total.
-        self.assertEqual([event.step_idx for event in events], list(range(10)))
-        self.assertTrue(all(event.total_steps == 10 for event in events))
-        self.assertEqual(model.forward_batch_sizes, [2, 2, 2, 2, 1, 1, 1, 1, 1, 1])
-
-        for steps, value, run in (
-            (4, 1.0, runs[0]),
-            (6, 2.0, runs[1]),
-            (4, 3.0, runs[2]),
-        ):
-            reference = make_run(steps, value)
-            list(
-                execute(microbatching.FakeSamplerModel(), [reference], sampler.guidance)
-            )
-            assert_bitwise(run.ctx.latents, reference.ctx.latents)
 
 
 if __name__ == "__main__":

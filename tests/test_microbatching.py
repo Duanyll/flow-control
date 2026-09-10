@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,11 @@ class FakeSamplerModel:
 
     def __init__(self) -> None:
         self.forward_batch_sizes: list[int] = []
+
+    def use_variant(self, variant: str | None):
+        if variant is not None:
+            raise ValueError(f"Test model has no variant {variant!r}.")
+        return nullcontext()
 
     def predict_velocity_batched(
         self,

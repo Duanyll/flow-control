@@ -12,28 +12,8 @@ from ..plan import (
     Transition,
     TransitionGen,
     TransitionResult,
-    zero_log_prob,
 )
 from .base import BaseSolver, solver_registry
-
-
-@dataclass(frozen=True, slots=True)
-class SaTransition(Transition):
-    """SA transition over the adjusted time grid.
-
-    A grid starting above ``initial_time`` is capped there; the optional
-    penultimate adjustment may also change ``sigma_next``. ``eta`` is the
-    actual ``tau(sigma_next)`` compiled at plan time (terminal is zero).
-    """
-
-    final: bool = False
-    """Terminal step: collapse to the previous eval's x0 prediction."""
-
-    def eval_topology(self) -> str:
-        # ``final`` collapses the transition to zero evals, so a front slice
-        # of a longer plan (no terminal marker) must not fingerprint-match a
-        # fresh plan of the same length that ends with one.
-        return f"{type(self).__name__}:{type(self.solver).__name__}:final={self.final}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,18 +55,17 @@ class SASolver(BaseSolver):
         times = list(sigmas)
         # The reference avoids evaluating exactly at pure noise for a full
         # 1.0-start grid. A partial plan already below that point must retain
-        # the exact sigma supplied by its init operation.
+        # the exact sigma supplied by its start configuration.
         times[0] = min(times[0], self.initial_time)
         if self.adjust_penultimate_time:
             times[-2] = times[-3] / 2.0
         num_steps = len(times) - 1
         return [
-            SaTransition(
+            Transition(
                 solver=self,
                 sigma=sigma,
                 sigma_next=sigma_next,
                 eta=self._tau(sigma_next) if index < num_steps - 1 else 0.0,
-                final=index == num_steps - 1,
             )
             for index, (sigma, sigma_next) in enumerate(
                 zip(times[:-1], times[1:], strict=True)
@@ -94,7 +73,6 @@ class SASolver(BaseSolver):
         ]
 
     def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        assert isinstance(tr, SaTransition)
         state = ctx.solver_state
         assert state is None or isinstance(state, SaRuntimeState)
         latents = ctx.latents
@@ -102,7 +80,9 @@ class SASolver(BaseSolver):
         if state is None:
             # Empty history (run start or sliced plan): seed it with an eval
             # at the current point, mirroring the reference initial evaluation.
-            out = yield EvalRequest(latents=latents, sigma=tr.sigma)
+            out = yield EvalRequest(
+                latents=latents, sigma=tr.sigma, eta=tr.eta, solver=self
+            )
             x0 = self._velocity_to_x0(
                 out.velocity, latents, latents.new_tensor(tr.sigma)
             )
@@ -112,16 +92,11 @@ class SASolver(BaseSolver):
             model_history = state.model_history
             time_history = state.time_history
 
-        if tr.final:
+        if ctx.item_index == ctx.num_items - 1:
             # Reference final step: return the last x0 prediction directly,
             # without predictor, corrector or noise.
             next_latents = model_history[-1]
-            recorded = (
-                self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
-                if tr.record
-                else None
-            )
-            return TransitionResult(next_latents=next_latents, recorded=recorded)
+            return TransitionResult(next_latents=next_latents)
 
         t = latents.new_tensor(tr.sigma_next)
         tau = latents.new_tensor(tr.eta)
@@ -144,7 +119,9 @@ class SASolver(BaseSolver):
         predicted = self._adams_bashforth_update(
             latents, tau, model_list, time_list, noise, t, order=order
         )
-        out = yield EvalRequest(latents=predicted, sigma=tr.sigma_next)
+        out = yield EvalRequest(
+            latents=predicted, sigma=tr.sigma_next, eta=tr.eta, solver=self
+        )
         new_model = self._velocity_to_x0(out.velocity, predicted, t)
         if order == 1:
             next_latents = predicted
@@ -157,14 +134,8 @@ class SASolver(BaseSolver):
             model_history=(*model_history, new_model)[-2:],
             time_history=(*time_history, tr.sigma_next)[-2:],
         )
-        recorded = (
-            self._make_recorded_step(tr, ctx, next_latents, zero_log_prob(latents))
-            if tr.record
-            else None
-        )
         return TransitionResult(
             next_latents=next_latents,
-            recorded=recorded,
             next_solver_state=next_state,
         )
 
