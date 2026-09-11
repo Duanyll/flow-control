@@ -11,7 +11,7 @@ import torch
 from pydantic import PrivateAttr
 
 from flow_control.processors.tasks.inpaint import InpaintProcessor
-from flow_control.samplers.executor import Run, execute
+from flow_control.samplers import Executor, SampleRun
 from flow_control.samplers.guidance import (
     BaseGuidance,
     BranchSpec,
@@ -32,8 +32,8 @@ from flow_control.samplers.solver import (
     SASolver,
 )
 from flow_control.training.grpo_sampling import (
+    GrpoCollector,
     ReplayItem,
-    collect_samples,
     replay_steps,
 )
 
@@ -59,6 +59,7 @@ class _CountingGuidance(BaseGuidance):
 
     _seen: list[int] = PrivateAttr(default_factory=list)
     """Counter value received at each combine, in eval order."""
+    _indices: list[int] = PrivateAttr(default_factory=list)
 
     def init_state(self) -> GuidanceState | None:
         return _CounterState(count=0)
@@ -74,6 +75,7 @@ class _CountingGuidance(BaseGuidance):
     ) -> tuple[GuidanceOutput, GuidanceState | None]:
         assert isinstance(state, _CounterState)
         self._seen.append(state.count)
+        self._indices.append(ctx.item_index)
         return (
             GuidanceOutput(velocity=evals.velocities["cond"]),
             _CounterState(count=state.count + 1),
@@ -81,7 +83,9 @@ class _CountingGuidance(BaseGuidance):
 
 
 class GuidedVelocityCompatibilityTest(unittest.TestCase):
-    def test_get_guided_velocity_matches_executor_path(self) -> None:
+    def test_guided_velocity_matches_sampling_path(self) -> None:
+        # Training re-evaluates a plan item through SampleRun.guided_velocity;
+        # it must be the very velocity the sampling loop stepped with.
         sampler = Sampler(
             steps=1,
             guidance=ClassifierFreeGuidance(scale=2.0),
@@ -89,31 +93,27 @@ class GuidedVelocityCompatibilityTest(unittest.TestCase):
         )
         cond = microbatching.make_sampler_batch(3.0)
         negative = microbatching.make_sampler_batch(1.0)
+        request = SampleRequest(batch=cond, negative_batch=negative)
 
-        velocity = sampler.get_guided_velocity(
-            microbatching.FakeSamplerModel(),
-            batches=[cond],
-            negative_batches=[negative],
-            latents=[cond["noisy_latents"]],
-            timesteps=[torch.tensor([1.0])],
-            sigmas=[1.0],
-        )[0]
+        run = sampler.make_run(request, plan=sampler.plan(cond))
+        velocity = Executor(
+            microbatching.FakeSamplerModel(), sampler.variant_keys()
+        ).evaluate([run.guided_velocity(cond["noisy_latents"], 0)])[0]
         torch.testing.assert_close(velocity, torch.tensor([[[5.0]]]))
 
-        output = sampler.sample(
-            microbatching.FakeSamplerModel(),
-            [SampleRequest(batch=cond, negative_batch=negative)],
-        )[0]
-        # The executor's single Euler step must use the same guided velocity.
+        sampled = next(
+            iter(sampler.sample(microbatching.FakeSamplerModel(), [request]))
+        )
+        # The single Euler step must use the same guided velocity.
         torch.testing.assert_close(
-            output.final_latents,
+            sampled.ctx.latents,
             euler_step(cond["noisy_latents"], velocity, 1.0, 0.0),
         )
 
 
 class DifferentialDiffusionTest(unittest.TestCase):
     @staticmethod
-    def _make_run() -> Run:
+    def _make_run() -> SampleRun:
         batch: Any = microbatching.make_batch(
             10.0,
             tokens=4,
@@ -123,7 +123,10 @@ class DifferentialDiffusionTest(unittest.TestCase):
         batch["inpaint_mask_latents"] = torch.tensor(
             [[[0.0], [0.25], [0.75], [1.0]]],
         )
-        return Run(
+        return SampleRun(
+            sampler=Sampler(),
+            batch=batch,
+            negative_batch=None,
             plan=FlowSolver().plan([1.0, 0.5, 0.0]),
             ctx=StepContext(
                 latents=batch["noisy_latents"].float(),
@@ -132,8 +135,6 @@ class DifferentialDiffusionTest(unittest.TestCase):
                 guidance_state=None,
                 num_items=2,
             ),
-            batch=batch,
-            negative_batch=None,
         )
 
     def test_config_wraps_inner_guidance(self) -> None:
@@ -238,11 +239,15 @@ class DifferentialDiffusionTest(unittest.TestCase):
                 super().__init__()
                 self.latents: list[list[torch.Tensor]] = []
 
-            def predict_velocity_batched(self, batches, timesteps):
+            def predict_velocity_batched(
+                self, batches, timesteps, *, dummy_outputs=None
+            ):
                 self.latents.append(
                     [batch["noisy_latents"].clone() for batch in batches]
                 )
-                return super().predict_velocity_batched(batches, timesteps)
+                return super().predict_velocity_batched(
+                    batches, timesteps, dummy_outputs=dummy_outputs
+                )
 
         guidance = DifferentialDiffusion()
         sampler = Sampler(steps=2, projectors=[guidance], solver=FlowSolver())
@@ -254,7 +259,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
             runs.append(SampleRequest(batch=batch))
 
         model = RecordingModel()
-        sampler.sample(model, runs)
+        list(sampler.sample(model, runs))
 
         self.assertEqual(model.forward_batch_sizes, [2, 2])
         torch.testing.assert_close(model.latents[0][0], torch.tensor([[[10.0]]]))
@@ -271,18 +276,26 @@ class DifferentialDiffusionTest(unittest.TestCase):
             type="fake",
         )
 
-        plain = Sampler(
-            steps=4,
-            guidance=ClassifierFreeGuidance(),
-            solver=DPMSolver(order=2),
-        ).sample(model, [SampleRequest(batch=batch)])[0]
-        differential = Sampler(
-            steps=4,
-            projectors=[DifferentialDiffusion()],
-            solver=DPMSolver(order=2),
-        ).sample(model, [SampleRequest(batch=batch)])[0]
+        plain = next(
+            iter(
+                Sampler(
+                    steps=4,
+                    guidance=ClassifierFreeGuidance(),
+                    solver=DPMSolver(order=2),
+                ).sample(model, [SampleRequest(batch=batch)])
+            )
+        )
+        differential = next(
+            iter(
+                Sampler(
+                    steps=4,
+                    projectors=[DifferentialDiffusion()],
+                    solver=DPMSolver(order=2),
+                ).sample(model, [SampleRequest(batch=batch)])
+            )
+        )
 
-        torch.testing.assert_close(differential.final_latents, plain.final_latents)
+        torch.testing.assert_close(differential.ctx.latents, plain.ctx.latents)
 
     def test_recorded_projection_gap_remains_independently_replayable(self) -> None:
         guidance = DifferentialDiffusion()
@@ -294,19 +307,27 @@ class DifferentialDiffusionTest(unittest.TestCase):
         batch: Any = microbatching.make_sampler_batch(0.0, initial=0.9)
         batch["inpaint_latents"] = torch.full((1, 1, 1), 0.2)
         batch["inpaint_mask_latents"] = torch.zeros(1, 1, 1)
-        _, records = collect_samples(
-            sampler,
-            microbatching.FakeSamplerModel(),
-            [SampleRequest(batch=batch, generator=torch.Generator().manual_seed(5))],
+        collector = GrpoCollector(sampler)
+        run = next(
+            iter(
+                sampler.sample(
+                    microbatching.FakeSamplerModel(),
+                    [
+                        SampleRequest(
+                            batch=batch, generator=torch.Generator().manual_seed(5)
+                        )
+                    ],
+                    collector=collector,
+                )
+            )
         )
-        trajectory = records[0]
+        trajectory = collector.take(run)
         self.assertEqual(len(trajectory), 2)
         self.assertFalse(torch.equal(trajectory[0].latent_next, trajectory[1].latent_t))
 
         replayed = replay_steps(
-            sampler,
             microbatching.FakeSamplerModel(),
-            [ReplayItem(batch=batch, recorded=step) for step in trajectory],
+            [ReplayItem(run, step) for step in trajectory],
         )
         for recorded, replay in zip(trajectory, replayed, strict=True):
             torch.testing.assert_close(replay.log_prob, recorded.log_prob)
@@ -317,25 +338,32 @@ class GuidanceStateTimingTest(unittest.TestCase):
         # SA's first PEC transition evaluates twice (seeding eval + predicted
         # point); the counter must advance at the mid-transition eval too.
         guidance = _CountingGuidance()
-        solver = SASolver(eta=0.0)
-        plan = solver.plan(torch.linspace(1.0, 0.0, 5).tolist())
+        sampler = Sampler(steps=4, solver=SASolver(eta=0.0), guidance=guidance)
         batch = microbatching.make_sampler_batch(1.0)
-        run = Run(
-            plan=plan,
-            ctx=StepContext(
-                latents=batch["noisy_latents"].float(),
-                generator=None,
-                solver_state=None,
-                guidance_state=guidance.init_state(),
-            ),
-            batch=batch,
-            negative_batch=None,
+        run = next(
+            iter(
+                sampler.sample(microbatching.FakeSamplerModel(), [SampleRequest(batch)])
+            )
         )
-        events = list(execute(microbatching.FakeSamplerModel(), [run], guidance))
-        self.assertEqual(len(events), len(plan))
+        self.assertEqual(len(run.plan), 4)
         # 4 transitions -> 2 + 1 + 1 + 0 evals; [0, 1] within the first
         # transition proves per-eval (not per-transition) advancement.
         self.assertEqual(guidance._seen, [0, 1, 2, 3])
         state = run.ctx.guidance_state
         assert isinstance(state, _CounterState)
         self.assertEqual(state.count, 4)
+
+        # S2 review reproduced [2, 2, 2] here: priming multiple evaluations
+        # of one run must not overwrite earlier contexts or reuse its state.
+        guidance._seen.clear()
+        guidance._indices.clear()
+        saved_index, saved_latents = run.ctx.item_index, run.ctx.latents
+        for _ in range(2):
+            Executor(microbatching.FakeSamplerModel()).evaluate(
+                [run.guided_velocity(batch["noisy_latents"], i) for i in range(3)]
+            )
+        self.assertEqual(guidance._indices, [0, 1, 2] * 2)
+        self.assertEqual(guidance._seen, [0] * 6)
+        self.assertEqual(run.ctx.item_index, saved_index)
+        self.assertIs(run.ctx.latents, saved_latents)
+        self.assertIs(run.ctx.guidance_state, state)

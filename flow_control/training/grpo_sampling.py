@@ -1,20 +1,15 @@
-"""GRPO's stochastic-step collection and differentiable likelihood replay."""
+"""GRPO's stochastic-step records and differentiable likelihood replay."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
-from flow_control.adapters.base import Batch, SamplerModel
-from flow_control.samplers.evaluation import evaluate
-from flow_control.samplers.executor import (
-    StepObserver,
-    validate_distributed_request_count,
-)
-from flow_control.samplers.plan import EvalRequest, StepContext, Transition, euler_step
-from flow_control.samplers.sampler import SampleOutput, Sampler, SampleRequest
+from flow_control.adapters.base import SamplerModel
+from flow_control.samplers import Executor, Sampler, SampleRun, StepRecord
+from flow_control.samplers.plan import Transition, euler_step
 from flow_control.samplers.solver import (
     CPSSolver,
     DanceSolver,
@@ -22,6 +17,8 @@ from flow_control.samplers.solver import (
     FlashSolver,
     FlowSolver,
 )
+
+_LIKELIHOOD_SOLVERS = (FlowSolver, DDIMSolver, CPSSolver, DanceSolver, FlashSolver)
 
 
 @dataclass(slots=True)
@@ -38,9 +35,9 @@ class RecordedStep:
 
 @dataclass(slots=True)
 class ReplayItem:
-    batch: Batch
+    run: SampleRun
+    """A training run over the rollout's executed plan (``Sampler.make_run(plan=...)``)."""
     recorded: RecordedStep
-    negative_batch: Batch | None = None
 
 
 @dataclass(slots=True)
@@ -53,6 +50,7 @@ class StepLogProbOutput:
 def normal_log_prob(
     sample: torch.Tensor, mean: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
+    sample, mean, scale = sample.float(), mean.float(), scale.float()
     log_prob = (
         -((sample.detach() - mean) ** 2) / (2 * scale**2)
         - torch.log(scale)
@@ -75,7 +73,7 @@ def step_log_prob(recorded: RecordedStep, velocity: torch.Tensor) -> StepLogProb
     """
     tr = recorded.transition
     solver = tr.solver
-    latents = recorded.latent_t
+    latents, velocity = recorded.latent_t.float(), velocity.float()
     if (tr.eta == 0.0 and not isinstance(solver, DDIMSolver)) or (
         isinstance(solver, FlashSolver) and tr.sigma_next <= 0.0
     ):
@@ -109,110 +107,75 @@ def step_log_prob(recorded: RecordedStep, velocity: torch.Tensor) -> StepLogProb
     if tr.eta == 0.0:
         log_prob = torch.zeros(latents.shape[0], device=latents.device)
     elif isinstance(solver, CPSSolver):
-        residual = -((recorded.latent_next.detach() - mean) ** 2)
+        residual = -((recorded.latent_next.detach().float() - mean) ** 2)
         log_prob = residual.mean(dim=tuple(range(1, residual.ndim)))
     else:
         log_prob = normal_log_prob(recorded.latent_next, mean, noise_scale)
     return StepLogProbOutput(log_prob, mean, std_dev)
 
 
-def _validate_guidance(sampler: Sampler) -> None:
-    if sampler.guidance.init_state() is not None:
-        raise ValueError(
-            "GRPO requires stateless guidance; guidance-state replay is unsupported."
-        )
+@dataclass
+class GrpoCollector:
+    """Keep stochastic latents and likelihoods as steps finish; never retain velocities."""
 
+    sampler: Sampler
+    _records: dict[int, list[RecordedStep]] = field(default_factory=dict, init=False)
 
-def collect_samples(
-    sampler: Sampler,
-    model: SamplerModel,
-    requests: list[SampleRequest],
-    *,
-    observer: StepObserver | None = None,
-) -> tuple[list[SampleOutput], list[list[RecordedStep]]]:
-    _validate_guidance(sampler)
-    if not isinstance(
-        sampler.solver, (FlowSolver, DDIMSolver, CPSSolver, DanceSolver, FlashSolver)
-    ):
-        raise ValueError(
-            f"GRPO has no step likelihood for solver {sampler.solver.type!r}."
-        )
-    trajectories: list[list[RecordedStep]] = [[] for _ in requests]
-
-    def collect(
-        run_index: int,
-        transition: Transition,
-        ctx: StepContext,
-        velocity: torch.Tensor | None,
-        next_latents: torch.Tensor,
-    ) -> None:
-        if transition.eta > 0.0:
-            assert velocity is not None
-            recorded = RecordedStep(
-                ctx.latents,
-                next_latents,
-                next_latents.new_empty(0),
-                transition,
-                ctx.item_index,
-                ctx.num_items,
-                noise_scale=(
-                    transition.solver.noise_scale_at(ctx.item_index, ctx.num_items)
-                    if isinstance(transition.solver, FlashSolver)
-                    else None
-                ),
+    def __post_init__(self) -> None:
+        if self.sampler.guidance.init_state() is not None:
+            raise ValueError(
+                "GRPO requires stateless guidance; guidance-state replay is unsupported."
             )
-            recorded.log_prob = step_log_prob(recorded, velocity).log_prob
-            trajectories[run_index].append(recorded)
-        if observer is not None:
-            observer(run_index, transition, ctx, velocity, next_latents)
+        if not isinstance(self.sampler.solver, _LIKELIHOOD_SOLVERS):
+            raise ValueError(
+                f"GRPO has no step likelihood for solver {self.sampler.solver.type!r}."
+            )
 
-    outputs = sampler.sample(model, requests, observer=collect)
-    if any(not steps for steps in trajectories):
-        raise ValueError(
-            "GRPO requires at least one stochastic step per sample; set solver.eta > 0 "
-            "and keep a nonempty stochastic window in sampler.transforms."
+    def __call__(self, run: SampleRun, step: StepRecord) -> None:
+        if step.transition.eta <= 0.0:
+            return
+        assert step.velocity is not None
+        solver = step.transition.solver
+        recorded = RecordedStep(
+            step.latents,
+            step.next_latents,
+            step.next_latents.new_empty(0),
+            step.transition,
+            step.index,
+            len(run.plan),
+            noise_scale=(
+                solver.noise_scale_at(step.index, len(run.plan))
+                if isinstance(solver, FlashSolver)
+                else None
+            ),
         )
-    return outputs, trajectories
+        recorded.log_prob = step_log_prob(recorded, step.velocity).log_prob
+        self._records.setdefault(id(run), []).append(recorded)
+
+    def take(self, run: SampleRun) -> list[RecordedStep]:
+        records = self._records.pop(id(run), [])
+        if not records:
+            raise ValueError(
+                "GRPO requires at least one stochastic step per sample; set solver.eta > 0 "
+                "and keep a nonempty stochastic window in sampler.transforms."
+            )
+        return records
 
 
 def replay_steps(
-    sampler: Sampler, model: SamplerModel, items: list[ReplayItem]
+    model: SamplerModel, items: list[ReplayItem]
 ) -> list[StepLogProbOutput]:
+    """Re-evaluate each recorded step's guided velocity and rebuild its likelihood."""
     if not items:
         raise ValueError("replay_steps requires at least one item.")
-    _validate_guidance(sampler)
-    validate_distributed_request_count(len(items), model.device, "GRPO.replay_steps")
-    requests = [
-        EvalRequest(
-            latents=item.recorded.latent_t,
-            sigma=item.recorded.transition.sigma,
-            sigma_next=item.recorded.transition.sigma_next,
-            eta=item.recorded.transition.eta,
-            solver=item.recorded.transition.solver,
-        )
-        for item in items
-    ]
-    contexts = [
-        StepContext(
-            latents=item.recorded.latent_t,
-            generator=None,
-            solver_state=None,
-            guidance_state=None,
-            item_index=item.recorded.item_index,
-            num_items=item.recorded.num_items,
-        )
-        for item in items
-    ]
-    outputs = evaluate(
-        model=model,
-        guidance=sampler.guidance,
-        batches=[item.batch for item in items],
-        negative_batches=[item.negative_batch for item in items],
-        requests=requests,
-        contexts=contexts,
-        projectors=sampler.projectors,
+    executor = Executor(model, items[0].run.sampler.variant_keys())
+    velocities = executor.evaluate(
+        [
+            item.run.guided_velocity(item.recorded.latent_t, item.recorded.item_index)
+            for item in items
+        ]
     )
     return [
-        step_log_prob(item.recorded, output.velocity)
-        for item, output in zip(items, outputs, strict=True)
+        step_log_prob(item.recorded, velocity)
+        for item, velocity in zip(items, velocities, strict=True)
     ]

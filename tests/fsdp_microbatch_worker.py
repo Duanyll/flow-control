@@ -14,9 +14,8 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers.evaluation import evaluate, predict_velocity
+from flow_control.samplers import Executor, Sampler, SampleRequest, conditional_velocity
 from flow_control.samplers.guidance import ClassifierFreeGuidance
-from flow_control.samplers.plan import EvalRequest, StepContext
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tiling import TileLayout
 
@@ -67,7 +66,7 @@ class TinyAdapter(BaseModelAdapter[TinyTransformer, Batch]):
 
     @property
     def dtype(self) -> torch.dtype:
-        return torch.float32
+        return self.transformer.dtype
 
     def _predict_velocity(
         self,
@@ -195,25 +194,17 @@ def run_branch_case(
     )
     torch.manual_seed(100 + dist.get_rank())
     batch = make_batch(4, device)
+    sampler = Sampler(steps=2, guidance=guidance)
     outputs = []
     for adapter in (sharded, control):
-        output = evaluate(
-            model=adapter,
-            guidance=guidance,
-            batches=[batch],
-            negative_batches=[None],
-            requests=[EvalRequest(batch["noisy_latents"], 0.5)],
-            contexts=[
-                StepContext(
-                    batch["noisy_latents"],
-                    None,
-                    None,
-                    None,
-                    item_index=dist.get_rank() if different_variants else 0,
-                    num_items=2,
+        run = sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
+        output = Executor(adapter, sampler.variant_keys()).evaluate(
+            [
+                run.guided_velocity(
+                    batch["noisy_latents"], dist.get_rank() if different_variants else 0
                 )
-            ],
-        )[0].velocity
+            ]
+        )[0]
         outputs.append(output)
     torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-5, atol=1e-6)
     for output in outputs:
@@ -239,7 +230,7 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     cast(dict[str, Any], batch)["tiling"] = TileLayout(
         tile_size=2 * stride, overlap=stride, stride=stride
     ).model_dump()
-    actual = predict_velocity(sharded, [batch], timesteps)[0]
+    actual = Executor(sharded).evaluate([conditional_velocity(batch, timesteps[0])])[0]
     # The toy network is tokenwise: an untiled, unsharded forward is an oracle
     # for overlap normalization and for every tile's gradient.
     expected = control.predict_velocity_batched([batch], timesteps)[0]
@@ -248,6 +239,25 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     actual.square().mean().backward()
     expected.square().mean().backward()
     compare_gradients(sharded, control, "tiled sequential forwards")
+
+    # Complete tiled sampling must match the tokenwise whole-image oracle.
+    # Run real bf16 Linear forwards while every solver/collector tensor is fp32.
+    def check_step(run, step):
+        assert step.latents.dtype == step.next_latents.dtype == torch.float32
+        assert step.velocity is not None and step.velocity.dtype == torch.float32
+
+    sampler = Sampler(steps=3)
+    nn.Module.to(control.transformer, dtype=torch.bfloat16)
+    untiled = {key: value for key, value in batch.items() if key != "tiling"}
+    with torch.no_grad():
+        (tiled_run,) = sampler.sample(
+            control, [SampleRequest(batch)], collector=check_step
+        )
+        (plain_run,) = sampler.sample(control, [SampleRequest(cast(Batch, untiled))])
+    torch.testing.assert_close(
+        tiled_run.ctx.latents, plain_run.ctx.latents, rtol=1e-5, atol=1e-6
+    )
+    logger.info("GPU regression passed: bf16 tiled sampling with fp32 steps")
 
 
 def main() -> None:

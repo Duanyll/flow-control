@@ -5,6 +5,7 @@ import unittest
 from collections import Counter
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -18,19 +19,26 @@ from torch.utils.checkpoint import checkpoint
 
 from flow_control.processors import get_processor_input_typeddict, parse_processor
 from flow_control.processors.tasks.tiled_t2i import TiledT2IProcessor
-from flow_control.samplers import Sampler, SampleRequest, SdeWindow
-from flow_control.samplers.evaluation import predict_velocity
+from flow_control.rewards import PairwiseReward, execute_pairwise_reward
+from flow_control.samplers import (
+    Executor,
+    Sampler,
+    SampleRequest,
+    SdeWindow,
+    Start,
+    conditional_velocity,
+)
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
 from flow_control.samplers.plan import BranchEvals, StepContext
 from flow_control.samplers.shift import LinearShift
-from flow_control.samplers.solver import DDIMSolver, FlowSolver
+from flow_control.samplers.solver import DDIMSolver, FlowSolver, SASolver
 from flow_control.training.data import (
     DistributedKRepeatSampler,
     PaddingAwareDatasetWrapper,
 )
 from flow_control.training.grpo_sampling import (
+    GrpoCollector,
     ReplayItem,
-    collect_samples,
     replay_steps,
 )
 
@@ -40,7 +48,7 @@ class _TileLeaf:
 
     device = torch.device("cpu")
     dtype = torch.float32
-    micro_batch_size = 1
+    micro_batch_size = 4
 
     def __init__(self):
         self.calls = []
@@ -48,7 +56,7 @@ class _TileLeaf:
     def use_variant(self, variant):
         return nullcontext()
 
-    def predict_velocity_batched(self, batches, timesteps):
+    def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
         self.calls.append(len(batches))
         return [
             2 * batch["noisy_latents"] + batch.get("prompt_embeds", 0)
@@ -102,6 +110,12 @@ def _preprocess(processor: TiledT2IProcessor, *inputs: Any) -> tuple[list[Any], 
             for item in inputs
         ]
     return batches, encode.call_count
+
+
+def _conditional(leaf: _TileLeaf, batches: list[Any], timestep: torch.Tensor):
+    return Executor(leaf).evaluate(
+        [conditional_velocity(batch, timestep) for batch in batches]
+    )
 
 
 def _tiled_latents(processor: TiledT2IProcessor, batch: Any) -> torch.Tensor:
@@ -170,24 +184,28 @@ class SamplerExtensionsTest(unittest.TestCase):
                 transforms=[SdeWindow(size=2, range=(1, 5))],
             )
             batch, negative = make_sampler_batch(0.3, 0.9), make_sampler_batch(-0.2)
-            _, trajectories = collect_samples(
-                sampler,
-                FakeSamplerModel(),
-                [
-                    SampleRequest(
-                        batch=batch,
-                        negative_batch=negative,
-                        generator=torch.Generator().manual_seed(3),
+            collector = GrpoCollector(sampler)
+            run = next(
+                iter(
+                    sampler.sample(
+                        FakeSamplerModel(),
+                        [
+                            SampleRequest(
+                                batch=batch,
+                                negative_batch=negative,
+                                generator=torch.Generator().manual_seed(3),
+                            )
+                        ],
+                        collector=collector,
                     )
-                ],
+                )
             )
-            self.assertEqual(len(trajectories[0]), 2)
+            trajectory = collector.take(run)
+            self.assertEqual(len(trajectory), 2)
             outputs = replay_steps(
-                sampler,
-                FakeSamplerModel(),
-                [ReplayItem(batch, step, negative) for step in trajectories[0]],
+                FakeSamplerModel(), [ReplayItem(run, step) for step in trajectory]
             )
-            for recorded, replayed in zip(trajectories[0], outputs, strict=True):
+            for recorded, replayed in zip(trajectory, outputs, strict=True):
                 torch.testing.assert_close(
                     replayed.log_prob, recorded.log_prob, rtol=0, atol=0
                 )
@@ -244,31 +262,29 @@ class SamplerExtensionsTest(unittest.TestCase):
                     flags,
                 )
         sampler = Sampler(
+            steps=2,
             guidance=ClassifierFreeGuidance(
                 scale=2,
                 positive_variant=["default", "other"],
                 negative_variant="base",
                 negative_condition="positive",
-            )
+            ),
         )
-        actual = sampler.get_guided_velocity(
-            adapter,
-            [batch, batch],
-            [None, None],
-            [x, x],
-            [torch.tensor([0.5])] * 2,
-            [0.5] * 2,
-            item_indices=[0, 1],
-            num_items=[2, 2],
+        executor = Executor(adapter, sampler.variant_keys())
+        runs = [
+            sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
+            for _ in range(2)
+        ]
+        # Item 0 runs the "default" branch, item 1 the "other" branch.
+        actual = executor.evaluate(
+            [run.guided_velocity(x, index) for index, run in enumerate(runs)]
         )
         for variant, value in zip(("default", "other"), actual, strict=True):
             torch.testing.assert_close(
                 value, outputs["base"] + 2 * (outputs[variant] - outputs["base"])
             )
         with adapter.use_variant("base"):
-            nested = sampler.get_guided_velocity(
-                adapter, [batch], [None], [x], [torch.tensor([0.5])], [0.5]
-            )[0]
+            nested = executor.evaluate([runs[0].guided_velocity(x, 0)])[0]
             torch.testing.assert_close(nested, outputs["base"])
             self.assertTrue(model.proj.disable_adapters)
         with (
@@ -294,15 +310,8 @@ class SamplerExtensionsTest(unittest.TestCase):
         for enabled in (False, True):
             model.checkpoint_enabled = enabled
             value = x.detach().clone().requires_grad_()
-            values = sampler.get_guided_velocity(
-                adapter,
-                [batch, batch],
-                [None, None],
-                [value, value],
-                [torch.tensor([0.5])] * 2,
-                [0.5] * 2,
-                item_indices=[0, 1],
-                num_items=[2, 2],
+            values = executor.evaluate(
+                [run.guided_velocity(value, index) for index, run in enumerate(runs)]
             )
             loss = torch.stack([output.square().mean() for output in values]).sum()
             gradients.append(torch.autograd.grad(loss, [value, *parameters]))
@@ -360,21 +369,21 @@ class SamplerExtensionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "row-major tile prompts"):
             _preprocess(processor, {**_SHARED, "tiles": [{"prompt": "1"}]})
 
-    def test_predict_velocity_stitches_tiles_with_gradients(self):
-        # Tiles are cut and feathered on the token grid inside the evaluation
-        # layer; the model sees plain per-tile batches and the stitched velocity
-        # keeps gradients to latents and to every tile's condition.
+    def test_conditional_velocity_stitches_tiles_with_gradients(self):
+        # Tiles are cut and feathered on the token grid inside the run layer;
+        # the model sees plain per-tile batches and the stitched velocity keeps
+        # gradients to latents and to every tile's condition.
         processor = _tiled_processor()
         (batch, shared), _ = _preprocess(processor, _VARIED, _SHARED)
         x = _tiled_latents(processor, batch).requires_grad_()
         self.assertEqual(x.shape, (1, 36, 1))
         leaf = _TileLeaf()
-        timestep = [torch.tensor([0.5])]
+        timestep = torch.tensor([0.5])
         # Constant conditions reconstruct 2x + 7 exactly; the contract permits
         # one shared condition without a tiles list.
         shared.pop("tiles")
         constant: Any = {**shared, "noisy_latents": x}
-        result = predict_velocity(leaf, [constant], timestep)[0]
+        result = _conditional(leaf, [constant], timestep)[0]
         torch.testing.assert_close(result, 2 * x + 7)
         torch.testing.assert_close(
             torch.autograd.grad(result.sum(), x)[0], torch.full_like(x, 2)
@@ -393,7 +402,7 @@ class SamplerExtensionsTest(unittest.TestCase):
                 for tile, prompt in zip(batch["tiles"], prompts, strict=True)
             ],
         }
-        stitched = predict_velocity(leaf, [varied], timestep)[0]
+        stitched = _conditional(leaf, [varied], timestep)[0]
         offset = (stitched - 2 * x.detach()).detach().reshape(6, 6)
         torch.testing.assert_close(
             offset + torch.flip(offset, (0, 1)), torch.full_like(offset, 3)
@@ -413,13 +422,13 @@ class SamplerExtensionsTest(unittest.TestCase):
             torch.testing.assert_close(gradient, torch.zeros_like(gradient))
         fewer_tiles: Any = {**varied, "tiles": varied["tiles"][:3]}
         with self.assertRaisesRegex(ValueError, "tile batches"):
-            predict_velocity(leaf, [fewer_tiles], timestep)
+            _conditional(leaf, [fewer_tiles], timestep)
         fewer_tokens: Any = {**constant, "noisy_latents": x[:, :30]}
         with self.assertRaisesRegex(ValueError, "packed BND"):
-            predict_velocity(leaf, [fewer_tokens], timestep)
+            _conditional(leaf, [fewer_tokens], timestep)
 
     def test_tiled_collect_and_replay_share_one_layout(self):
-        # Sampling and GRPO replay reach the model through the same leaf call, so
+        # Sampling and GRPO replay expand tiles through the same run code, so
         # both expand positive and negative tiles identically and log
         # probabilities replay bitwise from one whole-image noise draw.
         processor = _tiled_processor()
@@ -433,29 +442,33 @@ class SamplerExtensionsTest(unittest.TestCase):
         )
         leaf = _TileLeaf()
         with torch.no_grad():
-            _, records = collect_samples(
-                sampler,
-                leaf,
-                [
-                    SampleRequest(
-                        batch=batch,
-                        negative_batch=negative,
-                        generator=torch.Generator().manual_seed(5),
+            collector = GrpoCollector(sampler)
+            run = next(
+                iter(
+                    sampler.sample(
+                        leaf,
+                        [
+                            SampleRequest(
+                                batch=batch,
+                                negative_batch=negative,
+                                generator=torch.Generator().manual_seed(5),
+                            )
+                        ],
+                        collector=collector,
                     )
-                ],
+                )
             )
-        replayed = replay_steps(
-            sampler, leaf, [ReplayItem(batch, step, negative) for step in records[0]]
-        )
-        for step, replay in zip(records[0], replayed, strict=True):
+        records = collector.take(run)
+        replayed = replay_steps(leaf, [ReplayItem(run, step) for step in records])
+        for step, replay in zip(records, replayed, strict=True):
             torch.testing.assert_close(replay.log_prob, step.log_prob, rtol=0, atol=0)
-        # Three sampling steps of two branches, then both recorded steps replayed
-        # in one call per branch: every pass expands four tiles per item.
-        self.assertEqual(leaf.calls, [4] * 6 + [8] * 2)
+        # Both branches share one forward per sampling step (four tiles each),
+        # then both recorded steps replay in one call: 2 items x 2 branches x 4.
+        self.assertEqual(leaf.calls, [8] * 3 + [16])
 
-    def test_predict_velocity_mixes_layouts_in_one_leaf_call(self):
-        # One logical batch may hold a sub-tile image, two different layouts, a
-        # stride above one, and an ordinary batch; all expand into one leaf call.
+    def test_stream_batches_mixed_runs_and_matches_sequential_sampling(self):
+        # One executor call may hold a sub-tile image, two different layouts, a
+        # stride above one, and an ordinary batch; all expand into one forward.
         processor = _tiled_processor()
         (small, shared), _ = _preprocess(processor, _SMALL, _SHARED)
         small["noisy_latents"] = torch.arange(6, dtype=torch.float32).reshape(1, 6, 1)
@@ -477,10 +490,103 @@ class SamplerExtensionsTest(unittest.TestCase):
         }
         mixed: list[Any] = [small, different, strided, plain]
         leaf = _TileLeaf()
-        actual = predict_velocity(leaf, mixed, [torch.tensor([0.5])] * 4)
+        actual = _conditional(leaf, mixed, torch.tensor([0.5]))
         self.assertEqual(leaf.calls, [1 + 9 + 4 + 1])
         for output, original in zip(actual, mixed, strict=True):
             torch.testing.assert_close(output, 2 * original["noisy_latents"] + 7)
+
+        # One stream mixes runs with different plan lengths, solvers, guidance
+        # and tiling. The executor batches whatever is pending (up to the
+        # model's micro batch of 4), and every run ends bitwise where it would
+        # have ended sampled alone, because per-sample RNG and per-sample math
+        # never depend on who shares the forward.
+        (tiled,), _ = _preprocess(processor, _VARIED)
+        tiled["noisy_latents"] = _tiled_latents(processor, tiled)
+        negative: Any = processor.get_negative_batch(tiled)
+        plain["clean_latents"] = torch.zeros_like(plain["noisy_latents"])
+        samplers = [
+            Sampler(
+                steps=3,
+                solver=FlowSolver(eta=0.5),
+                guidance=ClassifierFreeGuidance(scale=2),
+            ),
+            Sampler(steps=4, solver=SASolver(eta=0.4)),
+            Sampler(steps=10, solver=FlowSolver(eta=0.7), start=Start(strength=0.6)),
+            Sampler(steps=2),
+        ]
+
+        def runs():
+            requests = [
+                SampleRequest(tiled, negative),
+                SampleRequest(plain),
+                SampleRequest(plain),
+                SampleRequest(plain),
+            ]
+            return [
+                sampler.make_run(
+                    replace(request, generator=torch.Generator().manual_seed(index))
+                )
+                for index, (sampler, request) in enumerate(
+                    zip(samplers, requests, strict=True)
+                )
+            ]
+
+        leaf = _TileLeaf()
+        stream_runs = runs()
+        list(Executor(leaf).stream(stream_runs))
+        # The tiled CFG run alone fills the window (8 calls per round); the
+        # other three then share rounds until each finishes: SA (2+1+1+0 evals)
+        # and the 6-transition SDEdit run outlast the 2-step one.
+        self.assertEqual(leaf.calls, [8, 8, 8, 3, 3, 2, 2, 1, 1])
+        alone_calls = 0
+        for streamed, run in zip(stream_runs, runs(), strict=True):
+            leaf = _TileLeaf()
+            (alone,) = Executor(leaf).stream([run])
+            alone_calls += len(leaf.calls)
+            torch.testing.assert_close(
+                streamed.ctx.latents, alone.ctx.latents, rtol=0, atol=0
+            )
+        self.assertLess(9, alone_calls)
+
+        # S2 streamed completions interleave prompt groups. The reward layer
+        # must group by __key__ BEFORE prepare_batch_for_async drops metadata.
+        class SamePromptReward(PairwiseReward):
+            async def async_score_pair(self, batch_a, batch_b) -> float:
+                assert batch_a["prompt"] == batch_b["prompt"]
+                return float(
+                    batch_a["clean_image"].mean() > batch_b["clean_image"].mean()
+                )
+
+        pair_runs = []
+        for index, steps in enumerate((3, 4, 1, 5)):
+            key = "A" if index < 2 else "B"
+            batch: Any = make_sampler_batch(0.2)
+            batch.update(
+                __key__=key,
+                prompt=key,
+                clean_image=torch.full((1, 3, 1, 1), float(index % 2)),
+            )
+            pair_runs.append(Sampler(steps=steps).make_run(SampleRequest(batch)))
+        completions = []
+
+        def submitter():
+            for run in Executor(_TileLeaf()).stream(pair_runs):
+                index = next(
+                    i for i, candidate in enumerate(pair_runs) if candidate is run
+                )
+                completions.append(index)
+                yield dict(run.batch), index
+
+        scored = dict(
+            execute_pairwise_reward(
+                SamePromptReward(),
+                submitter(),
+                lambda index, result: (index, result.raw.item()),
+                num_rollouts_per_prompt=2,
+            )
+        )
+        self.assertEqual(completions, [2, 0, 1, 3])
+        self.assertEqual(scored, {0: 0.25, 1: 0.75, 2: 0.25, 3: 0.75})
 
     def test_shift_reads_model_image_size(self):
         # Resolution-dependent shift follows the size the model actually sees:

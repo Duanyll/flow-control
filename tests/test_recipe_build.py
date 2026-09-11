@@ -21,26 +21,24 @@ class RecipeBuildTest(unittest.TestCase):
             if solver is not None:
                 sampler.solver = solver
             batch = make_sampler_batch(0.5, initial=0.3)
-            observed = []
-
-            def observer(
-                run_index, transition, ctx, velocity, next_latents, observed=observed
-            ):
-                if ctx.item_index == 0:
-                    observed.append((transition.sigma, ctx.latents.clone()))
-
-            output = sampler.sample(
-                FakeSamplerModel(),
-                [
-                    SampleRequest(
-                        batch=batch, generator=torch.Generator().manual_seed(5)
+            steps = []
+            run = next(
+                iter(
+                    sampler.sample(
+                        FakeSamplerModel(),
+                        [
+                            SampleRequest(
+                                batch=batch, generator=torch.Generator().manual_seed(5)
+                            )
+                        ],
+                        collector=lambda run, step, steps=steps: steps.append(step),
                     )
-                ],
-                observer=observer,
-            )[0]
-            sigma, latents = observed[0]
+                )
+            )
+            first = steps[0]
+            sigma, latents = first.transition.sigma, first.latents
             self.assertLessEqual(sigma, 0.6)
-            self.assertEqual(sigma, float(output.timesteps[0]))
+            self.assertEqual(sigma, run.plan[0].sigma)
             clean = batch["clean_latents"].float()
             noise = torch.randn(clean.shape, generator=torch.Generator().manual_seed(5))
             torch.testing.assert_close(latents, (1 - sigma) * clean + sigma * noise)

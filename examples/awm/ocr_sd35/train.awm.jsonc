@@ -22,9 +22,7 @@
     "recompile_limit": 16,
   },
 
-  "rollout_micro_batch_size": 4,
   "train_micro_batch_size": 4,
-  "validation_micro_batch_size": 4,
 
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,

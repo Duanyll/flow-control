@@ -1,11 +1,11 @@
 import csv
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from typing import Any, Literal, cast
 
 import torch
 import torch.distributed as dist
-from pydantic import ConfigDict, PositiveInt, model_validator
+from pydantic import ConfigDict, model_validator
 from rich.progress import Progress, TaskID
 from rich.table import Table
 from torch.distributed.checkpoint.state_dict import (
@@ -83,8 +83,6 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     full per-image breakdown. Written by the main process after gathering
     scores from all ranks.
     """
-    micro_batch_size: PositiveInt = 1
-    """Number of logical samples submitted to each sampler call per rank."""
 
     @model_validator(mode="after")
     def check_save_preview_dir(self):
@@ -132,7 +130,7 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=self.micro_batch_size,
+            batch_size=1,
             sampler=sampler,
             collate_fn=collate_fn,
             worker_init_fn=seed_worker,
@@ -182,77 +180,66 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
 
     # ---------------------------------- Sampling -------------------------------- #
 
-    def _sample_many(self, items: list[Any]) -> list[tuple[Any, Any, str]]:
-        """Preprocess separately, sample together, then decode separately."""
-        batches: list[Any] = []
-        keys: list[str] = []
-        requests: list[SampleRequest] = []
-        for item in items:
-            batch = deep_move_to_device(item, self.device)
-            batch = self.preprocess_for_inference(batch, save_extra=True)
-            batch = deep_cast_float_dtype(batch, self.model.dtype)
-            key = batch.get("__key__", "unknown")
-            generator = torch.Generator(device=self.device).manual_seed(
-                derive_seed(self.seed, key)
-            )
-            self.processor.initialize_latents(
-                batch,
-                generator=generator,
-                device=self.device,
-                dtype=self.model.dtype,
-            )
-
-            batches.append(batch)
-            keys.append(key)
-            requests.append(self.build_sample_request(self.sampler, batch, generator))
-
-        outputs = self.sampler.sample(self.model, requests)
-        results: list[tuple[Any, Any, str]] = []
-        for batch, output, key in zip(batches, outputs, keys, strict=True):
-            decoded = self.processor.decode_output(output.final_latents, batch)
-            batch.update(decoded)
-            results.append((batch, decoded, key))
-        return results
+    def _requests(self) -> Iterator[SampleRequest]:
+        """Preprocess one dataset item at a time as the sampler asks for it."""
+        for items in self.dataloader:
+            for item in items:
+                with dump_if_failed(logger, item):
+                    batch = deep_move_to_device(item, self.device)
+                    batch = self.preprocess_for_inference(batch, save_extra=True)
+                    batch = deep_cast_float_dtype(batch, self.model.dtype)
+                    generator = torch.Generator(device=self.device).manual_seed(
+                        derive_seed(self.seed, batch.get("__key__", "unknown"))
+                    )
+                    self.processor.initialize_latents(
+                        batch,
+                        generator=generator,
+                        device=self.device,
+                        dtype=self.model.dtype,
+                    )
+                    request = self.build_sample_request(self.sampler, batch, generator)
+                yield request
 
     def _sample_submitter(
         self,
         progress: Progress,
         task: TaskID,
     ) -> Generator[tuple[dict[str, Any], tuple[dict[str, Any], str]]]:
-        """Generate samples and yield ``(batch, (record, key))`` for scoring.
+        """Sample, decode and yield ``(batch, (record, key))`` for scoring.
 
         ``batch`` (on device) is handed to ``execute_reward``, which snapshots
-        the fields it needs for async scoring and lets sampling of the next
-        batch overlap with the reward request still in flight. ``record`` is the
-        CPU payload written to the datasink / preview once its score is known.
+        the fields it needs for async scoring and lets sampling of later
+        requests overlap with the reward request still in flight. ``record`` is
+        the CPU payload written to the datasink / preview once its score is known.
 
         Padding samples still run the model (to keep FSDP collectives balanced
         across ranks) but are not yielded for scoring or output.
         """
-        for items in self.dataloader:
-            with dump_if_failed(logger, items):
-                sampled = self._sample_many(items)
-            for batch, decoded, key in sampled:
-                # Build the annotated preview while the full GPU batch (e.g. tie's
-                # reference_images) and decoded outputs are still available.
-                preview = (
-                    self.processor.annotate_output(decoded, batch)
-                    if (self.annotate_output_image and key != "__padding__")
-                    else None
+        for run in self.sampler.sample(self.model, self._requests()):
+            batch: Any = run.batch
+            key = batch.get("__key__", "unknown")
+            decoded = self.processor.decode_output(run.ctx.latents, batch)
+            batch.update(decoded)
+            # Build the annotated preview while the full GPU batch (e.g. tie's
+            # reference_images) and decoded outputs are still available.
+            preview = (
+                self.processor.annotate_output(decoded, batch)
+                if (self.annotate_output_image and key != "__padding__")
+                else None
+            )
+            record = (
+                None
+                if key == "__padding__"
+                else deep_move_to_device(
+                    batch if self.save_extra else decoded,
+                    torch.device("cpu"),
                 )
-                record = (
-                    None
-                    if key == "__padding__"
-                    else deep_move_to_device(
-                        batch if self.save_extra else decoded,
-                        torch.device("cpu"),
-                    )
-                )
-                if record is not None and preview is not None:
-                    record["__preview_image__"] = preview.to(torch.device("cpu"))
-                progress.advance(task)
-                if record is not None:
-                    yield batch, (record, key)
+            )
+            if record is not None and preview is not None:
+                record["__preview_image__"] = preview.to(torch.device("cpu"))
+            progress.advance(task)
+            if record is not None:
+                yield batch, (record, key)
 
     # ---------------------------------- Output ---------------------------------- #
 

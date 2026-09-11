@@ -238,7 +238,7 @@ class BaseProcessor[
             (1, c, h, w), generator=generator, device=device, dtype=dtype
         )
         if self.initial_noise_scale != 1.0:
-            latents = latents * self.initial_noise_scale
+            latents = (latents.float() * self.initial_noise_scale).to(dtype)
         noisy_latents = batch["noisy_latents"] = self._pack_latents(latents)
         return noisy_latents
 

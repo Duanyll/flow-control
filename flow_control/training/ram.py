@@ -44,8 +44,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Sampler
-from flow_control.samplers.evaluation import predict_velocity
+from flow_control.samplers import Executor, Sampler, conditional_velocity
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -312,11 +311,15 @@ class RamTrainer(
 
         RAM's loss target is defined against conditional velocities even though
         rollouts are sampled with CFG, so this deliberately bypasses
-        ``get_guided_velocity``. ``predict_velocity`` is the same leaf the
-        sampler uses, so tiled batches are evaluated per tile here exactly as
-        during the rollout.
+        guidance. ``conditional_velocity`` expands tiles exactly as the sampler
+        does.
         """
-        return predict_velocity(self.model, batches, timesteps)
+        return Executor(self.model).evaluate(
+            [
+                conditional_velocity(batch, timestep)
+                for batch, timestep in zip(batches, timesteps, strict=True)
+            ]
+        )
 
     def _sample_timestep(self) -> torch.Tensor:
         t = self.timestep_weighting.sample_timesteps(1)
@@ -337,9 +340,13 @@ class RamTrainer(
 
         if cached_targets is not None:
             t = cached_targets.timestep.to(device=self.device, dtype=torch.float32)
-            noise = cached_targets.noise.to(device=self.device)
-            base_prediction = cached_targets.base_prediction.to(device=self.device)
-            old_prediction = cached_targets.old_prediction.to(device=self.device)
+            noise = cached_targets.noise.to(device=self.device, dtype=torch.float32)
+            base_prediction = cached_targets.base_prediction.to(
+                device=self.device, dtype=torch.float32
+            )
+            old_prediction = cached_targets.old_prediction.to(
+                device=self.device, dtype=torch.float32
+            )
         else:
             t = self._sample_timestep()
             noise = torch.randn_like(x0)
@@ -353,7 +360,7 @@ class RamTrainer(
             x0=x0,
             timestep=t,
             noise=noise,
-            advantage=rollout_advantages.to(device=self.device),
+            advantage=rollout_advantages.to(device=self.device, dtype=torch.float32),
             base_prediction=base_prediction,
             old_prediction=old_prediction,
         )
@@ -490,7 +497,7 @@ class RamTrainer(
                 timestep = cached_targets.timestep.to(
                     device=self.device, dtype=torch.float32
                 )
-                noise = cached_targets.noise.to(device=self.device)
+                noise = cached_targets.noise.to(device=self.device, dtype=torch.float32)
                 t_expanded = timestep.view(-1, *([1] * (x0.ndim - 1)))
                 batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
                 batches.append(batch)

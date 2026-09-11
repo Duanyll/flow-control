@@ -23,7 +23,7 @@ from typing import Any
 import torch
 
 from flow_control.adapters.base import Batch
-from flow_control.samplers import ClassifierFreeGuidance, SampleOutput, SampleRequest
+from flow_control.samplers import ClassifierFreeGuidance, SampleRequest
 from flow_control.samplers.plan import (
     GuidanceOutput,
     StepContext,
@@ -79,6 +79,8 @@ class RecordingModel:
         self,
         batches: list[Batch],
         timesteps: list[torch.Tensor],
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         outputs: list[torch.Tensor] = []
         for batch, timestep in zip(batches, timesteps, strict=True):
@@ -181,23 +183,29 @@ def step_configs() -> dict[str, FlowSolver | DDIMSolver | CPSSolver | DanceSolve
 
 
 @dataclass
-class TraceOutput(SampleOutput):
+class TraceOutput:
+    final_latents: torch.Tensor
+    timesteps: torch.Tensor
+    """Executed plan-item start sigmas."""
     trajectory: list[RecordedStep]
 
 
 def recorded_step(
     transition: Transition,
-    ctx: StepContext,
-    velocity: torch.Tensor | None,
+    latents: torch.Tensor,
     next_latents: torch.Tensor,
+    velocity: torch.Tensor | None,
+    item_index: int,
+    num_items: int,
 ) -> RecordedStep:
+    """A GRPO record of one executed step; eta-0 steps get a zero log-prob."""
     step = RecordedStep(
-        latent_t=ctx.latents,
+        latent_t=latents,
         latent_next=next_latents,
-        log_prob=torch.zeros(ctx.latents.shape[0]),
+        log_prob=torch.zeros(latents.shape[0]),
         transition=transition,
-        item_index=ctx.item_index,
-        num_items=ctx.num_items,
+        item_index=item_index,
+        num_items=num_items,
     )
     if velocity is not None:
         step.log_prob = step_log_prob(step, velocity).log_prob
@@ -205,15 +213,30 @@ def recorded_step(
 
 
 def trace_sample(model: Any, sampler: Sampler, request: SampleRequest) -> TraceOutput:
-    """Observe the legacy nonterminal window without adding recording to core."""
-    trajectory: list[RecordedStep] = []
-
-    def observer(run_index, transition, ctx, velocity, next_latents):
-        if ctx.item_index < ctx.num_items - 1:
-            trajectory.append(recorded_step(transition, ctx, velocity, next_latents))
-
-    output = sampler.sample(model, [request], observer=observer)[0]
-    return TraceOutput(output.final_latents, output.timesteps, trajectory)
+    """Sample one request, keeping the legacy nonterminal step window."""
+    steps = []
+    run = next(
+        iter(
+            sampler.sample(
+                model, [request], collector=lambda run, step: steps.append(step)
+            )
+        )
+    )
+    return TraceOutput(
+        run.ctx.latents,
+        torch.tensor([item.sigma for item in run.plan], dtype=torch.float32),
+        [
+            recorded_step(
+                step.transition,
+                step.latents,
+                step.next_latents,
+                step.velocity,
+                step.index,
+                len(run.plan),
+            )
+            for step in steps[:-1]
+        ],
+    )
 
 
 def capture_e2e() -> None:
@@ -275,7 +298,9 @@ def capture_steps() -> None:
                 guidance_state=None,
             )
             result = drive_single_eval_transition(tr, ctx, velocity)
-            recorded = recorded_step(tr, ctx, velocity, result.next_latents)
+            recorded = recorded_step(
+                tr, latents, result.next_latents, velocity, index, len(STEP_GRID) - 1
+            )
             mean, std_dev = type(solver).step_parts(
                 latents, velocity, sigma, sigma_next, solver.eta
             )[:2]
@@ -325,7 +350,9 @@ def capture_flash_steps() -> None:
         )
         ctx.item_index, ctx.num_items = index, len(plan)
         result = drive_single_eval_transition(tr, ctx, velocity)
-        recorded = recorded_step(tr, ctx, velocity, result.next_latents)
+        recorded = recorded_step(
+            tr, latents, result.next_latents, velocity, index, len(plan)
+        )
         noise_scale = solver.noise_scale_at(index, len(plan))
         mean = FlashSolver.renoise_parts(
             latents, velocity, tr.sigma, tr.sigma_next, noise_scale

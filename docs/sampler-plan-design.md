@@ -1,11 +1,13 @@
 # Sampler execution and extensions
 
-Updated 2026-09-11 for sampler-rethink R1–R5/A1–A4 and processor-owned tiling.
+Updated 2026-09-11 for generator execution, adapter-owned microbatching and caller-owned collection.
 
 `Sampler` owns the sigma grid, solver, start, transforms, guidance and projectors.
-The processor stores the tile layout in each processed batch. `sample(model, requests, observer=...)` is the single
-sampling path. Each request has its own batch, negative batch, and RNG.
-`SampleOutput` contains final latents and the **executed** start-sigma grid.
+The processor stores the tile layout in each processed batch.
+`sample(model, requests, collector=...)` accepts a lazy iterable and yields completed
+`SampleRun` objects. Each request has its own batch, negative batch and RNG.
+The result exposes final latents through `run.ctx.latents` and the **executed**
+plan through `run.plan`; completion order may differ from submission order.
 
 ## Execution
 
@@ -15,28 +17,41 @@ sampling path. Each request has its own batch, negative batch, and RNG.
 2. Slice for SDEdit, then apply transforms using the request generator.
 3. Initialize latents at the resulting plan's first sigma.
 4. For each transition, apply whole-image `pre_transition` projectors once.
-5. Drive solver generators together. Each yielded model evaluation expands
-   named branches; every branch reaches the model through `predict_velocity`,
-   the single leaf call, which expands tiled batches, runs the model once and
-   stitches whole images back.
+5. Each run drives its solver generator and expands named branches and tiles
+   into `ModelCall(batch, timestep, variant)` objects. `Executor` batches calls
+   across runs, using the same variant order on every rank. The adapter chunks
+   these calls by `model.micro_batch_size`, collates compatible inputs, and
+   falls back to sequential forwards when shapes differ. The run stitches
+   branch velocities back to whole images.
 6. Combine whole-image branch velocities, then apply `post_combine` projectors.
-7. Resume each solver with the velocity, observe the completed transition,
-   and advance its private runtime state.
+7. Resume each solver with the velocity, pass the completed `StepRecord` to
+   the optional caller collector `(run, step)`, and advance private state.
+   Sampling itself keeps no step history. GRPO retains only stochastic
+   latents/log probabilities; serving uses the callback for step progress.
 
 `Transition` contains `(solver, sigma, sigma_next, eta)`. Execution position is
 `StepContext.item_index / num_items`; solver and guidance history also live in
 that context. Shared configuration objects hold no per-sample numerical state.
 SA retains its multi-evaluation generator and cross-request batching.
 
-Distributed ranks use one per-round rendezvous path: each round synchronizes
-its evaluation count and raises when ranks disagree. No configuration
-fingerprint is exchanged, so unequal plan lengths (SDEdit with
-resolution-dependent shifting, mixed resolutions in one microbatch) surface as
-that count mismatch; use matching resolution groups. The branch schedule is
-derived from the guidance configuration alone, so ranks never exchange their
-local branches; missing branches receive dummy forwards, with zero-valued graph
-dependencies when backward is required. Tile counts are never padded: unequal
-counts across ranks fail in the adapter's collation sync.
+The sampling stream admits new runs while its pending calls are below one
+adapter microbatch (one tiled run can exceed that window). Training `evaluate()`
+drives all supplied logical items together, with physical forwards still chunked.
+Each round's all-reduce checks whether **any** rank has work; drained ranks keep
+participating with empty lists. Unequal request, plan and tile counts are legal.
+All ranks must use the same configured variant list and adapter microbatch limit.
+The adapter aligns chunk/forward counts and dense/fallback decisions. A rank
+with no cached dummy receives a detached sample through a cold-start collective;
+subsequent rounds reuse its local cache. Under autograd, the executor combines
+zero-valued dummy dependencies across variants into a local real output. A
+training rank must have a local evaluation to carry that graph into backward.
+
+Precision is an interface contract: adapter computation may use bf16 or lower,
+but returns fp32 velocities. Start, guidance, projectors, tile accumulation,
+solver state and loss arithmetic use fp32. Low-precision stored latents, teacher
+predictions and GRPO records are promoted before arithmetic. Final sampler
+latents are cast to the input latent storage dtype. Each `guided_velocity()`
+evaluation gets fresh state even when several evaluations share one run.
 
 ## Configuration examples
 
@@ -136,11 +151,11 @@ The processor preserves the full output `image_size` and writes:
   per-tile negative conditions go to `batch["negative"]["tiles"]`, so
   `get_negative_batch` needs no tile logic.
 
-`samplers/evaluation.py:predict_velocity` is the single leaf call for sampling,
-`get_guided_velocity()` and GRPO replay. It reads each batch's metadata, cuts
+`samplers/run.py` shares tile expansion and merging between full sampling,
+`SampleRun.guided_velocity()`, and `conditional_velocity()`. It reads metadata, cuts
 `noisy_latents` on the token grid into per-tile batches (the tile's condition
 plus its latent slice and `image_size`), passes ordinary batches through, runs
-one `predict_velocity_batched` over everything, and stitches each raw branch
+leaf calls through the executor and adapter, and stitches each raw branch
 back with `stitch_tiles` before guidance and `post_combine`. Stitching feathers
 only edges shared with a neighbour (Hann ramps over the actual overlap) and
 normalizes by the total weight, so constant inputs reconstruct exactly; the
@@ -157,7 +172,7 @@ Gaussian approximation when clipping noise. Inference solvers do not compute
 log probabilities. Replay and NFT use the same branch/combine/projector function
 as sampling, with actual executed step metadata supplied by the rollout.
 
-Tiling applies wherever the model is reached through `predict_velocity`:
+Tiling applies wherever the model is reached through these call generators:
 sampling, guided evaluation, GRPO replay, NFT guided training predictions and
 the direct SFT/AWM/RAM training forwards, so rollout and training see the same
 tiles.
@@ -165,7 +180,9 @@ tiles.
 The KRepeat data sampler groups bucketed prompts so corresponding rank positions
 share a resolution while preserving exactly K rollouts per prompt. Incompatible
 bucket capacities raise; repeats are never silently padded. Unbucketed datasets
-retain their prior selection semantics.
+retain their prior selection semantics. Pairwise rewards group completions by
+`__key__` in the reward executor; all K rollouts stay local to one rank and
+incomplete groups raise instead of comparing different prompts.
 
 Migration: move `rollout_recipe[0].transforms` into `rollout_sampler.transforms`
 and remove `record`; inference uses `sampler.start/transforms`. `recipe`, phases,
@@ -175,10 +192,12 @@ For tiled configurations, move the old `sampler.tiled` fields to the processor
 and select `task="tiled_t2i"`; regenerate preprocessed batches to store their
 layout. Plain `t2i` handles ordinary text-to-image preprocessing.
 
-DDNM, dual-weight training, time travel and SamplingPipeline are deferred. The
-next Pipeline round will define one microbatch upper limit that the container
-can enforce internally and outer callers can read. This tiling correction adds
-no separate microbatch control.
+DDNM, dual-weight training, time travel and SamplingPipeline are deferred. The adapter
+exposes `model.micro_batch_size` as its physical forward limit. Remove obsolete
+`micro_batch_size` from inference and `validation_micro_batch_size` /
+`rollout_micro_batch_size` from trainers, moving their intended forward limit
+under `model`. `train_micro_batch_size` still counts logical loss items per
+backward; branch/tile expansion is independently chunked by the adapter.
 
 Validation retains the 21 pre-refactor solver fixtures unchanged, and includes
 cross-module tests for CFG++/replay, variants, tiling, and KRepeat, plus real

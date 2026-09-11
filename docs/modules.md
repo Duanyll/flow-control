@@ -72,7 +72,7 @@
 | `BaseReward` | 奖励函数基类，定义 `score()`, `async_score()` 等方法，支持远程卸载 |
 | `parse_reward(conf)` | 工厂函数 |
 | `execute_reward()` | 执行奖励计算（支持异步批处理） |
-| `execute_pairwise_reward()` | 成对比较评分 |
+| `execute_pairwise_reward()` | 按原始 `__key__` 汇聚乱序完成的 K 个 rollout 后成对评分 |
 
 内置奖励类型：`clip_score`, `pickscore`, `geneval`, `unified_reward`, `composite`（加权组合）, `pairwise`（成对比较）
 
@@ -84,22 +84,24 @@
 
 | 接口 | 说明 |
 |------|------|
-| `Sampler` | 持有 solver、sigma grid、`start`、`transforms`、`guidance`、`projectors`；`plan()` 生成当前请求的执行计划，`sample(model, requests, observer=...)` 批量采样，`get_guided_velocity()` 与采样和 GRPO replay 共用分支求值路径 |
+| `Sampler` | 持有 solver、sigma grid、`start`、`transforms`、`guidance`、`projectors`；`plan()` 生成当前请求的执行计划，`sample(model, requests, collector=...)` 懒加载请求并按完成顺序产出 run；`make_run()` 创建独立运行状态 |
 | `Start` / `SdeWindow` | `start.source` 选择初始 tensor；设置 `strength` 时按 at-or-below 规则切片，并用切片点 sigma 重加噪。`sde_window` 按请求 RNG 选择窗口，仅保留窗口内的 eta |
-| `SampleOutput` | `final_latents` 与实际执行的起始 sigma 网格 `timesteps`；逐步记录由 observer 消费 |
+| `SampleRun` | `ctx.latents` 是最终结果，`plan` 是实际执行计划；`run()` 生成完整轨迹的叶子调用，`guided_velocity()` 为训练重算单步，每次创建独立 context |
+| `Executor` / `ModelCall` | 收集各 run 的分支、tile 调用，固定 variant 顺序，交给 adapter 按 `model.micro_batch_size` 分块；排空 rank 继续 collective |
+| `StepCollector` / `StepRecord` | 调用方提供 `(run, step)` 回调，消费每步 latents、velocity 和结果；sampler 不保留历史 |
 | `BranchSpec` / `BaseGuidance` | `branches(item_index)` 声明分支名字、condition 和模型 variant；`combine()` 在整幅分支结果上组合 velocity。内置 `cfg`（含 renorm，支持按步 LoRA variant）与一阶 Flow/DDIM `cfg_pp`；裸数字如 `"guidance": 4.5` 表示 CFG scale。`requires_negative(num_items)` 判断是否需要 processor 构造负条件 |
 | `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 reference latent 的释放时机 |
 | `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段 `tile_size`/`overlap`（正方形像素，需为 packed stride 倍数），布局用 `utils.tiling.plan_tiles` 在 token 网格上规划；写入 `batch["tiling"]`（`TileLayout`）、`batch["model_image_size"]`（单 tile 实际尺寸）与逐 tile 条件 `tiles`；`save_negative=true` 时逐 tile 负条件写入 `negative["tiles"]`（默认关闭） |
-| `predict_velocity()` | `evaluation.py` 中唯一的叶子调用：按 `tiling` 元数据在 token 网格上切片，把所有 tile 与普通 batch 合成一次 `predict_velocity_batched`，再用 `utils.tiling.stitch_tiles`（邻边 Hann ramp、按权重归一化）拼回整幅 velocity 后组合 guidance。不补齐 tile 数：跨 rank 不齐由 adapter 的 collation 同步 raise |
+| `conditional_velocity()` | 无 guidance 的训练调用生成器；与 guided sampling 共用 `run.py` 中的 tile 展开和整幅拼接。adapter 对齐跨 rank 不等的 tile/forward 数，冷启动通过 collective 提供 dummy，梯度依赖由 executor 跨 variant 合并 |
 | `derive_seed()` | 确定性种子派生 |
 
 `plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 读取 `batch["model_image_size"]`（缺省等于 `image_size`），tiled batch 因而按单 tile 的尺寸/序列长度计算。
 
 **Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正）, `sa`（SA-Solver 随机 PEC）, `flash`（逐步重加噪与可选噪声截断）。
 
-GRPO 的 `training/grpo_sampling.py` 提供 `collect_samples()` 与 `replay_steps()`：自动记录具有逐步密度且 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；stateful guidance 与多步 solver replay 不支持。Momentum guidance 位于 `flow_control/contrib/momentum_guidance.py`。
+GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(model, items)`：自动记录具有逐步密度且 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；stateful guidance 与多步 solver replay 不支持。Momentum guidance 位于 `flow_control/contrib/momentum_guidance.py`。
 
-tiling 在 `predict_velocity()` 展开；sample、guided evaluation、GRPO replay、NFT 以及 SFT/AWM/RAM 的直接训练前向都经过这一个叶子调用，rollout 与训练看到相同的 tile。下一轮 Pipeline 提供容器内可消费、外部可读取的 microbatch 上限；本轮不新增该控制。
+sample、guided evaluation、GRPO replay、NFT 以及 SFT/AWM/RAM 的直接训练前向共用 tile 展开/拼接，rollout 与训练看到相同布局。`model.micro_batch_size` 限制真实前向大小，`train_micro_batch_size` 决定每次 backward 的逻辑 loss 项数。只有 adapter 内允许低精度计算；sampler 与 loss 统一 fp32，低精度存储值在使用前升 fp32。
 
 ---
 

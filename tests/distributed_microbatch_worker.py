@@ -7,7 +7,7 @@ from pydantic import PrivateAttr
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers import Sampler, SampleRequest
+from flow_control.samplers import Executor, Sampler, SampleRequest
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
 from flow_control.training.data import (
     DistributedBucketSampler,
@@ -70,6 +70,8 @@ class DistributedSamplerModel:
         self,
         batches: list[Batch],
         timesteps: list[torch.Tensor],
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         self.calls.append(len(batches))
         return [batch["clean_latents"] for batch in batches]
@@ -104,6 +106,20 @@ def test_synchronized_fallback(rank: int) -> None:
 
 
 def test_unequal_counts_pad_with_dummy_forwards(rank: int) -> None:
+    # S2 cold start: rank 1 has never seen a sample. The adapter must transfer
+    # a dummy collectively before its first forward, and all-empty stays a no-op.
+    adapter = make_adapter(2)
+    local = ([make_batch(4, 7.0)], [torch.tensor([0.5])]) if rank == 0 else ([], [])
+    with torch.no_grad():
+        assert adapter.predict_velocity_batched([], []) == []
+        outputs = adapter.predict_velocity_batched(*local)
+    assert adapter._forward_batch_sizes == [1]
+    assert len(outputs) == len(local[0])
+    assert adapter._dummy_sample is not None
+    torch.testing.assert_close(
+        adapter._dummy_sample[0]["noisy_latents"], torch.full((1, 4, 2), 7.0)
+    )
+
     # Sampler-rethink S1: unequal logical counts no longer raise. Rank 0 has
     # chunks [2, 2, 1], rank 1 [2, 1] plus one dummy chunk: forward counts match
     # (dense sizes need not), and every real output stays in order.
@@ -144,56 +160,52 @@ def test_unequal_counts_pad_with_dummy_forwards(rank: int) -> None:
 
 
 def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
+    # A rank with a negative batch and one without issue the same forward
+    # sequence: one predict_velocity_batched per variant per round, carrying
+    # whatever branches the rank has (two here, one there); equal physical
+    # forward counts are the adapter's job, so the fake only sees its own list.
     sampler = Sampler(guidance=ClassifierFreeGuidance(scale=2.0), steps=1)
     model = DistributedSamplerModel()
     batch = make_batch(1, value=3.0)
     negative_batch = make_batch(1, value=1.0) if rank == 0 else None
-    sampler.get_guided_velocity(
-        model,
-        batches=[batch],
-        negative_batches=[negative_batch],
-        latents=[batch["noisy_latents"]],
-        timesteps=[torch.tensor([1.0])],
-        sigmas=[1.0],
+    run = sampler.make_run(
+        SampleRequest(batch, negative_batch), plan=sampler.plan(batch)
     )
-    assert model.calls == [1, 1]
+    Executor(model, sampler.variant_keys()).evaluate(
+        [run.guided_velocity(batch["noisy_latents"], 0)]
+    )
+    assert model.calls == ([2] if rank == 0 else [1])
 
-    # CFG++ cannot fall back to a conditional-only velocity. If only one rank
-    # lacks its negative batch, every rank must fail before model collectives.
+    # CFG++ cannot fall back to a conditional-only velocity: a request without
+    # its negative batch is rejected when the run is built, before any
+    # collective, so no rank can be left waiting in a forward.
     sampler = Sampler(guidance=CfgPlusPlusGuidance(), steps=1)
-    model = DistributedSamplerModel()
     try:
-        sampler.get_guided_velocity(
-            model,
-            batches=[batch],
-            negative_batches=[negative_batch],
-            latents=[batch["noisy_latents"]],
-            timesteps=[torch.tensor([1.0])],
-            sigmas=[1.0],
-            sigma_nexts=[0.0],
-        )
+        sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
     except ValueError as error:
-        assert "required guidance branch" in str(error)
+        assert "negative batch" in str(error)
     else:
-        raise AssertionError(
-            "Missing CFG++ negative batch was not rejected on every rank."
-        )
-    assert model.calls == []
+        raise AssertionError("Missing CFG++ negative batch was not rejected.")
 
 
-def test_sampler_request_count_mismatch_is_rejected(rank: int) -> None:
+def test_stream_drains_unequal_request_counts(rank: int) -> None:
+    # Rank 0 streams two requests and rank 1 one. The executor keeps rank 1 in
+    # the extra round with an empty call list and the adapter fills it with a
+    # dummy forward, so both ranks run two forwards and neither hangs; a
+    # one-step Euler run with velocity == latents lands on zero.
+    adapter = make_adapter(1)
     sampler = Sampler(steps=1)
-    model = DistributedSamplerModel()
-    request_count = 2 if rank == 0 else 1
-    try:
-        sampler.sample(
-            model,
-            [SampleRequest(batch=make_batch(1)) for _ in range(request_count)],
+    values = [3.0, 5.0] if rank == 0 else [3.0]
+    with torch.no_grad():
+        runs = list(
+            sampler.sample(
+                adapter, [SampleRequest(batch=make_batch(4, value)) for value in values]
+            )
         )
-    except ValueError as error:
-        assert "same number of requests" in str(error)
-    else:
-        raise AssertionError("Distributed sampler request mismatch was not rejected.")
+    assert adapter._forward_batch_sizes == [1, 1]
+    assert len(runs) == len(values)
+    for run in runs:
+        torch.testing.assert_close(run.ctx.latents, torch.zeros(1, 4, 2))
 
 
 class _TinyDataset:
@@ -238,7 +250,7 @@ def main() -> None:
         test_synchronized_fallback(rank)
         test_unequal_counts_pad_with_dummy_forwards(rank)
         test_mixed_cfg_is_globally_synchronized(rank)
-        test_sampler_request_count_mismatch_is_rejected(rank)
+        test_stream_drains_unequal_request_counts(rank)
         test_final_padded_microbatch(rank)
     finally:
         dist.destroy_process_group()

@@ -2,31 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 
 from flow_control.adapters.base import Batch, SamplerModel
-from flow_control.utils.logging import console, get_logger, warn_once
-from flow_control.utils.progress import report_progress
+from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.tensor import deep_move_to_device
 
-from .evaluation import evaluate
-from .executor import Run, StepObserver, execute, validate_distributed_request_count
+from .executor import Executor
 from .guidance import ClassifierFreeGuidance, Guidance
-from .plan import EvalRequest, SamplingPlan, StepContext
+from .plan import SamplingPlan, StepContext
 from .projectors import Projector
+from .run import SampleRun, StepCollector
 from .shift import ConstantShift, Shift
 from .solver import FlowSolver, Solver
 from .transforms import PlanTransform
@@ -40,31 +31,11 @@ def derive_seed(base_seed: int, key: str) -> int:
     return int.from_bytes(h[:8], "little") % (2**63)
 
 
-def make_sample_progress() -> Progress:
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]{task.description:<20}"),
-        BarColumn(complete_style="blue", finished_style="bold blue"),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-        transient=True,
-    )
-
-
 @dataclass(slots=True)
 class SampleRequest:
     batch: Batch
     negative_batch: Batch | None = None
     generator: torch.Generator | None = None
-
-
-@dataclass(slots=True)
-class SampleOutput:
-    final_latents: torch.Tensor
-    timesteps: torch.Tensor
-    """Executed plan-item start sigmas on the model device."""
 
 
 class Start(BaseModel):
@@ -189,133 +160,81 @@ class Sampler(BaseModel):
             plan = transform.apply(plan, generator)
         return plan
 
+    def variant_keys(self) -> list[str | None]:
+        """Every weight variant the guidance may ask for, in a fixed order."""
+        return list(
+            dict.fromkeys(
+                spec.variant
+                for index in range(self.steps)
+                for spec in self.guidance.branches(index)
+            )
+        )
+
+    def make_run(
+        self,
+        request: SampleRequest,
+        *,
+        plan: SamplingPlan | None = None,
+        collector: StepCollector | None = None,
+    ) -> SampleRun:
+        """Bind a request to a plan and fresh per-run state.
+
+        Without ``plan`` this is a sampling run: the plan is built for the
+        batch and latents start per ``start``. Training passes the executed
+        ``plan`` back and supplies latents through ``guided_velocity``.
+        """
+        batch, negative = request.batch, request.negative_batch
+        if plan is None:
+            plan = self.plan(batch, request.generator)
+            latents = self.start.latents(batch, plan[0].sigma, request.generator)
+        else:
+            latents = batch["noisy_latents"].float()
+        if negative is None:
+            negative_branches = [
+                spec
+                for index in range(len(plan))
+                for spec in self.guidance.branches(index)
+                if spec.batch_key == "negative"
+            ]
+            if any(not spec.optional for spec in negative_branches):
+                raise ValueError(
+                    f"Guidance {self.guidance.type!r} needs a negative batch but the "
+                    "request has none; enable the processor's negative conditioning."
+                )
+            if negative_branches:
+                warn_once(
+                    logger,
+                    "The configured guidance can use a negative branch but at least "
+                    "one request has no negative_batch; those samples fall back to "
+                    "the conditional velocity.",
+                )
+        ctx = StepContext(
+            latents=latents,
+            generator=request.generator,
+            solver_state=None,
+            guidance_state=self.guidance.init_state(),
+            num_items=len(plan),
+        )
+        return SampleRun(self, batch, negative, plan, ctx, collector)
+
     def sample(
         self,
         model: SamplerModel,
-        requests: list[SampleRequest],
+        requests: Iterable[SampleRequest],
         *,
-        observer: StepObserver | None = None,
-    ) -> list[SampleOutput]:
-        if not requests:
-            raise ValueError("sample requires at least one request.")
-        validate_distributed_request_count(
-            len(requests), model.device, "Sampler.sample"
-        )
-        if (
-            isinstance(self.guidance, ClassifierFreeGuidance)
-            and self.guidance.requires_negative(self.steps)
-            and any(request.negative_batch is None for request in requests)
-        ):
-            warn_once(
-                logger,
-                "The configured guidance needs a negative branch but at least "
-                "one request has no negative_batch; those samples fall back to "
-                "the conditional velocity.",
-            )
-        runs = []
-        for request in requests:
-            batch = deep_move_to_device(request.batch, model.device)
-            negative_batch = (
-                deep_move_to_device(request.negative_batch, model.device)
-                if request.negative_batch is not None
-                else None
-            )
-            # Window selection precedes start noise, preserving per-sample RNG order.
-            plan = self.plan(batch, request.generator)
-            runs.append(
-                Run(
-                    plan=plan,
-                    ctx=StepContext(
-                        latents=self.start.latents(
-                            batch, plan[0].sigma, request.generator
-                        ),
-                        generator=request.generator,
-                        solver_state=None,
-                        guidance_state=self.guidance.init_state(),
-                        num_items=len(plan),
+        collector: StepCollector | None = None,
+    ) -> Iterator[SampleRun]:
+        """Sample lazily through one Executor; runs come out as they finish."""
+
+        def runs() -> Iterator[SampleRun]:
+            for request in requests:
+                moved = replace(
+                    request,
+                    batch=deep_move_to_device(request.batch, model.device),
+                    negative_batch=deep_move_to_device(
+                        request.negative_batch, model.device
                     ),
-                    batch=batch,
-                    negative_batch=negative_batch,
                 )
-            )
-        with make_sample_progress() as progress:
-            task = progress.add_task("Sampling", total=len(runs[0].plan))
-            for event in execute(model, runs, self.guidance, self.projectors, observer):
-                progress.update(task, total=event.total_steps, advance=1)
-                report_progress(
-                    (event.step_idx + 1) / event.total_steps,
-                    f"Sampling {event.step_idx + 1}/{event.total_steps}",
-                )
-        return [
-            SampleOutput(
-                final_latents=run.ctx.latents.to(model.dtype),
-                timesteps=torch.tensor(
-                    [item.sigma for item in run.plan],
-                    dtype=torch.float32,
-                    device=model.device,
-                ),
-            )
-            for run in runs
-        ]
+                yield self.make_run(moved, collector=collector)
 
-    def get_guided_velocity(
-        self,
-        model: SamplerModel,
-        batches: list[Batch],
-        negative_batches: list[Batch | None],
-        latents: list[torch.Tensor],
-        timesteps: list[torch.Tensor],
-        sigmas: list[float],
-        *,
-        sigma_nexts: list[float | None] | None = None,
-        etas: list[float] | None = None,
-        item_indices: list[int] | None = None,
-        num_items: list[int] | None = None,
-    ) -> list[torch.Tensor]:
-        """Evaluate guidance and whole-image projections with fresh per-item state.
-
-        ``item_indices`` are positions in each request's executed plan, so they
-        must come with those plans' lengths ``num_items``; without them every
-        item is the first of ``steps``.
-        """
-        if len(timesteps) != len(sigmas):
-            raise ValueError("timesteps and sigmas must have equal lengths.")
-        if item_indices is not None and (
-            num_items is None or len(num_items) != len(item_indices)
-        ):
-            raise ValueError(
-                "item_indices requires an equally long num_items list of executed "
-                "plan lengths."
-            )
-        requests = [
-            EvalRequest(
-                latent,
-                sigma,
-                sigma_next=sigma_nexts[index] if sigma_nexts is not None else None,
-                eta=etas[index] if etas is not None else 0.0,
-                solver=self.solver,
-            )
-            for index, (latent, sigma) in enumerate(zip(latents, sigmas, strict=True))
-        ]
-        contexts = [
-            StepContext(
-                latents=latent,
-                generator=None,
-                solver_state=None,
-                guidance_state=self.guidance.init_state(),
-                item_index=item_indices[index] if item_indices is not None else 0,
-                num_items=num_items[index] if num_items is not None else self.steps,
-            )
-            for index, latent in enumerate(latents)
-        ]
-        outputs = evaluate(
-            model=model,
-            guidance=self.guidance,
-            batches=batches,
-            negative_batches=negative_batches,
-            requests=requests,
-            contexts=contexts,
-            projectors=self.projectors,
-            timesteps=timesteps,
-        )
-        return [output.velocity for output in outputs]
+        return Executor(model, self.variant_keys()).stream(runs())

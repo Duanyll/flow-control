@@ -605,16 +605,24 @@ class ServingEngine:
                 dtype=self.model.dtype,
             )
             report_progress(0.0, "Sampling...")
-            sample_output = self.sampler.sample(
-                self.model,
-                [
-                    SampleRequest(
-                        batch=batch,
-                        negative_batch=negative_batch,
-                        generator=generator,
+            run = next(
+                iter(
+                    self.sampler.sample(
+                        self.model,
+                        [
+                            SampleRequest(
+                                batch=batch,
+                                negative_batch=negative_batch,
+                                generator=generator,
+                            )
+                        ],
+                        collector=lambda run, step: report_progress(
+                            (step.index + 1) / len(run.plan),
+                            f"Sampling {step.index + 1}/{len(run.plan)}",
+                        ),
                     )
-                ],
-            )[0]
+                )
+            )
 
             # Reload processor back to GPU for decode
             if self.offload_processor:
@@ -622,7 +630,7 @@ class ServingEngine:
 
             # --- decode on processor_device ---
             report_progress(1.0, "Decoding...")
-            output_latent = sample_output.final_latents.to(self.processor_device)
+            output_latent = run.ctx.latents.to(self.processor_device)
             result = self.processor.decode_output(output_latent, batch)
             result = deep_move_to_device(result, torch.device("cpu"))
         finally:

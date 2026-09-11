@@ -3,6 +3,9 @@
 Status: core implementation complete; focused CPU, distributed, FSDP2, real
 model, end-to-end GRPO, and a 512x512 SD3.5 AWM throughput sweep passed.
 
+The real-model throughput measurements below predate the generator executor;
+they are retained as historical results, not remeasured in this refactor.
+
 This is the living implementation record for fixed-shape microbatching. It also
 records the stable boundary intended for future padding and sequence packing.
 
@@ -10,21 +13,20 @@ records the stable boundary intended for future padding and sequence packing.
 
 - [x] Treat each existing `[1, N, D]` item as one logical sample.
 - [x] Let adapters own physical collation instead of the DataLoader.
-- [x] Expose list-only adapter, sampler, guided-velocity, and replay APIs.
+- [x] Expose list-based adapter/replay APIs and a lazy sampler stream.
 - [x] Remove singleton compatibility overloads and migrate all in-tree callers.
 - [x] Use dense `[M, N, D]` forwards only for adapter-declared compatible fields.
 - [x] Fall back to one forward per logical sample when inputs are incompatible.
-- [x] Synchronize dense/fallback and CFG decisions across distributed ranks.
+- [x] Synchronize dense/fallback decisions and forward counts across distributed ranks.
 - [x] Preserve independent per-request sigma grids, solver states, generators,
       transformed plans (SDE windows), and outputs.
 - [x] Keep processor encode/decode, reward evaluation, and annotation per sample.
 - [x] (superseded by plan-as-data) SA-Solver now batches across requests through
       the plan executor's rendezvous loop; no sequential special case remains.
 - [x] Keep sequence packing out of the original microbatching change. Sampler-rethink
-      expands tiled batches inside `samplers.evaluation.predict_velocity`, the
-      single leaf call; the `tiled_t2i` processor writes the layout into each
+      expands tiled batches inside `samplers.run` into shared leaf generators; the `tiled_t2i` processor writes the layout into each
       batch and the sampler has no independent tile configuration. Unequal
-      tile counts across ranks are rejected by the adapter collation sync.
+      tile counts are padded with dummy forwards by the adapter.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
 
 ## Stable APIs
@@ -36,12 +38,18 @@ def predict_velocity_batched(
     self,
     batches: list[TBatch],
     timesteps: list[torch.Tensor],
+    *,
+    dummy_outputs: list[torch.Tensor] | None = None,
 ) -> list[torch.Tensor]:
-    """Return one singleton-leading velocity tensor per logical sample."""
+    """Return one singleton-leading fp32 velocity per logical sample."""
 ```
 
-- [x] Reject empty lists, unequal lengths, and non-singleton logical inputs.
+- [x] Accept empty lists; reject unequal argument lengths and non-singleton logical inputs.
 - [x] Cast and move inputs through the adapter's existing dtype/device path.
+- [x] Chunk by `model.micro_batch_size`, align chunk/forward counts, and
+      provide a dummy through a collective when a rank has no cached sample.
+- [x] Fold autograd dummy outputs into real results; the executor collects
+      dependencies across variants with no local real sample.
 - [x] Preserve input order and singleton leading output dimensions.
 - [x] Use `torch.cat(..., dim=0)` for singleton-leading tensor fields.
 - [x] Ignore undeclared dataset metadata when deciding dense compatibility.
@@ -68,10 +76,10 @@ class SampleRequest:
 def sample(
     self,
     model: SamplerModel,
-    requests: list[SampleRequest],
+    requests: Iterable[SampleRequest],
     *,
-    observer: StepObserver | None = None,
-) -> list[SampleOutput]:
+    collector: StepCollector | None = None,
+) -> Iterator[SampleRun]:
     ...
 ```
 
@@ -79,42 +87,40 @@ def sample(
 handles direct latent initialization and SDEdit; `transforms` applies SDE
 windows to each request's plan. Named branch evaluation, batch-described tile forwards,
 whole-image guidance/projectors, and solver steps preserve cross-request batching
-and FSDP alignment. `SampleOutput` contains final latents and the executed sigma
-grid; training-specific records are collected through the step observer.
+and FSDP alignment. Completed runs expose `ctx.latents` and `plan`; the
+optional caller collector `(run, step)` consumes each completed transition
+without the sampler retaining step tensors.
 Dynamic shift reads `model_image_size` (the tile size for tiled batches), so a
 4k output with 1k tiles follows the same sigma schedule as a real 1k model
 input. Each request can carry its own layout; tiles are feathered with the
 shared `utils.tiling.stitch_tiles` window; ordinary batches pass through.
 Tile-specific negative prompts require processor `save_negative=true`
 (default: false). Every model call, including SFT/AWM/RAM training forwards,
-goes through `predict_velocity`, so rollout and training see the same tiles.
+goes through the same tile expansion/merging helpers, so rollout and training
+see the same tiles.
 
-- [x] Return one `SampleOutput` per request without stacking logical outputs.
+- [x] Yield one `SampleRun` per request in completion order without stacking outputs.
 - [x] Build one shifted/custom sigma schedule per request.
 - [x] Keep one solver/guidance runtime state (`StepContext`) per request; SDE
-      windows are per-request plan data and GRPO recording is an observer.
+      windows are per-request plan data and GRPO recording is a caller collector.
 - [x] Batch the expensive conditional model forward once per rendezvous round.
 - [x] Run solver math independently per request.
 - [x] Support no-negative, all-negative, and mixed CFG request lists.
-- [x] Globally synchronize whether the unconditional pass is required.
-- [x] Use conditional dummy inputs for missing optional CFG negatives. Required
-      branches, including CFG++ negatives, are validated collectively before
-      any model forward; dummy outputs retain zero-valued backward dependencies.
+- [x] Execute the same configured variant order on every rank; validate required
+      negative conditions while constructing runs.
 - [x] Apply CFG renormalization per logical sample (`ClassifierFreeGuidance`).
-- [x] Reject different request counts across distributed ranks before sampling
-      (`executor.validate_distributed_request_count`, shared by `sample` and
-      `training.grpo_sampling.replay_steps`).
-- [x] Batch SA-Solver across requests through the executor's multi-evaluation
-      rendezvous. Unequal plan lengths or solver/guidance configurations raise;
-      requests with matching topology retain independent shifted sigma grids.
+- [x] Accept unequal request, plan and tile counts across ranks; exhausted
+      no-grad ranks continue until the executor's activity collective is empty.
+- [x] Give each standalone `guided_velocity()` evaluation fresh state, including
+      concurrent evaluations of different steps from the same run.
+- [x] Batch SA's multiple evaluations and replenish the stream as runs complete.
 
-Replay uses list-only `training.grpo_sampling.replay_steps(sampler, model, items)`.
-Each `ReplayItem` carries a plugin-owned `RecordedStep` with its executed
-transition, step index/count and optional Flash noise ramp snapshot. The plugin
-returns `StepLogProbOutput(log_prob, mean, std_dev)`; `collect_samples()` records
-supported stochastic steps automatically. NFT stores the actual executed plan
-on `Rollout` so selected training timesteps keep their branch schedule, successor
-sigma and transformed eta.
+Replay uses `training.grpo_sampling.replay_steps(model, items)`. Each `ReplayItem`
+carries its `SampleRun` and a training-owned `RecordedStep` containing the executed
+transition, step index/count and optional Flash noise ramp snapshot. `GrpoCollector`
+records stochastic latents and log probabilities immediately, dropping velocities;
+`take(run)` consumes a completed trajectory. NFT stores the executed plan on
+`Rollout`, keeping branch schedule, successor sigma and transformed eta.
 
 ## Window RNG (plan transforms)
 
@@ -124,7 +130,7 @@ sigma and transformed eta.
 - [x] Use the generator's device for `torch.randint`.
 - [x] Validate positive window size, valid range, and window fit.
 - [x] Preserve the half-open runtime window `[train_start, train_end)`;
-      `with_sde_window` gates eta; the GRPO observer records stochastic steps.
+      `with_sde_window` gates eta; the GRPO collector records stochastic steps.
 - [x] Test Python-RNG independence, generator isolation, and both endpoints
       (`tests/test_recipe_build.py::SelectSdeWindowTest`).
 
@@ -155,12 +161,13 @@ plan construction, SDEdit start noise, and stochastic solver draws — one per-r
 ## DataLoaders and callers
 
 - [x] Make the shared collator return raw `list[dict]`.
-- [x] Add `micro_batch_size` to inference and SFT.
-- [x] Add `validation_micro_batch_size` to validation.
-- [x] Add `rollout_micro_batch_size` to RL rollout collection.
+- [x] Use `model.micro_batch_size` for physical forwards in inference, validation
+      and rollout; remove their former caller-level forward-size fields.
 - [x] Add `train_micro_batch_size` to GRPO, NFT, AWM, and RAM.
 - [x] Use `PositiveInt` for every new configuration field.
-- [x] Keep serving list-based with one request until serving-level batching exists.
+- [x] Keep serving at one request and report per-step progress via its collector.
+- [x] Group streamed pairwise rewards by original `__key__`, retaining K per prompt
+      on the same rank and rejecting incomplete groups.
 - [x] Migrate inference, validation, rollout, serving, SFT, GRPO, NFT, AWM,
       and RAM.
 - [x] Regenerate JSON schemas with `uv run flow-control schema`.
@@ -174,8 +181,8 @@ scope because data assignment changes with world size.
 
 ## Training arithmetic
 
-For global optimizer batch `G`, world size `W`, and per-device physical
-microbatch `M`:
+For global optimizer batch `G`, world size `W`, and per-rank logical
+backward batch `M = train_micro_batch_size`:
 
 ```text
 local_update_batch = G // W
@@ -187,7 +194,7 @@ gradient_accumulation_steps = local_update_batch // M
 - [x] Keep optimizer/scheduler/current-step semantics tied to optimizer updates.
 - [x] Scale a short microbatch mean by `m / C` within an optimizer chunk of
       `C` logical items.
-- [x] Enable FSDP gradient synchronization only on the final physical microbatch.
+- [x] Enable FSDP gradient synchronization only on the final backward microbatch.
 - [x] Share the chunk/microbatch slicing, loss scaling, tail-update warning, and
       non-finite loss check across GRPO/NFT/AWM/RAM via `MicrobatchTrainMixin`
       (`flow_control/training/mixins/microbatch.py`); trainer loss entry points
@@ -207,8 +214,9 @@ gradient_accumulation_steps = local_update_batch // M
 
 - [ ] Add focused fake-trainer loss/gradient equivalence tests for every RL
       objective; the shared scaling path is implemented and code-reviewed but
-      only adapter-level gradient equivalence and real-model batched backward are
-      currently automated.
+      complete logical-batch equivalence is not yet covered for every objective.
+      Adapter gradients, real-model batched backward, and NFT/GRPO low-precision
+      storage with fp32 loss/gradient parity are covered.
 - [ ] Run full checkpoint/restore tests at SFT optimizer-step and RL outer-epoch
       boundaries. Raw list-batch StatefulDataLoader state round-trip is covered.
 - [ ] Treat changing microbatch size while restoring an existing mid-epoch
@@ -216,24 +224,34 @@ gradient_accumulation_steps = local_update_batch // M
 
 ## Distributed invariants
 
-- [x] All ranks submit the same number of logical requests.
+- [x] All ranks use the same adapter limit and configured variant order.
+- [x] Ranks may submit unequal logical counts; training still requires a local
+      evaluation to carry dummy dependencies into backward.
 - [x] All ranks agree on dense collation versus sequential fallback.
 - [x] All ranks execute equal conditional/unconditional CFG forward counts.
 - [x] All ranks execute equal backward counts per optimizer update.
 - [x] Bucket padding produces equal final logical microbatch lengths.
 - [x] A rank with dense-compatible inputs safely follows another rank's fallback.
-- [x] Two-rank CPU collective tests cover fallback, request count, CFG, and tails.
+- [x] Two-rank CPU collective tests cover fallback, cold empty ranks, CFG, and tails.
 - [x] Two-rank FSDP2/NCCL tests cover dense forward/backward, local fallback,
       and cross-rank synchronized fallback.
 
 ## Validation completed
+
+The 2026-09-11 generator refactor passed 70 tests and 154 subtests without
+changing the 21 numeric fixtures. Slurm job 30503 passed both two-rank Gloo
+workers; job 30504 passed FSDP checkpoint/variant/tile gradients and complete
+bf16 tiled sampling with fp32 steps. These short tiny-model correctness runs
+do not establish sustained production throughput.
 
 ### Static and CPU
 
 - [x] `uv run ruff format flow_control tests`
 - [x] `uv run ruff check --fix flow_control tests`
 - [x] `uv run ty check flow_control tests`
-- [x] 25 focused unit tests pass (19 original plus microbatch-arithmetic tests).
+- [x] Preserve all 21 bitwise solver fixtures without regeneration.
+- [x] Cover concurrent replay contexts, completion-order pairwise grouping,
+      collector parity, and bf16 storage with fp32 sampler/loss arithmetic.
 - [x] Two-rank Gloo distributed worker passes.
 - [x] JSON schemas regenerate successfully.
 - [x] `git diff --check` passes.
@@ -364,9 +382,10 @@ ragged example. FLUX and Qwen still require architecture-specific masks and
 position semantics; the new API removes the outer plumbing work but not that
 model-level complexity.
 
-## Deferred Pipeline control
+## Forward and backward limits
 
-The next SamplingPipeline round will define one microbatch upper limit. The
-container must be able to consume it internally, and outer callers must be able
-to read it when constructing logical batches. The processor-owned tiling
-correction adds no separate microbatch knob.
+`model.micro_batch_size` bounds physical adapter forwards, including branch/tile
+expansion. The executor uses it to decide how many sampling runs to keep active.
+`train_micro_batch_size` separately limits logical loss items per backward and
+therefore controls retained autograd state. There is no separate tiling or rollout
+forward-size setting.

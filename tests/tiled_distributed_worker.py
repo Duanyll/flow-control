@@ -8,7 +8,7 @@ from diffusers import ModelMixin
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers.evaluation import predict_velocity
+from flow_control.samplers import Executor, conditional_velocity
 from flow_control.utils.tiling import TileLayout
 
 
@@ -53,7 +53,9 @@ def main() -> None:
             arch="fake", type="fake", micro_batch_size=4
         )
         batch = make_batch(6, 6)
-        velocity = predict_velocity(adapter, [batch], timesteps)[0]
+        velocity = Executor(adapter).evaluate(
+            [conditional_velocity(batch, timesteps[0])]
+        )[0]
         x = batch["noisy_latents"]
         torch.testing.assert_close(velocity, 2 * x, rtol=1e-6, atol=1e-5)
         velocity.sum().backward()
@@ -67,7 +69,9 @@ def main() -> None:
             arch="fake", type="fake", micro_batch_size=2
         )
         batch = make_batch(4, 6) if rank == 0 else make_batch(6, 6)
-        velocity = predict_velocity(adapter, [batch], timesteps)[0]
+        velocity = Executor(adapter).evaluate(
+            [conditional_velocity(batch, timesteps[0])]
+        )[0]
         torch.testing.assert_close(
             velocity, 2 * batch["noisy_latents"], rtol=1e-6, atol=1e-5
         )

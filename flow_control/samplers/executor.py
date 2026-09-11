@@ -1,175 +1,128 @@
-"""One rendezvous loop for cross-request and distributed sampling."""
+"""Batches leaf model calls from many generators into collective adapter forwards."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
-from flow_control.adapters.base import Batch, SamplerModel
+from flow_control.adapters.base import SamplerModel
 
-from .evaluation import evaluate
-from .guidance import BaseGuidance
-from .plan import (
-    EvalRequest,
-    GuidanceOutput,
-    SamplingPlan,
-    StepContext,
-    Transition,
-    TransitionResult,
-)
-from .projectors import BaseProjector, apply_pre_transition
+from .run import Calls, ModelCall, SampleRun
 
 
 @dataclass(slots=True)
-class Run:
-    plan: SamplingPlan
-    ctx: StepContext
-    batch: Batch
-    negative_batch: Batch | None
+class _Active[T]:
+    gen: Calls[T]
+    calls: list[ModelCall]
+    velocities: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
-class StepEvent:
-    step_idx: int
-    total_steps: int
+class Executor:
+    """Drive call generators together so each adapter forward sees a full microbatch.
 
+    Every round is collective: one all-reduce decides whether any rank still
+    has work, then ``predict_velocity_batched`` runs once per variant in the
+    fixed ``variants`` order, with an empty list where this rank has nothing,
+    so all ranks issue the same forward sequence. Unequal sample counts are the
+    adapter's business (it pads with dummy forwards). Grad mode is the caller's.
+    """
 
-StepObserver = Callable[
-    [int, Transition, StepContext, torch.Tensor | None, torch.Tensor], None
-]
-"""Observe a completed transition before the executor advances its context."""
+    def __init__(
+        self, model: SamplerModel, variants: Sequence[str | None] = (None,)
+    ) -> None:
+        self.model = model
+        self.variants = list(variants)
 
+    def stream(self, runs: Iterable[SampleRun]) -> Iterator[SampleRun]:
+        """Sample runs lazily, pulling a new one only while pending calls fit a
+        microbatch; finished runs come out in completion order."""
+        source = ((run, run.run()) for run in runs)
+        for run, _ in self._drive(source, self.model.micro_batch_size):
+            yield run
 
-@dataclass(slots=True)
-class _EvalRound:
-    entries: list[tuple[Run, EvalRequest]]
+    def evaluate[T](self, gens: Sequence[Calls[T]]) -> list[T]:
+        """Run every generator at once (training microbatches); order preserved."""
+        results = dict(self._drive(iter(enumerate(gens)), None))
+        return [results[index] for index in range(len(gens))]
 
-
-def validate_distributed_request_count(
-    count: int, device: torch.device, operation: str
-) -> None:
-    if not dist.is_initialized():
-        return
-    counts = torch.tensor([count, -count], device=device, dtype=torch.int64)
-    dist.all_reduce(counts, op=dist.ReduceOp.MIN)
-    if int(counts[0].item()) != -int(counts[1].item()):
-        raise ValueError(
-            f"All distributed ranks must submit the same number of requests "
-            f"to {operation}."
-        )
-
-
-def _sync_eval_target(local_count: int, device: torch.device) -> int:
-    if not dist.is_initialized():
-        return local_count
-    counts = torch.tensor([local_count, -local_count], device=device, dtype=torch.int64)
-    dist.all_reduce(counts, op=dist.ReduceOp.MIN)
-    target = -int(counts[1].item())
-    if int(counts[0].item()) != target:
-        raise ValueError(
-            "Sampling transitions requested different evaluation counts across "
-            "ranks; solver configurations and execution topology must match."
-        )
-    return target
-
-
-def _result(stop: StopIteration) -> TransitionResult:
-    result = stop.value
-    assert isinstance(result, TransitionResult)
-    return result
-
-
-def _apply_result(run: Run, result: TransitionResult) -> None:
-    run.ctx.latents = result.next_latents
-    if result.next_solver_state is not None:
-        run.ctx.solver_state = result.next_solver_state
-
-
-def _drive(
-    runs: list[Run],
-    projectors: Sequence[BaseProjector],
-    observer: StepObserver | None,
-) -> Generator[_EvalRound | StepEvent, list[GuidanceOutput] | None, None]:
-    num_items = len(runs[0].plan)
-    for item_index in range(num_items):
-        for run in runs:
-            run.ctx.item_index = item_index
-            run.ctx.num_items = num_items
-            run.ctx.latents = apply_pre_transition(
-                projectors, run.batch, run.ctx, run.plan[item_index]
-            )
-        generators = [run.plan[item_index].run(run.ctx) for run in runs]
-        results: list[TransitionResult | None] = [None] * len(runs)
-        velocities: list[torch.Tensor | None] = [None] * len(runs)
-        pending: dict[int, EvalRequest] = {}
-        for index, generator in enumerate(generators):
-            try:
-                pending[index] = next(generator)
-            except StopIteration as stop:
-                results[index] = _result(stop)
-        while pending:
-            order = list(pending)
-            outputs = yield _EvalRound([(runs[i], pending[i]) for i in order])
-            assert outputs is not None and len(outputs) == len(order)
-            pending = {}
-            for index, output in zip(order, outputs, strict=True):
-                velocities[index] = output.velocity
+    def _drive[K, T](
+        self, source: Iterator[tuple[K, Calls[T]]], window: int | None
+    ) -> Iterator[tuple[K, T]]:
+        active: list[tuple[K, _Active[T]]] = []
+        exhausted = False
+        while True:
+            while not exhausted and (
+                window is None or sum(len(entry.calls) for _, entry in active) < window
+            ):
                 try:
-                    pending[index] = generators[index].send(output)
+                    key, gen = next(source)
+                except StopIteration:
+                    exhausted = True
+                    break
+                try:
+                    active.append((key, _Active(gen, self._checked(next(gen)))))
                 except StopIteration as stop:
-                    results[index] = _result(stop)
-        for index, (run, result) in enumerate(zip(runs, results, strict=True)):
-            assert result is not None
-            if observer is not None:
-                observer(
-                    index,
-                    run.plan[item_index],
-                    run.ctx,
-                    velocities[index],
-                    result.next_latents,
+                    yield key, stop.value
+            if not self._anyone_active(bool(active)):
+                return
+            self._forward(active)
+            remaining: list[tuple[K, _Active[T]]] = []
+            for key, entry in active:
+                velocities = [entry.velocities[i] for i in range(len(entry.calls))]
+                try:
+                    calls = entry.gen.send(velocities)
+                except StopIteration as stop:
+                    yield key, stop.value
+                else:
+                    remaining.append((key, _Active(entry.gen, self._checked(calls))))
+            active = remaining
+
+    def _checked(self, calls: list[ModelCall]) -> list[ModelCall]:
+        unknown = {call.variant for call in calls} - set(self.variants)
+        if unknown:
+            raise ValueError(
+                f"Model calls ask for weight variants {sorted(unknown, key=str)} "
+                f"but this Executor only runs {self.variants}; build it with "
+                "Sampler.variant_keys()."
+            )
+        return calls
+
+    def _anyone_active(self, local: bool) -> bool:
+        if not dist.is_initialized():
+            return local
+        flag = torch.tensor(int(local), device=self.model.device)
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        return bool(flag.item())
+
+    def _forward(self, active: list[tuple[Any, _Active[Any]]]) -> None:
+        dummies: list[torch.Tensor] = []
+        for variant in self.variants:
+            slots = [
+                (entry, index)
+                for _, entry in active
+                for index, call in enumerate(entry.calls)
+                if call.variant == variant
+            ]
+            with self.model.use_variant(variant):
+                velocities = self.model.predict_velocity_batched(
+                    [entry.calls[index].batch for entry, index in slots],
+                    [entry.calls[index].timestep for entry, index in slots],
+                    dummy_outputs=dummies,
                 )
-            _apply_result(run, result)
-        yield StepEvent(item_index, num_items)
-
-
-def execute(
-    model: SamplerModel,
-    runs: list[Run],
-    guidance: BaseGuidance,
-    projectors: Sequence[BaseProjector] = (),
-    observer: StepObserver | None = None,
-) -> Iterator[StepEvent]:
-    """Execute matching plans; each model round rendezvous is collective."""
-    if not runs:
-        raise ValueError("execute requires at least one run.")
-    driver = _drive(runs, projectors, observer)
-    try:
-        item: _EvalRound | StepEvent | None = next(driver)
-    except StopIteration:
-        item = None
-    while True:
-        while isinstance(item, StepEvent):
-            yield item
-            try:
-                item = next(driver)
-            except StopIteration:
-                item = None
-        entries = item.entries if isinstance(item, _EvalRound) else []
-        if _sync_eval_target(len(entries), model.device) == 0:
-            return
-        outputs = evaluate(
-            model=model,
-            guidance=guidance,
-            batches=[run.batch for run, _ in entries],
-            negative_batches=[run.negative_batch for run, _ in entries],
-            requests=[request for _, request in entries],
-            contexts=[run.ctx for run, _ in entries],
-            projectors=projectors,
-        )
-        try:
-            item = driver.send(outputs)
-        except StopIteration:
-            item = None
+            for (entry, index), velocity in zip(slots, velocities, strict=True):
+                entry.velocities[index] = velocity
+        if dummies:
+            if not active:
+                raise RuntimeError(
+                    "Distributed training needs at least one local evaluation "
+                    "to carry dummy forward gradients; only no-grad streams may "
+                    "have an entirely empty rank."
+                )
+            entry = active[0][1]
+            entry.velocities[0] = entry.velocities[0] + sum(
+                output.sum() * 0 for output in dummies
+            )

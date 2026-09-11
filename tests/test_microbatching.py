@@ -8,7 +8,7 @@ from diffusers import ModelMixin
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers import Sampler, SampleRequest
+from flow_control.samplers import Executor, Sampler, SampleRequest
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import FlowSolver
@@ -67,7 +67,8 @@ class FakeFallbackAdapter(FakeDenseAdapter):
 class FakeSamplerModel:
     device = torch.device("cpu")
     dtype = torch.float32
-    micro_batch_size = 1
+    micro_batch_size = 2
+    """Two runs share each forward, so cross-request batching is observable."""
 
     def __init__(self) -> None:
         self.forward_batch_sizes: list[int] = []
@@ -81,6 +82,8 @@ class FakeSamplerModel:
         self,
         batches: list[Batch],
         timesteps: list[torch.Tensor],
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         self.forward_batch_sizes.append(len(batches))
         return [
@@ -191,26 +194,36 @@ class AdapterBatchingTest(unittest.TestCase):
         torch.testing.assert_close(dense._scale.grad, fallback._scale.grad)
 
 
+def guided_velocities(
+    sampler: Sampler, model: FakeSamplerModel, requests: list[SampleRequest]
+) -> list[torch.Tensor]:
+    """Training-style evaluation of plan item 0 for every request, batched."""
+    runs = [
+        sampler.make_run(request, plan=sampler.plan(request.batch))
+        for request in requests
+    ]
+    return Executor(model, sampler.variant_keys()).evaluate(
+        [run.guided_velocity(run.batch["noisy_latents"], 0) for run in runs]
+    )
+
+
 class SamplerBatchingTest(unittest.TestCase):
-    def test_mixed_cfg_uses_dummy_forward_without_guiding_missing_negative(
-        self,
-    ) -> None:
+    def test_mixed_cfg_batches_only_the_branches_present(self) -> None:
+        # A request without a negative batch skips the optional branch instead
+        # of getting a dummy forward; the present branches share one forward
+        # and the missing one falls back to the conditional velocity.
         sampler = Sampler(steps=1, guidance=ClassifierFreeGuidance(scale=2.0))
         model = FakeSamplerModel()
-        cond_a = make_sampler_batch(3.0)
-        cond_b = make_sampler_batch(4.0)
-        negative_a = make_sampler_batch(1.0)
-
-        velocities = sampler.get_guided_velocity(
+        velocities = guided_velocities(
+            sampler,
             model,
-            batches=[cond_a, cond_b],
-            negative_batches=[negative_a, None],
-            latents=[cond_a["noisy_latents"], cond_b["noisy_latents"]],
-            timesteps=[torch.tensor([1.0]), torch.tensor([1.0])],
-            sigmas=[1.0, 1.0],
+            [
+                SampleRequest(make_sampler_batch(3.0), make_sampler_batch(1.0)),
+                SampleRequest(make_sampler_batch(4.0)),
+            ],
         )
 
-        self.assertEqual(model.forward_batch_sizes, [2, 2])
+        self.assertEqual(model.forward_batch_sizes, [3])
         torch.testing.assert_close(velocities[0], torch.tensor([[[5.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[4.0]]]))
 
@@ -219,15 +232,13 @@ class SamplerBatchingTest(unittest.TestCase):
             steps=1,
             guidance=ClassifierFreeGuidance(scale=3.0, renorm=True, renorm_min=0.0),
         )
-        model = FakeSamplerModel()
-        conditional = [make_sampler_batch(2.0), make_sampler_batch(8.0)]
-        velocities = sampler.get_guided_velocity(
-            model,
-            conditional,
-            [make_sampler_batch(-2.0), make_sampler_batch(4.0)],
-            [batch["noisy_latents"] for batch in conditional],
-            [torch.tensor([1.0]), torch.tensor([1.0])],
-            [1.0, 1.0],
+        velocities = guided_velocities(
+            sampler,
+            FakeSamplerModel(),
+            [
+                SampleRequest(make_sampler_batch(2.0), make_sampler_batch(-2.0)),
+                SampleRequest(make_sampler_batch(8.0), make_sampler_batch(4.0)),
+            ],
         )
         torch.testing.assert_close(velocities[0], torch.tensor([[[2.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[8.0]]]))
@@ -244,47 +255,56 @@ class SamplerBatchingTest(unittest.TestCase):
         )
         long_batch = make_batch(tokens=8)
         long_batch["clean_latents"] = torch.tensor(0.0)
-        outputs = sampler.sample(
+        short, long = sampler.sample(
             FakeSamplerModel(),
             [
                 SampleRequest(batch=make_sampler_batch(0.0)),
                 SampleRequest(batch=long_batch),
             ],
         )
-        self.assertFalse(torch.equal(outputs[0].timesteps, outputs[1].timesteps))
+        self.assertNotEqual(
+            [item.sigma for item in short.plan], [item.sigma for item in long.plan]
+        )
 
     def test_stochastic_generators_are_isolated_per_sample(self) -> None:
         sampler = Sampler(steps=3, solver=FlowSolver(eta=0.4))
         model = FakeSamplerModel()
-        batched = sampler.sample(
-            model,
-            [
-                SampleRequest(
-                    batch=make_sampler_batch(0.0),
-                    generator=torch.Generator().manual_seed(7),
-                ),
-                SampleRequest(
-                    batch=make_sampler_batch(0.0),
-                    generator=torch.Generator().manual_seed(19),
-                ),
-            ],
-        )
-
-        individual = [
+        batched = list(
             sampler.sample(
-                FakeSamplerModel(),
+                model,
                 [
                     SampleRequest(
                         batch=make_sampler_batch(0.0),
-                        generator=torch.Generator().manual_seed(seed),
-                    )
+                        generator=torch.Generator().manual_seed(7),
+                    ),
+                    SampleRequest(
+                        batch=make_sampler_batch(0.0),
+                        generator=torch.Generator().manual_seed(19),
+                    ),
                 ],
-            )[0]
+            )
+        )
+        self.assertEqual(model.forward_batch_sizes, [2, 2, 2])
+
+        individual = [
+            next(
+                iter(
+                    sampler.sample(
+                        FakeSamplerModel(),
+                        [
+                            SampleRequest(
+                                batch=make_sampler_batch(0.0),
+                                generator=torch.Generator().manual_seed(seed),
+                            )
+                        ],
+                    )
+                )
+            )
             for seed in (7, 19)
         ]
-        for batched_output, individual_output in zip(batched, individual, strict=True):
+        for batched_run, individual_run in zip(batched, individual, strict=True):
             torch.testing.assert_close(
-                batched_output.final_latents, individual_output.final_latents
+                batched_run.ctx.latents, individual_run.ctx.latents
             )
 
 

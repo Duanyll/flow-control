@@ -19,8 +19,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
-from flow_control.samplers import Sampler
-from flow_control.samplers.evaluation import predict_velocity
+from flow_control.samplers import Executor, Sampler, conditional_velocity
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -239,8 +238,13 @@ class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
                 )
             )
 
-        # Same leaf as the sampler: tiled batches are evaluated per tile.
-        predictions = predict_velocity(self.model, model_batches, timesteps)
+        # Same tile expansion as the sampler.
+        predictions = Executor(self.model).evaluate(
+            [
+                conditional_velocity(batch, timestep)
+                for batch, timestep in zip(model_batches, timesteps, strict=True)
+            ]
+        )
         per_sample_losses = [
             ((prediction - target) ** 2).mean() * weight.mean()
             for prediction, target, weight in zip(

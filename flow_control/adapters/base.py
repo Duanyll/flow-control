@@ -57,7 +57,11 @@ class SamplerModel(Protocol):
         self,
         batches: list[Any],
         timesteps: list[torch.Tensor],
-    ) -> list[torch.Tensor]: ...
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
+    ) -> list[torch.Tensor]:
+        """Return fp32 velocities; lower precision computation stays inside the adapter."""
+        ...
 
 
 class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
@@ -369,14 +373,19 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         return self._checked_velocity(self._predict_velocity(batch, timestep), 1)
 
     def _forward_dummy(self) -> torch.Tensor:
-        if self._dummy_sample is None:
-            raise RuntimeError(
-                f"Rank {dist.get_rank()}: another rank runs more forwards than "
-                "this rank has samples for, and this rank has never forwarded a "
-                "sample to repeat in their place. Give every rank at least one "
-                "sample (pad the request list to a multiple of the world size)."
-            )
+        assert self._dummy_sample is not None  # Seeded collectively before chunking.
         return self._forward_one(*self._dummy_sample)
+
+    def _share_dummy(self, source: int) -> None:
+        """Seed empty ranks once, transferring detached CPU data rather than GPU objects."""
+        payload: list[Any] = [
+            deep_move_to_device(self._dummy_sample, torch.device("cpu"))
+            if dist.get_rank() == source
+            else None
+        ]
+        dist.broadcast_object_list(payload, src=source, device=self.device)
+        if self._dummy_sample is None:
+            self._dummy_sample = deep_move_to_device(payload[0], self.device)
 
     def _forward_chunk(
         self,
@@ -413,6 +422,8 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         self,
         batches: list[TBatch],
         timesteps: list[torch.Tensor],
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Predict one velocity per logical sample; a collective on every rank.
 
@@ -421,7 +432,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         count (see ``_forward_chunk``), padding with dummy forwards. An empty
         list is therefore a legal call returning ``[]``. Under autograd, dummy
         outputs are folded into the first real output with zero weight so FSDP
-        backward stays aligned across ranks.
+        backward stays aligned across ranks. A caller grouping multiple variants
+        can supply ``dummy_outputs`` and fold them into its combined result;
+        this also supports variants with no local real output.
         """
         if len(batches) != len(timesteps):
             raise ValueError(
@@ -454,7 +467,17 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 prepared_timesteps[0].detach(),
             )
         size = self.micro_batch_size
-        (chunks,) = self._sync_max([math.ceil(len(prepared_batches) / size)])
+        chunks, needs_dummy, donor = self._sync_max(
+            [
+                math.ceil(len(prepared_batches) / size),
+                int(self._dummy_sample is None),
+                dist.get_rank() + 1
+                if dist.is_initialized() and self._dummy_sample is not None
+                else 0,
+            ]
+        )
+        if chunks and needs_dummy and donor:
+            self._share_dummy(donor - 1)
         velocities: list[torch.Tensor] = []
         dummies: list[torch.Tensor] = []
         # Run the longest rank's chunk count; slicing past our own end is empty.
@@ -466,7 +489,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
             velocities.extend(chunk_velocities)
             dummies.extend(chunk_dummies)
         dummies = [output for output in dummies if output.requires_grad]
-        if dummies:
+        if dummy_outputs is not None:
+            dummy_outputs.extend(dummies)
+        elif dummies:
             if not velocities:
                 raise RuntimeError(
                     f"Rank {dist.get_rank()} ran dummy forwards under autograd "

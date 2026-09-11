@@ -21,8 +21,8 @@ from typing import Any
 
 import torch
 
-from flow_control.samplers import SdeWindow
-from flow_control.samplers.executor import Run, execute
+from flow_control.samplers import Executor, SdeWindow
+from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.plan import (
     EvalRequest,
     GuidanceOutput,
@@ -51,9 +51,9 @@ from flow_control.samplers.transforms import (
     with_sde_window,
 )
 from flow_control.training.grpo_sampling import (
+    GrpoCollector,
     RecordedStep,
     ReplayItem,
-    collect_samples,
     replay_steps,
     step_log_prob,
 )
@@ -89,13 +89,27 @@ def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
 
 
 def run_recorded(model, sampler, batch, generator, transforms=None):
+    """Sample one recording run and return it with its GRPO records."""
     if transforms is not None:
         sampler = sampler.model_copy(update={"transforms": transforms})
-    outputs, trajectories = collect_samples(
-        sampler, model, [SampleRequest(batch=batch, generator=generator)]
+    collector = GrpoCollector(sampler)
+    run = next(
+        iter(
+            sampler.sample(
+                model,
+                [SampleRequest(batch=batch, generator=generator)],
+                collector=collector,
+            )
+        )
     )
-    output = outputs[0]
-    return capture.TraceOutput(output.final_latents, output.timesteps, trajectories[0])
+    return run, collector.take(run)
+
+
+def replay_run(sampler: Sampler, batch, plan=None):
+    """A training-side run for replaying records against ``sampler``."""
+    return sampler.make_run(
+        SampleRequest(batch=batch), plan=sampler.plan(batch) if plan is None else plan
+    )
 
 
 class ConstVelocityModel:
@@ -117,6 +131,8 @@ class ConstVelocityModel:
         self,
         batches: list,
         timesteps: list[torch.Tensor],
+        *,
+        dummy_outputs: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         return [self.velocity for _ in batches]
 
@@ -273,7 +289,12 @@ class BaselineParityTest(unittest.TestCase):
                     result = drive_single_eval_transition(tr, ctx, velocity)
                     assert_bitwise(result.next_latents, entry["next_latents"])
                     recorded = capture.recorded_step(
-                        tr, ctx, velocity, result.next_latents
+                        tr,
+                        latents,
+                        result.next_latents,
+                        velocity,
+                        entry["step_index"],
+                        8,
                     )
                     assert_bitwise(recorded.log_prob, entry["log_prob"])
 
@@ -310,12 +331,16 @@ class BaselineParityTest(unittest.TestCase):
             solver_type = solver_registry.get(fixture["solver_config"]["type"])
             self.assertIs(solver_type, solver_cls)
             solver = solver_cls.model_validate(fixture["solver_config"])
-            sampler = Sampler(solver=solver)
+            # The sweep grid is the 8-step sampler grid, so its plan carries
+            # exactly the swept transitions at their step indices.
+            run = replay_run(
+                Sampler(steps=8, solver=solver), make_request_batch(fixture["latents"])
+            )
             model = ConstVelocityModel(fixture["velocity"])
             items = [
                 ReplayItem(
-                    batch=make_request_batch(fixture["latents"]),
-                    recorded=RecordedStep(
+                    run,
+                    RecordedStep(
                         latent_t=fixture["latents"],
                         latent_next=fixture["prev_sample"],
                         log_prob=torch.zeros(1),
@@ -328,7 +353,7 @@ class BaselineParityTest(unittest.TestCase):
                 )
                 for entry in fixture["entries"]
             ]
-            outputs = replay_steps(sampler, model, items)
+            outputs = replay_steps(model, items)
             for entry, output in zip(fixture["entries"], outputs, strict=True):
                 with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
                     assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -380,7 +405,9 @@ class BaselineParityTest(unittest.TestCase):
                 ctx.item_index, ctx.num_items = index, len(plan)
                 result = drive_single_eval_transition(tr, ctx, velocity)
                 assert_bitwise(result.next_latents, entry["next_latents"])
-                recorded = capture.recorded_step(tr, ctx, velocity, result.next_latents)
+                recorded = capture.recorded_step(
+                    tr, latents, result.next_latents, velocity, index, len(plan)
+                )
                 assert_bitwise(recorded.log_prob, entry["log_prob"])
                 output = step_log_prob(
                     replace(recorded, latent_next=fixture["prev_sample"]), velocity
@@ -394,12 +421,14 @@ class BaselineParityTest(unittest.TestCase):
         # no runtime state is needed at replay time.
         fixture = load_fixture("step_flash_eta1.pt")
         solver = FlashSolver.model_validate(fixture["solver_config"])
-        sampler = Sampler(steps=8, solver=solver)
+        run = replay_run(
+            Sampler(steps=8, solver=solver), make_request_batch(fixture["latents"])
+        )
         model = ConstVelocityModel(fixture["velocity"])
         items = [
             ReplayItem(
-                batch=make_request_batch(fixture["latents"]),
-                recorded=RecordedStep(
+                run,
+                RecordedStep(
                     latent_t=fixture["latents"],
                     latent_next=fixture["prev_sample"],
                     log_prob=torch.zeros(1),
@@ -412,7 +441,7 @@ class BaselineParityTest(unittest.TestCase):
             )
             for entry in fixture["entries"]
         ]
-        outputs = replay_steps(sampler, model, items)
+        outputs = replay_steps(model, items)
         for entry, output in zip(fixture["entries"], outputs, strict=True):
             with self.subTest(sigma=entry["sigma"]):
                 assert_bitwise(output.log_prob, entry["replay_log_prob"])
@@ -637,14 +666,16 @@ class ExecutorSemanticsTest(unittest.TestCase):
         sampler = Sampler(steps=3, solver=DDIMSolver())
         generator = torch.Generator().manual_seed(5)
         state_before = generator.get_state().clone()
-        sampler.sample(
-            microbatching.FakeSamplerModel(),
-            [
-                SampleRequest(
-                    batch=microbatching.make_sampler_batch(0.5),
-                    generator=generator,
-                )
-            ],
+        list(
+            sampler.sample(
+                microbatching.FakeSamplerModel(),
+                [
+                    SampleRequest(
+                        batch=microbatching.make_sampler_batch(0.5),
+                        generator=generator,
+                    )
+                ],
+            )
         )
         self.assertTrue(torch.equal(generator.get_state(), state_before))
 
@@ -663,21 +694,78 @@ class ExecutorSemanticsTest(unittest.TestCase):
             generator = torch.Generator().manual_seed(11)
             if record:
                 return run_recorded(model, sampler, batch, generator)
-            return sampler.sample(
-                model, [SampleRequest(batch=batch, generator=generator)]
-            )[0]
+            run = next(
+                iter(
+                    sampler.sample(
+                        model, [SampleRequest(batch=batch, generator=generator)]
+                    )
+                )
+            )
+            return run, None
 
-        recorded = run(True)
-        plain = run(False)
-        assert_bitwise(recorded.final_latents, plain.final_latents)
-        self.assertEqual(recorded.timesteps.numel(), 6)
-        assert_bitwise(recorded.timesteps, plain.timesteps)
-        self.assertFalse(hasattr(plain, "trajectory"))
+        recorded, trajectory = run(True)
+        plain, _ = run(False)
+        assert_bitwise(recorded.ctx.latents, plain.ctx.latents)
+        self.assertEqual(len(recorded.plan), 6)
+        self.assertEqual(recorded.plan, plain.plan)
+        self.assertIsNone(plain.collector)
         # Recorded steps chain: each latent_next is the next step's latent_t.
-        trajectory = recorded.trajectory
         assert trajectory is not None
         self.assertEqual(len(trajectory), 2)
         assert_bitwise(trajectory[0].latent_next, trajectory[1].latent_t)
+        assert isinstance(recorded.collector, GrpoCollector)
+        self.assertEqual(recorded.collector._records, {})
+
+        # Low-precision initial storage and adapter forwards must never leak
+        # into CFG, tile stitching, or any solver's transition arithmetic.
+        class Bf16Adapter(microbatching.FakeDenseAdapter):
+            @property
+            def dtype(self):
+                return torch.bfloat16
+
+            def _predict_velocity(self, batch, timestep):
+                self_dtype = torch.bfloat16
+                assert batch["noisy_latents"].dtype == self_dtype
+                assert timestep.dtype == self_dtype
+                return super()._predict_velocity(batch, timestep)
+
+        def check_step(run, step):
+            for tensor in (step.latents, step.next_latents, step.velocity):
+                if tensor is not None:
+                    self.assertEqual(tensor.dtype, torch.float32)
+
+        for solver in (
+            FlowSolver(),
+            DDIMSolver(),
+            CPSSolver(),
+            DanceSolver(),
+            FlashSolver(),
+            DPMSolver(order=2),
+            FlowUniPCSolver(),
+            SASolver(),
+        ):
+            with self.subTest(precision_solver=solver.type):
+                adapter = Bf16Adapter.model_construct(
+                    arch="fake", type="fake", micro_batch_size=2
+                )
+                batch: Any = microbatching.make_batch(0.734)
+                batch["noisy_latents"] = batch["noisy_latents"].bfloat16()
+                batch["tiling"] = {"tile_size": 16, "overlap": 0, "stride": 16}
+                sampler = Sampler(
+                    steps=8, solver=solver, guidance=ClassifierFreeGuidance(scale=2)
+                )
+                with torch.no_grad():
+                    (result,) = sampler.sample(
+                        adapter,
+                        [
+                            SampleRequest(
+                                batch, batch, torch.Generator().manual_seed(11)
+                            )
+                        ],
+                        collector=check_step,
+                    )
+                self.assertEqual(result.ctx.latents.dtype, torch.bfloat16)
+                self.assertTrue(torch.isfinite(result.ctx.latents).all())
 
     def test_rollout_and_replay_are_self_consistent(self) -> None:
         # GRPO-shaped parity: replay every RecordedStep through the public
@@ -696,57 +784,97 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 sampler = Sampler(steps=4, solver=solver)
                 batch = microbatching.make_batch(0.9)
                 model = ConstVelocityModel(velocity)
-                output = run_recorded(
+                run, trajectory = run_recorded(
                     model, sampler, batch, torch.Generator().manual_seed(3)
                 )
-                trajectory = output.trajectory
-                assert trajectory is not None
                 self.assertEqual(len(trajectory), sampler.steps - 1)
                 self.assertTrue(all((step.log_prob != 0).all() for step in trajectory))
 
-                items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-                replayed = replay_steps(sampler, model, items)
+                items = [ReplayItem(run, step) for step in trajectory]
+                replayed = replay_steps(model, items)
                 for step, replay in zip(trajectory, replayed, strict=True):
                     assert_bitwise(replay.log_prob, step.log_prob)
 
                 # Replay reads the recorded transition's ACTUAL eta, never the
-                # sampler's live solver config.
-                retuned = Sampler(steps=4, solver=type(solver)(eta=0.123))
+                # sampler's live solver config: a retuned sampler replaying the
+                # executed plan reproduces the same likelihoods.
+                retuned = replay_run(
+                    Sampler(steps=4, solver=type(solver)(eta=0.123)), batch, run.plan
+                )
                 for output_now, output_then in zip(
-                    replay_steps(retuned, model, items),
+                    replay_steps(model, [ReplayItem(retuned, s) for s in trajectory]),
                     replayed,
                     strict=True,
                 ):
                     assert_bitwise(output_now.log_prob, output_then.log_prob)
+
+                # S2 precision review: bf16 storage made replay coefficients
+                # bf16 even with an fp32 velocity (mean drifted by 1.17e-4).
+                # Compare the SAME stored values, promoted before arithmetic.
+                stored = [
+                    replace(
+                        step,
+                        latent_t=step.latent_t.bfloat16(),
+                        latent_next=step.latent_next.bfloat16(),
+                    )
+                    for step in trajectory
+                ]
+                promoted = [
+                    replace(
+                        step,
+                        latent_t=step.latent_t.float(),
+                        latent_next=step.latent_next.float(),
+                    )
+                    for step in stored
+                ]
+                predictions = [velocity.clone().requires_grad_() for _ in range(2)]
+                low, reference = [
+                    replay_steps(
+                        ConstVelocityModel(prediction),
+                        [ReplayItem(run, step) for step in records],
+                    )
+                    for prediction, records in zip(
+                        predictions, (stored, promoted), strict=True
+                    )
+                ]
+                for actual, expected in zip(low, reference, strict=True):
+                    for name in ("log_prob", "mean", "std_dev"):
+                        self.assertEqual(getattr(actual, name).dtype, torch.float32)
+                        assert_bitwise(getattr(actual, name), getattr(expected, name))
+                for outputs in (low, reference):
+                    torch.stack(
+                        [output.log_prob.sum() for output in outputs]
+                    ).sum().backward()
+                torch.testing.assert_close(
+                    predictions[0].grad, predictions[1].grad, rtol=0, atol=0
+                )
 
     def test_recorded_steps_round_trip_deep_move_to_device(self) -> None:
         velocity = torch.full((1, 4, 2), 0.3)
         sampler = Sampler(steps=4, solver=FlowSolver(eta=0.5))
         batch = microbatching.make_batch(0.9)
         model = ConstVelocityModel(velocity)
-        output = run_recorded(model, sampler, batch, torch.Generator().manual_seed(3))
-        assert output.trajectory is not None
-
-        # CPU rollout storage round-trips the whole SampleOutput dataclass,
-        # rebuilding fresh RecordedStep/Transition instances along the way.
-        moved: capture.TraceOutput = deep_move_to_device(
-            output, torch.device("cpu"), preserve_aliases=True
+        run, trajectory = run_recorded(
+            model, sampler, batch, torch.Generator().manual_seed(3)
         )
-        self.assertIsNot(moved, output)
-        assert moved.trajectory is not None
-        for original, restored in zip(output.trajectory, moved.trajectory, strict=True):
+
+        # CPU rollout storage round-trips the record list, rebuilding fresh
+        # RecordedStep/Transition instances along the way.
+        moved: list[RecordedStep] = deep_move_to_device(
+            trajectory, torch.device("cpu"), preserve_aliases=True
+        )
+        self.assertIsNot(moved, trajectory)
+        for original, restored in zip(trajectory, moved, strict=True):
             self.assertIsNot(restored, original)
             self.assertEqual(restored.transition, original.transition)
             assert_bitwise(restored.latent_t, original.latent_t)
             assert_bitwise(restored.latent_next, original.latent_next)
-        for previous, following in zip(
-            moved.trajectory[:-1], moved.trajectory[1:], strict=True
-        ):
+        for previous, following in zip(moved[:-1], moved[1:], strict=True):
             self.assertIs(previous.latent_next, following.latent_t)
 
-        items = [ReplayItem(batch=batch, recorded=step) for step in moved.trajectory]
-        replayed = replay_steps(sampler, model, items)
-        for step, replay in zip(output.trajectory, replayed, strict=True):
+        items = [ReplayItem(run, step) for step in moved]
+        replayed = replay_steps(model, items)
+        for step, replay in zip(trajectory, replayed, strict=True):
             assert_bitwise(replay.log_prob, step.log_prob)
 
     def test_deep_tensor_map_alias_table_is_per_call(self) -> None:
@@ -776,15 +904,13 @@ class ExecutorSemanticsTest(unittest.TestCase):
         sampler = Sampler(steps=8, solver=solver)
         batch = microbatching.make_batch(0.9)
         model = ConstVelocityModel(velocity)
-        output = run_recorded(
+        run, trajectory = run_recorded(
             model,
             sampler,
             batch,
             torch.Generator().manual_seed(3),
             transforms=[SdeWindow(size=3, range=(2, 7))],
         )
-        trajectory = output.trajectory
-        assert trajectory is not None
 
         # The window is drawn from the request generator before any sampling
         # randomness, so a fresh generator with the same seed reproduces it.
@@ -797,20 +923,17 @@ class ExecutorSemanticsTest(unittest.TestCase):
             self.assertEqual(step.item_index, train_start + index)
             self.assertEqual(step.num_items, sampler.steps)
 
-        items = [ReplayItem(batch=batch, recorded=step) for step in trajectory]
-        replayed = replay_steps(sampler, model, items)
+        items = [ReplayItem(run, step) for step in trajectory]
+        replayed = replay_steps(model, items)
         for step, replay_output in zip(trajectory, replayed, strict=True):
             assert_bitwise(replay_output.log_prob, step.log_prob)
 
         # A wrong noise scale must change the replayed log-prob.
         first = trajectory[0]
         corrupted = ReplayItem(
-            batch=batch,
-            recorded=replace(
-                first, noise_scale=solver.noise_scale_at(0, sampler.steps)
-            ),
+            run, replace(first, noise_scale=solver.noise_scale_at(0, sampler.steps))
         )
-        wrong = replay_steps(sampler, model, [corrupted])[0]
+        wrong = replay_steps(model, [corrupted])[0]
         self.assertFalse(torch.equal(wrong.log_prob, first.log_prob))
 
     def test_sliced_plans_warm_up_from_empty_history(self) -> None:
@@ -830,19 +953,16 @@ class ExecutorSemanticsTest(unittest.TestCase):
 
                 results: list[torch.Tensor] = []
                 for plan in (tail_sliced, tail_fresh):
-                    run = Run(
+                    steps = []
+                    run = sampler.make_run(
+                        SampleRequest(batch=make_request_batch(initial)),
                         plan=plan,
-                        ctx=StepContext(
-                            latents=initial.clone(),
-                            generator=None,
-                            solver_state=None,
-                            guidance_state=None,
-                        ),
-                        batch=make_request_batch(initial),
-                        negative_batch=None,
+                        collector=lambda run, step, steps=steps: steps.append(step),
                     )
-                    events = list(execute(RecordingModel(), [run], sampler.guidance))
-                    self.assertEqual(len(events), len(plan))
+                    self.assertEqual(
+                        list(Executor(RecordingModel()).stream([run])), [run]
+                    )
+                    self.assertEqual(len(steps), len(plan))
                     self.assertTrue(torch.isfinite(run.ctx.latents).all())
                     results.append(run.ctx.latents)
                 assert_bitwise(results[0], results[1])
@@ -858,19 +978,14 @@ class ExecutorSemanticsTest(unittest.TestCase):
         def run_gated(seed: int) -> tuple[torch.Tensor, bool]:
             generator = torch.Generator().manual_seed(seed)
             state_before = generator.get_state().clone()
-            run = Run(
+            steps = []
+            run = sampler.make_run(
+                SampleRequest(batch=make_request_batch(initial), generator=generator),
                 plan=plan,
-                ctx=StepContext(
-                    latents=initial.clone(),
-                    generator=generator,
-                    solver_state=None,
-                    guidance_state=None,
-                ),
-                batch=make_request_batch(initial),
-                negative_batch=None,
+                collector=lambda run, step, steps=steps: steps.append(step),
             )
-            events = list(execute(RecordingModel(), [run], sampler.guidance))
-            self.assertEqual(len(events), len(plan))
+            list(Executor(RecordingModel()).stream([run]))
+            self.assertEqual(len(steps), len(plan))
             return run.ctx.latents, torch.equal(generator.get_state(), state_before)
 
         first, first_untouched = run_gated(3)
@@ -886,7 +1001,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 generator=torch.Generator().manual_seed(seed),
             )
             model = RecordingModel()
-            return sampler.sample(model, [request])[0].final_latents
+            return next(iter(sampler.sample(model, [request]))).ctx.latents
 
         self.assertFalse(torch.equal(sample_full(3), sample_full(19)))
 
@@ -895,12 +1010,14 @@ class ExecutorSemanticsTest(unittest.TestCase):
         # the executor now batches every rendezvous across requests.
         sampler = Sampler(steps=4, solver=SASolver(eta=0.0))
         model = microbatching.FakeSamplerModel()
-        sampler.sample(
-            model,
-            [
-                SampleRequest(batch=microbatching.make_sampler_batch(1.0)),
-                SampleRequest(batch=microbatching.make_sampler_batch(2.0)),
-            ],
+        list(
+            sampler.sample(
+                model,
+                [
+                    SampleRequest(batch=microbatching.make_sampler_batch(1.0)),
+                    SampleRequest(batch=microbatching.make_sampler_batch(2.0)),
+                ],
+            )
         )
         # 4 eval rounds (seed + 3 PEC target evals; terminal evaluates nothing),
         # each a single batched forward over both requests.

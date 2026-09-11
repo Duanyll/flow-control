@@ -2,13 +2,14 @@
 
 Naming convention: ``train_batch_size`` counts logical samples per optimizer
 update *globally* (world-size-invariant, divided across ranks), while
-``train_micro_batch_size`` is a per-rank physical forward size — a pure
-throughput/memory knob that never changes training dynamics. Changing
+``train_micro_batch_size`` counts per-rank logical items sharing one backward.
+The adapter's ``micro_batch_size`` bounds physical forwards after branch/tile
+expansion. Both are throughput/memory knobs. Changing
 world_size must never silently change dynamics; violated divisibility raises.
 
 SFT uses the fields and validation properties (its update loop is
 DataLoader-driven). The list-driven RL trainers (GRPO/NFT/AWM/RAM) also share
-the chunk (one optimizer update) / microbatch (one model forward) slicing via
+the chunk (one optimizer update) / microbatch (one backward) slicing via
 ``iter_micro_updates``; the side effects (gradient-sync flag, backward,
 optimizer step) stay in each trainer's visible loop.
 """
@@ -50,7 +51,7 @@ class MicrobatchTrainMixin(BaseTrainer, BaseModel):
     all ranks. Must be divisible by world_size.
     """
     train_micro_batch_size: PositiveInt = 1
-    """Number of logical items combined in each per-rank model forward."""
+    """Number of logical items combined in each per-rank loss/backward."""
 
     @property
     def local_train_batch_size(self) -> int:

@@ -271,8 +271,8 @@ def execute_pairwise_reward[TTag, TResult](
 ) -> list[TResult]:
     """Score batches using the pairwise execution path.
 
-    Expects rollouts to arrive contiguously per prompt (K at a time from the
-    ``keep_prompt_local`` sampler).
+    Groups by the original batch's ``__key__`` so rollouts may arrive in
+    completion order. All K rollouts for a prompt must stay on the same rank.
 
     For a CompositeReward with mixed children, non-pairwise children are scored
     independently while pairwise children go through the pairwise comparison
@@ -281,7 +281,7 @@ def execute_pairwise_reward[TTag, TResult](
     Args:
         reward: The reward (may be PairwiseReward, CompositeReward with
             pairwise children, or a regular reward).
-        submitter: Yields ``(batch, tag)`` pairs, K per prompt contiguously.
+        submitter: Yields ``(batch, tag)`` pairs, K per prompt in any order.
         handler: Called with ``(tag, reward_tensor)`` for each sample.
         num_rollouts_per_prompt: K value for grouping.
 
@@ -292,9 +292,11 @@ def execute_pairwise_reward[TTag, TResult](
     results: list[TResult] = []
 
     try:
-        prompt_group: list[tuple[dict[str, Any], TTag]] = []
+        prompt_groups: dict[str, list[tuple[dict[str, Any], TTag]]] = {}
 
-        def _flush_prompt_group() -> None:
+        def _flush_prompt_group(
+            prompt_group: list[tuple[dict[str, Any], TTag]],
+        ) -> None:
             """Process a completed prompt group of K rollouts."""
             batches = [b for b, _ in prompt_group]
             tags = [t for _, t in prompt_group]
@@ -313,16 +315,24 @@ def execute_pairwise_reward[TTag, TResult](
                 results.append(handler(tag, score))
 
         for batch, tag in submitter:
+            key = batch.get("__key__")
+            if not isinstance(key, str):
+                raise ValueError(
+                    "Pairwise rewards require a string __key__ for each prompt."
+                )
             async_batch = reward.prepare_batch_for_async(batch)
+            prompt_group = prompt_groups.setdefault(key, [])
             prompt_group.append((async_batch, tag))
 
             if len(prompt_group) == num_rollouts_per_prompt:
-                _flush_prompt_group()
-                prompt_group = []
+                _flush_prompt_group(prompt_groups.pop(key))
 
-        # Handle any remaining partial group
-        if prompt_group:
-            _flush_prompt_group()
+        if prompt_groups:
+            sizes = {key: len(group) for key, group in prompt_groups.items()}
+            raise ValueError(
+                f"Incomplete pairwise prompt groups: {sizes}; expected "
+                f"{num_rollouts_per_prompt} rollouts per prompt on this rank."
+            )
     finally:
         reward_loop.close()
 

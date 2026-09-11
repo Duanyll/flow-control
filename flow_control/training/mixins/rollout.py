@@ -4,13 +4,13 @@ Extracted from GrpoTrainer so that NFT and other RL trainers can reuse the
 rollout / reward / advantage pipeline.
 """
 
-from collections.abc import Generator
-from dataclasses import dataclass, field
+from collections.abc import Generator, Iterator
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, cast
 
 import torch
 import torch.distributed as dist
-from pydantic import BaseModel, PositiveInt
+from pydantic import BaseModel
 from rich.progress import Progress
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -27,8 +27,8 @@ from flow_control.rewards import (
     reduce_reward_profiles,
 )
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import SampleOutput, Sampler, SampleRequest, derive_seed
-from flow_control.samplers.plan import StepContext, Transition
+from flow_control.samplers import Sampler, SampleRequest, derive_seed
+from flow_control.samplers.plan import Transition
 from flow_control.utils.logging import console
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -42,7 +42,7 @@ from ..data import (
     collate_fn,
     seed_worker,
 )
-from ..grpo_sampling import RecordedStep, collect_samples
+from ..grpo_sampling import GrpoCollector, RecordedStep
 from .base import BaseTrainer
 from .logging import LoggingMixin
 from .preprocess import PreprocessMixin
@@ -50,7 +50,8 @@ from .preprocess import PreprocessMixin
 
 @dataclass
 class Rollout:
-    trajectory: SampleOutput
+    sampling_plan: list[Transition]
+    """The plan the sampler executed; ``batch["clean_latents"]`` is its endpoint."""
     reward: torch.Tensor
     raw_reward: torch.Tensor
     reward_weights: torch.Tensor
@@ -59,7 +60,6 @@ class Rollout:
     batch: Batch
     negative_batch: Batch | None
     recorded_steps: list[RecordedStep] | None = None
-    sampling_plan: list[Transition] = field(default_factory=list)
 
 
 class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
@@ -85,8 +85,6 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     Number of rollouts to generate for each prompt.
     """
-    rollout_micro_batch_size: PositiveInt = 1
-    """Number of logical rollouts submitted to each sampler call per rank."""
     rollout_storage_device: Literal["cpu", "device"] = "cpu"
     """
     Where to store collected rollout results between the rollout and training phases.
@@ -102,8 +100,8 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     processor: Processor
     reward: Reward
     rollout_sampler: Sampler
-    _ROLLOUT_NEEDS_LIKELIHOOD_REPLAY: ClassVar[bool] = False
-    """Whether this trainer requires recorded stochastic steps for replay."""
+    _ROLLOUT_RECORD_STEPS: ClassVar[bool] = False
+    """Whether rollouts keep GRPO's stochastic-step records for replay."""
 
     _dataloader: StatefulDataLoader
 
@@ -138,7 +136,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         self._dataloader = StatefulDataLoader(
             dataset,
-            batch_size=self.rollout_micro_batch_size,
+            batch_size=1,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
             collate_fn=collate_fn,
@@ -146,27 +144,23 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
 
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
-        """Rollout phase: generate images, decode, then score rewards concurrently."""
+        """Rollout phase: sample, decode, then score rewards as each sample finishes."""
         rollouts: list[Rollout] = []
-        transformer = self.model.transformer
         model = self.model
         processor = self.processor
-        reward: Reward = self.reward
+        sampler = self.rollout_sampler
+        collector = GrpoCollector(sampler) if self._ROLLOUT_RECORD_STEPS else None
         device = self.device
         rollout_storage = (
             device if self.rollout_storage_device == "device" else torch.device("cpu")
         )
-        seed: int = self.seed
-        rank: int = self.rank
         dataloader = self._dataloader
-        get_progress_columns = self.get_progress_columns
 
-        transformer.eval()
+        model.transformer.eval()
 
         total_rollouts = self.num_batches_per_epoch * self.rollout_batch_per_rank
-
         progress = Progress(
-            *get_progress_columns(),
+            *self.get_progress_columns(),
             console=console,
             transient=True,
         )
@@ -175,119 +169,57 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         # ``make_rollout_dataloader`` above always builds this sampler.
         cast(DistributedKRepeatSampler, dataloader.sampler).set_epoch(epoch)
 
+        def requests() -> Iterator[SampleRequest]:
+            """Preprocess lazily; the sampler pulls a request when it has room."""
+            ordinal = 0
+            for items in dataloader:
+                for item in items:
+                    batch = deep_move_to_device(item, device)
+                    batch = self.preprocess_for_inference(batch, save_extra=True)
+                    batch = deep_cast_float_dtype(batch, model.dtype)
+                    key = batch.get("__key__", "unknown")
+                    generator = torch.Generator(device=device).manual_seed(
+                        derive_seed(
+                            self.seed, f"rollout:{epoch}:{self.rank}:{ordinal}:{key}"
+                        )
+                    )
+                    ordinal += 1
+                    processor.initialize_latents(
+                        batch, generator=generator, device=device, dtype=model.dtype
+                    )
+                    yield self.build_sample_request(sampler, batch, generator)
+
         def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
-            rollout_ordinal = 0
-            with progress:
-                for items in dataloader:
-                    batches: list[Any] = []
-                    negative_batches: list[Any] = []
-                    requests: list[SampleRequest] = []
-                    for item in items:
-                        batch = deep_move_to_device(item, device)
-                        batch = self.preprocess_for_inference(batch, save_extra=True)
-                        batch = deep_cast_float_dtype(batch, model.dtype)
-                        key = batch.get("__key__", "unknown")
-                        sample_seed = derive_seed(
-                            seed,
-                            f"rollout:{epoch}:{rank}:{rollout_ordinal}:{key}",
-                        )
-                        rollout_ordinal += 1
-                        generator = torch.Generator(device=device).manual_seed(
-                            sample_seed
-                        )
-                        processor.initialize_latents(
-                            batch,
-                            generator=generator,
-                            device=device,
-                        )
-                        request = self.build_sample_request(
-                            self.rollout_sampler, batch, generator
-                        )
-                        batches.append(batch)
-                        negative_batches.append(request.negative_batch)
-                        requests.append(request)
-
-                    sampling_plans: list[list[Transition]] = [[] for _ in requests]
-
-                    def observe_plan(
-                        run_index: int,
-                        transition: Transition,
-                        ctx: StepContext,
-                        velocity: torch.Tensor | None,
-                        next_latents: torch.Tensor,
-                        plans: list[list[Transition]] = sampling_plans,
-                    ) -> None:
-                        plans[run_index].append(transition)
-
-                    with torch.no_grad():
-                        recorded: list[list[RecordedStep] | None]
-                        if self._ROLLOUT_NEEDS_LIKELIHOOD_REPLAY:
-                            rollout_outputs, trajectories = collect_samples(
-                                self.rollout_sampler,
-                                model,
-                                requests,
-                                observer=observe_plan,
-                            )
-                            recorded = list(trajectories)
-                        else:
-                            rollout_outputs = self.rollout_sampler.sample(
-                                model, requests, observer=observe_plan
-                            )
-                            recorded = [None] * len(rollout_outputs)
-
-                    for (
-                        batch,
-                        negative_batch,
-                        rollout_out,
-                        recorded_steps,
-                        sampling_plan,
-                    ) in zip(
-                        batches,
-                        negative_batches,
-                        rollout_outputs,
-                        recorded,
-                        sampling_plans,
-                        strict=True,
-                    ):
-                        batch["clean_latents"] = rollout_out.final_latents
-                        decoded = processor.decode_output(
-                            rollout_out.final_latents,
-                            batch,
-                        )
-                        batch.update(decoded)
-
-                        rollouts.append(
-                            Rollout(
-                                trajectory=deep_move_to_device(
-                                    rollout_out,
+            with progress, torch.no_grad():
+                for run in sampler.sample(model, requests(), collector=collector):
+                    batch: Any = run.batch
+                    batch["clean_latents"] = run.ctx.latents
+                    batch.update(processor.decode_output(run.ctx.latents, batch))
+                    rollouts.append(
+                        Rollout(
+                            sampling_plan=run.plan,
+                            recorded_steps=(
+                                deep_move_to_device(
+                                    collector.take(run),
                                     rollout_storage,
                                     preserve_aliases=True,
-                                ),
-                                sampling_plan=sampling_plan,
-                                recorded_steps=deep_move_to_device(
-                                    recorded_steps,
-                                    rollout_storage,
-                                    preserve_aliases=True,
-                                ),
-                                reward=torch.zeros(1),  # placeholder
-                                raw_reward=torch.zeros(1),  # placeholder
-                                reward_weights=torch.ones(1),  # placeholder
-                                reward_labels=["reward"],  # placeholder
-                                key=batch.get("__key__", "unknown"),
-                                batch=deep_move_to_device(batch, rollout_storage),
-                                negative_batch=(
-                                    deep_move_to_device(
-                                        negative_batch,
-                                        rollout_storage,
-                                    )
-                                    if negative_batch is not None
-                                    else None
-                                ),
-                            )
+                                )
+                                if collector is not None
+                                else None
+                            ),
+                            reward=torch.zeros(1),  # placeholder
+                            raw_reward=torch.zeros(1),  # placeholder
+                            reward_weights=torch.ones(1),  # placeholder
+                            reward_labels=["reward"],  # placeholder
+                            key=batch.get("__key__", "unknown"),
+                            batch=deep_move_to_device(batch, rollout_storage),
+                            negative_batch=deep_move_to_device(
+                                run.negative_batch, rollout_storage
+                            ),
                         )
-
-                        progress.advance(rollout_task)
-                        yield batch, len(rollouts) - 1
+                    )
+                    progress.advance(rollout_task)
+                    yield batch, len(rollouts) - 1
 
         def reward_handler(idx: int, result: RewardResult) -> None:
             # Result is [1, C] for the single rollout sample.
@@ -297,16 +229,16 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             rollouts[idx].reward_labels = result.labels
 
         reward_profile = RewardProfile()
-        if _has_pairwise_child(reward):
+        if _has_pairwise_child(self.reward):
             execute_pairwise_reward(
-                reward,
+                self.reward,
                 rollout_submitter(),
                 reward_handler,
                 num_rollouts_per_prompt=self.num_rollouts_per_prompt,
             )
         else:
             execute_reward(
-                reward, rollout_submitter(), reward_handler, profile=reward_profile
+                self.reward, rollout_submitter(), reward_handler, profile=reward_profile
             )
 
         # Drain the (now-finished) Rollout progress bar -> GPU production timing,

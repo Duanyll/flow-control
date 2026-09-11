@@ -17,7 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Sampler
+from flow_control.samplers import Sampler, SampleRequest
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
@@ -71,7 +71,7 @@ class GrpoTrainer(
     processor: Processor
     reward: Reward
 
-    _ROLLOUT_NEEDS_LIKELIHOOD_REPLAY: ClassVar[bool] = True
+    _ROLLOUT_RECORD_STEPS: ClassVar[bool] = True
 
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
@@ -228,7 +228,8 @@ class GrpoTrainer(
         clip_range = self.clip_range
         kl_beta = self.kl_beta
 
-        advantages = torch.clamp(advantages, -adv_clip_max, adv_clip_max)
+        log_prob, old_log_prob = log_prob.float(), old_log_prob.float()
+        advantages = torch.clamp(advantages.float(), -adv_clip_max, adv_clip_max)
         ratio = torch.exp(log_prob - old_log_prob)
 
         unclipped_loss = -advantages * ratio
@@ -256,6 +257,7 @@ class GrpoTrainer(
             and ref_mean is not None
             and std_dev is not None
         ):
+            mean, ref_mean, std_dev = mean.float(), ref_mean.float(), std_dev.float()
             kl_loss = ((mean - ref_mean) ** 2).mean(dim=tuple(range(1, mean.ndim))) / (
                 2 * std_dev**2
             )
@@ -277,16 +279,14 @@ class GrpoTrainer(
         recorded: RecordedStep = deep_move_to_device(
             trajectory[timestep_idx], self.device
         )
-        batch = deep_move_to_device(rollout.batch, self.device)
-        negative_batch = (
-            deep_move_to_device(rollout.negative_batch, self.device)
-            if rollout.negative_batch is not None
-            else None
+        run = self.rollout_sampler.make_run(
+            SampleRequest(
+                batch=deep_move_to_device(rollout.batch, self.device),
+                negative_batch=deep_move_to_device(rollout.negative_batch, self.device),
+            ),
+            plan=rollout.sampling_plan,
         )
-        return (
-            ReplayItem(batch=batch, recorded=recorded, negative_batch=negative_batch),
-            recorded.log_prob,
-        )
+        return ReplayItem(run, recorded), recorded.log_prob
 
     def _compute_loss_at_items(
         self,
@@ -303,13 +303,11 @@ class GrpoTrainer(
             replay_items.append(replay_item)
             old_log_probs.append(old_log_prob)
 
-        replay_outputs = replay_steps(self.rollout_sampler, self.model, replay_items)
+        replay_outputs = replay_steps(self.model, replay_items)
         uncached_reference_outputs = None
         if self.kl_beta > 0 and any(item.cached_ref_mean is None for item in items):
             with torch.no_grad(), self.reference_model():
-                uncached_reference_outputs = replay_steps(
-                    self.rollout_sampler, self.model, replay_items
-                )
+                uncached_reference_outputs = replay_steps(self.model, replay_items)
 
         losses: list[torch.Tensor] = []
         for index, (item, replay_output, old_log_prob) in enumerate(
@@ -362,7 +360,7 @@ class GrpoTrainer(
                     )[0]
                     for item in micro_items
                 ]
-                outputs = replay_steps(self.rollout_sampler, self.model, replay_items)
+                outputs = replay_steps(self.model, replay_items)
                 for item, output in zip(micro_items, outputs, strict=True):
                     item.cached_ref_mean = output.mean.detach()
                 progress.advance(precompute_task, advance=len(micro_items))

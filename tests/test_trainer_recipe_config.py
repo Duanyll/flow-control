@@ -1,6 +1,7 @@
 """Trainer config, rollout metadata and GRPO replay integration tests."""
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -8,10 +9,11 @@ from unittest.mock import patch
 import torch
 from pydantic import BaseModel, Field
 
-from flow_control.samplers import SampleOutput, Sampler
+from flow_control.samplers import Sampler
+from flow_control.samplers.solver import FlowSolver
 from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.mixins import Rollout
-from flow_control.training.nft import NftTrainer
+from flow_control.training.nft import NftCachedTargets, NftTrainer, NftTrainItem
 
 
 class _ProbeOverrides(BaseModel):
@@ -57,7 +59,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         from test_microbatching import FakeSamplerModel
 
         from flow_control.samplers import SampleRequest
-        from flow_control.training.grpo_sampling import collect_samples
+        from flow_control.training.grpo_sampling import GrpoCollector
 
         for eta in (0.0, 0.7):
             trainer = _GrpoProbe.model_validate(
@@ -68,21 +70,21 @@ class TrainerRolloutPlanTest(unittest.TestCase):
                     }
                 }
             )
-            if eta == 0:
-                with self.assertRaisesRegex(ValueError, "stochastic"):
-                    collect_samples(
-                        trainer.rollout_sampler,
+            collector = GrpoCollector(trainer.rollout_sampler)
+            run = next(
+                iter(
+                    trainer.rollout_sampler.sample(
                         FakeSamplerModel(),
                         [SampleRequest(batch=self.BATCH)],
+                        collector=collector,
                     )
-            else:
-                outputs, records = collect_samples(
-                    trainer.rollout_sampler,
-                    FakeSamplerModel(),
-                    [SampleRequest(batch=self.BATCH)],
                 )
-                self.assertEqual(len(outputs), 1)
-                self.assertEqual(len(records[0]), 3)
+            )
+            if eta == 0:
+                with self.assertRaisesRegex(ValueError, "stochastic"):
+                    collector.take(run)
+            else:
+                self.assertEqual(len(collector.take(run)), 3)
 
         with self.subTest("sde_window indexes the sliced plan"):
             # steps=10 sliced at strength 0.45 leaves 4 transitions; range/size
@@ -102,12 +104,9 @@ class TrainerRolloutPlanTest(unittest.TestCase):
 
     def test_nft_trains_on_the_executed_rollout_plan(self) -> None:
         trainer = _NftProbe.model_validate({"num_inner_epochs": 2})
-        timesteps = torch.tensor([0.9, 0.6, 0.3])
+        sigmas = [0.9, 0.6, 0.3]
         rollout = Rollout(
-            trajectory=SampleOutput(
-                final_latents=torch.zeros(1, 1, 1),
-                timesteps=timesteps,
-            ),
+            sampling_plan=FlowSolver().plan([*sigmas, 0.0]),
             reward=torch.zeros(1),
             raw_reward=torch.zeros(1),
             reward_weights=torch.ones(1),
@@ -121,10 +120,10 @@ class TrainerRolloutPlanTest(unittest.TestCase):
 
         self.assertEqual(len(plan), 2)
         for epoch in plan:
-            self.assertEqual(len(epoch), len(timesteps))
+            self.assertEqual(len(epoch), len(sigmas))
             for item in epoch:
                 self.assertIsInstance(item.sigma, float)
-                self.assertEqual(item.sigma, float(timesteps[item.timestep_idx]))
+                self.assertEqual(item.sigma, sigmas[item.timestep_idx])
 
         # The R3/R4 observer migration initially left ordinary NFT rollouts
         # without a plan, so per-step variants and CFG++ failed during training.
@@ -176,20 +175,48 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         self.assertIsNone(collected.recorded_steps)
         self.assertEqual(len(collected.sampling_plan), 4)
         self.assertEqual(sum(step.eta > 0 for step in collected.sampling_plan), 1)
-        for index, transition in enumerate(collected.sampling_plan):
-            self.assertEqual(
-                transition.sigma, float(collected.trajectory.timesteps[index])
-            )
-        predictions = trainer._predict_batched(
-            [collected.batch],
-            [collected.trajectory.timesteps[1:2]],
-            [float(collected.trajectory.timesteps[1])],
-            [collected.negative_batch],
-            [collected.sampling_plan[1]],
-            [1],
-            [len(collected.sampling_plan)],
+        item = NftTrainItem(
+            rollout_idx=0, timestep_idx=1, sigma=collected.sampling_plan[1].sigma
         )
+        predictions = trainer._predict_batched([trainer._make_run(collected)], [item])
         self.assertTrue(torch.isfinite(predictions[0]).all())
+
+        # S2 precision review: teacher-cache scalar products ran in bf16,
+        # while .double() in normalization made the final NFT loss fp64.
+        trainer.beta = 0.3
+        trainer.kl_beta = 0.2
+        cached = NftCachedTargets(
+            timestep=torch.tensor([0.317], dtype=torch.bfloat16),
+            noisy_latents=torch.full((1, 1, 1), 0.734, dtype=torch.bfloat16),
+            old_prediction=torch.full((1, 1, 1), 0.121, dtype=torch.bfloat16),
+            ref_prediction=torch.full((1, 1, 1), -0.219, dtype=torch.bfloat16),
+        )
+        assert cached.ref_prediction is not None
+        promoted = replace(
+            cached,
+            timestep=cached.timestep.float(),
+            noisy_latents=cached.noisy_latents.float(),
+            old_prediction=cached.old_prediction.float(),
+            ref_prediction=cached.ref_prediction.float(),
+        )
+        loss_values = []
+        gradients = []
+        with patch.object(_NftProbe, "log_aggregated_metrics"):
+            for targets in (cached, promoted):
+                prepared = trainer._prepare_nft_loss_input(
+                    collected,
+                    torch.tensor([0.23], dtype=torch.bfloat16),
+                    0.317,
+                    targets,
+                )
+                prediction = torch.full((1, 1, 1), 0.354421, requires_grad=True)
+                loss = trainer._nft_objective(prepared, prediction)
+                self.assertEqual(loss.dtype, torch.float32)
+                loss.backward()
+                loss_values.append(loss.detach())
+                gradients.append(prediction.grad)
+        torch.testing.assert_close(*loss_values, rtol=0, atol=0)
+        torch.testing.assert_close(*gradients, rtol=0, atol=0)
 
     def test_nft_timestep_range_keeps_float32_boundary(self) -> None:
         trainer = _NftProbe.model_validate({"timestep_range": 0.3})

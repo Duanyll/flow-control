@@ -50,8 +50,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Sampler
-from flow_control.samplers.evaluation import predict_velocity
+from flow_control.samplers import Executor, Sampler, conditional_velocity
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -341,12 +340,16 @@ class AwmTrainer(
         """Plain *conditional* velocity prediction (no CFG).
 
         AWM's flow-matching loss is defined against conditional velocities, so
-        this deliberately bypasses ``get_guided_velocity`` even when rollouts use
+        this deliberately bypasses guidance even when rollouts use
         CFG (``off_policy`` still samples endpoints via the sampler's CFG path).
-        ``predict_velocity`` is the same leaf the sampler uses, so tiled batches
-        are evaluated per tile here exactly as during the rollout.
+        ``conditional_velocity`` expands tiles exactly as the sampler does.
         """
-        return predict_velocity(self.model, batches, timesteps)
+        return Executor(self.model).evaluate(
+            [
+                conditional_velocity(batch, timestep)
+                for batch, timestep in zip(batches, timesteps, strict=True)
+            ]
+        )
 
     # ------------------------------- Loss helpers ------------------------------- #
 
@@ -403,14 +406,18 @@ class AwmTrainer(
         t = timestep.to(device=self.device, dtype=torch.float32)
 
         if cached_targets is not None:
-            noise = cached_targets.noise.to(device=self.device)
+            noise = cached_targets.noise.to(device=self.device, dtype=torch.float32)
             ref_prediction = (
-                cached_targets.ref_prediction.to(device=self.device)
+                cached_targets.ref_prediction.to(
+                    device=self.device, dtype=torch.float32
+                )
                 if cached_targets.ref_prediction is not None
                 else None
             )
             ema_prediction = (
-                cached_targets.ema_prediction.to(device=self.device)
+                cached_targets.ema_prediction.to(
+                    device=self.device, dtype=torch.float32
+                )
                 if cached_targets.ema_prediction is not None
                 else None
             )
@@ -428,7 +435,7 @@ class AwmTrainer(
             x0=x0,
             timestep=t,
             noise=noise,
-            advantage=rollout_advantages.to(device=self.device),
+            advantage=rollout_advantages.to(device=self.device, dtype=torch.float32),
             ref_prediction=ref_prediction,
             ema_prediction=ema_prediction,
         )
@@ -556,7 +563,11 @@ class AwmTrainer(
                 device=self.device, dtype=torch.float32
             )
 
-        grid = rollout.trajectory.timesteps.to(device=self.device, dtype=torch.float32)
+        grid = torch.tensor(
+            [transition.sigma for transition in rollout.sampling_plan],
+            device=self.device,
+            dtype=torch.float32,
+        )
         steps = grid.shape[0]
         lo = 1 if self.train_timestep_sampling == "discrete_wo_init" else 0
         hi = max(lo + 1, int(steps * self.timestep_fraction))
@@ -625,7 +636,7 @@ class AwmTrainer(
                 if cached_targets is None:
                     raise RuntimeError("Missing cached AWM targets.")
                 timestep = item.timestep.to(device=self.device, dtype=torch.float32)
-                noise = cached_targets.noise.to(device=self.device)
+                noise = cached_targets.noise.to(device=self.device, dtype=torch.float32)
                 t_expanded = timestep.view(-1, *([1] * (x0.ndim - 1)))
                 batch["noisy_latents"] = (1.0 - t_expanded) * x0 + t_expanded * noise
                 batches.append(batch)
