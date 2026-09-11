@@ -20,6 +20,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
+from flow_control.samplers.evaluation import predict_velocity
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -238,7 +239,8 @@ class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
                 )
             )
 
-        predictions = self.model.predict_velocity_batched(model_batches, timesteps)
+        # Same leaf as the sampler: tiled batches are evaluated per tile.
+        predictions = predict_velocity(self.model, model_batches, timesteps)
         per_sample_losses = [
             ((prediction - target) ** 2).mean() * weight.mean()
             for prediction, target, weight in zip(

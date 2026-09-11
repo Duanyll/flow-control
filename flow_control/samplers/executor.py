@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass
 
@@ -60,36 +59,6 @@ def validate_distributed_request_count(
         raise ValueError(
             f"All distributed ranks must submit the same number of requests "
             f"to {operation}."
-        )
-
-
-def _validate_topology(
-    runs: list[Run], guidance: BaseGuidance, device: torch.device
-) -> None:
-    # Solvers derive eval counts from config and execution position. The hash
-    # deliberately excludes sigma and transformed eta so resolution shifts and
-    # independently drawn stochastic windows can still share a rendezvous.
-    fingerprints = []
-    for run in runs:
-        description = (
-            guidance.model_dump_json()
-            + "|"
-            + "|".join(item.solver.model_dump_json() for item in run.plan)
-        )
-        digest = hashlib.sha256(description.encode()).digest()
-        fingerprints.append(int.from_bytes(digest[:8], "little") % (2**62))
-    limits = torch.tensor(
-        [min(fingerprints), -max(fingerprints)], device=device, dtype=torch.int64
-    )
-    if dist.is_initialized():
-        dist.all_reduce(limits, op=dist.ReduceOp.MIN)
-    if int(limits[0].item()) != -int(limits[1].item()):
-        raise ValueError(
-            "Sampling plans must have equal lengths and solver/guidance configurations "
-            "within each microbatch and across ranks. SDEdit with a "
-            "resolution-dependent shift can produce unequal plan lengths when "
-            "micro_batch_size > 1; group matching resolutions or use "
-            "micro_batch_size=1."
         )
 
 
@@ -176,7 +145,6 @@ def execute(
     """Execute matching plans; each model round rendezvous is collective."""
     if not runs:
         raise ValueError("execute requires at least one run.")
-    _validate_topology(runs, guidance, model.device)
     driver = _drive(runs, projectors, observer)
     try:
         item: _EvalRound | StepEvent | None = next(driver)

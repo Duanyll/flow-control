@@ -19,8 +19,8 @@ uv run ruff format <path_to_format>
 uv run ruff check --fix <path_to_check>
 ```
 
-1. Always try to maintain type hints in the code. We use Python 3.12, so prefer using `dict`, `list`, `|`, etc. over `Dict`, `List`, `Union` from `typing`.
-2. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Try avoid `# noqa` as much as possible.
+1. Maintain type hints in the code. We use Python 3.12, so prefer using `dict`, `list`, `|`, etc. over `Dict`, `List`, `Union` from `typing`.
+2. Use Ruff to check and fix style issues by first running `uv run ruff format <file>` and then `uv run ruff check --fix <file>`, then manually fix remaining issues if any. Fix the underlying issue rather than adding `# noqa`.
 3. The automated diagnostics from IDE after you edit the code may be stale or incorrect. Call above CLI commands to get accurate diagnostics.
 4. Silence a diagnostic only when the code is right and ty cannot see why, and say why in a comment. Use `# ty: ignore[rule]`, never a bare `# type: ignore` — ty reports suppressions that no longer suppress anything, and only its own spelling names the rule.
 
@@ -66,7 +66,7 @@ for details.
 
 ## Workflow
 
-1. Read related existing code if you want to add a new feature, and try to follow the existing patterns. 
+1. Read related existing code if you want to add a new feature, and follow the existing patterns.
 2. Write self-contained, minimal test code in `if __name__ == "__main__":` block to verify your code works as expected, and to provide usage examples. 
 3. Make sure you fix all linting and type errors.
 4. Review your changes against the following criteria with subagents:

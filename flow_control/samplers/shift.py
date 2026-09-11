@@ -1,12 +1,11 @@
 import math
 from abc import ABC, abstractmethod
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.adapters.base import Batch
-from flow_control.processors.tiles import TileConfig
 from flow_control.utils.registry import Registry, RegistryUnion
 
 
@@ -33,26 +32,16 @@ class BaseShift(BaseModel, ABC):
         return self._calculate_shift_factor(self._get_seq_len(batch), num_steps)
 
     def _get_seq_len(self, batch: Batch) -> int:
-        if "tiling" in batch:
-            height, width = batch["image_size"]
-            tile_h, tile_w = TileConfig.model_validate(batch["tiling"]).size_for(
-                (height, width)
-            )
-            # Edge tiles shift back instead of shrinking, so every tile in this
-            # image shares this actual size and the same sigma grid.
-            if self.latent_length_from == "actual":
-                return (
-                    batch["noisy_latents"].shape[1]
-                    * tile_h
-                    * tile_w
-                    // (height * width)
-                )
-            return tile_h * tile_w // 256
+        # The model may see less than the whole image per forward (tiles).
+        height, width = batch["image_size"]
+        model_h, model_w = cast(dict[str, Any], batch).get(
+            "model_image_size", (height, width)
+        )
         if self.latent_length_from == "actual":
-            return batch["noisy_latents"].shape[1]
-
-        h, w = batch["image_size"]
-        return h * w // 256  # assuming patch size 16x16
+            return (
+                batch["noisy_latents"].shape[1] * model_h * model_w // (height * width)
+            )
+        return model_h * model_w // 256  # assuming patch size 16x16
 
     @abstractmethod
     def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:

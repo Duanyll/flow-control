@@ -419,54 +419,6 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 )
         return velocities
 
-    def prepare_tile_batch(
-        self,
-        batch: dict[str, Any],
-        origin: tuple[int, int],
-        size: tuple[int, int],
-        position: str,
-    ) -> dict[str, Any]:
-        """Crop spatial conditioning; reference images remain independent context.
-
-        The wrapper supplies noisy latents separately. Explicit per-tile batches
-        already have ``size``; otherwise conditioning uses the full image grid.
-        Architectures must opt into global positional coordinates explicitly.
-        """
-        if position != "local":
-            raise ValueError(
-                f"{self.arch}/{self.type} does not support global tile positions; "
-                "use position='local' in the tiled processor."
-            )
-        result = batch.copy()
-        height, width = batch["image_size"]
-        top, left = (0, 0) if (height, width) == size else origin
-        tile_h, tile_w = size
-        scale = self.patch_size * self.vae_scale_factor
-        for key in ("control_latents", "inpaint_latents"):
-            if key in batch:
-                grid = rearrange(
-                    batch[key],
-                    "b (h w) d -> b h w d",
-                    h=height // scale,
-                    w=width // scale,
-                )
-                result[key] = rearrange(
-                    grid[
-                        :,
-                        top // scale : (top + tile_h) // scale,
-                        left // scale : (left + tile_w) // scale,
-                    ],
-                    "b h w d -> b (h w) d",
-                )
-        if "inpaint_mask" in batch:
-            result["inpaint_mask"] = batch["inpaint_mask"][
-                ..., top : top + tile_h, left : left + tile_w
-            ]
-        for key in ("tiling", "tiles", "negative", "clean_latents", "img_ids"):
-            result.pop(key, None)
-        result["image_size"] = size
-        return result
-
     def _pack_latents(self, latents):
         return rearrange(
             latents,

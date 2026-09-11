@@ -204,7 +204,7 @@ def replay_steps(
         for item in items
     ]
     outputs = evaluate(
-        model=sampler.wrap_model(model),
+        model=model,
         guidance=sampler.guidance,
         batches=[item.batch for item in items],
         negative_batches=[item.negative_batch for item in items],

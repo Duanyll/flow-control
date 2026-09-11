@@ -41,8 +41,9 @@ from typing import Literal
 
 import torch
 from einops import einsum, rearrange
+from pydantic import BaseModel, ConfigDict
 
-__all__ = ["TileSpec", "extract_tiles", "plan_tiles", "stitch_tiles"]
+__all__ = ["TileLayout", "TileSpec", "extract_tiles", "plan_tiles", "stitch_tiles"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +54,39 @@ class TileSpec:
     left: int
     height: int
     width: int
+
+
+class TileLayout(BaseModel):
+    """Tile layout a processor stores in ``batch["tiling"]``; lengths are pixels.
+
+    Layouts are planned on the packed token grid so every tile origin is
+    aligned to ``stride`` pixels, i.e. to whole packed tokens.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tile_size: int
+    overlap: int
+    stride: int
+    """Pixels per packed token along each axis (``patch_size * vae_scale_factor``)."""
+
+    def token_specs(self, image_size: tuple[int, int]) -> list[TileSpec]:
+        """Plan tiles on the ``image_size`` token grid (row-major)."""
+        height, width = image_size
+        if any(
+            length % self.stride
+            for length in (height, width, self.tile_size, self.overlap)
+        ):
+            raise ValueError(
+                f"Tiled image_size {image_size}, tile_size {self.tile_size} and overlap "
+                f"{self.overlap} must be multiples of the packed pixel stride ({self.stride})."
+            )
+        return plan_tiles(
+            height // self.stride,
+            width // self.stride,
+            self.tile_size // self.stride,
+            self.overlap // self.stride,
+        )
 
 
 def _plan_axis(extent: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:

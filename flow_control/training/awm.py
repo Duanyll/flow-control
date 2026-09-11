@@ -51,6 +51,7 @@ from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
+from flow_control.samplers.evaluation import predict_velocity
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -342,8 +343,10 @@ class AwmTrainer(
         AWM's flow-matching loss is defined against conditional velocities, so
         this deliberately bypasses ``get_guided_velocity`` even when rollouts use
         CFG (``off_policy`` still samples endpoints via the sampler's CFG path).
+        ``predict_velocity`` is the same leaf the sampler uses, so tiled batches
+        are evaluated per tile here exactly as during the rollout.
         """
-        return self.model.predict_velocity_batched(batches, timesteps)
+        return predict_velocity(self.model, batches, timesteps)
 
     # ------------------------------- Loss helpers ------------------------------- #
 

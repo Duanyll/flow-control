@@ -1,6 +1,6 @@
 """T2I preprocessing with a cached tile layout and per-tile conditions."""
 
-from typing import Annotated, ClassVar, Literal, NotRequired
+from typing import Annotated, Any, ClassVar, Literal, NotRequired
 
 from flow_control.datasets.coercion import JsonBeforeValidator
 
@@ -26,25 +26,26 @@ class TiledT2IProcessor(T2IProcessor, TileConfig):
     async def _add_tiles(
         self, result: T2IProcessedBatch, inputs: list[T2IInputBatch] | None
     ) -> T2IProcessedBatch:
-        stride = self.patch_size * self.vae_scale_factor
-        self.validate_stride(stride)
-        image_size = result["image_size"]
-        if any(length % stride for length in image_size):
-            raise ValueError(
-                f"Tiled image_size {image_size} must be aligned to the packed pixel stride ({stride})."
-            )
-        size = self.size_for(image_size)
-        count = len(self.origins(image_size))
+        layout = self.layout(self.patch_size * self.vae_scale_factor)
+        specs = layout.token_specs(result["image_size"])
+        size = specs[0].height * layout.stride, specs[0].width * layout.stride
+        negative: Any = result.get("negative")
         tiles: list[ProcessedBatch] = []
+        negative_tiles: list[ProcessedBatch] = []
         if inputs is None:
-            shared = result.copy()
-            shared.pop("clean_latents", None)
+            shared: Any = {
+                key: value
+                for key, value in result.items()
+                if key not in ("clean_latents", "negative")
+            }
             shared["image_size"] = size
-            tiles = [shared.copy() for _ in range(count)]
+            tiles = [shared.copy() for _ in specs]
+            if negative is not None:
+                negative_tiles = [{**shared, **negative} for _ in specs]
         else:
-            if len(inputs) != count:
+            if len(inputs) != len(specs):
                 raise ValueError(
-                    f"Expected {count} row-major tile prompts, got {len(inputs)}."
+                    f"Expected {len(specs)} row-major tile prompts, got {len(inputs)}."
                 )
             for index, source in enumerate(inputs):
                 if "tiles" in source:
@@ -56,9 +57,17 @@ class TiledT2IProcessor(T2IProcessor, TileConfig):
                     )
                 tile_input = source.copy()
                 tile_input["image_size"] = size
-                tiles.append(await super().prepare_inference_batch(tile_input))
-        result["tiling"] = self.model_dump(include=set(TileConfig.model_fields))
+                tile: Any = await super().prepare_inference_batch(tile_input)
+                tile_negative = tile.pop("negative", None)
+                tiles.append(tile)
+                if tile_negative is not None:
+                    negative_tiles.append({**tile, **tile_negative})
+        result["tiling"] = layout.model_dump()
+        result["model_image_size"] = size
         result["tiles"] = tiles
+        if negative is not None:
+            # ``get_negative_batch`` overlays this dict, replacing ``tiles`` too.
+            result["negative"] = {**negative, "tiles": negative_tiles}
         return result
 
     async def prepare_inference_batch(

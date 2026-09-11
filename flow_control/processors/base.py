@@ -52,8 +52,11 @@ class ProcessedBatch(TypedDict):
     """Clean latents corresponding to the images in the batch, as training targets."""
 
     negative: NotRequired[Mapping[str, Any]]
+    model_image_size: NotRequired[tuple[int, int]]
+    """Image size the model sees in one forward (for example one tile); defaults to
+    ``image_size``. Resolution-dependent shifts read this, not ``image_size``."""
     tiling: NotRequired[dict[str, Any]]
-    """Serialized TileConfig describing how model evaluation tiles this image."""
+    """Serialized ``TileLayout``; model evaluation tiles this image on the token grid."""
     tiles: NotRequired[list["ProcessedBatch"]]
     """Complete per-tile conditioning batches in row-major order, when sampling tiled."""
 
@@ -130,14 +133,6 @@ class BaseProcessor[
             batch = batch.copy()
             batch.pop("negative")
             batch.update(negative)
-            if "tiles" in batch:
-                tiles = [self.get_negative_batch(tile) for tile in batch["tiles"]]
-                if any(tile is None for tile in tiles):
-                    raise ValueError(
-                        "Each tile needs its own negative conditioning when the full image uses a negative branch."
-                    )
-                # Every tile was checked above; keep the processor's recursive contract.
-                batch["tiles"] = [tile for tile in tiles if tile is not None]
             return batch
         else:
             return None

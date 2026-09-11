@@ -454,6 +454,7 @@ class NftTrainer(
             for item in items
         ]
         item_indices = [item.timestep_idx for item in items]
+        num_items = [len(rollouts[item.rollout_idx].sampling_plan) for item in items]
 
         if any(item.old_prediction is None for item in prepared):
             with torch.no_grad(), apply_ema_maybe(self._old_ema):
@@ -464,6 +465,7 @@ class NftTrainer(
                     negative_batches,
                     transitions,
                     item_indices,
+                    num_items,
                 )
             for item, prediction in zip(prepared, old_predictions, strict=True):
                 if item.old_prediction is None:
@@ -478,13 +480,20 @@ class NftTrainer(
                     negative_batches,
                     transitions,
                     item_indices,
+                    num_items,
                 )
             for item, prediction in zip(prepared, ref_predictions, strict=True):
                 if item.ref_prediction is None:
                     item.ref_prediction = prediction.detach()
 
         forward_predictions = self._predict_batched(
-            batches, timesteps, sigmas, negative_batches, transitions, item_indices
+            batches,
+            timesteps,
+            sigmas,
+            negative_batches,
+            transitions,
+            item_indices,
+            num_items,
         )
         return torch.stack(
             [
@@ -501,11 +510,14 @@ class NftTrainer(
         negative_batches: list[Any | None],
         transitions: list[Transition],
         item_indices: list[int],
+        num_items: list[int],
     ) -> list[torch.Tensor]:
         """Get the guided velocity prediction matching the rollout sampler.
 
         ``get_guided_velocity`` itself skips the negative pass (and returns
         the conditional velocity) when the guidance needs no negative branch.
+        ``item_indices`` index each item's executed (possibly sliced) plan, so
+        ``num_items`` is that plan's length per item rather than ``sampler.steps``.
         """
         return self.rollout_sampler.get_guided_velocity(
             model=self.model,
@@ -517,6 +529,7 @@ class NftTrainer(
             sigma_nexts=[transition.sigma_next for transition in transitions],
             etas=[transition.eta for transition in transitions],
             item_indices=item_indices,
+            num_items=num_items,
         )
 
     # ----------------------------- Training phase ------------------------------- #
@@ -685,6 +698,7 @@ class NftTrainer(
                     for item in micro_items
                 ],
                 [item.timestep_idx for item in micro_items],
+                [len(rollouts[item.rollout_idx].sampling_plan) for item in micro_items],
             )
             for cached_targets, prediction in zip(
                 cached_targets_list, predictions, strict=True

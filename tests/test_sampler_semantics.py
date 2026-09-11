@@ -602,7 +602,7 @@ class BaselineParityTest(unittest.TestCase):
 
 
 class PlanInvariantsTest(unittest.TestCase):
-    def test_with_sde_window_gates_eta_and_marks_record(self) -> None:
+    def test_with_sde_window_gates_eta(self) -> None:
         plan = FlowSolver(eta=0.7).plan([1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
         windowed = with_sde_window(plan, 1, 3)
         self.assertEqual([item.eta for item in windowed], [0.0, 0.7, 0.7, 0.0, 0.0])

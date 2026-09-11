@@ -29,7 +29,6 @@ from .plan import EvalRequest, SamplingPlan, StepContext
 from .projectors import Projector
 from .shift import ConstantShift, Shift
 from .solver import FlowSolver, Solver
-from .tiled import TiledModel
 from .transforms import PlanTransform
 
 logger = get_logger(__name__)
@@ -72,7 +71,9 @@ class Start(BaseModel):
     """Read a source unchanged, or re-noise it at an aligned SDEdit strength."""
 
     model_config = ConfigDict(extra="forbid")
-    source: str = "noisy_latents"
+    source: str | None = None
+    """Batch tensor to start from. Defaults to ``noisy_latents`` (pure noise), or
+    to ``clean_latents`` when ``strength`` is set (SDEdit)."""
     strength: float | None = Field(default=None, gt=0.0, le=1.0)
 
     def slice(self, plan: SamplingPlan) -> SamplingPlan:
@@ -90,11 +91,12 @@ class Start(BaseModel):
     def latents(
         self, batch: Batch, sigma: float, generator: torch.Generator | None
     ) -> torch.Tensor:
-        source = cast("dict[str, Any]", batch).get(self.source)
+        key = self.source or (
+            "noisy_latents" if self.strength is None else "clean_latents"
+        )
+        source = cast("dict[str, Any]", batch).get(key)
         if not isinstance(source, torch.Tensor):
-            raise ValueError(
-                f"Start source {self.source!r} must name a tensor in the batch."
-            )
+            raise ValueError(f"Start source {key!r} must name a tensor in the batch.")
         source = source.float()
         if self.strength is None:
             return source
@@ -187,9 +189,6 @@ class Sampler(BaseModel):
             plan = transform.apply(plan, generator)
         return plan
 
-    def wrap_model(self, model: SamplerModel) -> SamplerModel:
-        return model if isinstance(model, TiledModel) else TiledModel(model)
-
     def sample(
         self,
         model: SamplerModel,
@@ -199,7 +198,6 @@ class Sampler(BaseModel):
     ) -> list[SampleOutput]:
         if not requests:
             raise ValueError("sample requires at least one request.")
-        model = self.wrap_model(model)
         validate_distributed_request_count(
             len(requests), model.device, "Sampler.sample"
         )
@@ -272,10 +270,23 @@ class Sampler(BaseModel):
         sigma_nexts: list[float | None] | None = None,
         etas: list[float] | None = None,
         item_indices: list[int] | None = None,
+        num_items: list[int] | None = None,
     ) -> list[torch.Tensor]:
-        """Evaluate guidance and whole-image projections with fresh per-item state."""
+        """Evaluate guidance and whole-image projections with fresh per-item state.
+
+        ``item_indices`` are positions in each request's executed plan, so they
+        must come with those plans' lengths ``num_items``; without them every
+        item is the first of ``steps``.
+        """
         if len(timesteps) != len(sigmas):
             raise ValueError("timesteps and sigmas must have equal lengths.")
+        if item_indices is not None and (
+            num_items is None or len(num_items) != len(item_indices)
+        ):
+            raise ValueError(
+                "item_indices requires an equally long num_items list of executed "
+                "plan lengths."
+            )
         requests = [
             EvalRequest(
                 latent,
@@ -293,12 +304,12 @@ class Sampler(BaseModel):
                 solver_state=None,
                 guidance_state=self.guidance.init_state(),
                 item_index=item_indices[index] if item_indices is not None else 0,
-                num_items=self.steps,
+                num_items=num_items[index] if num_items is not None else self.steps,
             )
             for index, latent in enumerate(latents)
         ]
         outputs = evaluate(
-            model=self.wrap_model(model),
+            model=model,
             guidance=self.guidance,
             batches=batches,
             negative_batches=negative_batches,

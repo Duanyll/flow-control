@@ -14,12 +14,11 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.processors.tiles import TileConfig
-from flow_control.samplers.evaluation import evaluate
+from flow_control.samplers.evaluation import evaluate, predict_velocity
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.plan import EvalRequest, StepContext
-from flow_control.samplers.tiled import TiledModel
 from flow_control.utils.logging import get_logger
+from flow_control.utils.tiling import TileLayout
 
 logger = get_logger(__name__)
 
@@ -226,26 +225,27 @@ def run_branch_case(
 
 
 def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
-    """Rethink A4: discarded padding previously omitted whole FSDP backward
-    graphs when unequal tile counts forced sequential leaf forwards.
+    """Rethink A4: tiled evaluation runs sequential leaf forwards under FSDP and
+    stitches them; the sharded gradients must match an untiled unsharded oracle.
     """
     sharded, control = make_peft_pair(mesh, device, fallback=True)
     torch.manual_seed(200 + dist.get_rank())
-    batch = make_batch(4 if dist.get_rank() == 0 else 7, device)
+    batch = make_batch(7, device)
     timesteps = [torch.tensor([0.5], device=device)]
-    cast(dict[str, Any], batch)["tiling"] = TileConfig(
-        tile_size=(32, 16), overlap=(16, 0)
+    stride = sharded.patch_size * sharded.vae_scale_factor
+    # Seven tokens tall, one wide: two-token tiles overlapping by one give six.
+    cast(dict[str, Any], batch)["tiling"] = TileLayout(
+        tile_size=2 * stride, overlap=stride, stride=stride
     ).model_dump()
-    tiled = TiledModel(sharded)
-    actual = tiled.predict_velocity_batched([batch], timesteps)[0]
+    actual = predict_velocity(sharded, [batch], timesteps)[0]
     # The toy network is tokenwise: an untiled, unsharded forward is an oracle
-    # for both overlap normalization and all real/padded-tile gradients.
+    # for overlap normalization and for every tile's gradient.
     expected = control.predict_velocity_batched([batch], timesteps)[0]
     assert sharded._forward_count == 6
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
     actual.square().mean().backward()
     expected.square().mean().backward()
-    compare_gradients(sharded, control, "unequal tiled fallback counts")
+    compare_gradients(sharded, control, "tiled sequential forwards")
 
 
 def main() -> None:

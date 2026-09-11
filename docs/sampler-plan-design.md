@@ -3,19 +3,22 @@
 Updated 2026-09-11 for sampler-rethink R1–R5/A1–A4 and processor-owned tiling.
 
 `Sampler` owns the sigma grid, solver, start, transforms, guidance and projectors.
-The processor stores tile layout and blend settings in each processed batch. `sample(model, requests, observer=...)` is the single
+The processor stores the tile layout in each processed batch. `sample(model, requests, observer=...)` is the single
 sampling path. Each request has its own batch, negative batch, and RNG.
 `SampleOutput` contains final latents and the **executed** start-sigma grid.
 
 ## Execution
 
 1. Build the shifted/custom grid and solver plan. Resolution-dependent shift
-   uses the actual tile size when the batch contains tiling metadata.
+   reads `batch["model_image_size"]` (the size one forward sees, e.g. a tile)
+   and falls back to `image_size`.
 2. Slice for SDEdit, then apply transforms using the request generator.
 3. Initialize latents at the resulting plan's first sigma.
 4. For each transition, apply whole-image `pre_transition` projectors once.
 5. Drive solver generators together. Each yielded model evaluation expands
-   named branches, reads each batch's tiling metadata, and assembles whole images.
+   named branches; every branch reaches the model through `predict_velocity`,
+   the single leaf call, which expands tiled batches, runs the model once and
+   stitches whole images back.
 6. Combine whole-image branch velocities, then apply `post_combine` projectors.
 7. Resume each solver with the velocity, observe the completed transition,
    and advance its private runtime state.
@@ -25,21 +28,25 @@ sampling path. Each request has its own batch, negative batch, and RNG.
 that context. Shared configuration objects hold no per-sample numerical state.
 SA retains its multi-evaluation generator and cross-request batching.
 
-Distributed ranks use one per-round rendezvous path. Unequal plan lengths or
-solver/guidance configurations raise collectively. In particular, SDEdit with
-resolution-dependent shifting can produce unequal sliced lengths; use matching
-resolution groups. Branch variants use a common forward schedule across ranks;
-missing branches receive dummy forwards, with zero-valued graph dependencies
-when backward is required. Tile-count padding belongs to the tiled wrapper.
+Distributed ranks use one per-round rendezvous path: each round synchronizes
+its evaluation count and raises when ranks disagree. No configuration
+fingerprint is exchanged, so unequal plan lengths (SDEdit with
+resolution-dependent shifting, mixed resolutions in one microbatch) surface as
+that count mismatch; use matching resolution groups. The branch schedule is
+derived from the guidance configuration alone, so ranks never exchange their
+local branches; missing branches receive dummy forwards, with zero-valued graph
+dependencies when backward is required. Tile counts are never padded: unequal
+counts across ranks fail in the adapter's collation sync.
 
 ## Configuration examples
 
 SDEdit starts from a clean batch tensor, selecting the first grid point at or
-below `strength`. Noise interpolation uses that selected sigma:
+below `strength`. Noise interpolation uses that selected sigma. `start.source`
+defaults to `noisy_latents`, or to `clean_latents` once `strength` is set:
 
 ```jsonc
 "sampler": {
-  "start": {"source": "clean_latents", "strength": 0.6},
+  "start": {"strength": 0.6},
   "steps": 30,
   "guidance": 4.5
 }
@@ -103,57 +110,42 @@ Tiling is a processor task. Its settings are top-level processor fields:
 "processor": {
   "task": "tiled_t2i",
   "preset": "flux1",
-  "tile_size": [1024, 1024],
-  "overlap": [128, 128],
-  "position": "local",
-  "blend": "uniform",
+  "tile_size": 1024,
+  "overlap": 128,
   "save_negative": true
 }
 ```
 
-`TileConfig` in `processors/tiles.py` provides the shared layout rules. Sizes
-are pixels and must align with the adapter's packed pixel stride. Each actual
-tile dimension is the smaller of the configured size and the image dimension;
-origins are row-major and the final tile reaches the image edge.
+`TileConfig` in `processors/tiles.py` holds the square pixel `tile_size` and
+`overlap`; both must be multiples of the adapter's packed pixel stride
+(`patch_size * vae_scale_factor`), as must the image. Layouts are planned on
+the token grid by `utils/tiling.py` (`plan_tiles`): an axis no longer than the
+tile is one tile of its own length; otherwise tiles of exactly `tile_size` are
+spread evenly with the first and last flush to the edges, so adjacent overlaps
+are at least `overlap` and every origin is token-aligned.
 
-The processor preserves the full output `image_size` and writes a plain
-`batch["tiling"]` dictionary containing `tile_size`, `overlap`, `position` and
-`blend`. Inputs may supply a row-major `tiles` list with individual prompts and
-negative prompts. Set processor `save_negative=true` to encode and retain those
-negative prompts; its default is `false`. The processor derives each tile's
-`image_size`; callers need not repeat it. Encoded tile dictionaries contain complete conditions. Without
-individual prompts the processor shares the global encoded conditions across
-tiles, avoiding repeated encoder calls. Negative batches retain the same layout
-and use the corresponding tile's negative condition.
+The processor preserves the full output `image_size` and writes:
 
-`TiledModel(model)` has no separate configuration. `Sampler.sample()`,
-`get_guided_velocity()` and GRPO replay automatically apply this wrapper. It
-reads each request's metadata, supports different layouts in one logical batch,
-and passes ordinary batches through. Plain batches count as one model input
-when synchronizing tile counts across ranks. The optional `batch["tiles"]` list
-can be omitted when every tile shares the full-image condition.
+- `batch["tiling"]`: a `TileLayout` (`tile_size`, `overlap`, `stride`).
+- `batch["model_image_size"]`: the actual tile size. Resolution-dependent shift
+  reads it, so a 4096-pixel output in 1024-pixel tiles gets the 1024-pixel grid.
+- `batch["tiles"]`: complete row-major per-tile conditions. Inputs may supply a
+  `tiles` list with individual prompts and negative prompts; otherwise the
+  global encoded condition is shared by every tile without extra encoder calls
+  (the list may also be omitted entirely). With `save_negative=true` the
+  per-tile negative conditions go to `batch["negative"]["tiles"]`, so
+  `get_negative_batch` needs no tile logic.
 
-Each raw branch is stitched before guidance and post-combine projection, and
-the solver draws one whole-image noise tensor. The three blend modes normalize
-by the total covering weight:
-
-- `uniform` (default): equal weights.
-- `gaussian`: a separable Gaussian with standard deviation one quarter of each
-  tile dimension.
-- `hann`: a separable Hann window evaluated at cell centers, so boundary weights
-  stay positive even where only one tile covers a pixel.
-
-Dynamic shift uses the actual model input tile rather than the full output
-resolution. With 1024-pixel tiles, a 4096-pixel output receives the same shift as
-a real 1024-pixel sample. `latent_length_from="actual"` scales packed token
-count by tile area/full-image area; `"image_size"` uses tile area with the
-existing 256-pixel divisor. An image smaller than a tile uses its own size.
-
-Spatial control and inpaint tensors are cropped to each tile; independent
-reference images retain their own geometry. Local coordinates restart per tile.
-Global coordinates currently support FLUX.1 base, d-concat, n-concat and Fill;
-unsupported adapters raise for global mode. The wrapper requires one packed BND
-image, rejects layered/multi-image latent layouts, and does not skip masked tiles.
+`samplers/evaluation.py:predict_velocity` is the single leaf call for sampling,
+`get_guided_velocity()` and GRPO replay. It reads each batch's metadata, cuts
+`noisy_latents` on the token grid into per-tile batches (the tile's condition
+plus its latent slice and `image_size`), passes ordinary batches through, runs
+one `predict_velocity_batched` over everything, and stitches each raw branch
+back with `stitch_tiles` before guidance and `post_combine`. Stitching feathers
+only edges shared with a neighbour (Hann ramps over the actual overlap) and
+normalizes by the total weight, so constant inputs reconstruct exactly; the
+solver draws one whole-image noise tensor. Adapters need no tile hooks and
+positional coordinates restart per tile.
 
 ## Training and migration
 
@@ -165,10 +157,10 @@ Gaussian approximation when clipping noise. Inference solvers do not compute
 log probabilities. Replay and NFT use the same branch/combine/projector function
 as sampling, with actual executed step metadata supplied by the rollout.
 
-Automatic tiling covers sampling, guided evaluation, GRPO replay and NFT guided
-training predictions. Direct SFT/AWM/RAM training forwards still call the raw
-adapter; batch metadata does not switch those forwards to tiled training. The
-next Pipeline round will unify this boundary.
+Tiling applies wherever the model is reached through `predict_velocity`:
+sampling, guided evaluation, GRPO replay, NFT guided training predictions and
+the direct SFT/AWM/RAM training forwards, so rollout and training see the same
+tiles.
 
 The KRepeat data sampler groups bucketed prompts so corresponding rank positions
 share a resolution while preserving exactly K rollouts per prompt. Incompatible

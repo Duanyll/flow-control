@@ -2,12 +2,15 @@
 
 from collections.abc import Sequence
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from einops import rearrange
 
 from flow_control.adapters.base import Batch, SamplerModel
+from flow_control.utils.tiling import TileLayout, TileSpec, extract_tiles, stitch_tiles
 
 from .guidance import BaseGuidance, BranchSpec
 from .plan import BranchEvals, EvalRequest, GuidanceOutput, StepContext
@@ -21,20 +24,16 @@ def _branch_batch(
         return positive
     if spec.batch_key == "negative":
         return negative
-    value = cast(dict[str, Any], positive).get(spec.batch_key)
-    return cast(Batch, value) if isinstance(value, dict) else None
+    raise ValueError(f"Branch {spec.name!r} has unknown batch_key {spec.batch_key!r}.")
 
 
-def _schedule(branches: list[list[BranchSpec]]) -> list[BranchSpec]:
-    local = list(dict.fromkeys(spec for specs in branches for spec in specs))
-    if not dist.is_initialized():
-        return local
-    # Replay microbatches can contain different step indices, hence different
-    # variants on each rank. Materialize one ordered union before any forwards.
-    gathered: list[list[BranchSpec] | None] = [None] * dist.get_world_size()
-    dist.all_gather_object(gathered, local)
+def _schedule(guidance: BaseGuidance, num_items: int) -> list[BranchSpec]:
+    # Derived from configuration alone, so every rank runs one forward schedule
+    # without exchanging its locally present branches.
     return list(
-        dict.fromkeys(spec for group in gathered if group is not None for spec in group)
+        dict.fromkeys(
+            spec for index in range(num_items) for spec in guidance.branches(index)
+        )
     )
 
 
@@ -73,6 +72,83 @@ def _keep_dummy_gradients(
         target[first] = target[first] + zero
 
 
+@dataclass(slots=True)
+class _Tiling:
+    specs: list[TileSpec]
+    height: int
+    width: int
+    """Token-grid extent of the whole image."""
+
+
+def _tile_batches(batch: Batch) -> tuple[list[Batch], _Tiling]:
+    """Split one packed BND image into per-tile model inputs on the token grid."""
+    source = cast(dict[str, Any], batch)
+    layout = TileLayout.model_validate(source["tiling"])
+    specs = layout.token_specs(source["image_size"])
+    height, width = (length // layout.stride for length in source["image_size"])
+    x = source["noisy_latents"]
+    if x.ndim != 3 or x.shape[:2] != (1, height * width):
+        raise ValueError(
+            "Tiled evaluation requires one packed BND image matching image_size; "
+            f"got {tuple(x.shape)}, image_size={source['image_size']}, "
+            f"stride={layout.stride}."
+        )
+    conditions = source.get("tiles")
+    if conditions is not None and len(conditions) != len(specs):
+        raise ValueError(
+            f"Expected {len(specs)} row-major tile batches, got {len(conditions)}."
+        )
+    grid = rearrange(x, "b (h w) d -> b d h w", h=height, w=width)
+    tiles: list[Batch] = []
+    for index, (spec, latents) in enumerate(
+        zip(specs, extract_tiles(grid, specs), strict=True)
+    ):
+        tile = dict(source if conditions is None else conditions[index])
+        for key in ("tiling", "tiles", "model_image_size", "negative", "clean_latents"):
+            tile.pop(key, None)
+        tile["image_size"] = (spec.height * layout.stride, spec.width * layout.stride)
+        tile["noisy_latents"] = rearrange(latents, "b d h w -> b (h w) d")
+        tiles.append(cast(Batch, tile))
+    return tiles, _Tiling(specs, height, width)
+
+
+def _stitch(velocities: list[torch.Tensor], tiling: _Tiling) -> torch.Tensor:
+    tiles = [
+        rearrange(velocity, "b (h w) d -> b d h w", h=spec.height, w=spec.width)
+        for velocity, spec in zip(velocities, tiling.specs, strict=True)
+    ]
+    stitched = stitch_tiles(tiles, tiling.specs, tiling.height, tiling.width)
+    return rearrange(stitched, "b d h w -> b (h w) d")
+
+
+def predict_velocity(
+    model: SamplerModel, batches: list[Batch], timesteps: list[torch.Tensor]
+) -> list[torch.Tensor]:
+    """The single leaf call: expand tiled batches, run the model once, merge tiles back."""
+    if not batches or len(batches) != len(timesteps):
+        raise ValueError(
+            "predict_velocity requires nonempty batches and equally many timesteps."
+        )
+    inputs: list[Batch] = []
+    times: list[torch.Tensor] = []
+    tilings: list[_Tiling | None] = []
+    for batch, timestep in zip(batches, timesteps, strict=True):
+        tiles, tiling = _tile_batches(batch) if "tiling" in batch else ([batch], None)
+        inputs.extend(tiles)
+        times.extend([timestep] * len(tiles))
+        tilings.append(tiling)
+    # Unequal input counts across ranks are rejected by the adapter's own sync.
+    velocities = model.predict_velocity_batched(inputs, times)
+    outputs = []
+    offset = 0
+    for tiling in tilings:
+        count = 1 if tiling is None else len(tiling.specs)
+        values = velocities[offset : offset + count]
+        outputs.append(values[0] if tiling is None else _stitch(values, tiling))
+        offset += count
+    return outputs
+
+
 def evaluate_branches(
     model: SamplerModel,
     guidance: BaseGuidance,
@@ -92,7 +168,7 @@ def evaluate_branches(
     branches = [guidance.branches(ctx.item_index) for ctx in contexts]
     if any(len({spec.name for spec in specs}) != len(specs) for specs in branches):
         raise ValueError("Guidance branch names must be unique within each evaluation.")
-    schedule = _schedule(branches)
+    schedule = _schedule(guidance, max(ctx.num_items for ctx in contexts))
     sources = [
         [
             _branch_batch(spec, batch, negative) if spec in specs else None
@@ -129,7 +205,7 @@ def evaluate_branches(
             if spec.variant is not None
             else nullcontext()
         ):
-            outputs = model.predict_velocity_batched(inputs, timesteps)
+            outputs = predict_velocity(model, inputs, timesteps)
         for target, source, velocity in zip(velocities, group, outputs, strict=True):
             if source is not None:
                 target[spec.name] = velocity

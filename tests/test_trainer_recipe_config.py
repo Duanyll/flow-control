@@ -42,9 +42,10 @@ class _NftProbe(_ProbeOverrides, NftTrainer):
         return torch.device("cpu")
 
 
-class RolloutPhaseBuildCheckTest(unittest.TestCase):
-    """GRPO's build-time recordable-step check (first rollout batch is the
-    cheapest correct spot: the plan only exists once a batch is available)."""
+class TrainerRolloutPlanTest(unittest.TestCase):
+    """How trainers consume the executed sampling plan: GRPO collection needs a
+    stochastic step to record, NFT trains on the grid the rollout actually ran
+    (including per-step eta and CFG++), and SDE windows index the sliced plan."""
 
     BATCH: Any = {
         "image_size": (32, 32),
@@ -52,7 +53,7 @@ class RolloutPhaseBuildCheckTest(unittest.TestCase):
         "noisy_latents": torch.zeros(1, 1, 1),
     }
 
-    def test_grpo_rejects_recipes_without_recordable_stochastic_step(self) -> None:
+    def test_grpo_collection_requires_a_stochastic_step(self) -> None:
         from test_microbatching import FakeSamplerModel
 
         from flow_control.samplers import SampleRequest
@@ -82,9 +83,24 @@ class RolloutPhaseBuildCheckTest(unittest.TestCase):
                 )
                 self.assertEqual(len(outputs), 1)
                 self.assertEqual(len(records[0]), 3)
-                self.assertNotIn("rollout_recipe", trainer.model_dump())
 
-    def test_nft_train_plan_carries_cpu_sigma_values(self) -> None:
+        with self.subTest("sde_window indexes the sliced plan"):
+            # steps=10 sliced at strength 0.45 leaves 4 transitions; range/size
+            # pin the window to slice indices 1-2 (on the full grid these would
+            # be sigmas 0.9/0.8, outside the slice, and nothing would record).
+            sliced = Sampler.model_validate(
+                {
+                    "steps": 10,
+                    "solver": {"type": "flow", "eta": 0.7},
+                    "start": {"strength": 0.45},
+                    "transforms": [{"type": "sde_window", "size": 2, "range": [1, 3]}],
+                }
+            )
+            self.assertEqual(
+                [item.eta for item in sliced.plan(self.BATCH)], [0.0, 0.7, 0.7, 0.0]
+            )
+
+    def test_nft_trains_on_the_executed_rollout_plan(self) -> None:
         trainer = _NftProbe.model_validate({"num_inner_epochs": 2})
         timesteps = torch.tensor([0.9, 0.6, 0.3])
         rollout = Rollout(
@@ -171,6 +187,7 @@ class RolloutPhaseBuildCheckTest(unittest.TestCase):
             [collected.negative_batch],
             [collected.sampling_plan[1]],
             [1],
+            [len(collected.sampling_plan)],
         )
         self.assertTrue(torch.isfinite(predictions[0]).all())
 

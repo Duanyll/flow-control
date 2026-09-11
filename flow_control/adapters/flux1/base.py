@@ -1,4 +1,4 @@
-from typing import Any, Literal, NotRequired
+from typing import Literal, NotRequired
 
 import torch
 from diffusers import FluxTransformer2DModel
@@ -72,33 +72,6 @@ class Flux1Adapter[TBatch: Flux1Batch](
             "ff_context.net.2",
         ]
     )
-
-    def prepare_tile_batch(
-        self,
-        batch: dict[str, Any],
-        origin: tuple[int, int],
-        size: tuple[int, int],
-        position: str,
-    ) -> dict[str, Any]:
-        if position == "global" and self.type not in {
-            "base",
-            "d_concat",
-            "n_concat",
-            "fill",
-        }:
-            return super().prepare_tile_batch(batch, origin, size, position)
-        result = super().prepare_tile_batch(batch, origin, size, "local")
-        if position == "global":
-            scale = self.patch_size * self.vae_scale_factor
-            ids = self._make_img_ids(
-                (size[0] // scale, size[1] // scale),
-                h_offset=origin[0] // scale,
-                w_offset=origin[1] // scale,
-            )
-            result["img_ids"] = (
-                torch.cat([ids, ids]) if self.type == "n_concat" else ids
-            )
-        return result
 
     def _predict_velocity(
         self,
