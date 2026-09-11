@@ -31,7 +31,6 @@ from flow_control.samplers import (
     SdeWindow,
     Start,
     TiledPrediction,
-    conditional_velocity,
     gather,
 )
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
@@ -153,7 +152,7 @@ def _preprocess(processor: TiledT2IProcessor, *inputs: Any) -> tuple[list[Any], 
 
 def _conditional(leaf: _TileLeaf, batches: list[Any], timestep: torch.Tensor):
     return Executor(leaf).evaluate(
-        [conditional_velocity(batch, timestep) for batch in batches]
+        [TiledPrediction().velocity(batch, timestep) for batch in batches]
     )
 
 

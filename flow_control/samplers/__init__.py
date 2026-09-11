@@ -11,7 +11,7 @@ from .prediction import (
 from .projectors import DifferentialDiffusion, Projector
 from .run import SampleRun, StepCollector, StepRecord
 from .sampler import Sampler, SampleRequest, Start, derive_seed
-from .tiling import TiledPrediction, conditional_velocity
+from .tiling import TiledPrediction
 from .transforms import PlanTransform, SdeWindow
 
 __all__ = [
@@ -37,6 +37,5 @@ __all__ = [
     "Start",
     "StepCollector",
     "StepRecord",
-    "conditional_velocity",
     "derive_seed",
 ]

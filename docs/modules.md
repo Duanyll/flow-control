@@ -94,16 +94,16 @@
 | `TiledPrediction` / `MomentumGuidance` | tiling 在自身生成器内切片、求值、拼接；Momentum 包装任意 child，每次求值后更新闭包中的 EMA。CFG 分支、tile、sample 各自 bind，状态自然隔离；同一 Momentum binding 并发求值会报错 |
 | `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 reference latent 的释放时机 |
 | `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段 `tile_size`/`overlap`（正方形像素，需为 packed stride 倍数），布局用 `utils.tiling.plan_tiles` 在 token 网格上规划；写入 `batch["tiling"]`（`TileLayout`）、`batch["model_image_size"]`（单 tile 实际尺寸）与逐 tile 条件 `tiles`；`save_negative=true` 时逐 tile 负条件写入 `negative["tiles"]`（默认关闭） |
-| `conditional_velocity()` | 无 guidance 的训练调用生成器，使用 `TiledPrediction(ModelPrediction)`；与 sampling 共用 tile 展开和整幅拼接。adapter 对齐跨 rank 不等的 tile/forward 数，冷启动通过 collective 提供 dummy，梯度依赖由 executor 跨 variant 合并 |
+| `BasePrediction.velocity()` | 任意预测树的独立 timestep 求值入口；不认识 tiling，也不推断训练模式。SFT/AWM/RAM 通过 `TrainingPredictionMixin.predict_training()` 使用显式 `train_predictor` |
 | `derive_seed()` | 确定性种子派生 |
 
 `plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 读取 `batch["model_image_size"]`（缺省等于 `image_size`），tiled batch 因而按单 tile 的尺寸/序列长度计算。
 
 **Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正）, `sa`（SA-Solver 随机 PEC）, `flash`（逐步重加噪与可选噪声截断）。
 
-GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(model, items)`：自动记录具有逐步密度且 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；stateful guidance 与多步 solver replay 不支持。Momentum guidance 位于 `flow_control/contrib/momentum_guidance.py`。
+GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(model, items)`：记录 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；rollout 可含 Momentum，但独立训练树必须无状态。分母保留实际 rollout score，current/reference 使用训练树，因此不同树的初始 ratio 不保证为 1。
 
-sample、guided evaluation、GRPO replay、NFT 以及 SFT/AWM/RAM 的直接训练前向共用 tile 展开/拼接，rollout 与训练看到相同布局。`model.micro_batch_size` 限制真实前向大小，`train_micro_batch_size` 决定每次 backward 的逻辑 loss 项数。只有 adapter 内允许低精度计算；sampler 与 loss 统一 fp32，低精度存储值在使用前升 fp32。
+五个 diffusion trainer 必须显式配置 `train_predictor`：`"model"` 直接前向，`"tiled"` 切片后拼接，CFG 可自由组合。所有 current/old/reference/cache 前向都使用该树；NFT/GRPO 的 `make_run(predictor=...)` 保留 rollout 的实际计划及 post-projectors。只有配置含 tiling 时才切片。`model.micro_batch_size` 限制真实前向大小，`train_micro_batch_size` 决定每次 backward 的逻辑 loss 项数。只有 adapter 内允许低精度计算；sampler 与 loss 统一 fp32，低精度存储值在使用前升 fp32。
 
 ---
 

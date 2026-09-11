@@ -25,6 +25,8 @@
     "peft_lora_rank": 16
   },
 
+  "train_predictor": "tiled",
+
   "validation_sampler": {
     "steps": 20,
     "shift": { "type": "linear" }

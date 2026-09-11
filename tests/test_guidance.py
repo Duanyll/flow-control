@@ -109,6 +109,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
         )
         return SampleRun(
             sampler=Sampler(),
+            predictor=ClassifierFreeGuidance(),
             batch=batch,
             negative_batch=None,
             plan=FlowSolver().plan([1.0, 0.5, 0.0]),
@@ -399,8 +400,6 @@ class GuidanceStateTimingTest(unittest.TestCase):
             self.assertEqual(
                 Sampler.model_validate_json(sampler.model_dump_json()), sampler
             )
-            with self.assertRaisesRegex(ValueError, "stateless"):
-                GrpoCollector(sampler)
             bindings, expected = [], []
             sigmas = (0.9, 0.6, 0.3)
             for index in range(2):

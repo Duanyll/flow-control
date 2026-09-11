@@ -13,8 +13,9 @@ where ``x0`` is a clean endpoint sampled by the (lagged) policy, ``A`` is the
 group-relative advantage, ``m`` is ``reward_multiplier``, ``v_ref`` is the frozen
 base model, and ``v_old`` is a lagged EMA of the policy.  There is no explicit KL
 term: regularization is implicit through the ``v_ref`` anchor and the reward
-scale.  All three velocity forwards are plain *conditional* passes (no CFG) even
-though rollouts are generated with CFG.
+scale. All three velocity forwards use ``train_predictor``. The reference
+algorithm uses conditional passes without CFG even with guided rollouts;
+examples configure that choice explicitly.
 
 Reference: arXiv:2605.10759, ``AndreasBergmeister/ram`` (``scripts/training_sd3.py``).
 
@@ -44,7 +45,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Executor, Sampler, conditional_velocity
+from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -68,6 +69,7 @@ from .mixins import (
     MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
+    TrainingPredictionMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -104,7 +106,11 @@ class _RamLossInput:
 
 @trainer_registry.register("ram")
 class RamTrainer(
-    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+    TrainingPredictionMixin,
+    RolloutMixin,
+    ValidationMixin,
+    MicrobatchTrainMixin,
+    CheckpointingMixin,
 ):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "ram"
@@ -302,25 +308,6 @@ class RamTrainer(
 
     # ---------------------------------- Predict --------------------------------- #
 
-    def _predict_batched(
-        self,
-        batches: list[Any],
-        timesteps: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
-        """Plain *conditional* velocity prediction (no CFG).
-
-        RAM's loss target is defined against conditional velocities even though
-        rollouts are sampled with CFG, so this deliberately bypasses
-        guidance. ``conditional_velocity`` expands tiles exactly as the sampler
-        does.
-        """
-        return Executor(self.model).evaluate(
-            [
-                conditional_velocity(batch, timestep)
-                for batch, timestep in zip(batches, timesteps, strict=True)
-            ]
-        )
-
     def _sample_timestep(self) -> torch.Tensor:
         t = self.timestep_weighting.sample_timesteps(1)
         return t.to(device=self.device, dtype=torch.float32)
@@ -415,19 +402,19 @@ class RamTrainer(
 
         if any(item.base_prediction is None for item in prepared):
             with torch.no_grad(), self.reference_model():
-                predictions = self._predict_batched(batches, timesteps)
+                predictions = self.predict_training(batches, timesteps)
             for item, prediction in zip(prepared, predictions, strict=True):
                 if item.base_prediction is None:
                     item.base_prediction = prediction.detach()
 
         if any(item.old_prediction is None for item in prepared):
             with torch.no_grad(), apply_ema_maybe(self._old_ema):
-                predictions = self._predict_batched(batches, timesteps)
+                predictions = self.predict_training(batches, timesteps)
             for item, prediction in zip(prepared, predictions, strict=True):
                 if item.old_prediction is None:
                     item.old_prediction = prediction.detach()
 
-        forward_predictions = self._predict_batched(batches, timesteps)
+        forward_predictions = self.predict_training(batches, timesteps)
         return torch.stack(
             [
                 self._ram_objective(item, prediction)
@@ -504,7 +491,7 @@ class RamTrainer(
                 timesteps.append(timestep)
                 cached_targets_list.append(cached_targets)
 
-            predictions = self._predict_batched(batches, timesteps)
+            predictions = self.predict_training(batches, timesteps)
             for cached_targets, prediction in zip(
                 cached_targets_list, predictions, strict=True
             ):

@@ -3,8 +3,9 @@
 AWM reframes diffusion RL so the policy-gradient objective *is* the pretraining
 flow-matching loss, weighted by the (group-relative) advantage.  For a clean
 endpoint ``x0`` sampled by the policy, re-noise it at a training timestep
-``x_t = (1 - t) * x0 + t * eps`` and evaluate the *conditional* velocity (no
-CFG).  The flow-matching log-likelihood surrogate is
+``x_t = (1 - t) * x0 + t * eps`` and evaluate ``train_predictor``. The reference
+algorithm uses conditional velocity (no CFG); examples configure that tree
+explicitly. The flow-matching log-likelihood surrogate is
 
     log_p(x0) ∝ - w(t) * || v_theta(x_t) - (eps - x0) ||^2
 
@@ -50,7 +51,7 @@ from torch.distributed.checkpoint.state_dict import (
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Executor, Sampler, conditional_velocity
+from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -74,6 +75,7 @@ from .mixins import (
     MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
+    TrainingPredictionMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -113,7 +115,11 @@ class _AwmLossInput:
 
 @trainer_registry.register("awm")
 class AwmTrainer(
-    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+    TrainingPredictionMixin,
+    RolloutMixin,
+    ValidationMixin,
+    MicrobatchTrainMixin,
+    CheckpointingMixin,
 ):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "awm"
@@ -332,25 +338,6 @@ class AwmTrainer(
 
     # ---------------------------------- Predict --------------------------------- #
 
-    def _predict_batched(
-        self,
-        batches: list[Any],
-        timesteps: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
-        """Plain *conditional* velocity prediction (no CFG).
-
-        AWM's flow-matching loss is defined against conditional velocities, so
-        this deliberately bypasses guidance even when rollouts use
-        CFG (``off_policy`` still samples endpoints via the sampler's CFG path).
-        ``conditional_velocity`` expands tiles exactly as the sampler does.
-        """
-        return Executor(self.model).evaluate(
-            [
-                conditional_velocity(batch, timestep)
-                for batch, timestep in zip(batches, timesteps, strict=True)
-            ]
-        )
-
     # ------------------------------- Loss helpers ------------------------------- #
 
     def _flow_matching_logp(
@@ -531,7 +518,7 @@ class AwmTrainer(
 
         if self.beta > 0 and any(item.ref_prediction is None for item in prepared):
             with torch.no_grad(), self.reference_model():
-                predictions = self._predict_batched(batches, timesteps)
+                predictions = self.predict_training(batches, timesteps)
             for item, prediction in zip(prepared, predictions, strict=True):
                 if item.ref_prediction is None:
                     item.ref_prediction = prediction.detach()
@@ -540,12 +527,12 @@ class AwmTrainer(
             item.ema_prediction is None for item in prepared
         ):
             with torch.no_grad(), apply_ema_maybe(self._old_ema):
-                predictions = self._predict_batched(batches, timesteps)
+                predictions = self.predict_training(batches, timesteps)
             for item, prediction in zip(prepared, predictions, strict=True):
                 if item.ema_prediction is None:
                     item.ema_prediction = prediction.detach()
 
-        forward_predictions = self._predict_batched(batches, timesteps)
+        forward_predictions = self.predict_training(batches, timesteps)
         return torch.stack(
             [
                 self._awm_objective(item, prediction)
@@ -643,7 +630,7 @@ class AwmTrainer(
                 timesteps.append(timestep)
                 cached_targets_list.append(cached_targets)
 
-            predictions = self._predict_batched(batches, timesteps)
+            predictions = self.predict_training(batches, timesteps)
             for cached_targets, prediction in zip(
                 cached_targets_list, predictions, strict=True
             ):

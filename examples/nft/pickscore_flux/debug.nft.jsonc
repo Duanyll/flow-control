@@ -52,6 +52,8 @@
     "path": "./data/pickscore_flux/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 8,
     "shift": { "type": "linear" },

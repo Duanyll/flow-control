@@ -66,6 +66,8 @@
     "path": "./data/pickscore_flux/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     // FLUX distilled: no true CFG -> default guidance (vs RAM's SD3 CFG 2.0).
     "steps": 20,

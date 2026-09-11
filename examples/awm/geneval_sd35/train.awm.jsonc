@@ -84,6 +84,8 @@
     "path": "./data/geneval_sd35/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 14,
     "sigma_schedule": "diffusers_flow",

@@ -68,6 +68,8 @@
     "path": "./data/pickscore_flux_512/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 20, // FF num_inference_steps
     // FF guidance_scale = 1.0 -> the default guidance (cfg scale 1.0), omitted.

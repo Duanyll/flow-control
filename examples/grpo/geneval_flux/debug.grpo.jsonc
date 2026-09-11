@@ -49,6 +49,8 @@
     "path": "./data/geneval_flux/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 6,
     "shift": { "type": "linear" },

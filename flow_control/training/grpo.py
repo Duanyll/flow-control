@@ -43,6 +43,7 @@ from .mixins import (
     MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
+    TrainingPredictionMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -60,7 +61,11 @@ class GrpoTrainItem:
 
 @trainer_registry.register("grpo")
 class GrpoTrainer(
-    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+    TrainingPredictionMixin,
+    RolloutMixin,
+    ValidationMixin,
+    MicrobatchTrainMixin,
+    CheckpointingMixin,
 ):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "grpo"
@@ -279,12 +284,18 @@ class GrpoTrainer(
         recorded: RecordedStep = deep_move_to_device(
             trajectory[timestep_idx], self.device
         )
+        batch = deep_move_to_device(rollout.batch, self.device)
         run = self.rollout_sampler.make_run(
             SampleRequest(
-                batch=deep_move_to_device(rollout.batch, self.device),
-                negative_batch=deep_move_to_device(rollout.negative_batch, self.device),
+                batch=batch,
+                negative_batch=self.training_negative(
+                    batch,
+                    len(rollout.sampling_plan),
+                    deep_move_to_device(rollout.negative_batch, self.device),
+                ),
             ),
             plan=rollout.sampling_plan,
+            predictor=self.train_predictor,
         )
         return ReplayItem(run, recorded), recorded.log_prob
 

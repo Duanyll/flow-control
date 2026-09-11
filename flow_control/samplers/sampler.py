@@ -15,7 +15,7 @@ from flow_control.utils.tensor import deep_move_to_device
 from .executor import Executor
 from .guidance import ClassifierFreeGuidance
 from .plan import SamplingPlan, StepContext
-from .prediction import Prediction
+from .prediction import BasePrediction, Prediction
 from .projectors import Projector
 from .run import SampleRun, StepCollector
 from .shift import ConstantShift, Shift
@@ -169,12 +169,15 @@ class Sampler(BaseModel):
         *,
         plan: SamplingPlan | None = None,
         collector: StepCollector | None = None,
+        predictor: BasePrediction | None = None,
     ) -> SampleRun:
         """Bind a request to a plan and fresh per-run state.
 
         Without ``plan`` this is a sampling run: the plan is built for the
         batch and latents start per ``start``. Training passes the executed
         ``plan`` back and supplies latents through ``guided_velocity``.
+        ``predictor`` explicitly selects an alternative tree, such as training's
+        configured predictor, while preserving the executed plan and projectors.
         """
         batch, negative = request.batch, request.negative_batch
         if plan is None:
@@ -188,7 +191,15 @@ class Sampler(BaseModel):
             solver_state=None,
             num_items=len(plan),
         )
-        return SampleRun(self, batch, negative, plan, ctx, collector)
+        return SampleRun(
+            self,
+            batch,
+            negative,
+            plan,
+            ctx,
+            self.guidance if predictor is None else predictor,
+            collector,
+        )
 
     def sample(
         self,

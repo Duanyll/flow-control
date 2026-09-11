@@ -29,6 +29,20 @@ class BasePrediction(BaseModel, ABC):
     def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
         """Return a predictor whose mutable history belongs only to this binding."""
 
+    def velocity(
+        self,
+        batch: Batch,
+        timestep: torch.Tensor,
+        negative_batch: Batch | None = None,
+    ) -> Calls[torch.Tensor]:
+        """Evaluate this tree at an independent timestep, without a solver plan."""
+        latents = batch["noisy_latents"].float()
+        return (
+            yield from self.bind(batch, negative_batch)(
+                EvalRequest(latents, timestep), StepContext(latents, None, None)
+            )
+        )
+
     def children(self) -> tuple[BasePrediction, ...]:
         return ()
 

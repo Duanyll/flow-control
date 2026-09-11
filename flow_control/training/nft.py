@@ -54,6 +54,7 @@ from .mixins import (
     MicrobatchTrainMixin,
     Rollout,
     RolloutMixin,
+    TrainingPredictionMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -94,7 +95,11 @@ class _NftLossInput:
 
 @trainer_registry.register("nft")
 class NftTrainer(
-    RolloutMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+    TrainingPredictionMixin,
+    RolloutMixin,
+    ValidationMixin,
+    MicrobatchTrainMixin,
+    CheckpointingMixin,
 ):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "nft"
@@ -304,12 +309,18 @@ class NftTrainer(
 
     def _make_run(self, rollout: Rollout) -> SampleRun:
         """A training-side run over the rollout's executed plan, on device."""
+        batch = deep_move_to_device(rollout.batch, self.device)
         return self.rollout_sampler.make_run(
             SampleRequest(
-                batch=deep_move_to_device(rollout.batch, self.device),
-                negative_batch=deep_move_to_device(rollout.negative_batch, self.device),
+                batch=batch,
+                negative_batch=self.training_negative(
+                    batch,
+                    len(rollout.sampling_plan),
+                    deep_move_to_device(rollout.negative_batch, self.device),
+                ),
             ),
             plan=rollout.sampling_plan,
+            predictor=self.train_predictor,
         )
 
     # -------------------------------- NFT loss ---------------------------------- #
@@ -480,9 +491,11 @@ class NftTrainer(
     def _predict_batched(
         self, runs: list[SampleRun], items: list[NftTrainItem]
     ) -> list[torch.Tensor]:
-        """Guided velocity at each run's ``noisy_latents``, as the rollout sampler
-        would evaluate that plan item (branches, CFG++ kappa, per-step variants)."""
-        executor = Executor(self.model, self.rollout_sampler.variant_keys())
+        """Training-tree velocity with the rollout's actual transition metadata."""
+        executor = Executor(
+            self.model,
+            runs[0].predictor.variant_keys(runs[0].sampler.steps) or [None],
+        )
         return executor.evaluate(
             [
                 run.guided_velocity(run.batch["noisy_latents"], item.timestep_idx)

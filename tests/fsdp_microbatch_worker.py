@@ -21,9 +21,9 @@ from flow_control.samplers import (
     Sampler,
     SampleRequest,
     TiledPrediction,
-    conditional_velocity,
 )
 from flow_control.samplers.guidance import ClassifierFreeGuidance
+from flow_control.samplers.plan import EvalRequest, StepContext
 from flow_control.samplers.solver import SASolver
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tiling import TileLayout
@@ -203,16 +203,24 @@ def run_branch_case(
     )
     torch.manual_seed(100 + dist.get_rank())
     batch = make_batch(4, device)
-    sampler = Sampler(steps=2, guidance=guidance)
+    # Training selects its own branches/variants despite a plain rollout tree.
+    sampler = Sampler(steps=2, guidance=ModelPrediction())
     outputs = []
     for adapter in (sharded, control):
-        run = sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
-        output = Executor(adapter, sampler.variant_keys()).evaluate(
-            [
-                run.guided_velocity(
-                    batch["noisy_latents"], dist.get_rank() if different_variants else 0
-                )
-            ]
+        index = dist.get_rank() if different_variants else 0
+        run = sampler.make_run(
+            SampleRequest(batch), plan=sampler.plan(batch), predictor=guidance
+        )
+        gen = (
+            run.guided_velocity(batch["noisy_latents"], index)
+            if adapter is sharded
+            else guidance.bind(batch)(
+                EvalRequest(batch["noisy_latents"], run.plan[index].sigma),
+                StepContext(batch["noisy_latents"], None, None, index, len(run.plan)),
+            )
+        )
+        output = Executor(adapter, guidance.variant_keys(sampler.steps)).evaluate(
+            [gen]
         )[0]
         outputs.append(output)
     torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-5, atol=1e-6)
@@ -239,7 +247,9 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     cast(dict[str, Any], batch)["tiling"] = TileLayout(
         tile_size=2 * stride, overlap=stride, stride=stride
     ).model_dump()
-    actual = Executor(sharded).evaluate([conditional_velocity(batch, timesteps[0])])[0]
+    actual = Executor(sharded).evaluate(
+        [TiledPrediction().velocity(batch, timesteps[0])]
+    )[0]
     # The toy network is tokenwise: an untiled, unsharded forward is an oracle
     # for overlap normalization and for every tile's gradient.
     expected = control.predict_velocity_batched([batch], timesteps)[0]

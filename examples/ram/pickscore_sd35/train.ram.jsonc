@@ -62,6 +62,8 @@
     "path": "./data/pickscore_sd35/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 20,
     "guidance": { "type": "cfg", "scale": 2.0 },

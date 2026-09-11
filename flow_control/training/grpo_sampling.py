@@ -122,10 +122,6 @@ class GrpoCollector:
     _records: dict[int, list[RecordedStep]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        if any(node.stateful for node in self.sampler.guidance.walk()):
-            raise ValueError(
-                "GRPO requires stateless guidance; guidance-state replay is unsupported."
-            )
         if not isinstance(self.sampler.solver, _LIKELIHOOD_SOLVERS):
             raise ValueError(
                 f"GRPO has no step likelihood for solver {self.sampler.solver.type!r}."
@@ -165,10 +161,22 @@ class GrpoCollector:
 def replay_steps(
     model: SamplerModel, items: list[ReplayItem]
 ) -> list[StepLogProbOutput]:
-    """Re-evaluate each recorded step's guided velocity and rebuild its likelihood."""
+    """Evaluate the selected predictor, retaining actual rollout scores.
+
+    Items and ranks share the predictor configuration and configured grid length.
+    """
     if not items:
         raise ValueError("replay_steps requires at least one item.")
-    executor = Executor(model, items[0].run.sampler.variant_keys())
+    if any(node.stateful for item in items for node in item.run.predictor.walk()):
+        raise ValueError(
+            "Independent GRPO replay requires a stateless predictor; "
+            "configure train_predictor without trajectory state."
+        )
+    # Enumerate the configured grid, not this rank's sliced plan: every rank
+    # must execute the same variant collectives.
+    run = items[0].run
+    variants = run.predictor.variant_keys(run.sampler.steps) or [None]
+    executor = Executor(model, variants)
     velocities = executor.evaluate(
         [
             item.run.guided_velocity(item.recorded.latent_t, item.recorded.item_index)

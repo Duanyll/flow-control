@@ -50,6 +50,8 @@
     "path": "./data/ocr_flux_grpo/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 6,
     "shift": { "type": "linear" },

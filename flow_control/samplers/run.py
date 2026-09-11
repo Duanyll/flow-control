@@ -12,7 +12,7 @@ from flow_control.adapters.base import Batch
 
 from .calls import Calls
 from .plan import EvalRequest, StepContext, Transition
-from .prediction import Predictor
+from .prediction import BasePrediction, Predictor
 from .projectors import apply_pre_transition
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ class SampleRun:
     negative_batch: Batch | None
     plan: list[Transition]
     ctx: StepContext
+    predictor: BasePrediction
     collector: StepCollector | None = None
     _prediction: Predictor = field(init=False, repr=False)
 
@@ -48,7 +49,7 @@ class SampleRun:
         self._prediction = self._bind_prediction()
 
     def _bind_prediction(self) -> Predictor:
-        inner = self.sampler.guidance.bind(self.batch, self.negative_batch)
+        inner = self.predictor.bind(self.batch, self.negative_batch)
         projectors, batch = self.sampler.projectors, self.batch
 
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:

@@ -93,13 +93,3 @@ class TiledPrediction(WrappedPrediction):
             return rearrange(stitched, "b d h w -> b (h w) d")
 
         return predict
-
-
-def conditional_velocity(batch: Batch, timestep: torch.Tensor) -> Calls[torch.Tensor]:
-    """Direct training prediction uses the same configured tiling algorithm."""
-    latents = batch["noisy_latents"].float()
-    return (
-        yield from TiledPrediction().bind(batch)(
-            EvalRequest(latents, timestep), StepContext(latents, None, None)
-        )
-    )

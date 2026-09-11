@@ -95,9 +95,9 @@ Dynamic shift reads `model_image_size` (the tile size for tiled batches), so a
 input. Each request can carry its own layout; tiles are feathered with the
 shared `utils.tiling.stitch_tiles` window; ordinary batches pass through.
 Tile-specific negative prompts require processor `save_negative=true`
-(default: false). Every model call, including SFT/AWM/RAM training forwards,
-goes through the same tile expansion/merging helpers, so rollout and training
-see the same tiles.
+(default: false). Training explicitly configures `train_predictor`; include
+`tiled` in both trees when rollout and training should use the same tiling.
+There is no implicit training tiling or training-mode dispatch.
 
 - [x] Yield one `SampleRun` per request in completion order without stacking outputs.
 - [x] Build one shifted/custom sigma schedule per request.
@@ -118,12 +118,17 @@ see the same tiles.
 - [x] Compose CFG, tiling and Momentum with `yield from` and local `gather`;
       each algorithm issues child calls and computes its result in one generator.
       Executor and adapter retain all physical batching and collective logic.
+- [x] Require a separate `train_predictor` for every diffusion trainer; all
+      current/teacher/reference/cache predictions use it. Resolve its negative
+      conditions independently of rollout, preserving SFT dropout inputs.
 
 Replay uses `training.grpo_sampling.replay_steps(model, items)`. Each `ReplayItem`
 carries its `SampleRun` and a training-owned `RecordedStep` containing the executed
 transition, step index/count and optional Flash noise ramp snapshot. `GrpoCollector`
 records stochastic latents and log probabilities immediately, dropping velocities;
-`take(run)` consumes a completed trajectory. NFT stores the executed plan on
+`take(run)` consumes a completed trajectory. The denominator stays the actual
+rollout score even when the stateless training tree differs from the behavior
+tree; stateful rollouts are supported. NFT stores the executed plan on
 `Rollout`, keeping branch schedule, successor sigma and transformed eta.
 
 ## Window RNG (plan transforms)

@@ -57,6 +57,8 @@
     "path": "./data/geneval_sd35/train",
   },
 
+  "train_predictor": "tiled",
+
   "rollout_sampler": {
     "steps": 10,
     "shift": { "type": "constant", "shift_value": 3.0 },

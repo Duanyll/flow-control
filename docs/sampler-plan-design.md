@@ -185,7 +185,7 @@ CFG binds its child once per condition, so a child requesting another negative
 condition, including nested CFG, is rejected instead of guessing its meaning.
 CFG++ requires both conditions and a supported Flow/DDIM transition. Generic
 tree traversal collects child weight variants and detects stateful nodes for
-GRPO; the executor never dispatches on a concrete algorithm class.
+independent training/replay; the executor never dispatches on a concrete algorithm class.
 
 ## Tiled evaluation
 
@@ -222,7 +222,7 @@ The processor preserves the full output `image_size` and writes:
   `get_negative_batch` needs no tile logic.
 
 `TiledPrediction` in `samplers/tiling.py` owns tile expansion and merging for
-sampling, `SampleRun.guided_velocity()`, and `conditional_velocity()`. It reads metadata, cuts
+sampling and training trees that include it. It reads metadata, cuts
 `noisy_latents` on the token grid into per-tile batches (the tile's condition
 plus its latent slice and `image_size`), passes ordinary batches through, runs
 child predictors through the executor and adapter, and stitches their results
@@ -234,18 +234,51 @@ positional coordinates restart per tile.
 
 ## Training and migration
 
+SFT/AWM/RAM/NFT/GRPO require a separate `train_predictor` tree. Nodes have no
+training-mode flag: omitting a wrapper is its no-op, and different parameters
+are ordinary configuration. Current, old/EMA, reference and precomputed targets
+all use this tree; rollout and validation keep their own sampler guidance.
+
+```jsonc
+"rollout_sampler": {"steps": 20, "guidance": 4.5},
+"train_predictor": "tiled" // conditional Tiled(Model), without CFG
+```
+
+Use `"train_predictor": "model"` to call the model directly even when batch
+metadata describes tiles. To keep training CFG, specify for example
+`{"type":"cfg","scale":4.5,"inner":"tiled"}`. Training resolves its own
+negative conditions regardless of whether rollout needed them; missing required
+negative data raises. SFT dropout retains the original negative condition.
+
+`BasePrediction.velocity(batch, timestep, negative_batch)` evaluates any tree
+at an independent timestep, replacing the removed `conditional_velocity`.
+SFT/AWM/RAM use this through `TrainingPredictionMixin.predict_training`; they
+have no solver transition and use index 0 for variant schedules. Consequently
+CFG++ is undefined there and raises. NFT/GRPO instead use
+`make_run(plan=executed_plan, predictor=train_predictor)` to preserve actual
+sigma, successor sigma, eta, execution index and post-projectors.
+
+Training timesteps are independent, so stateful training nodes are rejected;
+Momentum would otherwise reset on every call and silently become identity.
+Stateful rollout trees remain valid, including with GRPO collection.
+
 GRPO's `training/grpo_sampling.py` owns collection, records, likelihood replay,
 and mean/std reconstruction. It records every supported step with eta > 0 and
-rejects empty stochastic trajectories or stateful guidance. Flow/DDIM/CPS/
+rejects empty stochastic trajectories. Flow/DDIM/CPS/
 Dance/Flash retain their existing likelihood/KL conventions, including Flash's
 Gaussian approximation when clipping noise. Inference solvers do not compute
-log probabilities. Replay and NFT bind the same prediction tree and projectors
-as sampling, with actual executed step metadata supplied by the rollout.
+log probabilities. GRPO keeps the **actual rollout's recorded score** as the
+ratio denominator and evaluates the current/reference model through the training
+tree. Different trees can produce a non-unit initial ratio and nonzero clipfrac;
+the denominator is not recomputed to hide that difference. This preserves the
+existing GRPO surrogate (dimension-averaged log probabilities and the existing
+CPS/Flash conventions), rather than introducing a new importance-weight formula.
+All replay items/ranks share the configured training tree and grid length.
 
-Tiling applies wherever the model is reached through these call generators:
-sampling, guided evaluation, GRPO replay, NFT guided training predictions and
-the direct SFT/AWM/RAM training forwards, so rollout and training see the same
-tiles.
+Migration: add `train_predictor` explicitly. `"tiled"` preserves the previous
+SFT/AWM/RAM conditional path; copy the old rollout guidance into this field to
+preserve stateless NFT/GRPO behavior. Examples have been migrated. Include tiling
+in both trees when training and sampling should use the same tile evaluation.
 
 The KRepeat data sampler groups bucketed prompts so corresponding rank positions
 share a resolution while preserving exactly K rollouts per prompt. Incompatible

@@ -17,9 +17,10 @@ from torch.distributed.checkpoint.state_dict import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
+from flow_control.adapters.base import Batch
 from flow_control.datasets import DatasetConfig
 from flow_control.processors import Processor
-from flow_control.samplers import Executor, Sampler, conditional_velocity
+from flow_control.samplers import Sampler
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -47,6 +48,7 @@ from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
     MicrobatchTrainMixin,
+    TrainingPredictionMixin,
     ValidationMixin,
     distributed_main,
     trainer_registry,
@@ -62,7 +64,9 @@ logger = get_logger(__name__)
 
 
 @trainer_registry.register("sft")
-class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
+class SftTrainer(
+    TrainingPredictionMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"
 
@@ -209,11 +213,20 @@ class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
         targets: list[torch.Tensor] = []
         weights: list[torch.Tensor] = []
         model_batches: list[Any] = []
+        negative_batches: list[Batch | None] = []
 
         for original_batch in batches:
             batch: Any = original_batch
+            # Preserve the original negative condition before CFG dropout can
+            # replace the positive batch (negative batches have no overlay).
+            negative = self.training_negative(original_batch)
+            negative_batches.append(negative)
             if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
-                negative_batch = self.processor.get_negative_batch(batch)
+                negative_batch = (
+                    negative
+                    if negative is not None
+                    else self.processor.get_negative_batch(batch)
+                )
                 if negative_batch is not None:
                     batch = negative_batch
                 else:
@@ -238,13 +251,7 @@ class SftTrainer(ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin):
                 )
             )
 
-        # Same tile expansion as the sampler.
-        predictions = Executor(self.model).evaluate(
-            [
-                conditional_velocity(batch, timestep)
-                for batch, timestep in zip(model_batches, timesteps, strict=True)
-            ]
-        )
+        predictions = self.predict_training(model_batches, timesteps, negative_batches)
         per_sample_losses = [
             ((prediction - target) ** 2).mean() * weight.mean()
             for prediction, target, weight in zip(
