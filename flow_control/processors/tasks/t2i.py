@@ -17,7 +17,6 @@ from ..components.prompts import PromptStr, parse_prompt
 class T2IInputBatch(InputBatch):
     prompt: str
     negative_prompt: NotRequired[str | None]
-    tiles: NotRequired[list["T2IInputBatch"]]
 
 
 class T2ITrainInputBatch(TrainInputBatch):
@@ -68,17 +67,6 @@ class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessed
                 batch.get("negative_prompt", None) or self.default_negative_prompt,
                 system_prompt=self.encoder_prompt,
             )
-
-        if "tiles" in batch:
-            if any(tile.get("tiles") for tile in batch["tiles"]):
-                raise ValueError("Nested tile conditioning is not supported.")
-            if any(tile.get("image_size") is None for tile in batch["tiles"]):
-                raise ValueError(
-                    "Every tile prompt must declare its image_size in pixels."
-                )
-            result["tiles"] = [
-                await self.prepare_inference_batch(tile) for tile in batch["tiles"]
-            ]
 
         return result
 

@@ -49,7 +49,7 @@
 | `BaseProcessor` | 处理器抽象基类，定义 `load_models()`, `encode_batch()`, `decode_batch()` 等异步方法 |
 | `parse_processor(conf)` | 工厂函数，根据配置创建处理器 |
 
-**任务类型** (`task`)：`t2i`（文生图）, `t2i_control`（可控文生图）, `inpaint`（图像修复）, `efficient_layered`, `qwen_layered`, `tie`
+**任务类型** (`task`)：`t2i`（文生图）, `tiled_t2i`（保存 tile 布局与逐 tile 条件）, `t2i_control`（可控文生图）, `inpaint`（图像修复）, `efficient_layered`, `qwen_layered`, `tie`
 
 **预设** (`preset`)：`flux1`, `flux2`, `flux2_klein_4b`, `flux2_klein_9b`, `qwen_image`, `qwen_image_edit`, `qwen_image_layered`, `longcat_image`, `longcat_image_edit`, `zimage`, `sd35_medium`, `krea2_raw`, `krea2_turbo`, `hidream_o1_full`, `hidream_o1_dev`
 
@@ -84,19 +84,22 @@
 
 | 接口 | 说明 |
 |------|------|
-| `Sampler` | 持有 solver、sigma grid、`start`、`transforms`、`guidance`、`projectors` 和可选 `tiled`；`plan()` 生成当前请求的执行计划，`sample(model, requests, observer=...)` 批量采样，`get_guided_velocity()` 与采样和 GRPO replay 共用分支求值路径 |
+| `Sampler` | 持有 solver、sigma grid、`start`、`transforms`、`guidance`、`projectors`；`plan()` 生成当前请求的执行计划，`sample(model, requests, observer=...)` 批量采样，`get_guided_velocity()` 与采样和 GRPO replay 共用分支求值路径 |
 | `Start` / `SdeWindow` | `start.source` 选择初始 tensor；设置 `strength` 时按 at-or-below 规则切片，并用切片点 sigma 重加噪。`sde_window` 按请求 RNG 选择窗口，仅保留窗口内的 eta |
 | `SampleOutput` | `final_latents` 与实际执行的起始 sigma 网格 `timesteps`；逐步记录由 observer 消费 |
 | `BranchSpec` / `BaseGuidance` | `branches(item_index)` 声明分支名字、condition 和模型 variant；`combine()` 在整幅分支结果上组合 velocity。内置 `cfg`（含 renorm，支持按步 LoRA variant）与一阶 Flow/DDIM `cfg_pp`；裸数字如 `"guidance": 4.5` 表示 CFG scale。`requires_negative(num_items)` 判断是否需要 processor 构造负条件 |
 | `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 reference latent 的释放时机 |
-| `Tiled` | 在模型边界展开 packed BND tiles，按分支拼回整幅 velocity 后再组合 guidance；整幅抽样 solver 噪声，跨 rank tile 数量差异在 wrapper 内补齐 |
+| `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段配置尺寸、overlap、position 与 blend，写入 `batch["tiling"]`；processor 推导每 tile 的实际尺寸；`save_negative=true` 时保存逐 tile 负条件（默认关闭） |
+| `TiledModel` | 无配置 wrapper，采样、guided evaluation 与 replay 自动读取各 batch 的 tile 元数据；普通 batch 直接转发。支持 uniform/Gaussian/Hann 归一化融合，按分支拼回整幅 velocity 后再组合 guidance；跨 rank tile 数量差异在 wrapper 内补齐 |
 | `derive_seed()` | 确定性种子派生 |
 
-`plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。
+`plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 使用实际 tile 尺寸/序列长度，不使用完整输出图的面积。
 
 **Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正）, `sa`（SA-Solver 随机 PEC）, `flash`（逐步重加噪与可选噪声截断）。
 
 GRPO 的 `training/grpo_sampling.py` 提供 `collect_samples()` 与 `replay_steps()`：自动记录具有逐步密度且 `eta > 0` 的 transition，按实际 eta、Flash ramp 和执行步号重算 `StepLogProbOutput(log_prob, mean, std_dev)`。支持 flow / ddim / cps / dance / flash；stateful guidance 与多步 solver replay 不支持。Momentum guidance 位于 `flow_control/contrib/momentum_guidance.py`。
+
+自动 tiling 覆盖 sample、guided evaluation、GRPO replay 和 NFT guided 训练前向；SFT/AWM/RAM 的直接训练前向仍调用 raw adapter。下一轮 Pipeline 统一此边界，并提供容器内可消费、外部可读取的 microbatch 上限；本轮不新增该控制。
 
 ---
 

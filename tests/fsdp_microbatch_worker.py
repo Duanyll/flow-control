@@ -1,6 +1,6 @@
 import os
 from copy import deepcopy
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.distributed as dist
@@ -14,10 +14,11 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.processors.tiles import TileConfig
 from flow_control.samplers.evaluation import evaluate
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.plan import EvalRequest, StepContext
-from flow_control.samplers.tiled import Tiled
+from flow_control.samplers.tiled import TiledModel
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -232,7 +233,10 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     torch.manual_seed(200 + dist.get_rank())
     batch = make_batch(4 if dist.get_rank() == 0 else 7, device)
     timesteps = [torch.tensor([0.5], device=device)]
-    tiled = Tiled(tile_size=(32, 16), overlap=(16, 0)).wrap(sharded)
+    cast(dict[str, Any], batch)["tiling"] = TileConfig(
+        tile_size=(32, 16), overlap=(16, 0)
+    ).model_dump()
+    tiled = TiledModel(sharded)
     actual = tiled.predict_velocity_batched([batch], timesteps)[0]
     # The toy network is tokenwise: an untiled, unsharded forward is an oracle
     # for both overlap normalization and all real/padded-tile gradients.

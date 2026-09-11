@@ -21,7 +21,9 @@ records the stable boundary intended for future padding and sequence packing.
 - [x] (superseded by plan-as-data) SA-Solver now batches across requests through
       the plan executor's rendezvous loop; no sequential special case remains.
 - [x] Keep sequence packing out of the original microbatching change. Sampler-rethink
-      adds tile-count padding inside the tiled model wrapper.
+      adds tile-count padding inside the tiled model wrapper. The `tiled_t2i`
+      processor writes layout/blend metadata into each batch; the sampler has
+      no independent tile configuration.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
 
 ## Stable APIs
@@ -74,10 +76,16 @@ def sample(
 
 `sample()` executes all sampling configurations through one path. `start`
 handles direct latent initialization and SDEdit; `transforms` applies SDE
-windows to each request's plan. Named branch evaluation, optional tile forwards,
+windows to each request's plan. Named branch evaluation, batch-described tile forwards,
 whole-image guidance/projectors, and solver steps preserve cross-request batching
 and FSDP alignment. `SampleOutput` contains final latents and the executed sigma
 grid; training-specific records are collected through the step observer.
+Dynamic shift uses actual tile geometry, so a 4k output with 1k tiles follows
+the same sigma schedule as a real 1k model input. Each request can carry its own
+layout and uniform/Gaussian/Hann blend; ordinary batches pass through. Tile-specific
+negative prompts require processor `save_negative=true` (default: false).
+Automatic tiling covers sampler/guided evaluation, GRPO replay and NFT guided
+predictions; direct SFT/AWM/RAM training forwards still use the raw adapter.
 
 - [x] Return one `SampleOutput` per request without stacking logical outputs.
 - [x] Build one shifted/custom sigma schedule per request.
@@ -353,3 +361,10 @@ attention/position handling, and output splitting. Z-Image is the first native
 ragged example. FLUX and Qwen still require architecture-specific masks and
 position semantics; the new API removes the outer plumbing work but not that
 model-level complexity.
+
+## Deferred Pipeline control
+
+The next SamplingPipeline round will define one microbatch upper limit. The
+container must be able to consume it internally, and outer callers must be able
+to read it when constructing logical batches. The processor-owned tiling
+correction adds no separate microbatch knob.

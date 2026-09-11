@@ -52,6 +52,8 @@ class ProcessedBatch(TypedDict):
     """Clean latents corresponding to the images in the batch, as training targets."""
 
     negative: NotRequired[Mapping[str, Any]]
+    tiling: NotRequired[dict[str, Any]]
+    """Serialized TileConfig describing how model evaluation tiles this image."""
     tiles: NotRequired[list["ProcessedBatch"]]
     """Complete per-tile conditioning batches in row-major order, when sampling tiled."""
 

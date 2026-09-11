@@ -29,7 +29,7 @@ from .plan import EvalRequest, SamplingPlan, StepContext
 from .projectors import Projector
 from .shift import ConstantShift, Shift
 from .solver import FlowSolver, Solver
-from .tiled import Tiled
+from .tiled import TiledModel
 from .transforms import PlanTransform
 
 logger = get_logger(__name__)
@@ -110,7 +110,6 @@ class Sampler(BaseModel):
     start: Start = Field(default_factory=Start)
     transforms: list[PlanTransform] = Field(default_factory=list)
     projectors: list[Projector] = Field(default_factory=list)
-    tiled: Tiled | None = None
 
     seed: int = 42
     guidance: Guidance = Field(default_factory=ClassifierFreeGuidance)
@@ -189,7 +188,7 @@ class Sampler(BaseModel):
         return plan
 
     def wrap_model(self, model: SamplerModel) -> SamplerModel:
-        return self.tiled.wrap(model) if self.tiled is not None else model
+        return model if isinstance(model, TiledModel) else TiledModel(model)
 
     def sample(
         self,

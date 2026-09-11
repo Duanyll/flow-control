@@ -1,5 +1,6 @@
 """Four integration regressions authorized for sampler-rethink R1–R5/A1–A4."""
 
+import asyncio
 import unittest
 from collections import Counter
 from contextlib import nullcontext
@@ -14,11 +15,15 @@ from test_lora_tools import TinyTransformer, make_lora_model
 from test_microbatching import FakeDenseAdapter, FakeSamplerModel, make_sampler_batch
 from torch.utils.checkpoint import checkpoint
 
+from flow_control.processors import get_processor_input_typeddict, parse_processor
+from flow_control.processors.tasks.tiled_t2i import TiledT2IProcessor
+from flow_control.processors.tiles import TileConfig
 from flow_control.samplers import Sampler, SampleRequest, SdeWindow
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
 from flow_control.samplers.plan import BranchEvals, StepContext
+from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import DDIMSolver, FlowSolver
-from flow_control.samplers.tiled import Tiled
+from flow_control.samplers.tiled import TiledModel
 from flow_control.training.data import (
     DistributedKRepeatSampler,
     PaddingAwareDatasetWrapper,
@@ -48,7 +53,8 @@ class _TileLeaf:
     def predict_velocity_batched(self, batches, timesteps):
         self.calls.append(len(batches))
         return [
-            2 * batch["noisy_latents"] + batch.get("prompt", 0) for batch in batches
+            2 * batch["noisy_latents"] + batch.get("prompt_embeds", 0)
+            for batch in batches
         ]
 
 
@@ -256,17 +262,96 @@ class SamplerExtensionsTest(unittest.TestCase):
             torch.testing.assert_close(recomputed, eager)
 
     def test_tiled_reassembly_conditions_padding_and_gradients(self):
-        # A4 must blend branch velocities before whole-image guidance and draw
-        # solver noise once; padded duplicate tiles must never change the image.
+        # The 2026-09-11 tiled correction moves geometry to preprocessing. The
+        # old sampler-owned layout used full-image sequence length for shift,
+        # required redundant tile sizes and could not mix layouts per batch.
+        def encode_prompt(processor, prompt, **kwargs):
+            return {
+                "prompt_embeds": torch.tensor([[[float(prompt.strip() or "0")]]]),
+                "pooled_prompt_embeds": None,
+            }
+
+        processor = parse_processor(
+            {
+                "task": "tiled_t2i",
+                "preset": "flux1",
+                "tile_size": (4, 4),
+                "overlap": (2, 2),
+                "vae_scale_factor": 1,
+                "patch_size": 1,
+                "latent_channels": 1,
+                "save_negative": True,
+            }
+        )
+        assert isinstance(processor, TiledT2IProcessor)
+        self.assertIn(
+            "tiles",
+            get_processor_input_typeddict(type(processor), "inference").__annotations__,
+        )
+        with patch.object(
+            TiledT2IProcessor, "encode_prompt", autospec=True, side_effect=encode_prompt
+        ) as encode:
+            batch: Any = asyncio.run(
+                processor.prepare_inference_batch(
+                    {
+                        "image_size": (6, 6),
+                        "prompt": "0",
+                        "negative_prompt": "-1",
+                        "tiles": [
+                            {"prompt": str(i), "negative_prompt": str(-i - 1)}
+                            for i in range(4)
+                        ],
+                    }
+                )
+            )
+            small: Any = asyncio.run(
+                processor.prepare_inference_batch(
+                    {
+                        "image_size": (3, 2),
+                        "prompt": "7",
+                        "tiles": [{"prompt": "7"}],
+                    }
+                )
+            )
+            previous_calls = encode.call_count
+            inherited: Any = asyncio.run(
+                processor.prepare_inference_batch(
+                    {
+                        "image_size": (6, 6),
+                        "prompt": "7",
+                    }
+                )
+            )
+        self.assertEqual(batch["image_size"], (6, 6))
+        self.assertEqual([tile["image_size"] for tile in batch["tiles"]], [(4, 4)] * 4)
+        self.assertEqual(small["tiles"][0]["image_size"], (3, 2))
+        self.assertEqual(encode.call_count - previous_calls, 2)
+        self.assertTrue(
+            all(
+                tile["prompt_embeds"] is inherited["prompt_embeds"]
+                for tile in inherited["tiles"]
+            )
+        )
+        # The metadata contract also permits one shared condition without a tiles list.
+        inherited.pop("tiles")
+        self.assertEqual(TileConfig.model_validate(batch["tiling"]).tile_size, (4, 4))
+        processor.initialize_latents(
+            batch,
+            generator=torch.Generator().manual_seed(11),
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(batch["noisy_latents"].shape, (1, 36, 1))
         x = torch.arange(36, dtype=torch.float32).reshape(1, 36, 1).requires_grad_()
-        batch: Any = {
-            "image_size": (6, 6),
-            "clean_latents": torch.zeros_like(x),
-            "noisy_latents": x,
-            "tiles": [{"image_size": (4, 4), "prompt": i} for i in range(4)],
-        }
+        batch["noisy_latents"] = x
+        negative: Any = processor.get_negative_batch(batch)
+        assert negative is not None
+        self.assertEqual(negative["tiling"], batch["tiling"])
+        self.assertEqual(
+            [float(tile["prompt_embeds"].item()) for tile in negative["tiles"]],
+            [-1, -2, -3, -4],
+        )
         leaf = _TileLeaf()
-        wrapper = Tiled(tile_size=(4, 4), overlap=(2, 2)).wrap(leaf)
+        wrapper = TiledModel(leaf)
         output = wrapper.predict_velocity_batched([batch], [torch.tensor([0.5])])[0]
         offsets = torch.tensor(
             [[0, 0, 0.5, 0.5, 1, 1]] * 2
@@ -295,21 +380,143 @@ class SamplerExtensionsTest(unittest.TestCase):
             wrapper.predict_velocity_batched(
                 [{**batch, "tiles": batch["tiles"][:3]}], [torch.tensor([0.5])]
             )
+
+        for blend in ("uniform", "gaussian", "hann"):
+            with self.subTest(blend=blend):
+                value = x.detach().clone().requires_grad_()
+                configuration = {**batch["tiling"], "blend": blend}
+                constant = {
+                    **inherited,
+                    "tiling": configuration,
+                    "noisy_latents": value,
+                }
+                result = wrapper.predict_velocity_batched(
+                    [constant], [torch.tensor([0.5])]
+                )[0]
+                torch.testing.assert_close(result, 2 * value + 7)
+                gradient = torch.autograd.grad(result.sum(), value)[0]
+                torch.testing.assert_close(gradient, torch.full_like(value, 2))
+                self.assertTrue(torch.isfinite(result).all())
+                prompts = [
+                    tile["prompt_embeds"].detach().clone().requires_grad_()
+                    for tile in batch["tiles"]
+                ]
+                varied = {
+                    **batch,
+                    "tiling": configuration,
+                    "noisy_latents": value,
+                    "tiles": [
+                        {**tile, "prompt_embeds": prompt}
+                        for tile, prompt in zip(batch["tiles"], prompts, strict=True)
+                    ],
+                }
+                stitched = wrapper.predict_velocity_batched(
+                    [varied], [torch.tensor([0.5])]
+                )[0]
+                offset = (stitched - 2 * value).reshape(6, 6)
+                torch.testing.assert_close(
+                    offset + torch.flip(offset, (0, 1)), torch.full_like(offset, 3)
+                )
+                self.assertTrue(torch.isfinite(offset).all())
+                if blend == "uniform":
+                    torch.testing.assert_close(offset, offsets.reshape(6, 6))
+                else:
+                    self.assertGreater(float(offset[0, 2].detach()), 0)
+                    self.assertLess(float(offset[0, 2].detach()), 0.5)
+                    self.assertGreater(float(offset[0, 3].detach()), 0.5)
+                    self.assertLess(float(offset[0, 3].detach()), 1)
+                prompt_grads = torch.autograd.grad(stitched[0, 2, 0], prompts)
+                torch.testing.assert_close(
+                    prompt_grads[0] + prompt_grads[1], torch.ones_like(prompts[0])
+                )
+                torch.testing.assert_close(
+                    prompt_grads[1].squeeze(), offset[0, 2].detach()
+                )
+                for gradient in prompt_grads[2:]:
+                    torch.testing.assert_close(gradient, torch.zeros_like(gradient))
+
+        # Public sampling and plugin replay must discover the same layout
+        # on both positive and negative batches, with one whole-image noise.
+        configuration = {**batch["tiling"], "blend": "gaussian"}
         sampler = Sampler(
             steps=3,
             solver=FlowSolver(eta=0.5),
-            tiled=Tiled(tile_size=(4, 4), overlap=(2, 2)),
+            guidance=ClassifierFreeGuidance(scale=2),
         )
-        _, records = collect_samples(
+        request_batch: Any = {**batch, "tiling": configuration}
+        request_negative: Any = {**negative, "tiling": configuration}
+        with torch.no_grad():
+            _, records = collect_samples(
+                sampler,
+                leaf,
+                [
+                    SampleRequest(
+                        batch=request_batch,
+                        negative_batch=request_negative,
+                        generator=torch.Generator().manual_seed(5),
+                    )
+                ],
+            )
+        replayed = replay_steps(
             sampler,
             leaf,
-            [SampleRequest(batch=batch, generator=torch.Generator().manual_seed(5))],
-        )
-        replayed = replay_steps(
-            sampler, leaf, [ReplayItem(batch, step) for step in records[0]]
+            [ReplayItem(request_batch, step, request_negative) for step in records[0]],
         )
         for step, replay in zip(records[0], replayed, strict=True):
             torch.testing.assert_close(replay.log_prob, step.log_prob, rtol=0, atol=0)
+
+        # Smaller-than-tile images, another layout and an ordinary batch can share
+        # one call. All inherit constant conditions, so overlap must be invisible.
+        small["noisy_latents"] = torch.arange(6, dtype=torch.float32).reshape(1, 6, 1)
+        different = {
+            **inherited,
+            "tiling": TileConfig(tile_size=(3, 3), overlap=(1, 1)).model_dump(),
+            "noisy_latents": x.detach(),
+        }
+        plain: Any = {
+            "image_size": (2, 2),
+            "noisy_latents": torch.ones(1, 4, 1),
+            "prompt_embeds": torch.tensor([[[7.0]]]),
+        }
+        mixed: list[Any] = [small, different, plain]
+        actual = wrapper.predict_velocity_batched(mixed, [torch.tensor([0.5])] * 3)
+        self.assertEqual(leaf.calls[-1], 11)
+        for actual_batch, original in zip(actual, mixed, strict=True):
+            torch.testing.assert_close(actual_batch, 2 * original["noisy_latents"] + 7)
+        single = wrapper.predict_velocity_batched([plain], [torch.tensor([0.5])])[0]
+        torch.testing.assert_close(single, 2 * plain["noisy_latents"] + 7)
+
+        full: Any = {
+            "image_size": (4096, 4096),
+            "noisy_latents": torch.zeros(1, 256 * 256, 1),
+            "tiling": TileConfig(
+                tile_size=(1024, 1024), overlap=(128, 128)
+            ).model_dump(),
+        }
+        reference: Any = {
+            "image_size": (1024, 1024),
+            "noisy_latents": torch.zeros(1, 64 * 64, 1),
+        }
+        for source in ("actual", "image_size"):
+            with self.subTest(shift_source=source):
+                sampler = Sampler(steps=6, shift=LinearShift(latent_length_from=source))
+                self.assertEqual(
+                    sampler.make_sigmas(full), sampler.make_sigmas(reference)
+                )
+                untiled: Any = {
+                    key: value for key, value in full.items() if key != "tiling"
+                }
+                self.assertNotEqual(
+                    sampler.make_sigmas(untiled), sampler.make_sigmas(reference)
+                )
+                smaller: Any = {
+                    "image_size": (512, 512),
+                    "noisy_latents": torch.zeros(1, 32 * 32, 1),
+                }
+                tiled_smaller: Any = {**smaller, "tiling": full["tiling"]}
+                self.assertEqual(
+                    sampler.make_sigmas(tiled_smaller), sampler.make_sigmas(smaller)
+                )
 
     def test_krepeat_buckets_counts_and_resume(self):
         # R5 fixes resolution divergence between equal-position distributed

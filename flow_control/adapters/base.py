@@ -435,7 +435,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         if position != "local":
             raise ValueError(
                 f"{self.arch}/{self.type} does not support global tile positions; "
-                "use tiled.position='local'."
+                "use position='local' in the tiled processor."
             )
         result = batch.copy()
         height, width = batch["image_size"]
@@ -462,7 +462,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
             result["inpaint_mask"] = batch["inpaint_mask"][
                 ..., top : top + tile_h, left : left + tile_w
             ]
-        for key in ("tiles", "negative", "clean_latents", "img_ids"):
+        for key in ("tiling", "tiles", "negative", "clean_latents", "img_ids"):
             result.pop(key, None)
         result["image_size"] = size
         return result

@@ -26,6 +26,8 @@ from .tasks.qwen_layered import QwenImageLayeredProcessor
 from .tasks.t2i import T2IProcessor
 from .tasks.t2i_control import T2IControlProcessor
 from .tasks.tie import TIEProcessor
+from .tasks.tiled_t2i import TiledT2IProcessor
+from .tiles import TileConfig
 
 
 def parse_processor(conf: dict) -> BaseProcessor:
@@ -85,6 +87,10 @@ def get_processor_input_typeddict(
     """
     from flow_control.processors.base import BaseProcessor
 
+    # Task subclasses can refine input fields while reusing a parent's methods.
+    if (input_type := getattr(processor_class, f"{mode}_input_type", None)) is not None:
+        return input_type
+
     # Pydantic stores resolved generic args in __pydantic_generic_metadata__
     # on the parameterized BaseProcessor[...] class in the MRO.
     for base in processor_class.__mro__:
@@ -128,6 +134,8 @@ __all__ = [
     "T2IControlProcessor",
     "T2IProcessor",
     "TIEProcessor",
+    "TileConfig",
+    "TiledT2IProcessor",
     "ZImagePreset",
     "get_processor_input_typeddict",
     "parse_processor",
