@@ -89,10 +89,12 @@
 | `SampleRun` | `ctx.latents` 是最终结果，`plan` 是实际执行计划；`run()` 生成完整轨迹的叶子调用，`guided_velocity()` 为训练重算单步，每次创建独立 context |
 | `Executor` / `ModelCall` | 收集各 run 的分支、tile 调用，固定 variant 顺序，交给 adapter 按 `model.micro_batch_size` 分块；排空 rank 继续 collective |
 | `StepCollector` / `StepRecord` | 调用方提供 `(run, step)` 回调，消费每步 latents、velocity 和结果；sampler 不保留历史 |
-| `BranchSpec` / `BaseGuidance` | `branches(item_index)` 声明分支名字、condition 和模型 variant；`combine()` 在整幅分支结果上组合 velocity。内置 `cfg`（含 renorm，支持按步 LoRA variant）与一阶 Flow/DDIM `cfg_pp`；裸数字如 `"guidance": 4.5` 表示 CFG scale。`requires_negative(num_items)` 判断是否需要 processor 构造负条件 |
+| `BasePrediction` / `Predictor` | `bind(batch, negative_batch)` 返回独立运行闭包；闭包在同一生成器内调用子节点并完成本算法。`guidance` 配置可嵌套 `model`、`tiled`、`cfg`、`cfg_pp` 及插件；数字仍表示 CFG scale。CFG++ 的 scale 等参数直接放自身字段 |
+| `Calls[T]` / `gather()` | 生成器 yield 叶子调用列表，接收同序 fp32 velocity，return 算法结果；`gather` 仅汇合独立子生成器，支持多轮和嵌套，不处理模型、microbatch 或 collective |
+| `TiledPrediction` / `MomentumGuidance` | tiling 在自身生成器内切片、求值、拼接；Momentum 包装任意 child，每次求值后更新闭包中的 EMA。CFG 分支、tile、sample 各自 bind，状态自然隔离；同一 Momentum binding 并发求值会报错 |
 | `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 reference latent 的释放时机 |
 | `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段 `tile_size`/`overlap`（正方形像素，需为 packed stride 倍数），布局用 `utils.tiling.plan_tiles` 在 token 网格上规划；写入 `batch["tiling"]`（`TileLayout`）、`batch["model_image_size"]`（单 tile 实际尺寸）与逐 tile 条件 `tiles`；`save_negative=true` 时逐 tile 负条件写入 `negative["tiles"]`（默认关闭） |
-| `conditional_velocity()` | 无 guidance 的训练调用生成器；与 guided sampling 共用 `run.py` 中的 tile 展开和整幅拼接。adapter 对齐跨 rank 不等的 tile/forward 数，冷启动通过 collective 提供 dummy，梯度依赖由 executor 跨 variant 合并 |
+| `conditional_velocity()` | 无 guidance 的训练调用生成器，使用 `TiledPrediction(ModelPrediction)`；与 sampling 共用 tile 展开和整幅拼接。adapter 对齐跨 rank 不等的 tile/forward 数，冷启动通过 collective 提供 dummy，梯度依赖由 executor 跨 variant 合并 |
 | `derive_seed()` | 确定性种子派生 |
 
 `plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 读取 `batch["model_image_size"]`（缺省等于 `image_size`），tiled batch 因而按单 tile 的尺寸/序列长度计算。

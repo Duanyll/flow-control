@@ -12,6 +12,7 @@ from ..plan import (
     TransitionGen,
     TransitionResult,
 )
+from ..prediction import Predictor
 from .base import BaseSolver, solver_registry
 from .ddim import DDIMSolver
 
@@ -40,22 +41,25 @@ class DPMSolver(BaseSolver):
             for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:], strict=True)
         ]
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
         state = ctx.solver_state
         assert state is None or isinstance(state, DpmRuntimeState)
 
-        out = yield EvalRequest(
-            latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self
+        velocity = yield from predict(
+            EvalRequest(latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self),
+            ctx,
         )
         latents = ctx.latents
         sigma_t = latents.new_tensor(tr.sigma)
-        x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
+        x0 = self._velocity_to_x0(velocity, latents, sigma_t)
 
         # Warmup follows the runtime history, so a sliced plan restarts cleanly:
         # empty history behaves like the first step of a full run.
         if state is None or ctx.item_index == ctx.num_items - 1:
             next_latents, _ = DDIMSolver.step_parts(
-                latents, out.velocity, tr.sigma, tr.sigma_next, eta=0.0
+                latents, velocity, tr.sigma, tr.sigma_next, eta=0.0
             )
         elif self.order == 1:
             next_latents = self._dpm_solver_first_order_update(

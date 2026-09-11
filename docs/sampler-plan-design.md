@@ -1,6 +1,6 @@
 # Sampler execution and extensions
 
-Updated 2026-09-11 for generator execution, adapter-owned microbatching and caller-owned collection.
+Updated 2026-09-12 for composable predictors with binding-local state.
 
 `Sampler` owns the sigma grid, solver, start, transforms, guidance and projectors.
 The processor stores the tile layout in each processed batch.
@@ -16,23 +16,36 @@ plan through `run.plan`; completion order may differ from submission order.
    and falls back to `image_size`.
 2. Slice for SDEdit, then apply transforms using the request generator.
 3. Initialize latents at the resulting plan's first sigma.
-4. For each transition, apply whole-image `pre_transition` projectors once.
-5. Each run drives its solver generator and expands named branches and tiles
-   into `ModelCall(batch, timestep, variant)` objects. `Executor` batches calls
+4. Bind the configured prediction tree once for this run. For each transition,
+   apply whole-image `pre_transition` projectors once.
+5. The solver calls its predictor with `yield from predict(request, ctx)`.
+   Each component evaluates its children and finishes its own calculation in
+   the same generator. Independent children join with `yield from gather(...)`;
+   the model leaf yields `ModelCall(batch, timestep, variant)` objects.
+   `Executor` batches calls
    across runs, using the same variant order on every rank. The adapter chunks
    these calls by `model.micro_batch_size`, collates compatible inputs, and
-   falls back to sequential forwards when shapes differ. The run stitches
-   branch velocities back to whole images.
-6. Combine whole-image branch velocities, then apply `post_combine` projectors.
+   falls back to sequential forwards when shapes differ.
+6. Child results return through the prediction tree: tiling stitches, CFG guides,
+   Momentum updates its EMA, in the order configured. Once the root returns a
+   whole-image velocity, apply `post_combine` projectors.
 7. Resume each solver with the velocity, pass the completed `StepRecord` to
    the optional caller collector `(run, step)`, and advance private state.
    Sampling itself keeps no step history. GRPO retains only stochastic
    latents/log probabilities; serving uses the callback for step progress.
 
 `Transition` contains `(solver, sigma, sigma_next, eta)`. Execution position is
-`StepContext.item_index / num_items`; solver and guidance history also live in
-that context. Shared configuration objects hold no per-sample numerical state.
+`StepContext.item_index / num_items`; solver history lives in that context.
+Prediction history belongs to closures created by `bind(batch, negative_batch)`.
+Shared configuration objects hold no per-sample numerical state.
 SA retains its multi-evaluation generator and cross-request batching.
+
+The common execution protocol is `Calls[T]`: yield a list of model calls,
+receive a list of fp32 velocities in the same order, return `T`. Local `gather`
+joins any number of these generators, including nested joins and children that
+finish without a model call. It has no model, microbatch, or collective logic.
+Only `Executor` drives physical execution. `SampleRun` knows neither CFG branches
+nor tile geometry, and solvers need no special handling for either.
 
 The sampling stream admits new runs while its pending calls are below one
 adapter microbatch (one tiled run can exceed that window). Training `evaluate()`
@@ -83,7 +96,7 @@ and the transition's actual eta. It requires a negative branch even at scale
 one or below; unsupported solvers raise:
 
 ```jsonc
-"guidance": {"type": "cfg_pp", "inner": {"type": "cfg", "scale": 0.5}}
+"guidance": {"type": "cfg_pp", "scale": 0.5}
 ```
 
 Named branches separate condition selection from model weights. Existing LoRA
@@ -114,8 +127,65 @@ Differential Diffusion is a projector consuming whole-image inpaint tensors:
 
 It preserves the previous pre-transition mask schedule. `post_combine` is the
 second extension hook, called after each evaluation; no post-step blend is
-introduced. Momentum remains available through
-`"imports": ["flow_control.contrib.momentum_guidance"]`.
+introduced.
+
+## Composition and state
+
+The existing `guidance` field now accepts a recursive prediction tree. Core
+nodes are `model`, `tiled`, `cfg`, and `cfg_pp`; the Momentum plugin adds
+`momentum`. All use `bind(batch, negative_batch) -> Predictor`, where
+`Predictor(request, ctx) -> Calls[Tensor]`. Configuration declares children and
+execution requirements; a bound predictor owns its runtime history. Actual
+evaluation latents always come from `request.latents`, including SA substeps
+and tile slices, rather than the step-start latent in `ctx`.
+
+For compatibility, CFG's default child is `Tiled(Model)`: numeric guidance still
+handles tiled batches, and its renorm runs after whole-image reconstruction.
+This is a default configuration choice; CFG's execution never reads tile data.
+Set `inner="model"` to call the model directly, or place CFG inside tiling to
+guide each tile before stitching:
+
+```jsonc
+"guidance": {
+  "type": "tiled",
+  "inner": {"type": "cfg", "scale": 4.5, "renorm": true, "inner": "model"}
+}
+```
+
+Momentum composes with CFG instead of inheriting its configuration or methods:
+
+```jsonc
+"imports": ["flow_control.contrib.momentum_guidance"],
+"sampler": {
+  "guidance": {
+    "type": "momentum", "alpha": 0.5, "beta": 0.25,
+    "inner": {"type": "cfg", "scale": 4.5}
+  }
+}
+```
+
+`Momentum(CFG(...))` tracks the combined velocity. Conversely,
+`CFG(Momentum(Model))` binds independent positive and negative histories, and
+`Tiled(Momentum(...))` binds one history per tile. All bindings are separate
+across samples, even when they share the same config instance. A branch's
+history follows that logical branch across a variant schedule. Momentum updates
+after every child evaluation, so SA's first transition updates twice. There is
+no branch-key dictionary or mutable state in the config. A single Momentum
+binding cannot be evaluated concurrently: ambiguous update ordering raises;
+independent branches must bind separate predictors.
+
+These orders are meaningful but need not be equivalent, particularly with
+renorm. CFG++ also follows the specified order: `Momentum(CFG++)` applies EMA
+extrapolation to CFG++'s effective velocity, while `CFG++(Momentum(Model))`
+first updates the two condition histories and then applies CFG++'s
+solver-dependent conversion. Neither denotes a separate momentum operation
+on just the guided term while keeping a raw unconditional term.
+
+CFG binds its child once per condition, so a child requesting another negative
+condition, including nested CFG, is rejected instead of guessing its meaning.
+CFG++ requires both conditions and a supported Flow/DDIM transition. Generic
+tree traversal collects child weight variants and detects stateful nodes for
+GRPO; the executor never dispatches on a concrete algorithm class.
 
 ## Tiled evaluation
 
@@ -151,12 +221,12 @@ The processor preserves the full output `image_size` and writes:
   per-tile negative conditions go to `batch["negative"]["tiles"]`, so
   `get_negative_batch` needs no tile logic.
 
-`samplers/run.py` shares tile expansion and merging between full sampling,
-`SampleRun.guided_velocity()`, and `conditional_velocity()`. It reads metadata, cuts
+`TiledPrediction` in `samplers/tiling.py` owns tile expansion and merging for
+sampling, `SampleRun.guided_velocity()`, and `conditional_velocity()`. It reads metadata, cuts
 `noisy_latents` on the token grid into per-tile batches (the tile's condition
 plus its latent slice and `image_size`), passes ordinary batches through, runs
-leaf calls through the executor and adapter, and stitches each raw branch
-back with `stitch_tiles` before guidance and `post_combine`. Stitching feathers
+child predictors through the executor and adapter, and stitches their results
+with `stitch_tiles`. CFG may run inside or outside this node. Stitching feathers
 only edges shared with a neighbour (Hann ramps over the actual overlap) and
 normalizes by the total weight, so constant inputs reconstruct exactly; the
 solver draws one whole-image noise tensor. Adapters need no tile hooks and
@@ -169,7 +239,7 @@ and mean/std reconstruction. It records every supported step with eta > 0 and
 rejects empty stochastic trajectories or stateful guidance. Flow/DDIM/CPS/
 Dance/Flash retain their existing likelihood/KL conventions, including Flash's
 Gaussian approximation when clipping noise. Inference solvers do not compute
-log probabilities. Replay and NFT use the same branch/combine/projector function
+log probabilities. Replay and NFT bind the same prediction tree and projectors
 as sampling, with actual executed step metadata supplied by the rollout.
 
 Tiling applies wherever the model is reached through these call generators:
@@ -188,6 +258,12 @@ Migration: move `rollout_recipe[0].transforms` into `rollout_sampler.transforms`
 and remove `record`; inference uses `sampler.start/transforms`. `recipe`, phases,
 inversion, `from_previous`, and core replay APIs have been removed. Old config
 keys fail validation. Regenerate editor schemas with `uv run flow-control schema`.
+CFG++ now owns its CFG parameters directly: replace
+`{"type":"cfg_pp","inner":{"type":"cfg","scale":0.5}}` with
+`{"type":"cfg_pp","scale":0.5}`. `inner` now means the predictor evaluated
+separately for each condition. Move Momentum's old inherited CFG fields under
+its `inner` CFG object. Predictor plugins register with `prediction_registry`
+and implement `bind`, replacing `guidance_registry` and `branches/combine`.
 For tiled configurations, move the old `sampler.tiled` fields to the processor
 and select `task="tiled_t2i"`; regenerate preprocessed batches to store their
 layout. Plain `t2i` handles ordinary text-to-image preprocessing.

@@ -2,46 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
+from .calls import Calls
+
 if TYPE_CHECKING:
+    from .prediction import Predictor
     from .solver.base import BaseSolver
 
 
 class SolverRuntimeState:
-    """Live multistep history owned by the executor."""
-
-
-class GuidanceState:
-    """Immutable per-run state returned by guidance after each evaluation."""
+    """Live multistep history owned by one sampling run."""
 
 
 @dataclass(slots=True)
 class EvalRequest:
     latents: torch.Tensor
-    sigma: float
+    sigma: float | torch.Tensor
     sigma_next: float | None = None
     eta: float = 0.0
     solver: BaseSolver | None = None
-
-
-@dataclass(slots=True)
-class BranchEvals:
-    velocities: dict[str, torch.Tensor]
-    latents: torch.Tensor
-    sigma: float
-    sigma_next: float | None = None
-    eta: float = 0.0
-    solver: BaseSolver | None = None
-
-
-@dataclass(slots=True)
-class GuidanceOutput:
-    velocity: torch.Tensor
+    variant: str | None = None
 
 
 @dataclass(slots=True)
@@ -49,7 +33,6 @@ class StepContext:
     latents: torch.Tensor
     generator: torch.Generator | None
     solver_state: SolverRuntimeState | None
-    guidance_state: GuidanceState | None
     item_index: int = 0
     num_items: int = 1
 
@@ -77,9 +60,9 @@ class Transition:
     sigma_next: float
     eta: float = 0.0
 
-    def run(self, ctx: StepContext) -> TransitionGen:
-        return self.solver.run_transition(self, ctx)
+    def run(self, ctx: StepContext, predict: Predictor) -> TransitionGen:
+        return self.solver.run_transition(self, ctx, predict)
 
 
 SamplingPlan = list[Transition]
-TransitionGen = Generator[EvalRequest, GuidanceOutput, TransitionResult]
+type TransitionGen = Calls[TransitionResult]

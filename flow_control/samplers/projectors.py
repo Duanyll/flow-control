@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from flow_control.adapters.base import Batch
 from flow_control.utils.registry import Registry, RegistryUnion
 
-from .plan import EvalRequest, GuidanceOutput, StepContext, Transition
+from .plan import EvalRequest, StepContext, Transition
 
 
 class BaseProjector(BaseModel):
@@ -28,17 +28,17 @@ class BaseProjector(BaseModel):
 
     def post_combine(
         self,
-        output: GuidanceOutput,
+        velocity: torch.Tensor,
         request: EvalRequest,
         batch: Batch,
         ctx: StepContext,
-    ) -> GuidanceOutput:
-        """Project x0 = request.latents - request.sigma * output.velocity.
+    ) -> torch.Tensor:
+        """Project x0 = request.latents - request.sigma * velocity.
 
         Implementations return the corrected velocity. The identity keeps the
         original tensor, avoiding a lossy x0 round-trip for pre-only projectors.
         """
-        return output
+        return velocity
 
 
 projector_registry: Registry[BaseProjector] = Registry("projector", base=BaseProjector)

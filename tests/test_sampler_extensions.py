@@ -12,24 +12,30 @@ from typing import Any
 from unittest.mock import patch
 
 import torch
+from einops import rearrange
 from peft import LoraConfig
 from test_lora_tools import TinyTransformer, make_lora_model
 from test_microbatching import FakeDenseAdapter, FakeSamplerModel, make_sampler_batch
 from torch.utils.checkpoint import checkpoint
 
+from flow_control.contrib.momentum_guidance import MomentumGuidance
 from flow_control.processors import get_processor_input_typeddict, parse_processor
 from flow_control.processors.tasks.tiled_t2i import TiledT2IProcessor
 from flow_control.rewards import PairwiseReward, execute_pairwise_reward
 from flow_control.samplers import (
+    Calls,
     Executor,
+    ModelPrediction,
     Sampler,
     SampleRequest,
     SdeWindow,
     Start,
+    TiledPrediction,
     conditional_velocity,
+    gather,
 )
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
-from flow_control.samplers.plan import BranchEvals, StepContext
+from flow_control.samplers.plan import EvalRequest, StepContext
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import DDIMSolver, FlowSolver, SASolver
 from flow_control.training.data import (
@@ -41,6 +47,39 @@ from flow_control.training.grpo_sampling import (
     ReplayItem,
     replay_steps,
 )
+from flow_control.utils.tiling import TileLayout, extract_tiles, stitch_tiles
+
+
+class OtherPrediction(ModelPrediction):
+    def variant_keys(self, num_items):
+        return ["other"]
+
+    def bind(self, batch, negative_batch=None):
+        inner = super().bind(batch, negative_batch)
+
+        def predict(request, ctx):
+            return (yield from inner(replace(request, variant="other"), ctx))
+
+        return predict
+
+
+class NeedsNegative(OtherPrediction):
+    def requires_negative(self, num_items):
+        return True
+
+
+def _repeated(predict, request, ctx, count: int) -> Calls[torch.Tensor]:
+    value = torch.zeros_like(request.latents)
+    for _ in range(count):
+        value = value + (yield from predict(request, ctx))
+    return value
+
+
+def _nested(predict, request, ctx) -> Calls[torch.Tensor]:
+    values = yield from gather(
+        [*(_repeated(predict, request, ctx, n) for n in (0, 1, 3))]
+    )
+    return sum(values, start=torch.zeros_like(values[0]))
 
 
 class _TileLeaf:
@@ -139,25 +178,12 @@ class SamplerExtensionsTest(unittest.TestCase):
                 for eta in (0.0, 0.7, 1.0):
                     for scale in (0.5, 1.0, 3.0):
                         solver = solver_cls(eta=0.123)
-                        guidance = CfgPlusPlusGuidance(
-                            inner=ClassifierFreeGuidance(scale=scale)
-                        )
-                        evals = BranchEvals(
-                            {"cond": cond, "uncond": uncond},
-                            x,
-                            sigma,
-                            target,
-                            eta,
-                            solver,
-                        )
-                        velocity, _ = guidance.combine(
-                            evals, StepContext(x, None, None, None), None
-                        )
+                        guidance = CfgPlusPlusGuidance(scale=scale)
+                        request = EvalRequest(x, sigma, target, eta, solver)
+                        velocity = guidance._guide(cond, uncond, request)
                         guided = uncond + scale * (cond - uncond)
                         x0, epsilon = x - sigma * guided, x + (1 - sigma) * uncond
-                        actual = solver.step_parts(
-                            x, velocity.velocity, sigma, target, eta
-                        )[0]
+                        actual = solver.step_parts(x, velocity, sigma, target, eta)[0]
                         if solver_cls is DDIMSolver:
                             noise = solver.step_parts(x, uncond, sigma, target, eta)[1]
                             expected = (1 - target) * x0 + torch.sqrt(
@@ -180,7 +206,7 @@ class SamplerExtensionsTest(unittest.TestCase):
             sampler = Sampler(
                 steps=6,
                 solver=solver_cls(eta=0.7),
-                guidance=CfgPlusPlusGuidance(inner=ClassifierFreeGuidance(scale=0.5)),
+                guidance=CfgPlusPlusGuidance(scale=0.5),
                 transforms=[SdeWindow(size=2, range=(1, 5))],
             )
             batch, negative = make_sampler_batch(0.3, 0.9), make_sampler_batch(-0.2)
@@ -325,6 +351,18 @@ class SamplerExtensionsTest(unittest.TestCase):
         for eager, recomputed in zip(*gradients, strict=True):
             torch.testing.assert_close(recomputed, eager)
 
+        # Review caught CFG dropping variants declared by a generic child.
+        composed = Sampler(guidance=ClassifierFreeGuidance(inner=OtherPrediction()))
+        run = composed.make_run(SampleRequest(batch))
+        (value,) = Executor(adapter, composed.variant_keys()).evaluate(
+            [run.guided_velocity(x, 0)]
+        )
+        torch.testing.assert_close(value, outputs["other"])
+
+        for child in (NeedsNegative(), TiledPrediction(inner=ClassifierFreeGuidance())):
+            with self.assertRaisesRegex(ValueError, "another negative condition"):
+                ClassifierFreeGuidance(inner=child).bind(batch, batch)
+
     def test_tiled_processor_writes_layout_and_negative_tiles(self):
         # The 2026-09-11 rework moves tile geometry to preprocessing: the batch
         # carries a stride-aligned layout, the model-visible size for shift, and
@@ -421,7 +459,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         for gradient in prompt_grads[2:]:
             torch.testing.assert_close(gradient, torch.zeros_like(gradient))
         fewer_tiles: Any = {**varied, "tiles": varied["tiles"][:3]}
-        with self.assertRaisesRegex(ValueError, "tile batches"):
+        with self.assertRaisesRegex(ValueError, "tile conditions"):
             _conditional(leaf, [fewer_tiles], timestep)
         fewer_tokens: Any = {**constant, "noisy_latents": x[:, :30]}
         with self.assertRaisesRegex(ValueError, "packed BND"):
@@ -465,6 +503,74 @@ class SamplerExtensionsTest(unittest.TestCase):
         # Both branches share one forward per sampling step (four tiles each),
         # then both recorded steps replay in one call: 2 items x 2 branches x 4.
         self.assertEqual(leaf.calls, [8] * 3 + [16])
+
+        # Moving CFG inside Tiled must change where nonlinear renorm happens;
+        # the default CFG(Tiled(Model)) keeps whole-image branch semantics.
+        # Per-tile Momentum histories must remain separate over several calls.
+        layout = TileLayout.model_validate(batch["tiling"])
+        specs = layout.token_specs(batch["image_size"])
+        x = torch.linspace(-3, 3, 36).reshape(1, 36, 1)
+        cfg = ClassifierFreeGuidance(scale=3, renorm=True, inner=ModelPrediction())
+        configs = [
+            ClassifierFreeGuidance(scale=3, renorm=True, inner=TiledPrediction()),
+            TiledPrediction(inner=cfg),
+            TiledPrediction(inner=MomentumGuidance(alpha=0.5, beta=0.25, inner=cfg)),
+        ]
+        bindings = [config.bind(batch, negative) for config in configs]
+        expected_tiles = []
+        ordered_values = []
+        for index in range(3):
+            current = x + index * 0.7
+            tile_inputs = extract_tiles(
+                rearrange(current, "b (h w) d -> b d h w", h=6, w=6), specs
+            )
+
+            def guide(c, u):
+                combined = u + 3 * (c - u)
+                return combined * (c.abs() / (combined.abs() + 1e-8)).clamp(max=1)
+
+            tiles = [
+                guide(2 * tile + i, 2 * tile - i - 1)
+                for i, tile in enumerate(tile_inputs)
+            ]
+            expected_tiles.append(tiles)
+            raw_c, raw_u = _conditional(
+                _TileLeaf(),
+                [{**b, "noisy_latents": current} for b in (batch, negative)],
+                torch.tensor([0.5]),
+            )
+            value = Executor(_TileLeaf()).evaluate(
+                [
+                    binding(
+                        EvalRequest(current, 0.5),
+                        StepContext(current, None, None, item_index=index, num_items=3),
+                    )
+                    for binding in bindings
+                ]
+            )
+            torch.testing.assert_close(value[0], guide(raw_c, raw_u))
+            stitched = rearrange(
+                stitch_tiles(tiles, specs, 6, 6), "b d h w -> b (h w) d"
+            )
+            torch.testing.assert_close(value[1], stitched)
+            ordered_values.append(value[:2])
+            history = expected_tiles
+            if index == 0:
+                momentum_tiles = tiles
+            elif index == 1:
+                momentum_tiles = [
+                    1.5 * v1 - 0.5 * v0 for v0, v1 in zip(*history, strict=True)
+                ]
+            else:
+                momentum_tiles = [
+                    1.5 * v2 - 0.5 * (0.75 * v1 + 0.25 * v0)
+                    for v0, v1, v2 in zip(*history, strict=True)
+                ]
+            expected = rearrange(
+                stitch_tiles(momentum_tiles, specs, 6, 6), "b d h w -> b (h w) d"
+            )
+            torch.testing.assert_close(value[2], expected)
+        self.assertTrue(any(not torch.allclose(a, b) for a, b in ordered_values))
 
     def test_stream_batches_mixed_runs_and_matches_sequential_sampling(self):
         # One executor call may hold a sub-tile image, two different layouts, a
@@ -547,6 +653,27 @@ class SamplerExtensionsTest(unittest.TestCase):
                 streamed.ctx.latents, alone.ctx.latents, rtol=0, atol=0
             )
         self.assertLess(9, alone_calls)
+
+        # Nested joins may finish without a call or need several waves; the
+        # executor must see only ready leaves and return results in input order.
+        predict = ModelPrediction().bind(plain)
+        request = EvalRequest(plain["noisy_latents"], 0.5)
+        ctx = StepContext(plain["noisy_latents"], None, None)
+
+        leaf = _TileLeaf()
+        (values,) = Executor(leaf).evaluate(
+            [
+                gather(
+                    [
+                        _nested(predict, request, ctx),
+                        _repeated(predict, request, ctx, 2),
+                    ]
+                )
+            ]
+        )
+        self.assertEqual(leaf.calls, [3, 2, 1])
+        for value, count in zip(values, (4, 2), strict=True):
+            torch.testing.assert_close(value, count * (2 * plain["noisy_latents"] + 7))
 
         # S2 streamed completions interleave prompt groups. The reward layer
         # must group by __key__ BEFORE prepare_batch_for_async drops metadata.

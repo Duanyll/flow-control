@@ -21,11 +21,10 @@ from typing import Any
 
 import torch
 
-from flow_control.samplers import Executor, SdeWindow
+from flow_control.samplers import Calls, Executor, SdeWindow
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.plan import (
     EvalRequest,
-    GuidanceOutput,
     StepContext,
     Transition,
     TransitionResult,
@@ -205,16 +204,20 @@ def drive_transition(
     velocity_fn,
 ) -> tuple[TransitionResult, list[EvalRequest]]:
     """Drive a run_transition generator, answering evals via ``velocity_fn``."""
-    gen = tr.run(ctx)
     requests: list[EvalRequest] = []
+
+    def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
+        requests.append(request)
+        if False:
+            yield []
+        return velocity_fn(request)
+
     try:
-        request = next(gen)
-        while True:
-            requests.append(request)
-            request = gen.send(GuidanceOutput(velocity=velocity_fn(request)))
+        next(tr.run(ctx, predict))
     except StopIteration as stop:
         assert isinstance(stop.value, TransitionResult)
         return stop.value, requests
+    raise AssertionError("The local velocity oracle must not yield model calls.")
 
 
 class BaselineParityTest(unittest.TestCase):
@@ -284,7 +287,6 @@ class BaselineParityTest(unittest.TestCase):
                             5000 + entry["step_index"]
                         ),
                         solver_state=None,
-                        guidance_state=None,
                     )
                     result = drive_single_eval_transition(tr, ctx, velocity)
                     assert_bitwise(result.next_latents, entry["next_latents"])
@@ -400,7 +402,6 @@ class BaselineParityTest(unittest.TestCase):
                     latents=latents,
                     generator=torch.Generator().manual_seed(5000 + index),
                     solver_state=None,
-                    guidance_state=None,
                 )
                 ctx.item_index, ctx.num_items = index, len(plan)
                 result = drive_single_eval_transition(tr, ctx, velocity)
@@ -552,7 +553,6 @@ class BaselineParityTest(unittest.TestCase):
             solver_state=SaRuntimeState(
                 model_history=(m0,), time_history=(float(times[0]),)
             ),
-            guidance_state=None,
             num_items=len(times) - 1,
         )
         result, requests = drive_transition(tr, ctx, lambda request: sent_velocity)
@@ -590,7 +590,6 @@ class BaselineParityTest(unittest.TestCase):
                             float(times[t_index - 1]),
                         ),
                     ),
-                    guidance_state=None,
                     item_index=t_index - 1,
                     num_items=len(times) - 1,
                 )

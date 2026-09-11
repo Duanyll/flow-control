@@ -11,7 +11,8 @@ import torch.distributed as dist
 
 from flow_control.adapters.base import SamplerModel
 
-from .run import Calls, ModelCall, SampleRun
+from .calls import Calls, ModelCall
+from .run import SampleRun
 
 
 @dataclass(slots=True)

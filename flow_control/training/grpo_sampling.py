@@ -122,7 +122,7 @@ class GrpoCollector:
     _records: dict[int, list[RecordedStep]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        if self.sampler.guidance.init_state() is not None:
+        if any(node.stateful for node in self.sampler.guidance.walk()):
             raise ValueError(
                 "GRPO requires stateless guidance; guidance-state replay is unsupported."
             )

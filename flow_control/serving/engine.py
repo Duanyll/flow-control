@@ -20,7 +20,6 @@ from flow_control.samplers import (
     Sampler,
     SampleRequest,
 )
-from flow_control.samplers.guidance import CfgPlusPlusGuidance
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
@@ -35,10 +34,14 @@ logger = get_logger(__name__)
 def _classifier_free_guidance(
     sampler: Sampler,
 ) -> ClassifierFreeGuidance | None:
-    guidance = sampler.guidance
-    while isinstance(guidance, CfgPlusPlusGuidance):
-        guidance = guidance.inner
-    return guidance if isinstance(guidance, ClassifierFreeGuidance) else None
+    return next(
+        (
+            node
+            for node in sampler.guidance.walk()
+            if isinstance(node, ClassifierFreeGuidance)
+        ),
+        None,
+    )
 
 
 def cfg_scale_for_display(sampler: Sampler) -> float:

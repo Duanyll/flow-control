@@ -5,7 +5,6 @@ import torch
 
 from ..plan import (
     EvalRequest,
-    GuidanceOutput,
     SamplingPlan,
     SolverRuntimeState,
     StepContext,
@@ -13,6 +12,7 @@ from ..plan import (
     TransitionGen,
     TransitionResult,
 )
+from ..prediction import Predictor
 from .base import BaseSolver, solver_registry
 
 
@@ -72,7 +72,9 @@ class SASolver(BaseSolver):
             )
         ]
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
         state = ctx.solver_state
         assert state is None or isinstance(state, SaRuntimeState)
         latents = ctx.latents
@@ -80,12 +82,11 @@ class SASolver(BaseSolver):
         if state is None:
             # Empty history (run start or sliced plan): seed it with an eval
             # at the current point, mirroring the reference initial evaluation.
-            out = yield EvalRequest(
-                latents=latents, sigma=tr.sigma, eta=tr.eta, solver=self
+            velocity = yield from predict(
+                EvalRequest(latents=latents, sigma=tr.sigma, eta=tr.eta, solver=self),
+                ctx,
             )
-            x0 = self._velocity_to_x0(
-                out.velocity, latents, latents.new_tensor(tr.sigma)
-            )
+            x0 = self._velocity_to_x0(velocity, latents, latents.new_tensor(tr.sigma))
             model_history: tuple[torch.Tensor, ...] = (x0,)
             time_history: tuple[float, ...] = (tr.sigma,)
         else:
@@ -119,10 +120,13 @@ class SASolver(BaseSolver):
         predicted = self._adams_bashforth_update(
             latents, tau, model_list, time_list, noise, t, order=order
         )
-        out = yield EvalRequest(
-            latents=predicted, sigma=tr.sigma_next, eta=tr.eta, solver=self
+        velocity = yield from predict(
+            EvalRequest(
+                latents=predicted, sigma=tr.sigma_next, eta=tr.eta, solver=self
+            ),
+            ctx,
         )
-        new_model = self._velocity_to_x0(out.velocity, predicted, t)
+        new_model = self._velocity_to_x0(velocity, predicted, t)
         if order == 1:
             next_latents = predicted
         else:
@@ -285,22 +289,29 @@ if __name__ == "__main__":
         latents=torch.randn(2, 4, 8),
         generator=torch.Generator().manual_seed(0),
         solver_state=None,
-        guidance_state=None,
     )
-    eval_count = 0
-    for item in plan:
-        generator_obj = item.run(context)
+    from ..calls import Calls
+
+    # The local oracle returns immediately; a coroutine can do useful work
+    # without yielding a model call at all.
+    def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
+        if False:
+            yield []
+        return 0.1 * request.latents + request.sigma
+
+    for index, item in enumerate(plan):
+        context.item_index, context.num_items = index, len(plan)
+        generator_obj = item.run(context, predict)
         try:
-            request = next(generator_obj)
-            while True:
-                eval_count += 1
-                velocity = 0.1 * request.latents + request.sigma
-                request = generator_obj.send(GuidanceOutput(velocity=velocity))
+            next(generator_obj)
         except StopIteration as stop:
             result = stop.value
+        else:
+            raise AssertionError(
+                "The local velocity oracle must not yield model calls."
+            )
         context.latents = result.next_latents
         if result.next_solver_state is not None:
             context.solver_state = result.next_solver_state
-    assert eval_count == len(plan)  # 2 seeding+predicted, then 1 each, final 0
     assert torch.isfinite(context.latents).all()
-    print("SA-Solver plan execution smoke test passed.")
+    print("SA-Solver composition smoke test passed.")

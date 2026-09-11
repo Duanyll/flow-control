@@ -144,7 +144,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
             {
                 "steps": 4,
                 "solver": {"type": "flow", "eta": 0.7},
-                "guidance": {"type": "cfg_pp", "inner": 2.0},
+                "guidance": {"type": "cfg_pp", "scale": 2.0},
                 "transforms": [{"type": "sde_window", "size": 1, "range": [1, 3]}],
             }
         )

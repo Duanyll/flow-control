@@ -12,6 +12,7 @@ from ..plan import (
     TransitionGen,
     TransitionResult,
 )
+from ..prediction import Predictor
 from .base import BaseSolver, solver_registry
 
 
@@ -60,16 +61,19 @@ class FlowUniPCSolver(BaseSolver):
             for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:], strict=True)
         ]
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
         state = ctx.solver_state
         assert state is None or isinstance(state, UniPCRuntimeState)
 
-        out = yield EvalRequest(
-            latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self
+        velocity = yield from predict(
+            EvalRequest(latents=ctx.latents, sigma=tr.sigma, eta=tr.eta, solver=self),
+            ctx,
         )
         latents = ctx.latents
         sigma_t = latents.new_tensor(tr.sigma)
-        x0 = self._velocity_to_x0(out.velocity, latents, sigma_t)
+        x0 = self._velocity_to_x0(velocity, latents, sigma_t)
 
         # Reference semantics: the corrector for the previous step runs first,
         # before the history shift, reusing the previous predictor order and

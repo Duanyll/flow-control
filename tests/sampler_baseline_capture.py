@@ -23,9 +23,9 @@ from typing import Any
 import torch
 
 from flow_control.adapters.base import Batch
-from flow_control.samplers import ClassifierFreeGuidance, SampleRequest
+from flow_control.samplers import Calls, ClassifierFreeGuidance, SampleRequest
 from flow_control.samplers.plan import (
-    GuidanceOutput,
+    EvalRequest,
     StepContext,
     Transition,
     TransitionResult,
@@ -119,15 +119,21 @@ def drive_single_eval_transition(
     velocity: torch.Tensor,
 ) -> TransitionResult:
     """Manually run a single-eval run_transition generator with a fixed velocity."""
-    gen = tr.run(ctx)
-    request = next(gen)
-    assert request.sigma == tr.sigma
+    requests = []
+
+    def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
+        requests.append(request)
+        if False:
+            yield []
+        return velocity
+
     try:
-        gen.send(GuidanceOutput(velocity=velocity))
+        next(tr.run(ctx, predict))
     except StopIteration as stop:
         assert isinstance(stop.value, TransitionResult)
+        assert len(requests) == 1 and requests[0].sigma == tr.sigma
         return stop.value
-    raise AssertionError("expected a single-eval transition")
+    raise AssertionError("expected an immediate single-eval transition")
 
 
 def e2e_configs() -> dict[str, Sampler]:
@@ -295,7 +301,6 @@ def capture_steps() -> None:
                 latents=latents,
                 generator=torch.Generator().manual_seed(5000 + index),
                 solver_state=None,
-                guidance_state=None,
             )
             result = drive_single_eval_transition(tr, ctx, velocity)
             recorded = recorded_step(
@@ -346,7 +351,6 @@ def capture_flash_steps() -> None:
             latents=latents,
             generator=torch.Generator().manual_seed(5000 + index),
             solver_state=None,
-            guidance_state=None,
         )
         ctx.item_index, ctx.num_items = index, len(plan)
         result = drive_single_eval_transition(tr, ctx, velocity)

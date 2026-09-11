@@ -12,6 +12,7 @@ from ..plan import (
     Transition,
     TransitionGen,
 )
+from ..prediction import Predictor
 
 
 class BaseSolver(BaseModel, ABC):
@@ -40,8 +41,10 @@ class BaseSolver(BaseModel, ABC):
             )
         ]
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        """Generator performing one transition; yields EvalRequests for velocities."""
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
+        """Perform one transition through a supplied predictor, yielding its leaf calls."""
         raise NotImplementedError(
             f"Solver '{self.type}' must implement run_transition()."
         )

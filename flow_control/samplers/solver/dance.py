@@ -11,6 +11,7 @@ from ..plan import (
     TransitionResult,
     euler_step,
 )
+from ..prediction import Predictor
 from .base import BaseSolver, solver_registry
 
 
@@ -50,16 +51,20 @@ class DanceSolver(BaseSolver):
                 )
         return plan
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        out = yield EvalRequest(
-            latents=ctx.latents,
-            sigma=tr.sigma,
-            sigma_next=tr.sigma_next,
-            eta=tr.eta,
-            solver=self,
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
+        velocity = yield from predict(
+            EvalRequest(
+                latents=ctx.latents,
+                sigma=tr.sigma,
+                sigma_next=tr.sigma_next,
+                eta=tr.eta,
+                solver=self,
+            ),
+            ctx,
         )
         latents = ctx.latents
-        velocity = out.velocity
 
         if tr.eta == 0.0:
             next_latents = euler_step(latents, velocity, tr.sigma, tr.sigma_next)

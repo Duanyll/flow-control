@@ -10,19 +10,17 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.adapters.base import Batch, SamplerModel
-from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.tensor import deep_move_to_device
 
 from .executor import Executor
-from .guidance import ClassifierFreeGuidance, Guidance
+from .guidance import ClassifierFreeGuidance
 from .plan import SamplingPlan, StepContext
+from .prediction import Prediction
 from .projectors import Projector
 from .run import SampleRun, StepCollector
 from .shift import ConstantShift, Shift
 from .solver import FlowSolver, Solver
 from .transforms import PlanTransform
-
-logger = get_logger(__name__)
 
 
 def derive_seed(base_seed: int, key: str) -> int:
@@ -78,14 +76,15 @@ class Start(BaseModel):
 
 
 class Sampler(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Plugins import this class before registering their predictor members.
+    model_config = ConfigDict(extra="forbid", defer_build=True)
 
     start: Start = Field(default_factory=Start)
     transforms: list[PlanTransform] = Field(default_factory=list)
     projectors: list[Projector] = Field(default_factory=list)
 
     seed: int = 42
-    guidance: Guidance = Field(default_factory=ClassifierFreeGuidance)
+    guidance: Prediction = Field(default_factory=ClassifierFreeGuidance)
     """Sampling middleware; the default is ``ClassifierFreeGuidance`` with
     ``scale=1.0`` (no negative pass)."""
 
@@ -162,13 +161,7 @@ class Sampler(BaseModel):
 
     def variant_keys(self) -> list[str | None]:
         """Every weight variant the guidance may ask for, in a fixed order."""
-        return list(
-            dict.fromkeys(
-                spec.variant
-                for index in range(self.steps)
-                for spec in self.guidance.branches(index)
-            )
-        )
+        return self.guidance.variant_keys(self.steps) or [None]
 
     def make_run(
         self,
@@ -189,30 +182,10 @@ class Sampler(BaseModel):
             latents = self.start.latents(batch, plan[0].sigma, request.generator)
         else:
             latents = batch["noisy_latents"].float()
-        if negative is None:
-            negative_branches = [
-                spec
-                for index in range(len(plan))
-                for spec in self.guidance.branches(index)
-                if spec.batch_key == "negative"
-            ]
-            if any(not spec.optional for spec in negative_branches):
-                raise ValueError(
-                    f"Guidance {self.guidance.type!r} needs a negative batch but the "
-                    "request has none; enable the processor's negative conditioning."
-                )
-            if negative_branches:
-                warn_once(
-                    logger,
-                    "The configured guidance can use a negative branch but at least "
-                    "one request has no negative_batch; those samples fall back to "
-                    "the conditional velocity.",
-                )
         ctx = StepContext(
             latents=latents,
             generator=request.generator,
             solver_state=None,
-            guidance_state=self.guidance.init_state(),
             num_items=len(plan),
         )
         return SampleRun(self, batch, negative, plan, ctx, collector)

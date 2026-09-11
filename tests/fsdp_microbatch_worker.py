@@ -14,8 +14,17 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers import Executor, Sampler, SampleRequest, conditional_velocity
+from flow_control.contrib.momentum_guidance import MomentumGuidance
+from flow_control.samplers import (
+    Executor,
+    ModelPrediction,
+    Sampler,
+    SampleRequest,
+    TiledPrediction,
+    conditional_velocity,
+)
 from flow_control.samplers.guidance import ClassifierFreeGuidance
+from flow_control.samplers.solver import SASolver
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tiling import TileLayout
 
@@ -240,15 +249,40 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     expected.square().mean().backward()
     compare_gradients(sharded, control, "tiled sequential forwards")
 
+    # Deeply nested local joins must preserve FSDP's forward order. SA also
+    # exercises two sequential EMA updates inside its first transition.
+    untiled = {key: value for key, value in batch.items() if key != "tiling"}
+    composed = Sampler(
+        steps=4,
+        solver=SASolver(eta=0),
+        guidance=TiledPrediction(
+            inner=ClassifierFreeGuidance(
+                scale=2,
+                renorm=True,
+                negative_condition="positive",
+                negative_variant="base",
+                inner=MomentumGuidance(alpha=0.5, beta=0.25, inner=ModelPrediction()),
+            )
+        ),
+    )
+    with torch.no_grad():
+        (actual_run,) = composed.sample(sharded, [SampleRequest(batch)])
+        (expected_run,) = composed.sample(
+            control, [SampleRequest(cast(Batch, untiled))]
+        )
+    torch.testing.assert_close(
+        actual_run.ctx.latents, expected_run.ctx.latents, rtol=1e-5, atol=1e-6
+    )
+    logger.info("GPU regression passed: Tiled(CFG(Momentum(Model))) with SA and FSDP")
+
     # Complete tiled sampling must match the tokenwise whole-image oracle.
     # Run real bf16 Linear forwards while every solver/collector tensor is fp32.
     def check_step(run, step):
         assert step.latents.dtype == step.next_latents.dtype == torch.float32
         assert step.velocity is not None and step.velocity.dtype == torch.float32
 
-    sampler = Sampler(steps=3)
+    sampler = Sampler(steps=3, guidance=MomentumGuidance(alpha=0.5, beta=0.25))
     nn.Module.to(control.transformer, dtype=torch.bfloat16)
-    untiled = {key: value for key, value in batch.items() if key != "tiling"}
     with torch.no_grad():
         (tiled_run,) = sampler.sample(
             control, [SampleRequest(batch)], collector=check_step

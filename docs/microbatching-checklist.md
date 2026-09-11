@@ -24,7 +24,7 @@ records the stable boundary intended for future padding and sequence packing.
 - [x] (superseded by plan-as-data) SA-Solver now batches across requests through
       the plan executor's rendezvous loop; no sequential special case remains.
 - [x] Keep sequence packing out of the original microbatching change. Sampler-rethink
-      expands tiled batches inside `samplers.run` into shared leaf generators; the `tiled_t2i` processor writes the layout into each
+      expands tiled batches inside `TiledPrediction` into shared leaf generators; the `tiled_t2i` processor writes the layout into each
       batch and the sampler has no independent tile configuration. Unequal
       tile counts are padded with dummy forwards by the adapter.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
@@ -101,7 +101,8 @@ see the same tiles.
 
 - [x] Yield one `SampleRun` per request in completion order without stacking outputs.
 - [x] Build one shifted/custom sigma schedule per request.
-- [x] Keep one solver/guidance runtime state (`StepContext`) per request; SDE
+- [x] Keep solver state in `StepContext` and prediction history in per-binding
+      closures (independent across requests, CFG branches and tiles); SDE
       windows are per-request plan data and GRPO recording is a caller collector.
 - [x] Batch the expensive conditional model forward once per rendezvous round.
 - [x] Run solver math independently per request.
@@ -114,6 +115,9 @@ see the same tiles.
 - [x] Give each standalone `guided_velocity()` evaluation fresh state, including
       concurrent evaluations of different steps from the same run.
 - [x] Batch SA's multiple evaluations and replenish the stream as runs complete.
+- [x] Compose CFG, tiling and Momentum with `yield from` and local `gather`;
+      each algorithm issues child calls and computes its result in one generator.
+      Executor and adapter retain all physical batching and collective logic.
 
 Replay uses `training.grpo_sampling.replay_steps(model, items)`. Each `ReplayItem`
 carries its `SampleRun` and a training-owned `RecordedStep` containing the executed

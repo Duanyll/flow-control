@@ -3,27 +3,27 @@
 import importlib
 import sys
 import unittest
-from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import torch
 from pydantic import PrivateAttr
 
+from flow_control.adapters.base import Batch
+from flow_control.contrib.momentum_guidance import MomentumGuidance
 from flow_control.processors.tasks.inpaint import InpaintProcessor
-from flow_control.samplers import Executor, SampleRun
+from flow_control.samplers import Calls, Executor, SampleRun, WrappedPrediction
 from flow_control.samplers.guidance import (
-    BaseGuidance,
-    BranchSpec,
+    CfgPlusPlusGuidance,
     ClassifierFreeGuidance,
 )
 from flow_control.samplers.plan import (
-    BranchEvals,
-    GuidanceOutput,
-    GuidanceState,
+    EvalRequest,
     StepContext,
     euler_step,
 )
+from flow_control.samplers.prediction import ModelPrediction, Predictor
 from flow_control.samplers.projectors import DifferentialDiffusion
 from flow_control.samplers.sampler import Sampler, SampleRequest
 from flow_control.samplers.solver import (
@@ -43,43 +43,27 @@ if str(TESTS_DIR) not in sys.path:
 microbatching = importlib.import_module("test_microbatching")
 
 
-@dataclass(slots=True)
-class _CounterState(GuidanceState):
-    count: int
-
-
-class _CountingGuidance(BaseGuidance):
-    """Stateful dummy guidance: velocity = cond, state = eval counter.
-
-    Never registered — instances pass through the union validator directly,
-    the same way an out-of-tree plugin instance would.
-    """
+class _CountingGuidance(WrappedPrediction):
+    """Probe that observes a binding's private evaluation counter and step index."""
 
     type: Literal["counting"] = "counting"
-
+    stateful: ClassVar[bool] = True
     _seen: list[int] = PrivateAttr(default_factory=list)
-    """Counter value received at each combine, in eval order."""
     _indices: list[int] = PrivateAttr(default_factory=list)
 
-    def init_state(self) -> GuidanceState | None:
-        return _CounterState(count=0)
+    def bind(self, batch, negative_batch=None) -> Predictor:
+        inner = self.inner.bind(batch, negative_batch)
+        count = 0
 
-    def branches(self, item_index: int) -> list[BranchSpec]:
-        return [BranchSpec("cond")]
+        def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
+            nonlocal count
+            velocity = yield from inner(request, ctx)
+            self._seen.append(count)
+            self._indices.append(ctx.item_index)
+            count += 1
+            return velocity
 
-    def combine(
-        self,
-        evals: BranchEvals,
-        ctx: StepContext,
-        state: GuidanceState | None,
-    ) -> tuple[GuidanceOutput, GuidanceState | None]:
-        assert isinstance(state, _CounterState)
-        self._seen.append(state.count)
-        self._indices.append(ctx.item_index)
-        return (
-            GuidanceOutput(velocity=evals.velocities["cond"]),
-            _CounterState(count=state.count + 1),
-        )
+        return predict
 
 
 class GuidedVelocityCompatibilityTest(unittest.TestCase):
@@ -132,7 +116,6 @@ class DifferentialDiffusionTest(unittest.TestCase):
                 latents=batch["noisy_latents"].float(),
                 generator=None,
                 solver_state=None,
-                guidance_state=None,
                 num_items=2,
             ),
         )
@@ -349,9 +332,6 @@ class GuidanceStateTimingTest(unittest.TestCase):
         # 4 transitions -> 2 + 1 + 1 + 0 evals; [0, 1] within the first
         # transition proves per-eval (not per-transition) advancement.
         self.assertEqual(guidance._seen, [0, 1, 2, 3])
-        state = run.ctx.guidance_state
-        assert isinstance(state, _CounterState)
-        self.assertEqual(state.count, 4)
 
         # S2 review reproduced [2, 2, 2] here: priming multiple evaluations
         # of one run must not overwrite earlier contexts or reuse its state.
@@ -366,4 +346,132 @@ class GuidanceStateTimingTest(unittest.TestCase):
         self.assertEqual(guidance._seen, [0] * 6)
         self.assertEqual(run.ctx.item_index, saved_index)
         self.assertIs(run.ctx.latents, saved_latents)
-        self.assertIs(run.ctx.guidance_state, state)
+
+        # Composable Momentum must own history per sample AND condition branch.
+        # Renorm is nonlinear, so placing Momentum inside/outside CFG exercises
+        # different algebra; plain linear CFG would hide a misplaced EMA.
+        class TimeDependentModel(microbatching.FakeSamplerModel):
+            def predict_velocity_batched(
+                self, batches, timesteps, *, dummy_outputs=None
+            ):
+                self.forward_batch_sizes.append(len(batches))
+                return [
+                    b["clean_latents"] * t
+                    + torch.cat([t.square(), 1 - t]).reshape(1, 1, 2)
+                    for b, t in zip(batches, timesteps, strict=True)
+                ]
+
+        def cfg(c, u, sigma, cfg_pp):
+            guided = u + 3 * (c - u)
+            guided = guided * (
+                c.norm(dim=2, keepdim=True) / (guided.norm(dim=2, keepdim=True) + 1e-8)
+            ).clamp(max=1)
+
+            # Flow's CFG++ mean conversion uses the actual transition eta.
+            kappa = sigma * (1 - 0.15) / ((1 + 0.3**2 / 2) * (sigma - 0.15))
+            return u + kappa * (guided - u) if cfg_pp else guided
+
+        def ema(values):
+            v0, v1, v2 = values
+            return [v0, 1.5 * v1 - 0.5 * v0, 1.5 * v2 - 0.5 * (0.75 * v1 + 0.25 * v0)]
+
+        all_outputs = []
+        for cfg_cls, outside in product(
+            (ClassifierFreeGuidance, CfgPlusPlusGuidance), (True, False)
+        ):
+            config = (
+                MomentumGuidance(
+                    alpha=0.5,
+                    beta=0.25,
+                    inner=cfg_cls(scale=3, renorm=True, inner=ModelPrediction()),
+                )
+                if outside
+                else cfg_cls(
+                    scale=3,
+                    renorm=True,
+                    inner=MomentumGuidance(
+                        alpha=0.5, beta=0.25, inner=ModelPrediction()
+                    ),
+                )
+            )
+            cfg_pp = cfg_cls is CfgPlusPlusGuidance
+            sampler = Sampler(steps=3, guidance=config)
+            self.assertEqual(
+                Sampler.model_validate_json(sampler.model_dump_json()), sampler
+            )
+            with self.assertRaisesRegex(ValueError, "stateless"):
+                GrpoCollector(sampler)
+            bindings, expected = [], []
+            sigmas = (0.9, 0.6, 0.3)
+            for index in range(2):
+                positive, negative = [
+                    {
+                        **batch,
+                        "clean_latents": torch.tensor([[vector]], dtype=torch.float32),
+                    }
+                    for vector in ([2 + index, -1], [-1, 2 - index])
+                ]
+                bindings.append(
+                    config.bind(cast(Batch, positive), cast(Batch, negative))
+                )
+                condition_values = [
+                    [
+                        b["clean_latents"] * s + torch.tensor([[[s * s, 1 - s]]])
+                        for s in sigmas
+                    ]
+                    for b in (positive, negative)
+                ]
+                expected.append(
+                    ema(
+                        [
+                            cfg(c, u, s, cfg_pp)
+                            for c, u, s in zip(*condition_values, sigmas, strict=True)
+                        ]
+                    )
+                    if outside
+                    else [
+                        cfg(c, u, s, cfg_pp)
+                        for c, u, s in zip(
+                            *(ema(v) for v in condition_values), sigmas, strict=True
+                        )
+                    ]
+                )
+            model = TimeDependentModel()
+            executor = Executor(model, sampler.variant_keys())
+            outputs = []
+            for index, sigma in enumerate(sigmas):
+                values = executor.evaluate(
+                    [
+                        binding(
+                            EvalRequest(
+                                batch["noisy_latents"], sigma, 0.15, 0.3, FlowSolver()
+                            ),
+                            run.ctx,
+                        )
+                        for binding in bindings
+                    ]
+                )
+                for sample, value in enumerate(values):
+                    self.assertEqual(value.dtype, torch.float32)
+                    torch.testing.assert_close(value, expected[sample][index])
+                outputs.append(values[0])
+            self.assertEqual(model.forward_batch_sizes, [4, 4, 4])
+            all_outputs.append(outputs)
+        self.assertFalse(torch.allclose(all_outputs[0][-1], all_outputs[1][-1]))
+        self.assertFalse(torch.allclose(all_outputs[2][-1], all_outputs[3][-1]))
+
+        # An algorithm must bind two branches, not concurrently reuse one EMA.
+        from flow_control.samplers.calls import gather
+
+        momentum = MomentumGuidance(alpha=0.5, beta=0.25, inner=ModelPrediction())
+        binding = momentum.bind(batch)
+        request = EvalRequest(batch["noisy_latents"], 0.5)
+        with self.assertRaisesRegex(ValueError, "concurrently"):
+            Executor(microbatching.FakeSamplerModel()).evaluate(
+                [gather([binding(request, run.ctx), binding(request, run.ctx)])]
+            )
+        # Closing the aborted gather releases the guard without changing EMA.
+        (value,) = Executor(microbatching.FakeSamplerModel()).evaluate(
+            [binding(request, run.ctx)]
+        )
+        torch.testing.assert_close(value, batch["clean_latents"])

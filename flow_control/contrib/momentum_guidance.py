@@ -1,47 +1,56 @@
-"""Optional momentum guidance; opt in with imports in the launch config."""
+"""Momentum of any child predictor; opt in via the launch config's imports."""
 
-from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
+from pydantic import Field
 
-from flow_control.samplers.guidance import ClassifierFreeGuidance, guidance_registry
-from flow_control.samplers.plan import (
-    BranchEvals,
-    GuidanceOutput,
-    GuidanceState,
-    StepContext,
+from flow_control.adapters.base import Batch
+from flow_control.samplers.calls import Calls
+from flow_control.samplers.guidance import ClassifierFreeGuidance
+from flow_control.samplers.plan import EvalRequest, StepContext
+from flow_control.samplers.prediction import (
+    Prediction,
+    Predictor,
+    WrappedPrediction,
+    prediction_registry,
 )
 
 
-@dataclass(frozen=True, slots=True)
-class MomentumGuidanceState(GuidanceState):
-    momentum: torch.Tensor | None = None
+@prediction_registry.register("momentum")
+class MomentumGuidance(WrappedPrediction):
+    """Apply EMA momentum after each child evaluation, including SA substeps.
 
+    Each bind owns its own history. Above CFG this tracks the guided velocity;
+    below CFG the two separately bound children track their own conditions.
+    """
 
-@guidance_registry.register("momentum")
-class MomentumGuidance(ClassifierFreeGuidance):
     type: Literal["momentum"] = "momentum"
+    inner: Prediction = Field(default_factory=ClassifierFreeGuidance)
     alpha: float
     beta: float
+    stateful: ClassVar[bool] = True
 
-    def init_state(self) -> GuidanceState | None:
-        return MomentumGuidanceState()
+    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
+        inner = self.inner.bind(batch, negative_batch)
+        momentum: torch.Tensor | None = None
+        in_flight = False
 
-    def combine(
-        self,
-        evals: BranchEvals,
-        ctx: StepContext,
-        state: GuidanceState | None,
-    ) -> tuple[GuidanceOutput, GuidanceState | None]:
-        if not isinstance(state, MomentumGuidanceState):
-            raise TypeError("MomentumGuidance requires MomentumGuidanceState.")
-        output, _ = super().combine(evals, ctx, state)
-        velocity = output.velocity
-        momentum = velocity if state.momentum is None else state.momentum
-        return (
-            GuidanceOutput(velocity=velocity + self.alpha * (velocity - momentum)),
-            MomentumGuidanceState(
-                momentum=(1 - self.beta) * velocity + self.beta * momentum
-            ),
-        )
+        def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
+            nonlocal momentum, in_flight
+            if in_flight:
+                raise ValueError(
+                    "Momentum cannot evaluate one binding concurrently; "
+                    "bind independent branches separately to give each its own history."
+                )
+            in_flight = True
+            try:
+                velocity = yield from inner(request, ctx)
+                previous = velocity if momentum is None else momentum
+                guided = velocity + self.alpha * (velocity - previous)
+                momentum = (1 - self.beta) * velocity + self.beta * previous
+                return guided
+            finally:
+                in_flight = False
+
+        return predict

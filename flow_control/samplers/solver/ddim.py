@@ -9,6 +9,7 @@ from ..plan import (
     TransitionGen,
     TransitionResult,
 )
+from ..prediction import Predictor
 from .base import BaseSolver, solver_registry
 
 
@@ -45,18 +46,23 @@ class DDIMSolver(BaseSolver):
         ) * noise_pred
         return mean, noise_scale
 
-    def run_transition(self, tr: Transition, ctx: StepContext) -> TransitionGen:
-        out = yield EvalRequest(
-            latents=ctx.latents,
-            sigma=tr.sigma,
-            sigma_next=tr.sigma_next,
-            eta=tr.eta,
-            solver=self,
+    def run_transition(
+        self, tr: Transition, ctx: StepContext, predict: Predictor
+    ) -> TransitionGen:
+        velocity = yield from predict(
+            EvalRequest(
+                latents=ctx.latents,
+                sigma=tr.sigma,
+                sigma_next=tr.sigma_next,
+                eta=tr.eta,
+                solver=self,
+            ),
+            ctx,
         )
         latents = ctx.latents
 
         mean, noise_scale = self.step_parts(
-            latents, out.velocity, tr.sigma, tr.sigma_next, tr.eta
+            latents, velocity, tr.sigma, tr.sigma_next, tr.eta
         )
 
         if tr.eta == 0.0:

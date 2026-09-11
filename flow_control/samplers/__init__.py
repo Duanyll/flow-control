@@ -1,17 +1,32 @@
+from .calls import Calls, ModelCall, gather
 from .executor import Executor
-from .guidance import BranchSpec, CfgPlusPlusGuidance, ClassifierFreeGuidance, Guidance
+from .guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
+from .prediction import (
+    BasePrediction,
+    ModelPrediction,
+    Prediction,
+    Predictor,
+    WrappedPrediction,
+)
 from .projectors import DifferentialDiffusion, Projector
-from .run import ModelCall, SampleRun, StepCollector, StepRecord, conditional_velocity
+from .run import SampleRun, StepCollector, StepRecord
 from .sampler import Sampler, SampleRequest, Start, derive_seed
+from .tiling import TiledPrediction, conditional_velocity
 from .transforms import PlanTransform, SdeWindow
 
 __all__ = [
-    "BranchSpec",
+    "BasePrediction",
+    "Calls",
     "CfgPlusPlusGuidance",
     "ClassifierFreeGuidance",
     "DifferentialDiffusion",
     "Executor",
-    "Guidance",
+    "ModelPrediction",
+    "Prediction",
+    "Predictor",
+    "TiledPrediction",
+    "WrappedPrediction",
+    "gather",
     "ModelCall",
     "PlanTransform",
     "Projector",
