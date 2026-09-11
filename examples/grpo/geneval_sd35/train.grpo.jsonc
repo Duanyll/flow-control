@@ -32,6 +32,7 @@
   "model": {
     "arch": "sd3",
     "type": "base",
+    "micro_batch_size": 4,
     "peft_lora_rank": 32,
     "peft_lora_config": {
       "lora_alpha": 64,

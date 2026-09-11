@@ -1,3 +1,4 @@
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -9,13 +10,17 @@ from diffusers import ModelMixin
 from einops import rearrange
 from peft import LoraConfig
 from peft.tuners.tuners_utils import BaseTunerLayer
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PositiveInt, PrivateAttr
 from transformers import PreTrainedModel
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.registry import Registry
-from flow_control.utils.tensor import deep_cast_float_dtype, deep_move_to_device
+from flow_control.utils.tensor import (
+    deep_cast_float_dtype,
+    deep_detach,
+    deep_move_to_device,
+)
 from flow_control.utils.types import TorchDType
 from flow_control.utils.upcasting import (
     apply_layerwise_upcasting,
@@ -43,6 +48,9 @@ class SamplerModel(Protocol):
     @property
     def dtype(self) -> torch.dtype: ...
 
+    @property
+    def micro_batch_size(self) -> int: ...
+
     def use_variant(self, variant: str | None) -> AbstractContextManager[None]: ...
 
     def predict_velocity_batched(
@@ -65,6 +73,10 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     model_config = ConfigDict(extra="forbid")
     _base_variant_depth: int = PrivateAttr(default=0)
     _active_variant: str | None = PrivateAttr(default=None)
+    _dummy_sample: tuple[TBatch, torch.Tensor] | None = PrivateAttr(default=None)
+    """Last real prepared sample, forwarded in place of samples another rank
+    has and this rank lacks. Pins that sample's tensors on the device until
+    the next call; only set in multi-rank runs, where a dummy can be needed."""
 
     @contextmanager
     def use_variant(self, variant: str | None) -> Iterator[None]:
@@ -185,6 +197,11 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     patch_size: int = 2
     vae_scale_factor: int = 8
     latent_channels: int = 16
+
+    micro_batch_size: PositiveInt = 1
+    """Maximum logical samples per chunk. A throughput/memory knob: chunking is
+    mathematically equivalent, but dense forwards are not bitwise reproducible
+    on GPU."""
 
     supports_dense_batching: ClassVar[bool] = False
     """Whether equal-shaped logical samples may use the default dense collator."""
@@ -332,41 +349,80 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
             return True, first
         return False, first
 
-    def _sync_collation_decision(
-        self,
-        can_collate: bool,
-        logical_batch_size: int,
-    ) -> bool:
+    def _sync_max(self, values: list[int]) -> list[int]:
+        """MAX-reduce small integers across ranks."""
         if not dist.is_initialized():
-            return can_collate
-        # One MIN reduction communicates the decision, min length, and max length.
-        status = torch.tensor(
-            [int(can_collate), logical_batch_size, -logical_batch_size],
-            device=self.device,
-            dtype=torch.int64,
-        )
-        dist.all_reduce(status, op=dist.ReduceOp.MIN)
-        if int(status[1].item()) != -int(status[2].item()):
+            return values
+        status = torch.tensor(values, device=self.device, dtype=torch.int64)
+        dist.all_reduce(status, op=dist.ReduceOp.MAX)
+        return status.tolist()
+
+    def _checked_velocity(self, velocity: torch.Tensor, expected: int) -> torch.Tensor:
+        if velocity.ndim == 0 or velocity.shape[0] != expected:
             raise ValueError(
-                "All distributed ranks must submit the same number of logical "
-                "samples to predict_velocity_batched."
+                f"{type(self).__name__}._predict_velocity returned shape "
+                f"{tuple(velocity.shape)}, expected leading dimension {expected}."
             )
-        return bool(status[0].item())
+        return velocity.float()
+
+    def _forward_one(self, batch: TBatch, timestep: torch.Tensor) -> torch.Tensor:
+        return self._checked_velocity(self._predict_velocity(batch, timestep), 1)
+
+    def _forward_dummy(self) -> torch.Tensor:
+        if self._dummy_sample is None:
+            raise RuntimeError(
+                f"Rank {dist.get_rank()}: another rank runs more forwards than "
+                "this rank has samples for, and this rank has never forwarded a "
+                "sample to repeat in their place. Give every rank at least one "
+                "sample (pad the request list to a multiple of the world size)."
+            )
+        return self._forward_one(*self._dummy_sample)
+
+    def _forward_chunk(
+        self,
+        batches: list[TBatch],
+        timesteps: list[torch.Tensor],
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Run one chunk as ``(velocities, dummy_outputs)``.
+
+        A chunk is one dense forward when every rank holding data can collate
+        it, else as many sequential forwards as the longest rank's chunk. This
+        rank pads its shortfall (an empty chunk, or fewer samples than the
+        longest rank) with forwards on the dummy sample.
+        """
+        collated = (
+            self._collate_velocity_inputs(batches, timesteps) if batches else None
+        )
+        needs_fallback = bool(batches) and collated is None
+        sequential, longest = self._sync_max([int(needs_fallback), len(batches)])
+        if not sequential:
+            if collated is None:  # Empty chunk: pad the peers' single dense forward.
+                return [], [self._forward_dummy()]
+            velocity = self._checked_velocity(
+                self._predict_velocity(*collated), len(batches)
+            )
+            return list(velocity.split(1, dim=0)), []
+        velocities = [
+            self._forward_one(batch, timestep)
+            for batch, timestep in zip(batches, timesteps, strict=True)
+        ]
+        dummies = [self._forward_dummy() for _ in range(longest - len(batches))]
+        return velocities, dummies
 
     def predict_velocity_batched(
         self,
         batches: list[TBatch],
         timesteps: list[torch.Tensor],
     ) -> list[torch.Tensor]:
-        """
-        Predict one velocity per logical sample.
+        """Predict one velocity per logical sample; a collective on every rank.
 
-        Logical samples retain their leading singleton batch dimension. Adapters that
-        opt into dense batching combine compatible samples into one physical forward;
-        all other inputs use the synchronized sample-at-a-time fallback.
+        Logical samples keep their singleton leading batch dimension. Every
+        rank runs the same chunk count and, within a chunk, the same forward
+        count (see ``_forward_chunk``), padding with dummy forwards. An empty
+        list is therefore a legal call returning ``[]``. Under autograd, dummy
+        outputs are folded into the first real output with zero weight so FSDP
+        backward stays aligned across ranks.
         """
-        if not batches:
-            raise ValueError("predict_velocity_batched requires at least one batch.")
         if len(batches) != len(timesteps):
             raise ValueError(
                 "batches and timesteps must have equal lengths, got "
@@ -392,31 +448,33 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         prepared_timesteps = [
             self._prepare_timestep(timestep) for timestep in timesteps
         ]
-        collated = self._collate_velocity_inputs(prepared_batches, prepared_timesteps)
-
-        if self._sync_collation_decision(collated is not None, len(batches)):
-            assert collated is not None
-            collated_batch, collated_timestep = collated
-            velocity = self._predict_velocity(collated_batch, collated_timestep).float()
-            if velocity.ndim == 0 or velocity.shape[0] != len(batches):
-                raise ValueError(
-                    "Batched adapter output has the wrong leading dimension: "
-                    f"expected {len(batches)}, got {tuple(velocity.shape)}."
-                )
-            return list(velocity.split(1, dim=0))
-
-        velocities = [
-            self._predict_velocity(batch, timestep).float()
-            for batch, timestep in zip(
-                prepared_batches, prepared_timesteps, strict=True
+        if prepared_batches and dist.is_initialized() and dist.get_world_size() > 1:
+            self._dummy_sample = (
+                deep_detach(prepared_batches[0]),
+                prepared_timesteps[0].detach(),
             )
-        ]
-        for index, velocity in enumerate(velocities):
-            if velocity.ndim == 0 or velocity.shape[0] != 1:
-                raise ValueError(
-                    "Fallback adapter output must retain a singleton leading "
-                    f"dimension; sample {index} has shape {tuple(velocity.shape)}."
+        size = self.micro_batch_size
+        (chunks,) = self._sync_max([math.ceil(len(prepared_batches) / size)])
+        velocities: list[torch.Tensor] = []
+        dummies: list[torch.Tensor] = []
+        # Run the longest rank's chunk count; slicing past our own end is empty.
+        for start in range(0, chunks * size, size):
+            chunk_velocities, chunk_dummies = self._forward_chunk(
+                prepared_batches[start : start + size],
+                prepared_timesteps[start : start + size],
+            )
+            velocities.extend(chunk_velocities)
+            dummies.extend(chunk_dummies)
+        dummies = [output for output in dummies if output.requires_grad]
+        if dummies:
+            if not velocities:
+                raise RuntimeError(
+                    f"Rank {dist.get_rank()} ran dummy forwards under autograd "
+                    "with no real sample to carry their zero-weight graph "
+                    "dependency; a training call must give every rank at least "
+                    "one item."
                 )
+            velocities[0] = velocities[0] + sum(output.sum() * 0 for output in dummies)
         return velocities
 
     def _pack_latents(self, latents):

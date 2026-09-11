@@ -49,7 +49,9 @@ def main() -> None:
 
         # Equal tile counts: four tiles per rank share one dense forward, and the
         # stitched velocity and gradients match the tokenwise oracle up to feathering rounding.
-        adapter = TileAdapter.model_construct(arch="fake", type="fake")
+        adapter = TileAdapter.model_construct(
+            arch="fake", type="fake", micro_batch_size=4
+        )
         batch = make_batch(6, 6)
         velocity = predict_velocity(adapter, [batch], timesteps)[0]
         x = batch["noisy_latents"]
@@ -58,17 +60,18 @@ def main() -> None:
         torch.testing.assert_close(x.grad, torch.full_like(x, 2), rtol=1e-6, atol=1e-5)
         assert adapter._forward_batch_sizes == [4]
 
-        # Unequal tile counts (two versus four) are not padded: the adapter's
-        # collation sync rejects them on every rank before any forward.
-        adapter = TileAdapter.model_construct(arch="fake", type="fake")
+        # Unequal tile counts (two versus four) at micro_batch_size=2 are legal:
+        # rank 0 runs its one real chunk plus a dummy chunk to match rank 1's
+        # two chunks (sampler-rethink S1), and the stitch stays exact.
+        adapter = TileAdapter.model_construct(
+            arch="fake", type="fake", micro_batch_size=2
+        )
         batch = make_batch(4, 6) if rank == 0 else make_batch(6, 6)
-        try:
-            predict_velocity(adapter, [batch], timesteps)
-        except ValueError as error:
-            assert "same number of logical samples" in str(error)
-        else:
-            raise AssertionError("Unequal tile counts across ranks were not rejected.")
-        assert adapter._forward_batch_sizes == []
+        velocity = predict_velocity(adapter, [batch], timesteps)[0]
+        torch.testing.assert_close(
+            velocity, 2 * batch["noisy_latents"], rtol=1e-6, atol=1e-5
+        )
+        assert adapter._forward_batch_sizes == ([2, 1] if rank == 0 else [2, 2])
         dist.barrier()
     finally:
         dist.destroy_process_group()

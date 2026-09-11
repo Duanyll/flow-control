@@ -64,6 +64,7 @@ class RecordingModel:
 
     device = torch.device("cpu")
     dtype = torch.float32
+    micro_batch_size = 1
 
     def __init__(self) -> None:
         self.eval_sigmas: list[float] = []

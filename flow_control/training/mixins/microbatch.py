@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import torch
+import torch.distributed as dist
 from pydantic import BaseModel, PositiveInt
 
 from flow_control.utils.logging import get_logger, warn_once
@@ -89,6 +90,18 @@ class MicrobatchTrainMixin(BaseTrainer, BaseModel):
             raise RuntimeError(
                 f"{type(self).__name__} received no train items for this inner epoch."
             )
+        if dist.is_initialized():
+            counts = torch.tensor(
+                [len(train_items), -len(train_items)], device=self.device
+            )
+            dist.all_reduce(counts, op=dist.ReduceOp.MIN)
+            if int(counts[0]) != -int(counts[1]):
+                raise ValueError(
+                    f"Rank {dist.get_rank()} has {len(train_items)} train items "
+                    f"but ranks range from {int(counts[0])} to {-int(counts[1])}; "
+                    "every rank must submit the same number of train items per "
+                    "inner epoch."
+                )
         self._warn_if_tail_update(len(train_items))
         for chunk_start in range(0, len(train_items), self.local_train_batch_size):
             chunk = train_items[chunk_start : chunk_start + self.local_train_batch_size]

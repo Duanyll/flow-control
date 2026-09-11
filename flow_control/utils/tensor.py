@@ -84,6 +84,18 @@ def deep_cast_float_dtype(data, dtype: torch.dtype):
     )
 
 
+def deep_detach(data):
+    """Detach every tensor from its graph, keeping which ones require grad.
+
+    FSDP2 registers per-forward backward hooks only when some input requires
+    grad, so a detached copy that stands in for a real input must ask for
+    grad the same way the original did.
+    """
+    return deep_apply_tensor_fn(
+        data, lambda x: x.detach().requires_grad_(x.requires_grad)
+    )
+
+
 def pil_to_tensor(image: Image.Image) -> torch.Tensor:
     """
     Convert a PIL Image to a normalized torch Tensor.

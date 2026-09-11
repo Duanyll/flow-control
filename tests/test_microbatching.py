@@ -67,6 +67,7 @@ class FakeFallbackAdapter(FakeDenseAdapter):
 class FakeSamplerModel:
     device = torch.device("cpu")
     dtype = torch.float32
+    micro_batch_size = 1
 
     def __init__(self) -> None:
         self.forward_batch_sizes: list[int] = []
@@ -96,10 +97,12 @@ def make_sampler_batch(velocity: float, initial: float = 0.0) -> Batch:
 
 
 class AdapterBatchingTest(unittest.TestCase):
-    def make_adapter(self) -> FakeDenseAdapter:
-        return FakeDenseAdapter.model_construct(arch="fake", type="fake")
+    def make_adapter(self, micro_batch_size: int = 2) -> FakeDenseAdapter:
+        return FakeDenseAdapter.model_construct(
+            arch="fake", type="fake", micro_batch_size=micro_batch_size
+        )
 
-    def test_dense_inputs_use_one_forward(self) -> None:
+    def test_dense_inputs_use_one_forward_per_chunk(self) -> None:
         adapter = self.make_adapter()
         batches = [make_batch(1.0), make_batch(2.0)]
         outputs = adapter.predict_velocity_batched(
@@ -111,6 +114,29 @@ class AdapterBatchingTest(unittest.TestCase):
         self.assertEqual([tuple(output.shape) for output in outputs], [(1, 4, 2)] * 2)
         torch.testing.assert_close(outputs[0], torch.full((1, 4, 2), 1.25))
         torch.testing.assert_close(outputs[1], torch.full((1, 4, 2), 2.5))
+
+        # Sampler-rethink S1: lists longer than micro_batch_size are chunked in
+        # order, and an empty list is a legal call that runs no forward.
+        adapter = self.make_adapter()
+        outputs = adapter.predict_velocity_batched(
+            [make_batch(float(value)) for value in range(5)],
+            [torch.tensor([0.0])] * 5,
+        )
+        self.assertEqual(adapter._forward_batch_sizes, [2, 2, 1])
+        for value, output in enumerate(outputs):
+            torch.testing.assert_close(output, torch.full((1, 4, 2), float(value)))
+        self.assertEqual(adapter.predict_velocity_batched([], []), [])
+        self.assertEqual(adapter._forward_batch_sizes, [2, 2, 1])
+
+        # The dense/fallback decision is per chunk: a ragged pair after a
+        # compatible pair falls back only for its own chunk.
+        adapter = self.make_adapter()
+        outputs = adapter.predict_velocity_batched(
+            [make_batch(), make_batch(), make_batch(tokens=3), make_batch(tokens=5)],
+            [torch.tensor([0.0])] * 4,
+        )
+        self.assertEqual(adapter._forward_batch_sizes, [2, 1, 1])
+        self.assertEqual([output.shape[1] for output in outputs], [4, 4, 3, 5])
 
     def test_incompatible_inputs_fall_back_to_single_sample(self) -> None:
         adapter = self.make_adapter()
@@ -140,7 +166,9 @@ class AdapterBatchingTest(unittest.TestCase):
 
     def test_dense_and_fallback_gradients_match(self) -> None:
         dense = self.make_adapter()
-        fallback = FakeFallbackAdapter.model_construct(arch="fake", type="fake")
+        fallback = FakeFallbackAdapter.model_construct(
+            arch="fake", type="fake", micro_batch_size=2
+        )
         batches = [make_batch(1.0), make_batch(2.0)]
         timesteps = [torch.tensor([0.25]), torch.tensor([0.5])]
 

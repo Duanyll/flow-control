@@ -94,7 +94,7 @@ def make_batch(tokens: int, device: torch.device) -> Batch:
 def run_case(
     adapter: TinyAdapter,
     optimizer: torch.optim.Optimizer,
-    token_counts: tuple[int, int],
+    token_counts: tuple[int, ...],
 ) -> None:
     device = adapter.device
     outputs = adapter.predict_velocity_batched(
@@ -121,7 +121,9 @@ def make_peft_pair(
     """Load both variants before sharding; the oracle has no checkpointing."""
     torch.manual_seed(2718)
     adapter_class = FallbackTinyAdapter if fallback else TinyAdapter
-    sharded = adapter_class.model_construct(arch="tiny", type="tiny")
+    sharded = adapter_class.model_construct(
+        arch="tiny", type="tiny", micro_batch_size=2
+    )
     for variant in ("default", "other"):
         sharded.transformer.add_adapter(
             LoraConfig(
@@ -255,7 +257,9 @@ def main() -> None:
     dist.init_process_group("nccl", device_id=device)
     try:
         mesh = dist.device_mesh.init_device_mesh("cuda", (dist.get_world_size(),))
-        adapter = TinyAdapter.model_construct(arch="tiny", type="tiny")
+        adapter = TinyAdapter.model_construct(
+            arch="tiny", type="tiny", micro_batch_size=2
+        )
         nn.Module.to(adapter.transformer, device=device)
         fully_shard(adapter.transformer.block, mesh=mesh)
         fully_shard(adapter.transformer, mesh=mesh)
@@ -265,6 +269,11 @@ def main() -> None:
         run_case(adapter, optimizer, (4, 5))
         token_counts = (4, 4) if dist.get_rank() == 0 else (4, 5)
         run_case(adapter, optimizer, token_counts)
+        # Sampler-rethink S1: unequal logical counts (two versus four samples
+        # at micro_batch_size=2) pad rank 0 with a dummy chunk under autograd;
+        # forward counts must match and the folded backward must complete.
+        count = 2 if dist.get_rank() == 0 else 4
+        run_case(adapter, optimizer, (4,) * count)
         run_branch_case(mesh, device, different_variants=False)
         run_branch_case(mesh, device, different_variants=True)
         run_tiled_case(mesh, device)

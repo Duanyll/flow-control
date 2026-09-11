@@ -29,6 +29,11 @@ class DistributedFakeAdapter(BaseModelAdapter[ModelMixin, Batch]):
     supports_dense_batching = True
     dense_batch_fields = ("image_size", "noisy_latents")
     _forward_batch_sizes: list[int] = PrivateAttr(default_factory=list)
+    _scale: torch.Tensor = PrivateAttr(
+        default_factory=lambda: torch.tensor(1.0, requires_grad=True)
+    )
+    _forward_scales: list[torch.Tensor] = PrivateAttr(default_factory=list)
+    """One fresh leaf per forward, so backward reaching a forward is observable."""
 
     @property
     def device(self) -> torch.device:
@@ -44,12 +49,14 @@ class DistributedFakeAdapter(BaseModelAdapter[ModelMixin, Batch]):
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         self._forward_batch_sizes.append(batch["noisy_latents"].shape[0])
-        return batch["noisy_latents"]
+        self._forward_scales.append(torch.tensor(1.0, requires_grad=True))
+        return batch["noisy_latents"] * self._scale * self._forward_scales[-1]
 
 
 class DistributedSamplerModel:
     device = torch.device("cpu")
     dtype = torch.float32
+    micro_batch_size = 1
 
     def __init__(self) -> None:
         self.calls: list[int] = []
@@ -68,8 +75,15 @@ class DistributedSamplerModel:
         return [batch["clean_latents"] for batch in batches]
 
 
+def make_adapter(micro_batch_size: int) -> DistributedFakeAdapter:
+    return DistributedFakeAdapter.model_construct(
+        arch="fake", type="fake", micro_batch_size=micro_batch_size
+    )
+
+
 def test_synchronized_fallback(rank: int) -> None:
-    adapter = DistributedFakeAdapter.model_construct(arch="fake", type="fake")
+    # One rank's incompatible shapes force sequential forwards on every rank.
+    adapter = make_adapter(2)
     token_counts = (4, 4) if rank == 0 else (4, 5)
     adapter.predict_velocity_batched(
         [make_batch(tokens) for tokens in token_counts],
@@ -77,19 +91,56 @@ def test_synchronized_fallback(rank: int) -> None:
     )
     assert adapter._forward_batch_sizes == [1, 1]
 
+    # Sampler-rethink S1: the fallback path runs one forward per sample, so a
+    # shorter rank pads to the longest rank's chunk with dummy forwards.
+    adapter = make_adapter(2)
+    token_counts = (4, 5) if rank == 0 else (4,)
+    outputs = adapter.predict_velocity_batched(
+        [make_batch(tokens) for tokens in token_counts],
+        [torch.tensor([0.5]) for _ in token_counts],
+    )
+    assert adapter._forward_batch_sizes == [1, 1]
+    assert [output.shape[1] for output in outputs] == list(token_counts)
 
-def test_length_mismatch_is_rejected(rank: int) -> None:
-    adapter = DistributedFakeAdapter.model_construct(arch="fake", type="fake")
-    logical_batch_size = 2 if rank == 0 else 1
-    try:
-        adapter.predict_velocity_batched(
-            [make_batch(4) for _ in range(logical_batch_size)],
-            [torch.tensor([0.5]) for _ in range(logical_batch_size)],
+
+def test_unequal_counts_pad_with_dummy_forwards(rank: int) -> None:
+    # Sampler-rethink S1: unequal logical counts no longer raise. Rank 0 has
+    # chunks [2, 2, 1], rank 1 [2, 1] plus one dummy chunk: forward counts match
+    # (dense sizes need not), and every real output stays in order.
+    adapter = make_adapter(2)
+    values = [float(value) for value in range(5 if rank == 0 else 3)]
+    with torch.no_grad():
+        outputs = adapter.predict_velocity_batched(
+            [make_batch(4, value) for value in values],
+            [torch.tensor([0.5]) for _ in values],
         )
-    except ValueError as error:
-        assert "same number of logical samples" in str(error)
-    else:
-        raise AssertionError("Distributed logical batch mismatch was not rejected.")
+    assert adapter._forward_batch_sizes == ([2, 2, 1] if rank == 0 else [2, 1, 1])
+    for value, output in zip(values, outputs, strict=True):
+        torch.testing.assert_close(output, torch.full((1, 4, 2), value))
+
+    # A drained rank keeps participating with an empty list; its dummy comes
+    # from the sample cached by the previous call.
+    adapter._forward_batch_sizes.clear()
+    local = ([make_batch(4, 7.0)], [torch.tensor([0.5])]) if rank == 0 else ([], [])
+    with torch.no_grad():
+        outputs = adapter.predict_velocity_batched(*local)
+    assert adapter._forward_batch_sizes == [1]
+    assert len(outputs) == len(local[0])
+
+    # Under autograd the dummy output is folded into the first real output with
+    # zero weight: backward must reach every forward (a detached dummy would
+    # leave its leaf without a gradient and desync FSDP's reduce-scatters),
+    # while the gradient value stays the real samples' alone.
+    adapter = make_adapter(1)
+    count = 2 if rank == 0 else 1
+    outputs = adapter.predict_velocity_batched(
+        [make_batch(4, 3.0) for _ in range(count)],
+        [torch.tensor([0.5]) for _ in range(count)],
+    )
+    assert adapter._forward_batch_sizes == [1, 1]
+    torch.stack([output.mean() for output in outputs]).sum().backward()
+    assert all(scale.grad is not None for scale in adapter._forward_scales)
+    torch.testing.assert_close(adapter._scale.grad, torch.tensor(3.0 * count))
 
 
 def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
@@ -185,7 +236,7 @@ def main() -> None:
     try:
         rank = dist.get_rank()
         test_synchronized_fallback(rank)
-        test_length_mismatch_is_rejected(rank)
+        test_unequal_counts_pad_with_dummy_forwards(rank)
         test_mixed_cfg_is_globally_synchronized(rank)
         test_sampler_request_count_mismatch_is_rejected(rank)
         test_final_padded_microbatch(rank)
