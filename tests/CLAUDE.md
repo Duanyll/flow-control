@@ -42,6 +42,9 @@
 
 `tests/fixtures/sampler_baselines/` holds solver outputs replayed bitwise by
 `BaselineParityTest`, so numeric drift in any solver fails loudly.
+`tests/fixtures/objective_baselines/` does the same for the nft/ram/awm
+objective losses and gradients (`tests/test_objectives.py`); regenerate with
+`uv run python tests/objective_baseline_capture.py` (`--check` replays bitwise).
 
 1. Regenerate with `uv run python tests/sampler_baseline_capture.py` only when
    algorithm behaviour changes on purpose, and commit the new fixtures in the
