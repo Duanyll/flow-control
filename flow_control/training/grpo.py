@@ -1,53 +1,26 @@
-import os
-from contextlib import contextmanager
+"""GRPO (Group Relative Policy Optimization) over recorded rollout steps.
+
+The loop is :class:`~flow_control.training.rollout_trainer.RolloutTrainerBase`.
+What sets GRPO apart from the endpoint family: the train points are the
+stochastic transitions recorded during the rollout (replayed through
+``train_predictor``), the old policy is the log-prob recorded at rollout time
+rather than an EMA, and the loss is the clipped policy ratio plus an optional
+KL to the reference model's step mean.
+"""
+
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import torch
-from pydantic import ConfigDict
 from rich.progress import Progress
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_model_state_dict,
-    get_optimizer_state_dict,
-    set_model_state_dict,
-    set_optimizer_state_dict,
-)
 
-from flow_control.adapters import ModelAdapter
-from flow_control.processors import Processor
-from flow_control.rewards import Reward
-from flow_control.samplers import Sampler, SampleRequest
-from flow_control.utils import device as devutil
+from flow_control.samplers import SampleRequest
 from flow_control.utils.logging import console, get_logger
-from flow_control.utils.tensor import (
-    deep_move_to_device,
-)
-from flow_control.utils.types import (
-    OptimizerConfig,
-    SchedulerConfig,
-    parse_optimizer,
-    parse_scheduler,
-)
+from flow_control.utils.tensor import deep_move_to_device
 
-from .ema import (
-    EMAConfig,
-    EMAOptimizer,
-    InitBackupOptimizer,
-    apply_ema_maybe,
-    apply_init_maybe,
-)
 from .grpo_sampling import RecordedStep, ReplayItem, replay_steps
-from .mixins import (
-    CheckpointingMixin,
-    MicrobatchTrainMixin,
-    Rollout,
-    RolloutMixin,
-    TrainingPredictionMixin,
-    ValidationMixin,
-    distributed_main,
-    trainer_registry,
-)
+from .mixins import Rollout, trainer_registry
+from .rollout_trainer import RolloutTrainerBase
 
 logger = get_logger(__name__)
 
@@ -60,161 +33,59 @@ class GrpoTrainItem:
 
 
 @trainer_registry.register("grpo")
-class GrpoTrainer(
-    TrainingPredictionMixin,
-    RolloutMixin,
-    ValidationMixin,
-    MicrobatchTrainMixin,
-    CheckpointingMixin,
-):
-    model_config = ConfigDict(extra="forbid")
+class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
     training_type: str = "grpo"
-
-    # ---------------------------------- Configs --------------------------------- #
-    model: ModelAdapter
-    rollout_sampler: Sampler
-    processor: Processor
-    reward: Reward
 
     _ROLLOUT_RECORD_STEPS: ClassVar[bool] = True
 
-    seed_checkpoint_dir: str
-    resume_from_dir: str | None = None
-
-    optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 3e-4}
-    scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
-
-    num_inner_epochs: int = 1
     clip_range: float = 1e-4
     adv_clip_max: float = 5.0
     kl_beta: float = 0.0
 
-    ema: EMAConfig | None = None
-    precompute_aux_model_outputs: bool = False
-    """
-    Precompute reference-model replay outputs once per outer epoch and reuse
-    them during optimization. This reduces repeated model switching at the cost
-    of extra accelerator memory for cached per-item tensors.
-    """
-    clip_grad_norm: float = 1.0
+    # --------------------------------- Hooks ------------------------------------ #
 
-    # Optimization / training loop
-    train_epochs: int = 100
-    validation_epochs: int = 20
+    def _needs_reference(self) -> bool:
+        return self.kl_beta > 0
 
-    # --------------------------------- Status bar ------------------------------- #
-    _status_fields: dict[str, str] = {
-        "rollout/reward_mean": "R̄: {v:.3f}",
-        "rollout/reward_std": "σ: {v:.3f}",
-        "train/loss": "Loss: {v:.4f}",
-        "val/reward_mean": "Val R̄: {v:.3f}",
-    }
+    def _check_rollouts(self, rollouts: list[Rollout]) -> None:
+        """Fail fast on rollouts that GRPO's step replay cannot train on."""
+        for rollout in rollouts:
+            trajectory = rollout.recorded_steps
+            if not trajectory:
+                raise RuntimeError(
+                    "GRPO rollout produced no recorded trajectory steps; step "
+                    "replay needs at least one recorded transition. Check the "
+                    "rollout_sampler solver eta and sde_window transforms."
+                )
+            if not any(bool((step.log_prob != 0).any()) for step in trajectory):
+                raise RuntimeError(
+                    "GRPO rollout recorded only deterministic steps (all step "
+                    "log-probs are zero), which cannot train a policy ratio. "
+                    f"Solver '{self.rollout_sampler.solver.type}' ran with "
+                    f"eta={self.rollout_sampler.solver.eta}; set eta > 0 and "
+                    "make sure the sde_window covers stochastic steps."
+                )
 
-    # ------------------------------- Lazy state --------------------------------- #
-    _optimizer: torch.optim.Optimizer
-    _scheduler: Any
-    _ema_optimizer: EMAOptimizer | None = None
-    _init_backup_optimizer: InitBackupOptimizer | None = None
-    _current_step: int = 0
-    _current_epoch: int = 0
-
-    @property
-    def transformer(self):
-        return self.model.transformer
-
-    # ------------------------------- Setup methods ------------------------------ #
-
-    def make_optimizer_and_scheduler(self):
-        params = [p for p in self.transformer.parameters() if p.requires_grad]
-        num_trainable_params = sum(p.numel() for p in params)
-        if num_trainable_params == 0:
-            raise RuntimeError("No trainable parameters found in the model.")
-        self._optimizer = parse_optimizer(self.optimizer_config, params)
-        logger.info(
-            f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
-        )
-        self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
-        if self.ema is not None:
-            self._ema_optimizer = EMAOptimizer(params, self.ema)
-        need_init = self.kl_beta > 0 and self.model.peft_lora_rank == 0
-        if need_init:
-            self._init_backup_optimizer = InitBackupOptimizer(params)
-            logger.info("Init backup enabled for reference model (kl_beta > 0).")
-
-    # ------------------------------- Checkpointing ------------------------------ #
-
-    def state_dict(self):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        transformer_sd = get_model_state_dict(self.transformer, options=opts)
-        if len(transformer_sd) == 0:
-            raise RuntimeError("Nothing to save in transformer state dict.")
-        state: dict[str, Any] = {
-            "transformer": transformer_sd,
-            "optimizer": get_optimizer_state_dict(
-                self.transformer, self._optimizer, options=opts
-            ),
-            "dataloader": self._dataloader.state_dict(),
-            "scheduler": self._scheduler.state_dict(),
-            "current_step": self._current_step,
-            "current_epoch": self._current_epoch,
-            "rng": self.get_rng_state_bytes(),
-        }
-        if self._ema_optimizer is not None:
-            state["optim_ema"] = get_optimizer_state_dict(
-                self.transformer, self._ema_optimizer, options=opts
+    def _build_train_plan(self, rollouts: list[Rollout]) -> list[list[GrpoTrainItem]]:
+        """Every inner epoch shuffles the rollout order while keeping each
+        rollout's recorded steps contiguous and in trajectory order."""
+        item_groups: list[list[GrpoTrainItem]] = []
+        for rollout_idx, rollout in enumerate(rollouts):
+            trajectory = rollout.recorded_steps
+            assert trajectory, "validated by _check_rollouts"
+            item_groups.append(
+                [
+                    GrpoTrainItem(rollout_idx=rollout_idx, timestep_idx=timestep_idx)
+                    for timestep_idx in range(len(trajectory))
+                ]
             )
-        if self._init_backup_optimizer is not None:
-            state["optim_init_backup"] = get_optimizer_state_dict(
-                self.transformer, self._init_backup_optimizer, options=opts
-            )
-        return state
+        train_plan: list[list[GrpoTrainItem]] = []
+        for _ in range(self.num_inner_epochs):
+            perm = torch.randperm(len(item_groups)).tolist()
+            train_plan.append([item for index in perm for item in item_groups[index]])
+        return train_plan
 
-    def load_state_dict(self, state_dict: dict[str, Any]):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
-        set_optimizer_state_dict(
-            self.transformer,
-            self._optimizer,
-            state_dict["optimizer"],
-            options=opts,
-        )
-        if self._ema_optimizer is not None and "optim_ema" in state_dict:
-            set_optimizer_state_dict(
-                self.transformer,
-                self._ema_optimizer,
-                state_dict["optim_ema"],
-                options=opts,
-            )
-            self._ema_optimizer.coerce_buffer_dtype()
-        if (
-            self._init_backup_optimizer is not None
-            and "optim_init_backup" in state_dict
-        ):
-            set_optimizer_state_dict(
-                self.transformer,
-                self._init_backup_optimizer,
-                state_dict["optim_init_backup"],
-                options=opts,
-            )
-        self._dataloader.load_state_dict(state_dict["dataloader"])
-        self._scheduler.load_state_dict(state_dict["scheduler"])
-        self._current_step = state_dict["current_step"]
-        self._current_epoch = state_dict.get("current_epoch", 0)
-        self.load_rng_state_bytes(state_dict.get("rng"))
-
-    # ------------------------------- Reference model ---------------------------- #
-
-    @contextmanager
-    def reference_model(self):
-        """Temporarily switch to reference model weights."""
-        if self.model.peft_lora_rank > 0:
-            with self.model.use_variant("base"):
-                yield
-        else:
-            with apply_init_maybe(self._init_backup_optimizer):
-                yield
-
-    # --- GRPO loss ---
+    # --------------------------------- Loss ------------------------------------- #
 
     def grpo_loss(
         self,
@@ -280,7 +151,7 @@ class GrpoTrainer(
         timestep_idx: int,
     ) -> tuple[ReplayItem, torch.Tensor]:
         trajectory = rollout.recorded_steps
-        assert trajectory, "validated by _validate_rollout_trajectories"
+        assert trajectory, "validated by _check_rollouts"
         recorded: RecordedStep = deep_move_to_device(
             trajectory[timestep_idx], self.device
         )
@@ -299,7 +170,7 @@ class GrpoTrainer(
         )
         return ReplayItem(run, recorded), recorded.log_prob
 
-    def _compute_loss_at_items(
+    def _loss_batched(
         self,
         items: list[GrpoTrainItem],
         rollouts: list[Rollout],
@@ -345,14 +216,21 @@ class GrpoTrainer(
             )
         return torch.stack(losses).mean()
 
-    def _precompute_reference_means(
+    # ------------------------------- Precompute --------------------------------- #
+
+    def _precompute(
         self,
         rollouts: list[Rollout],
-        items: list[GrpoTrainItem],
+        train_plan: list[list[GrpoTrainItem]],
+        advantages: torch.Tensor,
     ) -> None:
         """Fill ``item.cached_ref_mean`` for every item using the reference model."""
-        if not self.precompute_aux_model_outputs or self.kl_beta <= 0:
+        if self.kl_beta <= 0:
             return
+        # Inner epochs reorder the same item objects, so cache each item once.
+        items = list(
+            {id(item): item for items in train_plan for item in items}.values()
+        )
 
         was_training = self.transformer.training
         self.transformer.eval()
@@ -382,177 +260,3 @@ class GrpoTrainer(
         self.log_progress_timing(
             progress, self._current_step, prefix="profile/precompute"
         )
-
-    def _build_train_items(self, rollouts: list[Rollout]) -> list[list[GrpoTrainItem]]:
-        """One item group per rollout, in trajectory timestep order."""
-        item_groups: list[list[GrpoTrainItem]] = []
-        for rollout_idx, rollout in enumerate(rollouts):
-            trajectory = rollout.recorded_steps
-            assert trajectory, "validated by _validate_rollout_trajectories"
-            item_groups.append(
-                [
-                    GrpoTrainItem(rollout_idx=rollout_idx, timestep_idx=timestep_idx)
-                    for timestep_idx in range(len(trajectory))
-                ]
-            )
-        return item_groups
-
-    def _validate_rollout_trajectories(self, rollouts: list[Rollout]) -> None:
-        """Fail fast on rollouts that GRPO's step replay cannot train on."""
-        for rollout in rollouts:
-            trajectory = rollout.recorded_steps
-            if not trajectory:
-                raise RuntimeError(
-                    "GRPO rollout produced no recorded trajectory steps; step "
-                    "replay needs at least one recorded transition. Check the "
-                    "rollout_sampler solver eta and sde_window transforms."
-                )
-            if not any(bool((step.log_prob != 0).any()) for step in trajectory):
-                raise RuntimeError(
-                    "GRPO rollout recorded only deterministic steps (all step "
-                    "log-probs are zero), which cannot train a policy ratio. "
-                    f"Solver '{self.rollout_sampler.solver.type}' ran with "
-                    f"eta={self.rollout_sampler.solver.eta}; set eta > 0 and "
-                    "make sure the sde_window covers stochastic steps."
-                )
-
-    # --- Core training phases ---
-
-    def _optimizer_step(self):
-        """Clip gradients, step all optimizers, and zero gradients."""
-        if self.clip_grad_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self.transformer.parameters(), self.clip_grad_norm
-            )
-        self._optimizer.step()
-        if self._ema_optimizer is not None:
-            self._ema_optimizer.step()
-        if self._init_backup_optimizer is not None:
-            self._init_backup_optimizer.step()
-        self._scheduler.step()
-        self._optimizer.zero_grad()
-
-    def _train_on_rollouts(
-        self,
-        rollouts: list[Rollout],
-        advantages: torch.Tensor,
-    ):
-        """Training phase: update model using collected rollouts and advantages."""
-        self.transformer.train()
-
-        item_groups = self._build_train_items(rollouts)
-        all_items = [item for group in item_groups for item in group]
-        self._precompute_reference_means(rollouts, all_items)
-
-        progress = Progress(
-            *self.get_progress_columns(),
-            console=console,
-            transient=True,
-        )
-        train_task = progress.add_task(
-            "Training", total=self.num_inner_epochs * len(all_items)
-        )
-
-        with progress:
-            for _inner_epoch in range(self.num_inner_epochs):
-                # Shuffle rollout order while keeping each rollout's timesteps
-                # contiguous and in trajectory order.
-                perm = torch.randperm(len(item_groups)).tolist()
-                train_items = [item for index in perm for item in item_groups[index]]
-
-                for update in self.iter_micro_updates(train_items):
-                    self.transformer.set_requires_gradient_sync(update.is_sync_step)
-                    loss = self._compute_loss_at_items(
-                        update.items, rollouts, advantages
-                    )
-                    self._check_finite_loss(loss, update.items)
-                    (loss * update.loss_scale).backward()
-                    progress.advance(train_task, advance=len(update.items))
-
-                    if update.is_sync_step:
-                        self._optimizer_step()
-                        self._current_step += 1
-                        self.flush_aggregated_metrics(self._current_step)
-
-        self.log_progress_timing(progress, self._current_step, prefix="profile/train")
-
-    # --- Main loop ---
-
-    @distributed_main
-    def run(self):
-        self.set_seed()
-        self.resolve_run_context()
-        self.init_tracker()
-        self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
-        self.make_optimizer_and_scheduler()
-        self.load_processor()
-        self.make_rollout_dataloader()
-        self.make_validation_dataloader()
-
-        self.reward.load_model(self.device)
-        if self.validation_reward:
-            self.validation_reward.load_model(self.device)
-
-        os.makedirs(self.checkpoint_root, exist_ok=True)
-        self.maybe_auto_resume(self.resume_from_dir)
-
-        with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self._current_step, reward=self.reward)
-        logger.info(
-            f"GRPO rollouts in each epoch will randomly select {self.num_prompts_per_batch}"
-            f" unique prompts for {self.num_batches_per_epoch} times, and generate"
-            f" {self.num_rollouts_per_prompt} rollouts for each prompt. That is "
-            f"{self.num_batches_per_epoch * self.num_prompts_per_batch * self.num_rollouts_per_prompt}"
-            " rollouts in total (may have duplicates across batches)."
-        )
-        logger.info(
-            "GRPO optimization uses train_batch_size=%d, world_size=%d, grad_acc_steps=%d.",
-            self.train_batch_size,
-            self.world_size,
-            self.grad_acc_steps,
-        )
-
-        progress = Progress(
-            *self.get_progress_columns(),
-            console=console,
-        )
-        task = progress.add_task(
-            "GRPO Training", total=self.train_epochs, completed=self._current_epoch
-        )
-
-        with self.status_bar("GRPO Training"), progress:
-            while self._current_epoch < self.train_epochs:
-                logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
-                rollouts = self._collect_rollouts(self._current_epoch)
-                self._validate_rollout_trajectories(rollouts)
-
-                advantages = self._compute_advantages(rollouts, step=self._current_step)
-
-                logger.debug(f"Epoch {self._current_epoch}: starting training phase...")
-                self._train_on_rollouts(rollouts, advantages)
-
-                self._current_epoch += 1
-                progress.update(task, advance=1)
-
-                del rollouts, advantages
-                devutil.empty_cache()
-
-                self.save_maybe(
-                    self._current_step,
-                    progress=self._current_epoch,
-                    force_archival=self._current_epoch == self.train_epochs,
-                )
-
-                if (
-                    self.validation_epochs > 0
-                    and self._current_epoch % self.validation_epochs == 0
-                ):
-                    with apply_ema_maybe(self._ema_optimizer):
-                        self.validate_and_log(
-                            self.model, self._current_step, reward=self.reward
-                        )
-
-        with apply_ema_maybe(self._ema_optimizer):
-            self.save_dcp_checkpoint(
-                self.get_checkpoint_dir(self._current_step) + "_final"
-            )
