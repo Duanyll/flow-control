@@ -73,7 +73,7 @@ class GridTimesteps(BaseTrainTimesteps):
     """
 
     type: Literal["grid"] = "grid"
-    count: int | None = None
+    count: PositiveInt | None = None
     """Timesteps per rollout. ``None`` derives it from the window and ``fraction``."""
     fraction: float = 1.0
     """Fraction of the window to train on when ``count`` is ``None``."""
@@ -89,8 +89,6 @@ class GridTimesteps(BaseTrainTimesteps):
             raise ValueError(f"fraction must be in (0, 1], got {self.fraction}.")
         if not 0.0 < self.window <= 1.0:
             raise ValueError(f"window must be in (0, 1], got {self.window}.")
-        if self.count is not None and self.count <= 0:
-            raise ValueError("count must be positive when explicitly set.")
         return self
 
     def draw(self, sigmas: list[float]) -> list[TrainTimestep]:
@@ -207,7 +205,7 @@ if __name__ == "__main__":
         else:
             raise AssertionError(f"{grid}.draw({sigmas}) must raise")
 
-    # Config validation keeps the trainer-era messages.
+    # Config validation: ranges, positive counts, no legacy flat keys.
     for bad in (
         {"type": "grid", "fraction": 0.0},
         {"type": "grid", "window": 1.5},

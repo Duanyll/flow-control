@@ -257,11 +257,14 @@ negative data raises. SFT dropout retains the original negative condition.
 
 `BasePrediction.velocity(batch, timestep, negative_batch)` evaluates any tree
 at an independent timestep, replacing the removed `conditional_velocity`.
-SFT/AWM/RAM use this through `TrainingPredictionMixin.predict_training`; they
-have no solver transition and use index 0 for variant schedules. Consequently
-CFG++ is undefined there and raises. NFT/GRPO instead use
-`make_run(plan=executed_plan, predictor=train_predictor)` to preserve actual
-sigma, successor sigma, eta, execution index and post-projectors.
+SFT and continuous training timesteps (`train_timesteps: continuous`, the RAM
+preset) use this through `TrainingPredictionMixin.predict_training`; they have
+no solver transition and use index 0 for variant schedules. Consequently CFG++
+is undefined there and raises. Grid training timesteps (`train_timesteps:
+grid`, the NFT and AWM presets) and GRPO replay instead use
+`make_run(plan=executed_plan, predictor=train_predictor)` plus
+`guided_velocity(x_t, grid_index)` to preserve actual sigma, successor sigma,
+eta, execution index and post-projectors.
 
 Training timesteps are independent, so stateful training nodes are rejected;
 Momentum would otherwise reset on every call and silently become identity.

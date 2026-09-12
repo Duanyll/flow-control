@@ -39,10 +39,6 @@ class TrainPoint:
     """``[1]`` training timestep, ``1`` = pure noise."""
     advantage: torch.Tensor
     """``[1]`` group-relative advantage of the rollout."""
-    grid_index: int | None
-    """Index of ``t`` on the rollout sigma grid, or ``None`` for a continuous
-    draw. Decides how the trainer evaluates the point: a grid point goes through
-    the rollout plan's guided step, a continuous one through the predictor."""
 
     @property
     def xt(self) -> torch.Tensor:
@@ -481,7 +477,6 @@ if __name__ == "__main__":
         noise=torch.randn(shape),
         t=torch.tensor([0.7]),
         advantage=torch.tensor([1.5]),
-        grid_index=None,
     )
     velocities = PolicyVelocities(
         current=torch.randn(shape, requires_grad=True),

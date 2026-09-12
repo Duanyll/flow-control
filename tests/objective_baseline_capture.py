@@ -20,11 +20,6 @@ flat ``dict[str, Tensor]`` per kind, loadable with ``weights_only=True``:
     <case>/<combo>/old|ref        auxiliary-policy velocities; present only when
                                   ``objective.required_policies()`` contains the
                                   role (AWM's ``ema_prediction`` is ``old``)
-    <case>/grad_reaches_old|ref   0-dim bool, pre-refactor record only: whether
-                                  the trainer-era code let gradient reach that
-                                  auxiliary input. ``Objective.compute`` detaches
-                                  ``old``/``ref`` by contract, so ``--check``
-                                  skips these keys and a recapture omits them.
 
 Regenerate only when an objective changes on purpose, and commit the new
 fixtures together with the change that caused them.
@@ -160,9 +155,7 @@ def evaluate_combo(
     """Loss, gradient and the inputs used for one combo."""
     aux = {role: getattr(combo, role) for role in sorted(roles)}
     forward = combo.forward.clone().requires_grad_(True)
-    point = TrainPoint(
-        x0=combo.x0, noise=combo.noise, t=combo.t, advantage=combo.adv, grid_index=None
-    )
+    point = TrainPoint(x0=combo.x0, noise=combo.noise, t=combo.t, advantage=combo.adv)
     loss = objective.compute(
         point, PolicyVelocities(forward, aux.get("old"), aux.get("ref"))
     ).loss
@@ -184,7 +177,7 @@ def evaluate_case(
 ) -> dict[str, torch.Tensor]:
     """Flat ``<combo>/<field>`` records for one case."""
     objective = make_objective(kind, kwargs)
-    roles = frozenset(objective.required_policies())
+    roles = objective.required_policies()
     out: dict[str, torch.Tensor] = {}
     for combo in inputs:
         for field, value in evaluate_combo(objective, combo, roles).items():
@@ -228,17 +221,12 @@ def check() -> bool:
             inputs = inputs_from_fixture(fixture, name)
             for key, value in evaluate_case(kind, kwargs, inputs).items():
                 expected[f"{name}/{key}"] = value
-        # ``grad_reaches_*`` flags are the pre-refactor leak record (see the
-        # module docstring); the objectives detach by contract, so skip them.
         mismatched = sorted(
             key
             for key in fixture.keys() | expected.keys()
-            if "/grad_reaches_" not in key
-            and (
-                key not in fixture
-                or key not in expected
-                or not _same(fixture[key], expected[key])
-            )
+            if key not in fixture
+            or key not in expected
+            or not _same(fixture[key], expected[key])
         )
         if mismatched:
             ok = False

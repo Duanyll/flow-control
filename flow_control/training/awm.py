@@ -26,4 +26,3 @@ class AwmTrainer(EndpointTrainer):
         decay=0.3, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001)
     )
     """TRPO-EMA config (stepped once per epoch)."""
-    clip_grad_norm: float = 1.0

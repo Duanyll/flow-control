@@ -70,7 +70,6 @@ class ObjectiveParityTest(unittest.TestCase):
                             noise=combo.noise,
                             t=combo.t,
                             advantage=combo.adv,
-                            grid_index=None,
                         )
                         out = objective.compute(
                             point,
@@ -119,7 +118,7 @@ class ObjectiveGradientIdentityTest(unittest.TestCase):
             v = randn().requires_grad_(True)
             t = torch.tensor([t_value], dtype=torch.float64)
             adv = torch.tensor([adv_value], dtype=torch.float64)
-            point = TrainPoint(x0=x0, noise=noise, t=t, advantage=adv, grid_index=None)
+            point = TrainPoint(x0=x0, noise=noise, t=t, advantage=adv)
             target = noise - x0
             velocities = PolicyVelocities(current=v, old=v_old, ref=v_ref)
 

@@ -12,10 +12,9 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
-from rich.progress import Progress
 
 from flow_control.samplers import SampleRequest
-from flow_control.utils.logging import console, get_logger
+from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_move_to_device
 
 from .grpo_sampling import RecordedStep, ReplayItem, replay_steps
@@ -232,16 +231,8 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
             {id(item): item for items in train_plan for item in items}.values()
         )
 
-        was_training = self.transformer.training
-        self.transformer.eval()
-        progress = Progress(
-            *self.get_progress_columns(),
-            console=console,
-            transient=True,
-        )
-        precompute_task = progress.add_task("Precompute ref", total=len(items))
-
-        with progress, torch.no_grad(), self.reference_model():
+        with self._precompute_scope() as progress, self.reference_model():
+            precompute_task = progress.add_task("Precompute ref", total=len(items))
             for micro_items in self.iter_train_micro_batches(items):
                 replay_items = [
                     self._make_replay_item(
@@ -253,10 +244,3 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
                 for item, output in zip(micro_items, outputs, strict=True):
                     item.cached_ref_mean = output.mean.detach()
                 progress.advance(precompute_task, advance=len(micro_items))
-
-        if was_training:
-            self.transformer.train()
-
-        self.log_progress_timing(
-            progress, self._current_step, prefix="profile/precompute"
-        )

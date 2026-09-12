@@ -21,4 +21,3 @@ class NftTrainer(EndpointTrainer):
         decay=0.5, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001)
     )
     """Old-teacher EMA config (stepped once per epoch)."""
-    clip_grad_norm: float = 1.0
