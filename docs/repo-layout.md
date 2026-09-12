@@ -79,7 +79,7 @@ plugin datasets/processors work inside workers too.
 
 Trainers are a registry too: `trainer_registry` (in
 `flow_control/training/mixins/base.py`, next to `BaseTrainer`) maps a config's
-`launch.type` to a trainer class. Built-ins (`sft`/`grpo`/`nft`/`inference`) are
+`launch.type` to a trainer class. Built-ins (`sft`/`grpo`/`nft`/`awm`/`ram`/`inference`) are
 registered by `import_builtin_trainers()` (`flow_control/training/__init__.py`),
 which the entry points call before resolving; plugin trainers (e.g. `vae` from
 `flow_control.contrib.rgba_vae_training`) register via `imports`. A trainer
@@ -87,6 +87,17 @@ subclasses `BaseTrainer` (`flow_control/training/mixins/base.py`) and
 overrides `run()`; it may also override `seed_checkpoint()` / `export_checkpoint()`
 (the base seeds a transformer adapter and rejects export). `flow-control
 launch`/`seed`/`export` dispatch through the registry uniformly.
+
+The RL trainers share one loop. `RolloutTrainerBase`
+(`flow_control/training/rollout_trainer.py`) owns the optimizer / EMA / checkpoint /
+`run()` skeleton; `GrpoTrainer` subclasses it directly, and `EndpointTrainer` adds the
+endpoint family's two config axes, both registry unions: `objective`
+(`flow_control/training/objective.py`: `nft` / `ram` / `awm` / `weighted_fm` — the loss
+math plus which policies it samples with and needs) and `train_timesteps`
+(`flow_control/training/train_timesteps.py`: `grid` / `continuous`). `nft` / `ram` /
+`awm` are presets over `EndpointTrainer` that only set defaults, so a config's
+`objective` / `train_timesteps` blocks (each with an explicit `type`) are what
+distinguish the methods; plugins can register new members of either union.
 
 ### Editor schemas with plugins
 

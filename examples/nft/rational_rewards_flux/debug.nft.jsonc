@@ -15,15 +15,21 @@
   "num_inner_epochs": 1,
   "train_batch_size": 8,
 
-  "num_train_timesteps": 2,
-  "timestep_range": 0.8,
-  "train_timestep_sampling": "stratified",
-  "beta": 1.0,
+  "train_timesteps": {
+    "type": "grid",
+    "count": 2,
+    "window": 0.8,
+    "mode": "stratified",
+  },
+  "objective": {
+    "type": "nft",
+    "beta": 1.0,
+    "adv_clip_max": 5.0,
+    // Non-zero so the debug exercises the v-based KL reference path
+    // (transformer.disable_adapters()) that the full train config uses.
+    "kl_beta": 0.002,
+  },
   "clip_grad_norm": 1.0,
-  "adv_clip_max": 5.0,
-  // Non-zero so the debug exercises the v-based KL reference path
-  // (transformer.disable_adapters()) that the full train config uses.
-  "kl_beta": 0.002,
 
   "train_epochs": 20,
   "checkpoint_interval": 5,

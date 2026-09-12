@@ -33,21 +33,28 @@
   "num_inner_epochs": 1,
   // 1152 rollouts x 6 training timesteps -> 6912 items, 1 optimizer update per epoch.
   "train_batch_size": 6912,
-  "num_train_timesteps": 6,
-  "timestep_fraction": 0.9,
-  // PickScore uses the `discrete` grid (includes the pure-noise init index 0).
-  "train_timestep_sampling": "discrete",
+  "train_timesteps": {
+    "type": "grid",
+    "count": 6,
+    "window": 0.9,
+    // PickScore uses the `discrete` grid (includes the pure-noise init index 0).
+    "exclude_first": false,
+    "mode": "stratified",
+  },
 
-  "beta": 0.0001,
-  "ema_beta": 1.0,
-  "advantage_max": 1.0,
-  "adv_clip_max": 5.0,
-  "clip_range": 1.0,
-  "weighting": "ghuber",
-  "ghuber_power": 0.25,
-  "kl_weight": "uniform",
-  "kl_ema_weight": "uniform",
-  "off_policy": false,
+  "objective": {
+    "type": "awm",
+    "beta": 0.0001,
+    "ema_beta": 1.0,
+    "advantage_max": 1.0,
+    "adv_clip_max": 5.0,
+    "clip_range": 1.0,
+    "weighting": "ghuber",
+    "ghuber_power": 0.25,
+    "kl_weight": "uniform",
+    "kl_ema_weight": "uniform",
+    "off_policy": false,
+  },
   "clip_grad_norm": 1.0,
 
   "train_epochs": 500,

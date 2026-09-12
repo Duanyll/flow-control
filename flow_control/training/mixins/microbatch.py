@@ -8,10 +8,11 @@ expansion. Both are throughput/memory knobs. Changing
 world_size must never silently change dynamics; violated divisibility raises.
 
 SFT uses the fields and validation properties (its update loop is
-DataLoader-driven). The list-driven RL trainers (GRPO/NFT/AWM/RAM) also share
-the chunk (one optimizer update) / microbatch (one backward) slicing via
-``iter_micro_updates``; the side effects (gradient-sync flag, backward,
-optimizer step) stay in each trainer's visible loop.
+DataLoader-driven). The list-driven RL trainers (GRPO and the NFT/AWM/RAM
+endpoint presets) share the chunk (one optimizer update) / microbatch (one
+backward) slicing via ``iter_micro_updates``; the side effects (gradient-sync
+flag, backward, optimizer step) live in the one visible loop,
+``RolloutTrainerBase._train_on_rollouts``.
 """
 
 from collections.abc import Iterator, Sequence

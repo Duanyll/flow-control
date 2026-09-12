@@ -23,11 +23,17 @@
   "num_inner_epochs": 1,
   // 1152 rollouts x K=8 loss targets -> 9216 items, 1 optimizer update per epoch.
   "train_batch_size": 9216,
-  "num_train_timesteps": 8,
-  "timestep_weighting": { "type": "power_law", "alpha": 1.0 },
+  "train_timesteps": {
+    "type": "continuous",
+    "count": 8,
+    "weighting": { "type": "power_law", "alpha": 1.0 },
+  },
 
-  "reward_multiplier": 100.0,
-  "adv_clip_max": null,
+  "objective": {
+    "type": "ram",
+    "reward_multiplier": 100.0,
+    "adv_clip_max": null,
+  },
   "clip_grad_norm": 0.0,
 
   "train_epochs": 500,

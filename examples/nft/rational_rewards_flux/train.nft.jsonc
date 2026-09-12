@@ -26,13 +26,19 @@
   // step 2 off-policy on the EMA-generated rollouts).
   "train_batch_size": 1920,
 
-  "num_train_timesteps": 5,
-  "timestep_range": 0.8, // noisiest 80% of the trajectory (FF timestep_range)
-  "train_timestep_sampling": "stratified", // FF discrete stratified sampling
-  "beta": 1.0,
+  "train_timesteps": {
+    "type": "grid",
+    "count": 5,
+    "window": 0.8, // noisiest 80% of the trajectory (FF timestep_range)
+    "mode": "stratified", // FF discrete stratified sampling
+  },
+  "objective": {
+    "type": "nft",
+    "beta": 1.0,
+    "adv_clip_max": 5.0, // FF adv_clip_range
+    "kl_beta": 0.002, // FF kl_beta (v-based KL via LoRA disable_adapter)
+  },
   "clip_grad_norm": 1.0,
-  "adv_clip_max": 5.0, // FF adv_clip_range
-  "kl_beta": 0.002, // FF kl_beta (v-based KL via LoRA disable_adapter)
 
   "train_epochs": 500,
   "checkpoint_interval": 5,

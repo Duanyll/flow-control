@@ -22,15 +22,21 @@
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // 1152 rollouts x 4 forward-process timesteps -> 4608 items, /2 optimizer updates.
-  // Faithful DiffusionNFT trains 9 timesteps: num_train_timesteps: 9, train_batch_size: 5184.
+  // Faithful DiffusionNFT trains 9 timesteps: train_timesteps.count: 9, train_batch_size: 5184.
   "train_batch_size": 2304,
-  "num_train_timesteps": 4,
-  "timestep_range": 1.0,
-  "train_timestep_sampling": "stratified",
+  "train_timesteps": {
+    "type": "grid",
+    "count": 4,
+    "window": 1.0,
+    "mode": "stratified",
+  },
 
-  "beta": 0.1,
-  "kl_beta": 1e-4,
-  "adv_clip_max": 5.0,
+  "objective": {
+    "type": "nft",
+    "beta": 0.1,
+    "kl_beta": 1e-4,
+    "adv_clip_max": 5.0,
+  },
   "clip_grad_norm": 1.0,
 
   "train_epochs": 500,

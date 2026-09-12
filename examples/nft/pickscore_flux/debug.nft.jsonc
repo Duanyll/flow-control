@@ -12,12 +12,18 @@
   "num_inner_epochs": 1,
   "train_batch_size": 8,
   
-  "num_train_timesteps": 2,
-  "timestep_fraction": 0.7,
-  "beta": 1.0,
+  "train_timesteps": {
+    "type": "grid",
+    "count": 2,
+    "fraction": 0.7,
+  },
+  "objective": {
+    "type": "nft",
+    "beta": 1.0,
+    "adv_clip_max": 5.0,
+    "kl_beta": 0.0,
+  },
   "clip_grad_norm": 1.0,
-  "adv_clip_max": 5.0,
-  "kl_beta": 0.0,
 
   "train_epochs": 20,
   "checkpoint_interval": 5,

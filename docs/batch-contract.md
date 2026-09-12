@@ -60,8 +60,9 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
 
 1. `run.batch["noisy_latents"]` is the initial/source tensor. The evolving state is
    `run.ctx.latents`, and only the model-call copy receives the current value.
-   The one exception is `NftTrainer._precompute_predictions`, which writes cached
-   training inputs back into `run.batch["noisy_latents"]` before re-evaluating.
+   The one exception is `EndpointTrainer._prepare`, which writes the re-noised
+   training input `x_t` into `batch["noisy_latents"]` before `make_run` /
+   `guided_velocity` re-evaluates the rollout step on it.
 2. RL rollout collection writes the sampled endpoint into `batch["clean_latents"]`.
    General inference merges decoded images but does **not** write endpoint latents
    there. A retained `clean_latents` may therefore still be an input/cache target.
