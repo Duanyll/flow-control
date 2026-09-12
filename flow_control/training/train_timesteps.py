@@ -2,7 +2,8 @@
 
 A :class:`TrainTimesteps` decides, per rollout, at which timesteps the clean
 endpoint is re-noised and trained on. It is the second axis of the trainer
-layering next to the :mod:`~flow_control.training.objective`: a *grid* draw
+layering next to the :class:`~flow_control.training.endpoint.Objective`: a
+*grid* draw
 returns rollout-grid indices (the trainer then evaluates the point through the
 rollout plan's guided step), a *continuous* draw returns free timesteps (the
 trainer evaluates them through the train predictor directly).

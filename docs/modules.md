@@ -125,13 +125,13 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `VaeTrainer` | VAE 训练 |
 | `Inference` | 批量推理 + 评测（DCP/EMA 权重加载、reward 汇总与逐样本 CSV、datasink/预览输出）。新任务先写 config 走 `launch`，不要另写推理脚本 |
 
-### RL trainer 分层（`rollout_trainer.py` / `objective.py` / `train_timesteps.py`）
+### RL trainer 分层（`rollout_trainer.py` / `endpoint.py` / `train_timesteps.py`）
 
 - `RolloutTrainerBase[ItemT]`：四个 RL trainer 共用的唯一循环——字段块、optimizer/scheduler、验证 EMA、`InitBackupOptimizer`（仅当 `_needs_reference()` 且 `peft_lora_rank == 0`；EndpointTrainer 看 objective 是否需要 `ref`，GRPO 看 `kl_beta > 0`）、`state_dict`/`load_state_dict`、`_train_on_rollouts`、`run()`（含 `validation_non_ema`）。子类实现 `_build_train_plan(rollouts)` 与 `_loss_batched(items, rollouts, advantages)`，可选 `_precompute`。
-- `EndpointTrainer(RolloutTrainerBase)`：在 rollout 终点上训练的族，字段 `objective`、`train_timesteps`、`ema_old`。前向规则：`grid_index` 非 `None` 的 item 走 `SampleRun.guided_velocity(x_t, grid_index)`（rollout 的实际 plan + `train_predictor`），连续 timestep 走 `train_predictor.velocity`；old/ref 速度按 `objective.required_policies()` 缓存在 `item.cache`（`precompute_aux_model_outputs`）或 `no_grad` 现算。
-- `Objective`（registry union，`"type": nft | ram | awm | weighted_fm`）：纯数学，`compute(TrainPoint, PolicyVelocities) -> LossOutput`，加 `rollout_policy()`（`current`/`old`，谁采样）与 `required_policies()`（`old`/`ref`）。方法超参（`beta`、`kl_beta`、`reward_multiplier`、`off_policy`……）都在这一块。
+- `EndpointTrainer(RolloutTrainerBase)`（`endpoint.py`，与 objective 契约同文件）：在 rollout 终点上训练的族，字段 `objective`、`train_timesteps`、`ema_old`。前向规则：`grid_index` 非 `None` 的 item 走 `SampleRun.guided_velocity(x_t, grid_index)`（rollout 的实际 plan + `train_predictor`），连续 timestep 走 `train_predictor.velocity`；old/ref 速度按 `objective.required_policies()` 缓存在 `item.cache`（`precompute_aux_model_outputs`）或 `no_grad` 现算。
+- `Objective`（registry union，`"type": nft | ram | awm | weighted_fm`）：纯数学，`compute(TrainPoint, PolicyVelocities) -> LossOutput`，加 `rollout_policy()`（`current`/`old`，谁采样）与 `required_policies()`（`old`/`ref`）。方法超参（`beta`、`kl_beta`、`reward_multiplier`、`off_policy`……）都在这一块。契约（`BaseObjective`/`TrainPoint`/`PolicyVelocities`/`LossOutput`/registry）在 `endpoint.py`，每个成员和它的 preset 同文件（`nft.py`/`ram.py`/`awm.py`；`weighted_fm.py` 只有 objective、没有 preset）。
 - `TrainTimesteps`（registry union）：`grid`——按下标在 rollout 网格上取最噪的 `window` 比例，`count`/`fraction`、`exclude_first`、`random`/`stratified`；`continuous`——`count` × `TimestepWeighting`。窗是下标比例，所有 rank 的 item 数只依赖步数。
-- preset（`nft.py`/`ram.py`/`awm.py`）：只设 `training_type`、`objective`、`train_timesteps`、`ema_old`、`clip_grad_norm` 的默认值，`launch.type` 不变。配置中的 `"objective"`/`"train_timesteps"` 块必须带 `"type"`（或写裸字符串取全默认）。
+- preset（`nft.py`/`ram.py`/`awm.py`，各自的 objective 在同一文件）：只设 `training_type`、`objective`、`train_timesteps`、`ema_old`、`clip_grad_norm` 的默认值，`launch.type` 不变。配置中的 `"objective"`/`"train_timesteps"` 块必须带 `"type"`（或写裸字符串取全默认）。
 
 ### Mixin
 

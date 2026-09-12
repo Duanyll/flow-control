@@ -9,7 +9,10 @@ command processes.
 
 
 def import_builtin_trainers() -> None:
-    """Import the built-in trainer modules so they register in ``trainer_registry``.
+    """Import the built-in trainer and objective modules so they register.
+
+    Trainers land in ``trainer_registry``, objectives in ``objective_registry``
+    (``weighted_fm`` has no trainer of its own).
 
     Called by the training entry points (``launch._run_child``, ``seed``,
     ``export``, ``schema``) before resolving a trainer; plugin trainers register
@@ -18,5 +21,5 @@ def import_builtin_trainers() -> None:
     """
     import importlib
 
-    for name in ("sft", "grpo", "nft", "awm", "ram", "inference"):
+    for name in ("sft", "grpo", "nft", "awm", "ram", "weighted_fm", "inference"):
         importlib.import_module(f"flow_control.training.{name}")

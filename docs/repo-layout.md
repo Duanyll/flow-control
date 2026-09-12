@@ -90,10 +90,12 @@ launch`/`seed`/`export` dispatch through the registry uniformly.
 
 The RL trainers share one loop. `RolloutTrainerBase`
 (`flow_control/training/rollout_trainer.py`) owns the optimizer / EMA / checkpoint /
-`run()` skeleton; `GrpoTrainer` subclasses it directly, and `EndpointTrainer` adds the
+`run()` skeleton; `GrpoTrainer` subclasses it directly, and `EndpointTrainer`
+(`flow_control/training/endpoint.py`, together with the objective contract) adds the
 endpoint family's two config axes, both registry unions: `objective`
-(`flow_control/training/objective.py`: `nft` / `ram` / `awm` / `weighted_fm` — the loss
-math plus which policies it samples with and needs) and `train_timesteps`
+(`nft` / `ram` / `awm` / `weighted_fm` — the loss math plus which policies it samples
+with and needs; each lives in its method file next to its preset trainer,
+`weighted_fm.py` holds the preset-less one) and `train_timesteps`
 (`flow_control/training/train_timesteps.py`: `grid` / `continuous`). `nft` / `ram` /
 `awm` are presets over `EndpointTrainer` that only set defaults, so a config's
 `objective` / `train_timesteps` blocks (each with an explicit `type`) are what

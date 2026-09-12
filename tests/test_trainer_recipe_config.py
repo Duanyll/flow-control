@@ -22,6 +22,7 @@ from flow_control.samplers import (
 )
 from flow_control.samplers.solver import FlowSolver
 from flow_control.training.awm import AwmTrainer
+from flow_control.training.endpoint import EndpointTrainItem
 from flow_control.training.grpo import GrpoTrainer
 from flow_control.training.grpo_sampling import (
     GrpoCollector,
@@ -29,10 +30,8 @@ from flow_control.training.grpo_sampling import (
     step_log_prob,
 )
 from flow_control.training.mixins import Rollout
-from flow_control.training.nft import NftTrainer
-from flow_control.training.objective import NftObjective
+from flow_control.training.nft import NftObjective, NftTrainer
 from flow_control.training.ram import RamTrainer
-from flow_control.training.rollout_trainer import EndpointTrainItem
 from flow_control.training.sft import SftTrainer
 from flow_control.training.weighting import LogitNormalTimestepWeighting
 

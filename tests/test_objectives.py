@@ -7,14 +7,10 @@ from pathlib import Path
 
 import torch
 
-from flow_control.training.objective import (
-    AwmObjective,
-    BaseObjective,
-    NftObjective,
-    PolicyVelocities,
-    RamObjective,
-    TrainPoint,
-)
+from flow_control.training.awm import AwmObjective
+from flow_control.training.endpoint import BaseObjective, PolicyVelocities, TrainPoint
+from flow_control.training.nft import NftObjective
+from flow_control.training.ram import RamObjective
 
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:

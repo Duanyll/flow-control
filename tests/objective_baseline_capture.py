@@ -4,7 +4,7 @@ The fixtures were captured from the pre-refactor per-item losses
 (``_nft_objective``, ``_ram_objective``, ``_awm_objective``) that the
 trainer-layering refactor (``draft/sampler-rethink/09-trainer-layering.md``
 §C.1) ported verbatim behind one ``Objective.compute`` contract
-(``flow_control.training.objective``). This harness evaluates the objectives on
+(``flow_control.training.endpoint``). This harness evaluates the objectives on
 fixed inputs and stores loss, gradient and the inputs themselves, so the port
 is proven bitwise instead of "close enough"; ``tests/test_objectives.py``
 replays the same fixtures as a collected test.
@@ -37,7 +37,8 @@ from typing import Any
 import torch
 from pydantic import TypeAdapter
 
-from flow_control.training.objective import (
+from flow_control.training import import_builtin_trainers
+from flow_control.training.endpoint import (
     BaseObjective,
     Objective,
     PolicyVelocities,
@@ -77,6 +78,8 @@ CASES: list[tuple[str, str, dict[str, Any]]] = [
 """``(case name, kind, objective field overrides)``; names are unique per kind."""
 
 
+# The objectives register from their method modules (nft / ram / awm).
+import_builtin_trainers()
 _objective_adapter = TypeAdapter(Objective)
 
 

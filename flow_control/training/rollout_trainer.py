@@ -1,32 +1,20 @@
 """The rollout -> advantage -> update loop shared by the RL trainers.
 
-Two layers:
-
-- :class:`RolloutTrainerBase` owns everything that is method-independent:
-  the config surface, optimizer / scheduler / validation EMA / reference
-  backup, checkpoint state, the micro-update loop and the outer epoch loop.
-  Subclasses fill in how rollouts become train items
-  (:meth:`RolloutTrainerBase._build_train_plan`) and how a microbatch of items
-  becomes a loss (:meth:`RolloutTrainerBase._loss_batched`).
-- :class:`EndpointTrainer` is the endpoint family (NFT / RAM / AWM /
-  weighted flow matching): the clean rollout endpoint is re-noised at a
-  training timestep and an :class:`~flow_control.training.objective.Objective`
-  turns the velocities of the current / old / reference policies there into a
-  loss. The concrete trainers are presets over ``objective`` and
-  ``train_timesteps``; their math lives on the objective classes.
-
-Forward rule for endpoint items: a *grid* timestep (``grid_index`` set) is
-evaluated through the rollout plan's own step
-(``SampleRun.guided_velocity`` with ``train_predictor``), so per-step variant
-schedules and CFG++ see the executed transition; a *continuous* timestep has no
-transition and goes through ``train_predictor.velocity`` directly.
+:class:`RolloutTrainerBase` owns everything that is method-independent: the
+config surface, optimizer / scheduler / validation EMA / reference backup,
+checkpoint state, the micro-update loop and the outer epoch loop. Subclasses
+fill in how rollouts become train items
+(:meth:`RolloutTrainerBase._build_train_plan`) and how a microbatch of items
+becomes a loss (:meth:`RolloutTrainerBase._loss_batched`):
+:class:`~flow_control.training.grpo.GrpoTrainer` replays the recorded rollout
+steps, :class:`~flow_control.training.endpoint.EndpointTrainer` re-noises the
+rollout endpoints.
 """
 
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -41,14 +29,11 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from flow_control.adapters import ModelAdapter
-from flow_control.adapters.base import Batch
 from flow_control.processors import Processor
 from flow_control.rewards import Reward
-from flow_control.samplers import Executor, Sampler, SampleRequest
-from flow_control.samplers.calls import Calls
+from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
-from flow_control.utils.tensor import deep_move_to_device
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -73,15 +58,8 @@ from .mixins import (
     distributed_main,
 )
 from .mixins.microbatch import RolloutIndexedItem
-from .objective import Objective, PolicyRole, PolicyVelocities, TrainPoint
-from .train_timesteps import TrainTimesteps
 
 logger = get_logger(__name__)
-
-POLICY_ROLE_ORDER: tuple[PolicyRole, ...] = ("old", "ref")
-"""Auxiliary forwards run in this fixed order on every rank. Iterating the
-objective's ``frozenset`` directly would follow per-process string hashing and
-could desynchronize the collective forward sequence across ranks."""
 
 
 class RolloutTrainerBase[ItemT: RolloutIndexedItem](
@@ -471,270 +449,3 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
             self.save_dcp_checkpoint(
                 self.get_checkpoint_dir(self._current_step) + "_final"
             )
-
-
-# =============================================================================== #
-#                               Endpoint trainers                                 #
-# =============================================================================== #
-
-
-@dataclass(slots=True)
-class EndpointTrainItem:
-    rollout_idx: int
-    sigma: float
-    """Training timestep, ``1`` = pure noise."""
-    grid_index: int | None
-    """Index of ``sigma`` on the rollout plan, or ``None`` for a continuous draw."""
-    noise: torch.Tensor | None = None
-    """The re-noising ``eps``; drawn once by precompute so the cached velocities
-    match the training input, otherwise fresh per loss evaluation."""
-    cache: dict[PolicyRole, torch.Tensor] = field(default_factory=dict)
-    """Detached auxiliary velocities by policy role."""
-
-
-@dataclass(slots=True)
-class _Prepared:
-    """One item on device: the batch already carries ``noisy_latents = x_t``."""
-
-    item: EndpointTrainItem
-    rollout: Rollout
-    batch: Batch
-    negative: Batch | None
-    point: TrainPoint
-
-
-class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
-    """Re-noise rollout endpoints and train an :class:`Objective` on them.
-
-    ``objective`` decides which policy samples the rollouts and which auxiliary
-    velocities the loss needs; ``train_timesteps`` decides where each endpoint
-    is re-noised. The old policy is a lagged EMA (``ema_old``) stepped once per
-    outer epoch; the reference policy is the frozen initial weights.
-    """
-
-    objective: Objective
-    train_timesteps: TrainTimesteps
-    ema_old: EMAConfig
-    """Old / lagged policy EMA (stepped once per outer epoch). Required, like
-    ``objective`` and ``train_timesteps``: every preset chooses its own."""
-
-    _old_ema: EMAOptimizer
-
-    # --------------------------------- Hooks ------------------------------------ #
-
-    def _needs_reference(self) -> bool:
-        return "ref" in self.objective.required_policies()
-
-    def _make_aux_optimizers(self, params: list[torch.nn.Parameter]) -> None:
-        self._old_ema = EMAOptimizer(params, self.ema_old)
-        logger.info(
-            f"Old-policy EMA created (decay={self.ema_old.decay}, "
-            f"warmup={self.ema_old.warmup.type})."
-        )
-
-    def _aux_state_dict(self, opts: StateDictOptions) -> dict[str, Any]:
-        return {
-            "optim_ema_old": get_optimizer_state_dict(
-                self.transformer, self._old_ema, options=opts
-            )
-        }
-
-    def _load_aux_state_dict(
-        self, state_dict: dict[str, Any], opts: StateDictOptions
-    ) -> None:
-        if "optim_ema_old" in state_dict:
-            set_optimizer_state_dict(
-                self.transformer,
-                self._old_ema,
-                state_dict["optim_ema_old"],
-                options=opts,
-            )
-            self._old_ema.coerce_buffer_dtype()
-
-    def _rollout_scope(self) -> AbstractContextManager[None]:
-        if self.objective.rollout_policy() == "old":
-            return apply_ema_maybe(self._old_ema)
-        return nullcontext()
-
-    def _after_train_epoch(self) -> None:
-        self._old_ema.step()
-
-    def _policy_scope(self, role: PolicyRole) -> AbstractContextManager[None]:
-        if role == "old":
-            return apply_ema_maybe(self._old_ema)
-        return self.reference_model()
-
-    # ------------------------------- Train plan --------------------------------- #
-
-    def _build_train_plan(
-        self, rollouts: list[Rollout]
-    ) -> list[list[EndpointTrainItem]]:
-        # Resolve the scalar plan data once per rollout. For device-backed
-        # storage this is one host transfer here, never one sync per model eval.
-        rollout_sigmas = [
-            [transition.sigma for transition in rollout.sampling_plan]
-            for rollout in rollouts
-        ]
-        train_plan: list[list[EndpointTrainItem]] = []
-        for _ in range(self.num_inner_epochs):
-            items: list[EndpointTrainItem] = []
-            for rollout_idx in torch.randperm(len(rollouts)).tolist():
-                items.extend(
-                    EndpointTrainItem(rollout_idx, sigma, grid_index)
-                    for sigma, grid_index in self.train_timesteps.draw(
-                        rollout_sigmas[rollout_idx]
-                    )
-                )
-            train_plan.append(items)
-        return train_plan
-
-    # ------------------------------- Prediction --------------------------------- #
-
-    def _make_point(
-        self, item: EndpointTrainItem, batch: Batch, advantage: torch.Tensor
-    ) -> TrainPoint:
-        x0 = batch["clean_latents"].float()
-        noise = (
-            torch.randn_like(x0)
-            if item.noise is None
-            else item.noise.to(device=self.device, dtype=torch.float32)
-        )
-        return TrainPoint(
-            x0=x0,
-            noise=noise,
-            t=torch.tensor([item.sigma], device=self.device, dtype=torch.float32),
-            advantage=advantage.to(device=self.device, dtype=torch.float32).view(1),
-        )
-
-    def _prepare(
-        self,
-        items: list[EndpointTrainItem],
-        rollouts: list[Rollout],
-        advantages: torch.Tensor,
-    ) -> list[_Prepared]:
-        prepared: list[_Prepared] = []
-        for item in items:
-            rollout = rollouts[item.rollout_idx]
-            batch = deep_move_to_device(rollout.batch, self.device)
-            point = self._make_point(item, batch, advantages[item.rollout_idx])
-            batch["noisy_latents"] = point.xt
-            prepared.append(
-                _Prepared(
-                    item,
-                    rollout,
-                    batch,
-                    deep_move_to_device(rollout.negative_batch, self.device),
-                    point,
-                )
-            )
-        return prepared
-
-    def _predict(self, prepared: list[_Prepared]) -> list[torch.Tensor]:
-        """``train_predictor`` velocities at every point, in one collective pass.
-
-        One ``train_timesteps`` draws either only grid or only continuous
-        timesteps, so a microbatch is homogeneous. Continuous points are
-        independent evaluations; grid points run through the rollout plan's
-        step so the predictor sees the executed transition.
-        """
-        if prepared[0].item.grid_index is None:
-            return self.predict_training(
-                [entry.batch for entry in prepared],
-                [entry.point.t for entry in prepared],
-                [entry.negative for entry in prepared],
-            )
-        gens: list[Calls[torch.Tensor]] = []
-        for entry in prepared:
-            batch, negative, plan = (
-                entry.batch,
-                entry.negative,
-                entry.rollout.sampling_plan,
-            )
-            run = self.rollout_sampler.make_run(
-                SampleRequest(
-                    batch=batch,
-                    negative_batch=self.training_negative(batch, len(plan), negative),
-                ),
-                plan=plan,
-                predictor=self.train_predictor,
-            )
-            assert entry.item.grid_index is not None, "homogeneous microbatch"
-            gens.append(run.guided_velocity(entry.point.xt, entry.item.grid_index))
-        # Enumerate the configured grid, not this rank's executed plan: an
-        # SDEdit-sliced plan is batch dependent, and every rank must run the
-        # same variant collectives (same rule as GRPO's replay_steps).
-        variants = self.train_predictor.variant_keys(self.rollout_sampler.steps)
-        return Executor(self.model, variants or [None]).evaluate(gens)
-
-    def _required_roles(self) -> Iterator[PolicyRole]:
-        required = self.objective.required_policies()
-        return (role for role in POLICY_ROLE_ORDER if role in required)
-
-    def _loss_batched(
-        self,
-        items: list[EndpointTrainItem],
-        rollouts: list[Rollout],
-        advantages: torch.Tensor,
-    ) -> torch.Tensor:
-        prepared = self._prepare(items, rollouts, advantages)
-        aux: dict[PolicyRole, list[torch.Tensor]] = {}
-        for role in self._required_roles():
-            if all(role in entry.item.cache for entry in prepared):
-                aux[role] = [
-                    entry.item.cache[role].to(device=self.device, dtype=torch.float32)
-                    for entry in prepared
-                ]
-            else:
-                with torch.no_grad(), self._policy_scope(role):
-                    aux[role] = [v.detach() for v in self._predict(prepared)]
-
-        losses: list[torch.Tensor] = []
-        for index, (entry, current) in enumerate(
-            zip(prepared, self._predict(prepared), strict=True)
-        ):
-            out = self.objective.compute(
-                entry.point,
-                PolicyVelocities(
-                    current=current,
-                    old=aux["old"][index] if "old" in aux else None,
-                    ref=aux["ref"][index] if "ref" in aux else None,
-                ),
-            )
-            self.log_aggregated_metrics(
-                {f"train/{key}": value for key, value in out.metrics.items()}
-            )
-            losses.append(out.loss)
-        return torch.stack(losses).mean()
-
-    # ------------------------------- Precompute --------------------------------- #
-
-    def _precompute(
-        self,
-        rollouts: list[Rollout],
-        train_plan: list[list[EndpointTrainItem]],
-        advantages: torch.Tensor,
-    ) -> None:
-        flat_items = [item for items in train_plan for item in items]
-        if len(flat_items) == 0:
-            return
-
-        with self._precompute_scope() as progress:
-            prepare_task = progress.add_task("Prepare cache", total=len(flat_items))
-            # Draw the noise once so every cached velocity sees the exact x_t
-            # the update loop will train on.
-            for item in flat_items:
-                item.noise = torch.randn_like(
-                    rollouts[item.rollout_idx].batch["clean_latents"],
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                progress.advance(prepare_task)
-            for role in self._required_roles():
-                task = progress.add_task(f"Precompute {role}", total=len(flat_items))
-                with self._policy_scope(role):
-                    for micro_items in self.iter_train_micro_batches(flat_items):
-                        prepared = self._prepare(micro_items, rollouts, advantages)
-                        velocities = self._predict(prepared)
-                        for item, velocity in zip(micro_items, velocities, strict=True):
-                            item.cache[role] = velocity.detach()
-                        progress.advance(task, advance=len(micro_items))
