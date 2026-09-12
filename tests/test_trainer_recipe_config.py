@@ -1,7 +1,6 @@
 """Trainer config, rollout metadata and GRPO replay integration tests."""
 
 import unittest
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -30,8 +29,10 @@ from flow_control.training.grpo_sampling import (
     step_log_prob,
 )
 from flow_control.training.mixins import Rollout
-from flow_control.training.nft import NftCachedTargets, NftTrainer, NftTrainItem
+from flow_control.training.nft import NftTrainer
+from flow_control.training.objective import NftObjective
 from flow_control.training.ram import RamTrainer
+from flow_control.training.rollout_trainer import EndpointTrainItem
 from flow_control.training.sft import SftTrainer
 from flow_control.training.weighting import LogitNormalTimestepWeighting
 
@@ -313,8 +314,10 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         for epoch in plan:
             self.assertEqual(len(epoch), len(sigmas))
             for item in epoch:
+                self.assertIsInstance(item, EndpointTrainItem)
                 self.assertIsInstance(item.sigma, float)
-                self.assertEqual(item.sigma, sigmas[item.timestep_idx])
+                assert item.grid_index is not None
+                self.assertEqual(item.sigma, sigmas[item.grid_index])
 
         # The R3/R4 observer migration initially left ordinary NFT rollouts
         # without a plan, so per-step variants and CFG++ failed during training.
@@ -367,56 +370,79 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         self.assertIsNone(collected.recorded_steps)
         self.assertEqual(len(collected.sampling_plan), 4)
         self.assertEqual(sum(step.eta > 0 for step in collected.sampling_plan), 1)
-        item = NftTrainItem(
-            rollout_idx=0, timestep_idx=1, sigma=collected.sampling_plan[1].sigma
+        item = EndpointTrainItem(
+            rollout_idx=0, sigma=collected.sampling_plan[1].sigma, grid_index=1
         )
-        predictions = trainer._predict_batched([trainer._make_run(collected)], [item])
-        self.assertTrue(torch.isfinite(predictions[0]).all())
+        (prediction,) = trainer._predict(
+            trainer._prepare([item], [collected], torch.zeros(1))
+        )
+        self.assertTrue(torch.isfinite(prediction).all())
 
         # S2 precision review: teacher-cache scalar products ran in bf16,
-        # while .double() in normalization made the final NFT loss fp64.
-        trainer.beta = 0.3
-        trainer.kl_beta = 0.2
-        cached = NftCachedTargets(
-            timestep=torch.tensor([0.317], dtype=torch.bfloat16),
-            noisy_latents=torch.full((1, 1, 1), 0.734, dtype=torch.bfloat16),
-            old_prediction=torch.full((1, 1, 1), 0.121, dtype=torch.bfloat16),
-            ref_prediction=torch.full((1, 1, 1), -0.219, dtype=torch.bfloat16),
+        # while .double() in normalization made the final NFT loss fp64. The
+        # cached noise / old / ref tensors must be promoted to fp32 before the
+        # objective sees them, so a bf16 cache trains bitwise like an fp32 one.
+        trainer.objective = NftObjective(beta=0.3, kl_beta=0.2)
+        trainer.model = _ConditionModel()
+        conditioned: Any = collected.batch
+        conditioned["prompt_embeds"] = torch.tensor([[[3.0]]])
+        negative_conditioned: Any = collected.negative_batch
+        negative_conditioned["prompt_embeds"] = torch.tensor([[[1.0]]])
+        cached = EndpointTrainItem(
+            rollout_idx=0,
+            sigma=0.317,
+            grid_index=1,
+            noise=torch.full((1, 1, 1), 0.734, dtype=torch.bfloat16),
+            cache={
+                "old": torch.full((1, 1, 1), 0.121, dtype=torch.bfloat16),
+                "ref": torch.full((1, 1, 1), -0.219, dtype=torch.bfloat16),
+            },
         )
-        assert cached.ref_prediction is not None
-        promoted = replace(
-            cached,
-            timestep=cached.timestep.float(),
-            noisy_latents=cached.noisy_latents.float(),
-            old_prediction=cached.old_prediction.float(),
-            ref_prediction=cached.ref_prediction.float(),
+        assert cached.noise is not None
+        promoted = EndpointTrainItem(
+            rollout_idx=0,
+            sigma=0.317,
+            grid_index=1,
+            noise=cached.noise.float(),
+            cache={role: value.float() for role, value in cached.cache.items()},
         )
         loss_values = []
         gradients = []
         with patch.object(_NftProbe, "log_aggregated_metrics"):
             for targets in (cached, promoted):
-                prepared = trainer._prepare_nft_loss_input(
-                    collected,
-                    torch.tensor([0.23], dtype=torch.bfloat16),
-                    0.317,
-                    targets,
+                loss = trainer._loss_batched(
+                    [targets], [collected], torch.tensor([0.23], dtype=torch.bfloat16)
                 )
-                prediction = torch.full((1, 1, 1), 0.354421, requires_grad=True)
-                loss = trainer._nft_objective(prepared, prediction)
                 self.assertEqual(loss.dtype, torch.float32)
-                loss.backward()
                 loss_values.append(loss.detach())
-                gradients.append(prediction.grad)
+                gradients.append(torch.autograd.grad(loss, trainer.model.gain)[0])
         torch.testing.assert_close(*loss_values, rtol=0, atol=0)
         torch.testing.assert_close(*gradients, rtol=0, atol=0)
+        self.assertEqual(trainer.model.forward_batch_sizes, [2, 2])
 
-    def test_nft_timestep_range_keeps_float32_boundary(self) -> None:
+    def test_nft_timestep_window_is_index_based(self) -> None:
+        # NFT's sigma-threshold ``timestep_range`` made the per-rank item count
+        # depend on the rollout's sigma values (resolution-dependent shift);
+        # the grid window keeps the noisiest index fraction instead.
         trainer = _NftProbe.model_validate(
-            {"timestep_range": 0.3, "train_predictor": "model"}
+            {
+                "train_timesteps": {"type": "grid", "window": 0.3},
+                "train_predictor": "model",
+            }
         )
-        sigmas = torch.tensor([0.7, 0.699, 0.8], dtype=torch.float32).tolist()
-
-        self.assertEqual(trainer._eligible_timestep_indices(sigmas), [0, 2])
+        uniform = [1.0 - i / 10 for i in range(10)]
+        shifted = [s / (s + (1 - s) / 3) for s in uniform]
+        for sigmas, expected in (
+            ([0.7, 0.699, 0.8], [0]),
+            ([0.95, 0.5, 0.05], [0]),
+            (uniform, [0, 1, 2]),
+            (shifted, [0, 1, 2]),
+        ):
+            drawn = trainer.train_timesteps.draw(sigmas)
+            self.assertEqual(sorted(i for _, i in drawn if i is not None), expected)
+            self.assertEqual(
+                sorted(sigma for sigma, _ in drawn), sorted(sigmas[i] for i in expected)
+            )
 
 
 if __name__ == "__main__":
