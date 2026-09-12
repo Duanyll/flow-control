@@ -1,11 +1,13 @@
-"""Freeze the NFT / RAM / AWM objective numerics before the trainer split.
+"""Freeze the NFT / RAM / AWM objective numerics across the trainer split.
 
-Each trainer carries a per-item loss (``_nft_objective``, ``_ram_objective``,
-``_awm_objective``) that the trainer-layering refactor
-(``draft/sampler-rethink/09-trainer-layering.md`` §C.1) ports verbatim behind
-one ``Objective.compute`` contract. This harness evaluates the *pre-refactor*
-losses on fixed inputs and stores loss, gradient and the inputs themselves, so
-the port can be proven bitwise instead of "close enough".
+The fixtures were captured from the pre-refactor per-item losses
+(``_nft_objective``, ``_ram_objective``, ``_awm_objective``) that the
+trainer-layering refactor (``draft/sampler-rethink/09-trainer-layering.md``
+§C.1) ported verbatim behind one ``Objective.compute`` contract
+(``flow_control.training.objective``). This harness evaluates the objectives on
+fixed inputs and stores loss, gradient and the inputs themselves, so the port
+is proven bitwise instead of "close enough"; ``tests/test_objectives.py``
+replays the same fixtures as a collected test.
 
 Fixture layout, ``tests/fixtures/objective_baselines/{nft,ram,awm}.pt`` — one
 flat ``dict[str, Tensor]`` per kind, loadable with ``weights_only=True``:
@@ -16,12 +18,13 @@ flat ``dict[str, Tensor]`` per kind, loadable with ``weights_only=True``:
     <case>/<combo>/t|adv          ``[1]`` float32 timestep (1 = pure noise) and
                                   advantage
     <case>/<combo>/old|ref        auxiliary-policy velocities; present only when
-                                  the trainer would have computed that role for
-                                  the case (AWM's ``ema_prediction`` is ``old``)
-    <case>/grad_reaches_old|ref   0-dim bool: whether the pre-refactor code lets
-                                  gradient flow into that auxiliary input when it
-                                  requires grad (informational; the trainers
-                                  compute them under ``no_grad``)
+                                  ``objective.required_policies()`` contains the
+                                  role (AWM's ``ema_prediction`` is ``old``)
+    <case>/grad_reaches_old|ref   0-dim bool, pre-refactor record only: whether
+                                  the trainer-era code let gradient reach that
+                                  auxiliary input. ``Objective.compute`` detaches
+                                  ``old``/``ref`` by contract, so ``--check``
+                                  skips these keys and a recapture omits them.
 
 Regenerate only when an objective changes on purpose, and commit the new
 fixtures together with the change that caused them.
@@ -32,18 +35,19 @@ Usage:
 """
 
 import argparse
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import TypeAdapter
 
-from flow_control.samplers import Sampler, SampleRun
-from flow_control.training.awm import AwmTrainer, _AwmLossInput
-from flow_control.training.nft import NftTrainer, _NftLossInput
-from flow_control.training.ram import RamTrainer, _RamLossInput
+from flow_control.training.objective import (
+    BaseObjective,
+    Objective,
+    PolicyVelocities,
+    TrainPoint,
+)
 from flow_control.utils.logging import console
 
 BASELINE_DIR = Path(__file__).resolve().parent / "fixtures/objective_baselines"
@@ -75,59 +79,14 @@ CASES: list[tuple[str, str, dict[str, Any]]] = [
     ("elbo", "awm", {"kl_weight": "elbo", "kl_ema_weight": "elbo"}),
     ("advantage_max05", "awm", {"advantage_max": 0.5}),
 ]
-"""``(case name, kind, trainer field overrides)``; names are unique per kind."""
+"""``(case name, kind, objective field overrides)``; names are unique per kind."""
 
 
-class _ProbeOverrides(BaseModel):
-    """Defaults for the heavy required trainer fields; no model is ever loaded."""
-
-    model: Any = None
-    processor: Any = None
-    reward: Any = None
-    dataset: Any = None
-    launch: Any = None
-    checkpoint_root: str = ""
-    experiment_name: str = "probe"
-    seed_checkpoint_dir: str = ""
-    num_batches_per_epoch: int = 1
-    num_prompts_per_batch: int = 1
-    num_rollouts_per_prompt: int = 1
-    rollout_sampler: Sampler = Field(default_factory=Sampler)
-    validation_sampler: Sampler = Field(default_factory=Sampler)
-
-    @property
-    def device(self) -> torch.device:
-        return torch.device("cpu")
-
-    def log_aggregated_metrics(
-        self, metrics: Mapping[str, float | torch.Tensor]
-    ) -> None:
-        """The objectives log inline; the fixture only keeps loss and grad."""
+_objective_adapter = TypeAdapter(Objective)
 
 
-class _NftProbe(_ProbeOverrides, NftTrainer):
-    pass
-
-
-class _RamProbe(_ProbeOverrides, RamTrainer):
-    pass
-
-
-class _AwmProbe(_ProbeOverrides, AwmTrainer):
-    pass
-
-
-Trainer = NftTrainer | RamTrainer | AwmTrainer
-
-PROBES: dict[str, type[Trainer]] = {
-    "nft": _NftProbe,
-    "ram": _RamProbe,
-    "awm": _AwmProbe,
-}
-
-
-def make_probe(kind: str, kwargs: dict[str, Any]) -> Trainer:
-    return PROBES[kind].model_validate({"train_predictor": "model", **kwargs})
+def make_objective(kind: str, kwargs: dict[str, Any]) -> BaseObjective:
+    return _objective_adapter.validate_python({"type": kind, **kwargs})
 
 
 @dataclass(slots=True)
@@ -195,104 +154,20 @@ def inputs_from_fixture(
     ]
 
 
-# ------------------------------------------------------------------------------
-# The pre-refactor entry points. S1 replaces ``required_roles`` with
-# ``objective.required_policies()`` and ``old_api_loss`` with
-# ``objective.compute(point, velocities).loss``; nothing else needs to move.
-# ------------------------------------------------------------------------------
-
-
-def required_roles(trainer: Trainer) -> frozenset[str]:
-    """Which auxiliary velocities ``*_loss_batched`` computes for this config."""
-    if isinstance(trainer, NftTrainer):
-        return frozenset({"old"} | ({"ref"} if trainer.kl_beta > 0 else set()))
-    if isinstance(trainer, RamTrainer):
-        return frozenset({"old", "ref"})
-    return frozenset(
-        ({"ref"} if trainer.beta > 0 else set())
-        | ({"old"} if trainer._needs_ema_prediction else set())
-    )
-
-
-def old_api_loss(
-    trainer: Trainer,
-    combo: ComboInputs,
-    forward: torch.Tensor,
-    old: torch.Tensor | None,
-    ref: torch.Tensor | None,
-) -> torch.Tensor:
-    """Call the per-item objective exactly as the trainer's ``*_loss_batched`` does."""
-    if isinstance(trainer, NftTrainer):
-        # ``_prepare_nft_loss_input`` interpolates x_t with this exact expression.
-        t_expanded = combo.t.view(-1, *([1] * (combo.x0.ndim - 1)))
-        xt = (1.0 - t_expanded) * combo.x0 + t_expanded * combo.noise
-        prepared = _NftLossInput(
-            # Only ``_predict_batched`` reads ``run``; the objective never does.
-            run=cast(SampleRun, None),
-            timestep=combo.t,
-            sigma=float(combo.t.item()),
-            x0=combo.x0,
-            noisy_latents=xt,
-            advantage=combo.adv,
-            old_prediction=old,
-            ref_prediction=ref,
-        )
-        return trainer._nft_objective(prepared, forward)
-    if isinstance(trainer, RamTrainer):
-        return trainer._ram_objective(
-            _RamLossInput(
-                batch=None,
-                x0=combo.x0,
-                timestep=combo.t,
-                noise=combo.noise,
-                advantage=combo.adv,
-                base_prediction=ref,
-                old_prediction=old,
-            ),
-            forward,
-        )
-    return trainer._awm_objective(
-        _AwmLossInput(
-            batch=None,
-            x0=combo.x0,
-            timestep=combo.t,
-            noise=combo.noise,
-            advantage=combo.adv,
-            ref_prediction=ref,
-            ema_prediction=old,
-        ),
-        forward,
-    )
-
-
 def evaluate_combo(
-    trainer: Trainer, combo: ComboInputs, roles: frozenset[str]
-) -> tuple[dict[str, torch.Tensor], dict[str, bool]]:
-    """Loss, gradient and the inputs used, plus which aux inputs receive gradient."""
+    objective: BaseObjective, combo: ComboInputs, roles: frozenset[str]
+) -> dict[str, torch.Tensor]:
+    """Loss, gradient and the inputs used for one combo."""
     aux = {role: getattr(combo, role) for role in sorted(roles)}
     forward = combo.forward.clone().requires_grad_(True)
-    loss = old_api_loss(trainer, combo, forward, aux.get("old"), aux.get("ref"))
+    point = TrainPoint(
+        x0=combo.x0, noise=combo.noise, t=combo.t, advantage=combo.adv, grid_index=None
+    )
+    loss = objective.compute(
+        point, PolicyVelocities(forward, aux.get("old"), aux.get("ref"))
+    ).loss
     (grad,) = torch.autograd.grad(loss, forward)
-
-    # Second pass with the aux velocities requiring grad: the trainers never do
-    # this (they come from ``no_grad`` forwards), so it must not change loss or
-    # the forward gradient; it only reveals whether the objective detaches them.
-    leaky = {role: value.clone().requires_grad_(True) for role, value in aux.items()}
-    forward_again = combo.forward.clone().requires_grad_(True)
-    loss_again = old_api_loss(
-        trainer, combo, forward_again, leaky.get("old"), leaky.get("ref")
-    )
-    grads = torch.autograd.grad(
-        loss_again, [forward_again, *leaky.values()], allow_unused=True
-    )
-    assert torch.equal(loss.detach(), loss_again.detach()) and grads[0] is not None
-    assert torch.equal(grad, grads[0])
-    reached = {
-        role: aux_grad is not None
-        for role, aux_grad in zip(leaky, grads[1:], strict=True)
-    }
-
-    record = {
+    return {
         "loss": loss.detach(),
         "grad": grad,
         "x0": combo.x0,
@@ -302,25 +177,18 @@ def evaluate_combo(
         "forward": combo.forward,
         **aux,
     }
-    return record, reached
 
 
 def evaluate_case(
     kind: str, kwargs: dict[str, Any], inputs: list[ComboInputs]
 ) -> dict[str, torch.Tensor]:
-    """Flat ``<combo>/<field>`` records for one case, plus the per-case leak flags."""
-    trainer = make_probe(kind, kwargs)
-    roles = required_roles(trainer)
+    """Flat ``<combo>/<field>`` records for one case."""
+    objective = make_objective(kind, kwargs)
+    roles = frozenset(objective.required_policies())
     out: dict[str, torch.Tensor] = {}
-    reached = dict.fromkeys(sorted(roles), False)
     for combo in inputs:
-        record, combo_reached = evaluate_combo(trainer, combo, roles)
-        for field, value in record.items():
+        for field, value in evaluate_combo(objective, combo, roles).items():
             out[f"{combo.name}/{field}"] = value
-        for role, flag in combo_reached.items():
-            reached[role] |= flag
-    for role, flag in reached.items():
-        out[f"grad_reaches_{role}"] = torch.tensor(flag)
     return out
 
 
@@ -360,12 +228,17 @@ def check() -> bool:
             inputs = inputs_from_fixture(fixture, name)
             for key, value in evaluate_case(kind, kwargs, inputs).items():
                 expected[f"{name}/{key}"] = value
+        # ``grad_reaches_*`` flags are the pre-refactor leak record (see the
+        # module docstring); the objectives detach by contract, so skip them.
         mismatched = sorted(
             key
             for key in fixture.keys() | expected.keys()
-            if key not in fixture
-            or key not in expected
-            or not _same(fixture[key], expected[key])
+            if "/grad_reaches_" not in key
+            and (
+                key not in fixture
+                or key not in expected
+                or not _same(fixture[key], expected[key])
+            )
         )
         if mismatched:
             ok = False
@@ -373,7 +246,7 @@ def check() -> bool:
             for key in mismatched[:20]:
                 console.print(f"  {key}")
         else:
-            console.print(f"{kind}: {len(fixture)} tensors match bitwise")
+            console.print(f"{kind}: {len(expected)} tensors match bitwise")
     return ok
 
 
