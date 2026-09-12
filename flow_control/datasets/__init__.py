@@ -17,7 +17,6 @@ from .lmdb import LMDBDataset, LMDBDataSink
 from .parquet import ParquetDataset
 from .pickle_directory import PickleDirectoryDataset, PickleDirectoryDataSink
 from .plain_directory import PlainDirectoryDataset
-from .prism_layers_pro import PrismLayersProDataset
 from .raw_directory import RawDirectoryDataset, RawDirectoryDataSink
 from .registry import dataset_registry, datasink_registry
 
@@ -197,7 +196,6 @@ __all__ = [
     "PickleDirectoryDataSink",
     "PickleDirectoryDataset",
     "PlainDirectoryDataset",
-    "PrismLayersProDataset",
     "RawDirectoryDataSink",
     "RawDirectoryDataset",
     "dataset_registry",

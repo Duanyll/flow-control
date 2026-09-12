@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from flow_control.rewards.base import BaseReward, reward_registry
 from flow_control.utils import device as devutil
+from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 
 
 def _import_pyiqa(module: str = "pyiqa") -> Any:
@@ -62,7 +63,7 @@ class PyIQAReward(BaseReward):
 
     Batch contract: ``clean_image`` is the image under evaluation as
     ``[1, C, H, W]`` in ``[0, 1]``; full-reference (FR) metrics additionally
-    read ``reference_image`` (the ground truth) in the same format and size.
+    read the :attr:`reference` condition image in the same format and size.
     No-reference (NR) metrics ignore the reference, so a battery of only NR
     metrics can score images without ground truth.
 
@@ -77,6 +78,9 @@ class PyIQAReward(BaseReward):
     type: Literal["pyiqa"] = "pyiqa"
     metrics: list[PyIQAMetricSpec] = Field(min_length=1)
     flip_lower_better: bool = True
+    reference: ConditionImageSpec = "reference"
+    """Condition image for full-reference metrics, e.g. ``"reference[0]"`` or
+    ``"control"``; it must have the generated image's shape."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -115,7 +119,7 @@ class PyIQAReward(BaseReward):
         if any(
             _default_config(spec.name)["metric_mode"] == "FR" for spec in self.metrics
         ):
-            fields.add("reference_image")
+            fields.add(ConditionImage.parse(self.reference).image_field)
         return fields
 
     def _load_model(self, device: torch.device) -> None:
@@ -130,16 +134,16 @@ class PyIQAReward(BaseReward):
     @torch.no_grad()
     def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         image = batch["clean_image"].to(device=self._device, dtype=torch.float32)
-        reference = batch.get("reference_image")
-        if reference is not None:
-            reference = reference.to(device=self._device, dtype=torch.float32)
+        reference: torch.Tensor | None = None
 
         scores = []
         for spec, model in zip(self.metrics, self._models, strict=True):
             if model.metric_mode == "FR":
                 if reference is None:
-                    raise ValueError(
-                        f"FR metric {spec.name!r} requires batch['reference_image']"
+                    reference = (
+                        ConditionImage.parse(self.reference)
+                        .image(batch)
+                        .to(device=self._device, dtype=torch.float32)
                     )
                 if reference.shape != image.shape:
                     raise ValueError(
@@ -188,8 +192,8 @@ if __name__ == "__main__":
     print(f"[bold]component weights:[/] {reward.component_weights}")
     reward.load_model(device)
 
-    good = reward.score({"clean_image": slightly_noisy, "reference_image": clean})
-    bad = reward.score({"clean_image": very_noisy, "reference_image": clean})
+    good = reward.score({"clean_image": slightly_noisy, "reference_images": [clean]})
+    bad = reward.score({"clean_image": very_noisy, "reference_images": [clean]})
     for label, result in [("slightly noisy", good), ("very noisy", bad)]:
         row = {
             k: f"{v:.4f}"

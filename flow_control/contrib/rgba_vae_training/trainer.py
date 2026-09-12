@@ -502,23 +502,6 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
 
     # ------------------------------ Training -------------------------------- #
 
-    def _maybe_blend_to_bg(self, target: torch.Tensor) -> torch.Tensor:
-        """With ``blend_prob``, composite RGBA over a random solid background.
-
-        Matches AlphaVAE: each RGB channel of the background is independently
-        sampled from {0.0, 0.5, 1.0}, and the result becomes fully opaque.
-        """
-        if torch.rand(1).item() >= self.blend_prob:
-            return target
-        rgb = target[:, :3]
-        alpha = target[:, 3:4]
-        bg = (
-            torch.randint(0, 3, (1, 3, 1, 1), device=target.device).to(target.dtype)
-            / 2.0
-        )
-        blended_rgb = rgb * alpha + bg * (1 - alpha)
-        return torch.cat([blended_rgb, torch.ones_like(alpha)], dim=1)
-
     def _prepare_target(self, batch: dict) -> torch.Tensor:
         """Extract clean_image, resize, and normalize to [-1, 1]."""
         if "target_image" in batch:

@@ -55,7 +55,8 @@ class PreprocessMixin(BaseTrainer):
         if save_extra:
             original_batch.update(processed_batch)
             processed_batch = original_batch
-        processed_batch["__key__"] = original_batch.get("__key__")
+        elif "__key__" in original_batch:
+            processed_batch["__key__"] = original_batch["__key__"]
         self._sample_latent_distributions(processed_batch)
         return cast(ProcessedBatch, processed_batch)
 

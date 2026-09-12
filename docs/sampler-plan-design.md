@@ -9,6 +9,9 @@ The processor stores the tile layout in each processed batch.
 The result exposes final latents through `run.ctx.latents` and the **executed**
 plan through `run.plan`; completion order may differ from submission order.
 
+The [batch dictionary contract](batch-contract.md) lists data fields, coordinate
+spaces and their producers/consumers. Execution state remains outside the batch.
+
 ## Execution
 
 1. Build the shifted/custom grid and solver plan. Resolution-dependent shift
@@ -68,9 +71,10 @@ evaluation gets fresh state even when several evaluations share one run.
 
 ## Configuration examples
 
-SDEdit starts from a clean batch tensor, selecting the first grid point at or
-below `strength`. Noise interpolation uses that selected sigma. `start.source`
-defaults to `noisy_latents`, or to `clean_latents` once `strength` is set:
+SDEdit starts from a condition image's latents, selecting the first grid point
+at or below `strength`. Noise interpolation uses that selected sigma.
+`start.source` is a [condition-image selector](batch-contract.md#condition-image-roles)
+defaulting to `noisy_latents`, or to `clean` once `strength` is set:
 
 ```jsonc
 "sampler": {
@@ -119,10 +123,11 @@ trainability, including checkpoint recomputation. An outer base/reference
 context takes precedence over branch choices. Loading/training two independent
 weight sets and learning a density-ratio classifier are separate work.
 
-Differential Diffusion is a projector consuming whole-image inpaint tensors:
+Differential Diffusion is a projector consuming the whole-image inpaint mask
+and a selectable source, defaulting to the `inpaint` condition image:
 
 ```jsonc
-"projectors": [{"type": "differential"}]
+"projectors": [{"type": "differential", "source": "inpaint"}]
 ```
 
 It preserves the previous pre-transition mask schedule. `post_combine` is the
@@ -211,7 +216,7 @@ are at least `overlap` and every origin is token-aligned.
 
 The processor preserves the full output `image_size` and writes:
 
-- `batch["tiling"]`: a `TileLayout` (`tile_size`, `overlap`, `stride`).
+- `batch["tiling"]`: a serialized `TileLayout` dictionary (`tile_size`, `overlap`, `stride`).
 - `batch["model_image_size"]`: the actual tile size. Resolution-dependent shift
   reads it, so a 4096-pixel output in 1024-pixel tiles gets the 1024-pixel grid.
 - `batch["tiles"]`: complete row-major per-tile conditions. Inputs may supply a
@@ -311,3 +316,37 @@ backward; branch/tile expansion is independently chunked by the adapter.
 Validation retains the 21 pre-refactor solver fixtures unchanged, and includes
 cross-module tests for CFG++/replay, variants, tiling, and KRepeat, plus real
 distributed CPU/GPU worker harnesses.
+
+## Planned DDNM extensions
+
+These components are not implemented yet. The intended split is:
+
+- `DDNMProjector`: correct a whole-image clean estimate in `post_combine`, after
+  the prediction tree has returned its velocity. Tiling and guidance remain
+  ordinary predictor composition; the projector needs no tile knowledge.
+- `DDNMPlusSampler`: own the supported trajectory, noise adjustment and time
+  travel. It can restrict solver/parameterization choices to those for which its
+  formulas are defined; it need not support every registered solver.
+
+The projector's velocity conversion follows directly from this repository's
+flow convention, `x_sigma = (1 - sigma) * x0 + sigma * noise`. For `sigma > 0`,
+with linear degradation `A`, pseudoinverse `A_dagger`, and a measurement `y` in
+the **same coordinate convention**:
+
+```text
+x0_hat = x_sigma - sigma * v
+delta = A_dagger(y - A(x0_hat))
+x0_projected = x0_hat + delta
+v_projected = (x_sigma - x0_projected) / sigma = v - delta / sigma
+```
+
+Thus the existing velocity-returning projector interface can express the
+clean-estimate projection without changing solver or executor interfaces.
+`sigma == 0` requires an explicit endpoint policy instead of this division.
+This algebra alone does not specify a DDNM+ transition or its noise covariance.
+
+The [batch contract's DDNM boundary](batch-contract.md#ddnm-inputoutput-boundary-planned)
+records the remaining observation, normalization and noise-unit requirements.
+Sampler registration and richer/data-dependent transition streams are still
+future work; existing replay and plan consumers need an explicit compatibility
+contract when those streams are introduced.

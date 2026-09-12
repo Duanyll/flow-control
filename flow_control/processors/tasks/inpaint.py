@@ -19,8 +19,9 @@ from ..components.prompts import PromptStr, parse_prompt
 class InpaintInputBatch(InputBatch):
     prompt: str
     negative_prompt: NotRequired[str | None]
+    inpaint_image: ImageTensor
+    """Source image; masked regions are regenerated, the rest is kept."""
     inpaint_mask: ImageTensor
-    clean_image: ImageTensor
 
 
 class InpaintTrainInputBatch(TrainInputBatch):
@@ -82,7 +83,9 @@ class InpaintProcessor(
     async def prepare_inference_batch(
         self, batch: InpaintInputBatch
     ) -> InpaintProcessedBatch:
-        inpaint_image = batch["clean_image"] = self.resize_image(batch["clean_image"])
+        inpaint_image = batch["inpaint_image"] = self.resize_image(
+            batch["inpaint_image"]
+        )
         image_size = (inpaint_image.shape[2], inpaint_image.shape[3])
         inpaint_mask, inpaint_mask_latents = self._prepare_inpaint_mask(
             batch["inpaint_mask"], image_size
@@ -119,6 +122,7 @@ class InpaintProcessor(
         clean_latents = self.encode_latents(
             clean_image, posterior=self.target_posterior
         )
+        # Training is self-supervised: the clean target is also the inpaint source.
         inpaint_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )

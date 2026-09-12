@@ -270,7 +270,7 @@ class EfficientLayeredProcessor(
         stacked_images = self._stack_all_images(
             batch["clean_image"], batch["layer_boxes"], batch["layer_images"]
         )
-        orig_size = batch["clean_image"].shape[2], batch["clean_image"].shape
+        orig_size = batch["clean_image"].shape[2], batch["clean_image"].shape[3]
         resized_images = self.resize_image(stacked_images)
         new_size = resized_images.shape[2], resized_images.shape[3]
         batch["clean_image"] = clean_image = resized_images[0:1]

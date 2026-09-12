@@ -15,10 +15,10 @@ class LongCatBatch(Batch):
     prompt_embeds: torch.Tensor
     """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
     txt_ids: NotRequired[torch.Tensor]
-    """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
+    """`[N, 3]` Used for adding positional embeddings to the text embeddings.
            Usually all zeros. Will be calculated if not present."""
     img_ids: NotRequired[torch.Tensor]
-    """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
+    """`[N, 3]` Used for adding positional embeddings to the image embeddings.
            Will be calculated if not present."""
 
 

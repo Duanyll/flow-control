@@ -18,10 +18,10 @@ class Flux1Batch(Batch):
     prompt_embeds: torch.Tensor
     """`[B, N, D]` Text embeddings from T5XXL text encoder."""
     txt_ids: NotRequired[torch.Tensor]
-    """`[B, N, 3]` Used for adding positional embeddings to the text embeddings.
+    """`[N, 3]` Used for adding positional embeddings to the text embeddings.
         Usually all zeros. Will be calculated if not present."""
     img_ids: NotRequired[torch.Tensor]
-    """`[B, N, 3]` Used for adding positional embeddings to the image embeddings.
+    """`[N, 3]` Used for adding positional embeddings to the image embeddings.
         Will be calculated if not present."""
 
 

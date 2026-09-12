@@ -8,6 +8,7 @@ from einops import repeat
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.adapters.base import Batch
+from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 from flow_control.utils.registry import Registry, RegistryUnion
 
 from .plan import EvalRequest, StepContext, Transition
@@ -76,6 +77,9 @@ class DifferentialDiffusion(BaseProjector):
     """
 
     type: Literal["differential"] = "differential"
+    source: ConditionImageSpec = "inpaint"
+    """Condition image whose latents the mask keeps, e.g. ``"inpaint"`` or
+    ``"reference[0]"``; it must match the generated latent geometry."""
 
     @staticmethod
     def _edit_strength(batch: Batch, latents: torch.Tensor) -> torch.Tensor:
@@ -109,12 +113,12 @@ class DifferentialDiffusion(BaseProjector):
         ctx: StepContext,
         transition: Transition,
     ) -> torch.Tensor:
-        source = _batch_tensor(batch, "inpaint_latents").to(latents)
+        source = ConditionImage.parse(self.source).latents(batch).to(latents)
         noise = _batch_tensor(batch, "noisy_latents").to(latents)
         if source.shape != latents.shape or noise.shape != latents.shape:
             raise ValueError(
-                "Differential diffusion requires inpaint_latents and noisy_latents to match the current latent shape "
-                f"{tuple(latents.shape)}; got {tuple(source.shape)} and {tuple(noise.shape)}."
+                f"Differential diffusion requires source {self.source} and noisy_latents to match the current "
+                f"latent shape {tuple(latents.shape)}; got {tuple(source.shape)} and {tuple(noise.shape)}."
             )
         sigma = latents.new_tensor(transition.sigma)
         reference = (1.0 - sigma) * source + sigma * noise

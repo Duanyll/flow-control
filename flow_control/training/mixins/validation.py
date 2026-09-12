@@ -108,7 +108,7 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         for items in self.validation_dataloader:
             for item in items:
                 batch = deep_move_to_device(item, self.device)
-                batch = self.preprocess_for_inference(batch)
+                batch = self.preprocess_for_inference(batch, save_extra=True)
                 batch = deep_cast_float_dtype(batch, model.dtype)
                 generator = torch.Generator(device=self.device).manual_seed(
                     derive_seed(base_seed, batch.get("__key__", "unknown"))

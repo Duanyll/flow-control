@@ -68,9 +68,8 @@ class GenevalReward(BaseReward):
     """GenEval reward based on Mask2Former object detection and CLIP color
     classification.
 
-    Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
-    ``batch["metadata"]`` (geneval metadata dict with ``tag``, ``include``,
-    ``exclude``, ``prompt`` fields).
+    Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and the
+    top-level GenEval fields ``tag``, ``include`` and ``exclude``.
     """
 
     type: Literal["geneval"] = "geneval"

@@ -5,6 +5,7 @@ import torchvision.transforms as T
 from pydantic import ConfigDict, PrivateAttr
 
 from flow_control.utils import device as devutil
+from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 
 from .base import BaseReward, reward_registry
 
@@ -13,8 +14,8 @@ from .base import BaseReward, reward_registry
 class CLIPImageSimilarityReward(BaseReward):
     """CLIP-based image-to-image cosine similarity reward.
 
-    Encodes ``batch["clean_image"]`` and ``batch["reference_image"]`` with a
-    CLIP image encoder, L2-normalizes the embeddings, and returns their cosine
+    Encodes ``batch["clean_image"]`` and the :attr:`reference` condition image
+    with a CLIP image encoder, L2-normalizes the embeddings, and returns their cosine
     similarity in ``[-1, 1]`` (typically in ``[0, 1]`` for natural images).
 
     The raw cosine similarity is returned as-is; configure the optional
@@ -24,6 +25,8 @@ class CLIPImageSimilarityReward(BaseReward):
 
     type: Literal["clip_image_similarity"] = "clip_image_similarity"
     model_name: str = "openai/clip-vit-large-patch14"
+    reference: ConditionImageSpec = "reference"
+    """Condition image to compare against, e.g. ``"reference[1]"`` or ``"control"``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -34,7 +37,7 @@ class CLIPImageSimilarityReward(BaseReward):
 
     @property
     def _batch_fields(self) -> set[str]:
-        return {"clean_image", "reference_image"}
+        return {"clean_image", ConditionImage.parse(self.reference).image_field}
 
     def _load_model(self, device: torch.device) -> None:
         from transformers import CLIPModel, CLIPProcessor
@@ -96,11 +99,11 @@ class CLIPImageSimilarityReward(BaseReward):
     def _score(self, batch: dict[str, Any]) -> torch.Tensor:
         """Compute CLIP image-similarity score for a single sample.
 
-        Expects ``batch["clean_image"]`` and ``batch["reference_image"]``, both
+        Expects ``batch["clean_image"]`` and the :attr:`reference` image, both
         ``[1, C, H, W]`` tensors in ``[0, 1]``.
         """
         clean = batch["clean_image"]
-        reference = batch["reference_image"]
+        reference = ConditionImage.parse(self.reference).image(batch)
 
         clean_embeds = self._encode(clean)
         reference_embeds = self._encode(reference)
@@ -149,7 +152,7 @@ if __name__ == "__main__":
 
     same_batch = {
         "clean_image": image_tensor,
-        "reference_image": image_tensor,
+        "reference_images": [image_tensor],
     }
     same_score = reward.score(same_batch)
     print(f"[bold]Identical image similarity:[/] {same_score.aggregate().item():.4f}")
@@ -159,7 +162,7 @@ if __name__ == "__main__":
 
     inverted_batch = {
         "clean_image": image_tensor,
-        "reference_image": inverted_tensor,
+        "reference_images": [inverted_tensor],
     }
     inverted_score = reward.score(inverted_batch)
     print(

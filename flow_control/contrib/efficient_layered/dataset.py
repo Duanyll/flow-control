@@ -8,10 +8,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from flow_control.datasets.registry import dataset_registry
 from flow_control.utils.logging import console
 from flow_control.utils.tensor import pil_to_tensor
-
-from .registry import dataset_registry
 
 
 @dataset_registry.register("prism_layers_pro")
@@ -53,7 +52,7 @@ class PrismLayersProDataset(Dataset):
                     torch.bfloat16
                 )
 
-        h, w = row_data["whole_image"].shape[1:3]
+        h, w = row_data["whole_image"].shape[-2:]
         output = {
             "__key__": record["id"],
             "prompt": row_data["whole_caption"],

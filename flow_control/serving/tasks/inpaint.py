@@ -17,7 +17,7 @@ class InpaintTemplate:
     """Inpainting: prompt + source image + mask image."""
 
     prompt: gr.Textbox
-    clean_image: gr.Image
+    inpaint_image: gr.Image
     inpaint_mask: gr.Image
 
     def render(self) -> list[gr.components.Component]:
@@ -27,24 +27,24 @@ class InpaintTemplate:
             lines=3,
         )
         with gr.Row():
-            self.clean_image = gr.Image(label="Source Image", type="pil", height=384)
+            self.inpaint_image = gr.Image(label="Source Image", type="pil", height=384)
             self.inpaint_mask = gr.Image(
                 label="Inpaint Mask (white = inpaint)", type="pil", height=384
             )
-        return [self.prompt, self.clean_image, self.inpaint_mask]
+        return [self.prompt, self.inpaint_image, self.inpaint_mask]
 
     def coerce(
         self,
         prompt: str,
-        clean_image: Image.Image | None,
+        inpaint_image: Image.Image | None,
         inpaint_mask: Image.Image | None,
     ) -> dict[str, Any]:
-        if clean_image is None:
+        if inpaint_image is None:
             raise gr.Error("Source image is required.")
         if inpaint_mask is None:
             raise gr.Error("Inpaint mask is required.")
         return {
             "prompt": prompt,
-            "clean_image": _coerce_to_image_tensor(clean_image),
+            "inpaint_image": _coerce_to_image_tensor(inpaint_image),
             "inpaint_mask": _coerce_to_image_tensor(inpaint_mask),
         }

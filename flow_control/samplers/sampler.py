@@ -4,12 +4,13 @@ import hashlib
 import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
-from typing import Any, Literal, cast
+from typing import Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.adapters.base import Batch, SamplerModel
+from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 from flow_control.utils.tensor import deep_move_to_device
 
 from .executor import Executor
@@ -40,9 +41,10 @@ class Start(BaseModel):
     """Read a source unchanged, or re-noise it at an aligned SDEdit strength."""
 
     model_config = ConfigDict(extra="forbid")
-    source: str | None = None
-    """Batch tensor to start from. Defaults to ``noisy_latents`` (pure noise), or
-    to ``clean_latents`` when ``strength`` is set (SDEdit)."""
+    source: ConditionImageSpec | None = None
+    """Condition image whose latents to start from, e.g. ``"inpaint"`` or
+    ``"reference[0]"``, or a literal batch key. Defaults to ``noisy_latents``
+    (pure noise), or to ``clean`` when ``strength`` is set (SDEdit)."""
     strength: float | None = Field(default=None, gt=0.0, le=1.0)
 
     def slice(self, plan: SamplingPlan) -> SamplingPlan:
@@ -60,13 +62,15 @@ class Start(BaseModel):
     def latents(
         self, batch: Batch, sigma: float, generator: torch.Generator | None
     ) -> torch.Tensor:
-        key = self.source or (
-            "noisy_latents" if self.strength is None else "clean_latents"
+        spec = ConditionImage.parse(
+            self.source or ("noisy_latents" if self.strength is None else "clean")
         )
-        source = cast("dict[str, Any]", batch).get(key)
-        if not isinstance(source, torch.Tensor):
-            raise ValueError(f"Start source {key!r} must name a tensor in the batch.")
-        source = source.float()
+        source = spec.latents(batch).float()
+        if source.shape != batch["noisy_latents"].shape:
+            raise ValueError(
+                f"Start source {spec} has shape {tuple(source.shape)}, but the "
+                f"model expects {tuple(batch['noisy_latents'].shape)}."
+            )
         if self.strength is None:
             return source
         noise = torch.randn(

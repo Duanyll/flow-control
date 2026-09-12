@@ -112,7 +112,9 @@ class QwenImageLayeredProcessor(
         image_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
-        num_layers = batch.get("num_layers", None) or self.default_num_layers
+        num_layers = batch.get("num_layers")
+        if num_layers is None:
+            num_layers = self.default_num_layers
 
         result = QwenLayeredProcessedBatch(
             image_size=image_size,
