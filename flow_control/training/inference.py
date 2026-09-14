@@ -27,7 +27,6 @@ from flow_control.data import (
     build_loader,
     is_padding,
 )
-from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
@@ -65,7 +64,6 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
 
     model: ModelAdapter
     sampler: Sampler
-    processor: Processor
     report: ReportConfig
     """Where the outputs go (design §10): ``metrics.jsonl`` with one line per
     sample, ``previews/<key>.png`` and optionally ``records/`` (a random cache of

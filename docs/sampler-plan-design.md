@@ -288,12 +288,16 @@ SFT/AWM/RAM conditional path; copy the old rollout guidance into this field to
 preserve stateless NFT/GRPO behavior. Examples have been migrated. Include tiling
 in both trees when training and sampling should use the same tile evaluation.
 
-The KRepeat data sampler groups bucketed prompts so corresponding rank positions
-share a resolution while preserving exactly K rollouts per prompt. Incompatible
-bucket capacities raise; repeats are never silently padded. Unbucketed datasets
-retain their prior selection semantics. Pairwise rewards group completions by
-`__key__` in the reward executor; all K rollouts stay local to one rank and
-incomplete groups raise instead of comparing different prompts.
+Rollout prompts come from `RowCursor` (`chunked`: consecutive rows of the
+cost-grouped plan, no repeats within a pass over the dataset; `independent`: a
+fresh random subset per epoch) and `expand_rollouts` splits the `M × K` rollouts
+across ranks with a stride, so the i-th rollout of every rank comes from
+cost-adjacent prompts while every prompt keeps exactly K rollouts. Short plan
+groups are padded at plan time (`__padding__`) and the cursor skips the padding;
+there are no buckets. Pairwise rewards group completions by `__key__` in the
+reward executor; `expand_rollouts(whole_prompts=True)` keeps all K rollouts of a
+prompt on one rank and incomplete groups raise instead of comparing different
+prompts. See the data section of [modules.md](modules.md).
 
 Migration: move `rollout_recipe[0].transforms` into `rollout_sampler.transforms`
 and remove `record`; inference uses `sampler.start/transforms`. `recipe`, phases,
@@ -317,7 +321,7 @@ under `model`. `train_micro_batch_size` still counts logical loss items per
 backward; branch/tile expansion is independently chunked by the adapter.
 
 Validation retains the 21 pre-refactor solver fixtures unchanged, and includes
-cross-module tests for CFG++/replay, variants, tiling, and KRepeat, plus real
+cross-module tests for CFG++/replay, variants, tiling, and the rollout cursor, plus real
 distributed CPU/GPU worker harnesses.
 
 ## Planned DDNM extensions

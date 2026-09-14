@@ -1,4 +1,3 @@
-import math
 import os
 import time
 from typing import Any
@@ -14,12 +13,10 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.data import RowStream, build_loader, is_padding
-from flow_control.processors import Processor
+from flow_control.data import is_padding
 from flow_control.samplers import Sampler
 from flow_control.utils.logging import (
     console,
@@ -41,6 +38,7 @@ from flow_control.utils.types import (
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
+    EpochLoopMixin,
     MicrobatchTrainMixin,
     TrainingPredictionMixin,
     ValidationMixin,
@@ -59,7 +57,11 @@ logger = get_logger(__name__)
 
 @trainer_registry.register("sft")
 class SftTrainer(
-    TrainingPredictionMixin, ValidationMixin, MicrobatchTrainMixin, CheckpointingMixin
+    TrainingPredictionMixin,
+    ValidationMixin,
+    MicrobatchTrainMixin,
+    EpochLoopMixin,
+    CheckpointingMixin,
 ):
     model_config = ConfigDict(extra="forbid")
     training_type: str = "sft"
@@ -67,7 +69,6 @@ class SftTrainer(
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
     validation_sampler: Sampler
-    processor: Processor
 
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
@@ -99,30 +100,13 @@ class SftTrainer(
     }
 
     # ------------------------------- Lazy state --------------------------------- #
-    _stream: RowStream
-    _dataloader: StatefulDataLoader
     _optimizer: torch.optim.Optimizer
     _scheduler: Any
     _ema_optimizer: EMAOptimizer | None = None
-    _current_step: int = 0
 
     @property
     def transformer(self):
         return self.model.transformer
-
-    @property
-    def steps_per_epoch(self) -> int:
-        """Optimizer steps per epoch; the microbatches after the last complete
-        update of an epoch are skipped (a different tail every epoch)."""
-        return len(self._dataloader) // self.grad_acc_steps
-
-    @property
-    def total_epochs(self):
-        return math.ceil(self.train_steps / self.steps_per_epoch)
-
-    @property
-    def current_epoch(self):
-        return self._current_step // self.steps_per_epoch
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -143,27 +127,16 @@ class SftTrainer(
         # The plan hands every rank the same number of rows per epoch (padding
         # rows included); the DataLoader cuts them into physical microbatches.
         self._store = self.open_train_store()
-        self._stream = RowStream(
+        self.make_train_loader(
             self._store,
             self.make_planner(
                 self._store,
                 shuffle=True,
                 micro_batch_size=self.train_micro_batch_size,
             ),
-            self.rank,
-            self.world_size,
-        )
-        self._dataloader = build_loader(
-            self._stream,
-            batch_size=self.train_micro_batch_size,
+            micro_batch_size=self.train_micro_batch_size,
             num_workers=self.num_dataloader_workers,
         )
-        if self.steps_per_epoch == 0:
-            raise ValueError(
-                f"Each rank gets {len(self._stream)} rows per epoch, fewer than one "
-                f"optimizer update needs ({self.local_train_batch_size}); raise "
-                "group_size (the plan pads groups) or lower train_batch_size."
-            )
 
     # ------------------------------- Checkpointing ------------------------------ #
 
@@ -341,45 +314,31 @@ class SftTrainer(
         )
 
         with self.status_bar("SFT Training"), progress:
-            starting_epoch = self.current_epoch
             accumulated_loss = 0.0
-            for _ in range(starting_epoch, self.total_epochs):
-                epoch = self.current_epoch
-                # Rows are pickled into the workers when the iterator starts.
-                self._stream.set_epoch(epoch)
-                epoch_micro_batches = self.steps_per_epoch * self.grad_acc_steps
-                for i, items in enumerate(self._dataloader):
-                    if i >= epoch_micro_batches:
-                        # Tail short of one update: let the iterator run out so
-                        # the StatefulDataLoader epoch boundary stays clean.
-                        continue
-                    with dump_if_failed(logger, items):
-                        is_sync_step = (i + 1) % self.grad_acc_steps == 0
-                        self.transformer.set_requires_gradient_sync(is_sync_step)
+            for epoch, items, is_sync_step in self.epoch_microbatches():
+                with dump_if_failed(logger, items):
+                    self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        batches = [
-                            deep_cast_float_dtype(
-                                self.prepare_row(item, mode="training", epoch=epoch),
-                                self.model.dtype,
-                            )
-                            for item in items
-                        ]
+                    batches = [
+                        deep_cast_float_dtype(
+                            self.prepare_row(item, mode="training", epoch=epoch),
+                            self.model.dtype,
+                        )
+                        for item in items
+                    ]
 
-                        loss = self.train_step(batches)
-                        self.check_loss(loss)
-                        scaled_loss = loss / self.grad_acc_steps
-                        scaled_loss.backward()
-                        accumulated_loss += scaled_loss.item()
+                    loss = self.train_step(batches)
+                    self.check_loss(loss)
+                    scaled_loss = loss / self.grad_acc_steps
+                    scaled_loss.backward()
+                    accumulated_loss += scaled_loss.item()
 
-                    if not is_sync_step:
-                        continue
+                if not is_sync_step:
+                    continue
 
-                    self._after_sync_step(accumulated_loss)
-                    accumulated_loss = 0.0
-                    progress.advance(task)
-
-                    if self._current_step >= self.train_steps:
-                        break
+                self._after_sync_step(accumulated_loss)
+                accumulated_loss = 0.0
+                progress.advance(task)
 
         with apply_ema_maybe(self._ema_optimizer):
             self.save_dcp_checkpoint(

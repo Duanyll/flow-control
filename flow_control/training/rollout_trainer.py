@@ -29,7 +29,6 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from flow_control.adapters import ModelAdapter
-from flow_control.processors import Processor
 from flow_control.rewards import Reward
 from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
@@ -77,7 +76,6 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
     rollout_sampler: Sampler
-    processor: Processor
     reward: Reward
 
     seed_checkpoint_dir: str

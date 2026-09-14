@@ -21,7 +21,13 @@ from rich.progress import Progress
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.data import KEY, PromptSampling, RowCursor, expand_rollouts
+from flow_control.data import (
+    KEY,
+    OnlineStore,
+    PromptSampling,
+    RowCursor,
+    expand_rollouts,
+)
 from flow_control.rewards import (
     Reward,
     RewardProfile,
@@ -33,7 +39,7 @@ from flow_control.rewards import (
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.samplers.plan import Transition
-from flow_control.utils.logging import console
+from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
@@ -44,6 +50,8 @@ from ..grpo_sampling import GrpoCollector, RecordedStep
 from .base import BaseTrainer
 from .data import DataMixin
 from .logging import LoggingMixin
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -143,6 +151,24 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             seed=self.seed,
             sampling=self.prompt_sampling,
         )
+        short = len(store) % self.group_size
+        if (
+            self.prompt_sampling == "chunked"
+            and not isinstance(store, OnlineStore)
+            and short % self.world_size != 0
+            and (
+                _has_pairwise_child(self.reward)
+                or self.num_rollouts_per_prompt % self.world_size != 0
+            )
+        ):
+            # See the RowCursor alignment caveat: throughput only.
+            logger.warning(
+                f"{len(store)} rows leave a plan group of {short} real rows "
+                f"(group_size {self.group_size}), not a multiple of world_size "
+                f"({self.world_size}): once a pass walks past it, one block of "
+                "rollouts per group straddles two cost groups. Set dataset.limit "
+                "to a multiple of group_size to keep every rank on one group."
+            )
 
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
         """Rollout phase: sample, decode, then score rewards as each sample finishes."""

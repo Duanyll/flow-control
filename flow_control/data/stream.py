@@ -45,18 +45,35 @@ class RowStream(Dataset):
     Call ``set_epoch`` before creating the epoch's iterator: the rows are pickled
     into the DataLoader workers at that point, so it must run in the main process
     first. Padding rows come back with ``__padding__ = True``.
+
+    ``multiple_of``: a trainer passes its rows per optimizer update so every
+    epoch is a whole number of updates; the tail short of that is dropped from
+    the plan (the same count on every rank, so collectives stay balanced) and,
+    since the plan is reshuffled, holds different rows every epoch.
     """
 
-    def __init__(self, store: RowStore, planner: Planner, rank: int, world_size: int):
+    def __init__(
+        self,
+        store: RowStore,
+        planner: Planner,
+        rank: int,
+        world_size: int,
+        *,
+        multiple_of: int = 1,
+    ):
+        if multiple_of < 1:
+            raise ValueError(f"multiple_of must be >= 1, got {multiple_of}")
         self.store = store
         self.planner = planner
         self.rank = rank
         self.world_size = world_size
+        self.multiple_of = multiple_of
         self._rows: list[PlannedRow] = []
         self.set_epoch(0)
 
     def set_epoch(self, epoch: int) -> None:
-        self._rows = rank_rows(self.planner(epoch), self.rank, self.world_size)
+        rows = rank_rows(self.planner(epoch), self.rank, self.world_size)
+        self._rows = rows[: len(rows) - len(rows) % self.multiple_of]
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -100,6 +117,17 @@ class RowCursor:
     allowed on a ``PackedStore``: it would seek at random across shards.
 
     State is ``(pass, position)``; it goes into the trainer checkpoint.
+
+    Alignment caveat (chunked): ``expand_rollouts`` cuts the taken prompts into
+    blocks of ``world_size`` (per prompt under ``whole_prompts``, per rollout
+    otherwise), and a block lies inside one plan group only while the walk has
+    consumed whole groups. Skipping a padded group's padding (``N mod
+    group_size`` real rows) or a duplicate at a pass boundary shifts every later
+    block by that many rows, so from then on one block per group straddles two
+    groups of possibly different cost. This costs throughput (a rank waits on
+    the collective), never correctness; it is exact when ``(N mod group_size) %
+    world_size == 0`` and irrelevant when ``K % world_size == 0`` without
+    pairwise rewards (each block is then inside one prompt).
     """
 
     def __init__(
@@ -205,6 +233,10 @@ if __name__ == "__main__":
             if not r.get(PADDING)
         }
         assert keys == {str(i) for i in range(10)}
+
+    # multiple_of drops the tail short of one update: 6 rows per rank -> 4.
+    truncated = RowStream(store, planner, 0, 2, multiple_of=4)
+    assert len(truncated) == 4 and len(streams[0]) == 6
 
     cursor = RowCursor(store, planner, seed=0)
     first = cursor.take(6, epoch=0)

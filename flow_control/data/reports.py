@@ -24,7 +24,14 @@ import torch.distributed as dist
 from pydantic import BaseModel, ConfigDict
 
 from flow_control.data.index import META_FILE
-from flow_control.data.rows import COST, IMAGE_SIZE, KEY, Row, is_padding
+from flow_control.data.rows import (
+    COST,
+    IMAGE_SIZE,
+    KEY,
+    KEY_PATTERN,
+    Row,
+    is_padding,
+)
 from flow_control.data.writer import RandomCacheWriter, finalize_cache
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
@@ -102,6 +109,19 @@ class ReportWriter:
         if is_padding(row):
             return
         key = row[KEY]
+        if (self.previews or self._records is not None) and not (
+            isinstance(key, str) and KEY_PATTERN.fullmatch(key)
+        ):
+            # Raw sources take keys from file names / a __key__ column, which no
+            # inference option can rewrite; the preview / record file is named
+            # after the key, so refuse before anything is written for this row.
+            raise ValueError(
+                f"Row key {key!r} cannot name a preview / record file "
+                f"({KEY_PATTERN.pattern}); rename the source rows (files for "
+                "plain_directory / raw_directory, the __key__ column otherwise) "
+                "or preprocess the dataset into a cache with reassign_keys=true "
+                "and run inference on the cache."
+            )
         line = {
             "key": key,
             "rank": self.rank,
@@ -179,6 +199,12 @@ if __name__ == "__main__":
                 },
             )
         writers[1].write({KEY: "pad", "__padding__": True}, None, {})
+        try:
+            writers[0].write({KEY: "no spaces", COST: 1}, None, {})
+        except ValueError as e:
+            print("rejected:", e)
+        else:
+            raise AssertionError("invalid key accepted")
         # Without torch.distributed there is no barrier: close rank 1 before rank 0 merges.
         for w in reversed(writers):
             w.finalize(meta={"note": "smoke"})

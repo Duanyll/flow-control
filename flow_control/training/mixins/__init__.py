@@ -9,6 +9,7 @@ from .base import (
 )
 from .data import DataMixin
 from .dcp import CheckpointingMixin, DcpMixin
+from .epochs import EpochLoopMixin
 from .logging import LoggingMixin
 from .microbatch import MicrobatchTrainMixin, MicroUpdate
 from .prediction import TrainingPredictionMixin
@@ -20,6 +21,7 @@ __all__ = [
     "DcpMixin",
     "BaseTrainer",
     "DataMixin",
+    "EpochLoopMixin",
     "LaunchConfig",
     "TorchCompileConfig",
     "LoggingMixin",

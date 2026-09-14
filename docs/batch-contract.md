@@ -146,10 +146,10 @@ validation, which always merge extras, and into records or caches only with
 | `inpaint_image` | Inference source image for inpainting; resized before encoding and written back. Training has no such input: the clean target doubles as the source. | Dataset/user, then `InpaintProcessor`. | `InpaintProcessor` produces `inpaint_latents`. |
 | `reference_images` | Ordered list of editing source images, trimmed and resized by `TIEProcessor` (HiDream's preset overrides the resize); only entry 0 is resized to the target size, and a missing inference `image_size` is taken from it. | Dataset/user. | TIE VAE/multimodal conditioning, edit annotations, `RationalRewardsEditReward`; the `reference` role below. |
 | `inpaint_mask` | Raw mask (file inputs arrive as RGB/RGBA; L/LA only from tensors) becomes pixel-resolution **`[1, H, W]` luminance** after processing. White means editable, black means fixed; alpha is ignored. | Dataset/user, then `InpaintProcessor._prepare_inpaint_mask`. | `Flux1FillAdapter` packs the pixel mask; processor also produces `inpaint_mask_latents` for Differential Diffusion. |
-| `layer_images` | Ordered target layers during training; decoded generated layers afterward. Qwen layers are full-frame. Efficient-layered rewrites the training list into RGBA crops aligned to the rescaled boxes and decodes one RGBA crop per box, so entry 0 is the full-frame background. | Dataset/user, `PrismLayersProDataset`, layered decoder. | Layered target encoding, annotations/serving and output sinks. |
+| `layer_images` | Ordered target layers during training; decoded generated layers afterward. Qwen layers are full-frame. Efficient-layered rewrites the training list into RGBA crops aligned to the rescaled boxes and decodes one RGBA crop per box, so entry 0 is the full-frame background. | Dataset/user, `PrismLayersProSource`, layered decoder. | Layered target encoding, annotations/serving and output sinks. |
 | `base_image` | Decoded first full-frame reconstruction from Qwen Layered. | `QwenImageLayeredProcessor.decode_output`. | Layered annotations, serving and output sinks. Efficient-layered does not emit it; its background is `layer_images[0]`. |
 | `annotated_image` | Optional Efficient-layered RGBA box/label visualization drawn on the resized image. | Input extra, overwritten at inference when `save_annotated_image` is enabled; training never produces it. | Retained extras/output sinks; no model consumer. |
-| `target_image` | VAE-training target: fp32 **`[1, 4, H, W]` in `[-1, 1]`**, after resize/crop and optional RGBA background augmentation. | `VaeTargetDatasetWrapper` / `prepare_vae_target_image`, or a preprepared sample. | `VaeTrainer._prepare_target` and VAE losses. Separate from diffusion `clean_latents`. |
+| `target_image` | VAE-training target: fp32 **`[1, 4, H, W]` in `[-1, 1]`**, after resize/crop and optional RGBA background augmentation. | `VaeTargetResample` / `prepare_vae_target_image` (the VAE trainer's `prepare_row`), or a preprepared sample. | `VaeTrainer.train_step` and VAE losses. Separate from diffusion `clean_latents`. |
 
 Rewards and sampler components that need one of these images select it by
 [condition-image role](#condition-image-roles) rather than by key.
@@ -159,7 +159,8 @@ Sources: processor tasks [t2i](../flow_control/processors/tasks/t2i.py),
 [inpaint](../flow_control/processors/tasks/inpaint.py), [tie](../flow_control/processors/tasks/tie.py),
 [qwen_layered](../flow_control/processors/tasks/qwen_layered.py),
 [efficient_layered](../flow_control/contrib/efficient_layered/processor.py);
-[training data wrappers](../flow_control/training/data.py),
+[row stream](../flow_control/data/stream.py),
+[RGBA VAE data helpers](../flow_control/contrib/rgba_vae_training/data.py),
 [RGBA VAE trainer](../flow_control/contrib/rgba_vae_training/trainer.py).
 
 ## Encoded model conditions
@@ -203,7 +204,7 @@ Sources: [encoder implementations](../flow_control/processors/components/encoder
 | Key | Meaning / representation | Producer | Consumers |
 | --- | --- | --- | --- |
 | `num_layers` | Qwen requested layer count, defaulting to processor configuration for inference and `len(layer_images)` for training. The generated stream contains **one base frame plus this many layers**, all at `image_size`. | Dataset/user, then `QwenImageLayeredProcessor`. | Qwen Layered initialization, adapter and length estimate; decode infers the frame count from the token count. The separate `image_latents` adds another conditioning frame only inside the adapter. |
-| `layer_boxes` | Efficient-layered ordered pixel boxes `(top, bottom, left, right)`; bottom/right are exclusive. Input boxes use source-image coordinates; processing rescales them and aligns to the processor's `multiple_of`, which must stay a multiple of the adapter's 16-pixel grid. The full-frame background normally comes first. | Dataset/user, `PrismLayersProDataset`, or processor detection. | Efficient-layered crop encoding, latent initialization, length estimate, adapter positional/attention layout and decode. |
+| `layer_boxes` | Efficient-layered ordered pixel boxes `(top, bottom, left, right)`; bottom/right are exclusive. Input boxes use source-image coordinates; processing rescales them and aligns to the processor's `multiple_of`, which must stay a multiple of the adapter's 16-pixel grid. The full-frame background normally comes first. | Dataset/user, `PrismLayersProSource`, or processor detection. | Efficient-layered crop encoding, latent initialization, length estimate, adapter positional/attention layout and decode. |
 | `layer_prompts` | Ordered per-box text captions, including background. | Dataset/user, Prism dataset or processor captioning. | Efficient-layered inference/training preprocessing encodes each prompt; order must match `layer_boxes`. |
 | `text_lengths` | Per-layer text-token lengths; sum equals concatenated `prompt_embeds.shape[1]`. Negative conditions carry their own lengths. | Efficient-layered preprocessing / `generate_negative`. | `EfficientLayeredQwenImageAdapter` text positions and attention mask. |
 | `block_mask` | Optional `torch.nn.attention.flex_attention.BlockMask` or `None`, specific to layer/image/text geometry. | Efficient-layered adapter when the key is absent; a supplied mask is reused unchecked, so its producer must drop it on any geometry change. | That adapter's flex-attention call (the adapter is not dense-batchable); normally a transient prepared-batch cache. |
@@ -283,7 +284,7 @@ Sources: [tiled processor](../flow_control/processors/tasks/tiled_t2i.py),
 | `tag` | GenEval task category string; e.g. counting selects the counting threshold. | Dataset extra. | `GenevalReward`. This is top-level, not inside a `metadata` wrapper. |
 | `include` | Optional list of expected object groups. Each has `class: str`, `count: int`, optional `color: str` and `position: (relation, target_group_index)`. | Dataset extra. | `GenevalReward` object/count/color/position checks. |
 | `exclude` | Optional list of forbidden object-count specs, each with `class: str`, `count: int`. | Dataset extra. | GenEval original scoring mode; reward-server mode does not apply exclude penalties. |
-| `style_category` | Prism source style/category metadata. | `PrismLayersProDataset`. | Retained extras/generic sinks; no current algorithm consumer. |
+| `style_category` | Prism source style/category metadata. | `PrismLayersProSource`. | Retained extras/generic sinks; no current algorithm consumer. |
 | `reward` | Aggregate CPU tensor, normally `[1]`, in an inference report record. | `Inference._reward_fields` from `RewardResult.aggregate`. | `ReportWriter` flattens it into `metrics.jsonl`; `records/` rows keep it for downstream filtering. |
 | `reward_raw` | Dictionary of component label to raw CPU tensor `[1]`. Labels come from reward configuration. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_raw.<label>`; downstream analysis. |
 | `reward_normalized` | Same label mapping, with normalized component values before weighted aggregation. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_normalized.<label>`; downstream analysis. |
