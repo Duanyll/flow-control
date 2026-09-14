@@ -30,7 +30,7 @@
     }
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_flux2_tie"
+    "path": "./demo/preprocess_flux2_tie",
+    "backend": "directory"
   }
 }

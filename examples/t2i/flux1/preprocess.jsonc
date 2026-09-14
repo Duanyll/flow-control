@@ -17,7 +17,7 @@
     "preset": "flux1"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_flux_t2i"
+    "path": "./demo/preprocess_flux_t2i",
+    "backend": "directory"
   }
 }

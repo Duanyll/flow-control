@@ -31,7 +31,7 @@ For where a training *run* writes its artifacts (`runs/`, logs, checkpoints), se
 Most algorithmic choices are **open registries**, not closed enums: model
 adapters, rewards (and reward normalizers), samplers' `shift`/`solver`, processor
 tasks and presets, encoders, VAEs, timestep/loss weightings, advantage estimators,
-EMA warmups, datasets/datasinks, serving task templates, and trainers. The
+EMA warmups, raw data sources, serving task templates, and trainers. The
 mechanism is `Registry` / `RegistryUnion` / `load_plugins` in
 `flow_control/utils/registry.py`.
 
@@ -73,7 +73,7 @@ Plugins are passed **explicitly, never via an env var**: loaded in `_dispatch`
 (`flow_control/scripts/cli.py`) and `_run_child` (`flow_control/scripts/launch.py`)
 before any config is built, and threaded into the spawn-based preprocess pipeline
 workers as an explicit `plugin_modules` argument (`flow_control/utils/pipeline/`), so
-plugin datasets/processors work inside workers too.
+plugin sources/processors work inside workers too.
 
 ### Trainers
 

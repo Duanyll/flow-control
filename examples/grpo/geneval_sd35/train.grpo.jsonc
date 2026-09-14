@@ -11,8 +11,7 @@
   "train_micro_batch_size": 4,
 
   // Per-epoch sample budget: 6 x 8 = 48 unique prompts, x24 rollouts = 1152 rollouts.
-  "num_batches_per_epoch": 6,
-  "num_prompts_per_batch": 8,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // train all 10 rollout timesteps -> 1152 x 10 = 11520 items, /2 optimizer updates.
@@ -51,7 +50,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/train",
   },
 
@@ -93,7 +92,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/validation",
   },
 

@@ -3,7 +3,7 @@ from typing import ClassVar, Literal, NotRequired, cast
 import torch
 from einops import rearrange
 
-from flow_control.datasets.coercion import ImageTensor, ImageTensorList
+from flow_control.data.coercion import ImageTensor, ImageTensorList
 from flow_control.utils.merge_images import merge_images
 from flow_control.utils.resize import resize_to_resolution
 

@@ -1,13 +1,17 @@
 {
   "$schema": "../../../schema/inference.schema.json",
-  "save_preview_dir": "./demo/inference_longcat_tie_preview",
+  "report": {
+    "path": "./demo/inference_longcat_tie",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 1,
   "model": {
     "arch": "longcat",
     "type": "edit"
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_longcat_tie"
   },
   "sampler": {

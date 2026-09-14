@@ -15,7 +15,7 @@
     "preset": "flux1"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./data/christian_boragine/flux1_validation"
+    "path": "./data/christian_boragine/flux1_validation",
+    "backend": "directory"
   }
 }

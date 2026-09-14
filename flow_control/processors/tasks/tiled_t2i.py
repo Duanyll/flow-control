@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, ClassVar, Literal, NotRequired
 
-from flow_control.datasets.coercion import JsonBeforeValidator
+from flow_control.data.coercion import JsonBeforeValidator
 
 from ..base import ProcessedBatch, task_registry
 from ..tiles import TileConfig

@@ -17,7 +17,7 @@
     "preset": "longcat_image"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_longcat_t2i"
+    "path": "./demo/preprocess_longcat_t2i",
+    "backend": "directory"
   }
 }

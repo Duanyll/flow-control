@@ -17,7 +17,7 @@
     "preset": "krea2_raw"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_krea2_raw_t2i"
+    "path": "./demo/preprocess_krea2_raw_t2i",
+    "backend": "directory"
   }
 }

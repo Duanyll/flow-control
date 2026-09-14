@@ -520,7 +520,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
             pw=self.patch_size,
         )
 
-    def latent_length_test(self):
+    def cost_test(self):
+        """Yield synthetic batches of increasing ``cost`` (token total) for
+        ``SftTrainer.run_cost_test``'s memory probe."""
         raise NotImplementedError()
 
 

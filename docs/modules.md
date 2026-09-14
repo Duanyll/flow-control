@@ -25,20 +25,22 @@
 
 ---
 
-## datasets — 数据集加载
+## data — 数据栈
 
-提供多种数据源的读取与写入，支持 Pydantic 类型强制转换。
+raw source → `preprocess`（random cache）→ `pack`（packed cache）→ 分组 plan → resample → consumer → report。行是 `dict`，保留键 `__key__` / `cost` / `image_size` / `__padding__`（`rows.py`）。
 
 | 接口 | 说明 |
 |------|------|
-| `parse_dataset(config)` | 工厂函数，根据配置创建数据集 |
-| `parse_datasink(config)` | 工厂函数，根据配置创建数据输出端 |
-| `LimitedDataset` | 限制数据集长度的包装器 |
-| `CoercedDataset` | 对样本施加 Pydantic 类型强制转换的包装器 |
+| `open_source(config, coerce_to)` | 按 `"type"` 从 `source_registry` 实例化 raw 读取器，处理 `limit` / `attachment_dir` / `concat`，coercion 到 processor 输入 TypedDict 总是施加 |
+| `open_store(config, processor_class=, mode=)` | `"type": "cache"` 按 `meta.json` 打开 `DirectoryStore` / `LmdbStore` / `PackedStore`；其它 type 走 `OnlineStore(open_source(...))`（无 cache，consumer 在线 preprocess） |
+| `RandomCacheWriter` / `finalize_cache()` | preprocess sink：写 `rows/<hh>/<key>.pt` 或 `data.mdb` 与 `index.jsonl`（`IndexEntry`：key / cost / sig / image_size / loc），主进程合并 index 并写 `meta.json` |
+| `pack(PackConfig)` | random cache → tar shard 的 packed cache（shard 内按 `(cost, sig)` 排序），`flow-control pack` |
+| `groups_shuffled` / `groups_sorted` / `groups_packed` / `groups_plain` / `rank_rows` | 纯函数分组 plan：n 个 cost 相近的行成一组，组内按 rank 跨步切片，尾组用同块行补齐并标 `__padding__` |
+| `RowStream` + `build_loader()` | SFT / inference / validation 的 map-style Dataset（每 epoch `set_epoch`），恒等 collate，`StatefulDataLoader` 可恢复 |
+| `RowCursor` + `expand_rollouts()` | RL：每 epoch 取 `num_prompts_per_epoch` 条不重复 prompt（`chunked` / `independent`），K 份 rollout 按 rank 跨步展开 |
+| `ReportWriter` / `ReportConfig` | inference 输出：`metrics.jsonl`、`previews/`、可选 `records/`（本身是 `{"type": "cache"}` 数据集） |
 
-支持的数据源类型：`lmdb`, `plain_directory`, `pickle_directory`, `raw_directory`, `bucket_directory`, `csv`, `jsonl`, `parquet`, `inline`, `lines`；`prism_layers_pro` 随 `flow_control.contrib.efficient_layered` 一起注册（`imports` 引入）
-
-支持的输出端类型：`lmdb`, `pickle_directory`, `raw_directory`, `bucket_directory`
+raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directory`, `raw_directory`, `huggingface`, `concat`；`prism_layers_pro` 随 `flow_control.contrib.efficient_layered` 一起注册（`imports` 引入）。旧的 `pickle_directory` / `bucket_directory` / `lmdb` cache 不兼容，重新 `preprocess` 后用 `"type": "cache"`。
 
 ---
 
@@ -185,7 +187,8 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 
 | 命令 | 说明 |
 |------|------|
-| `preprocess` | 数据预处理管线 |
+| `preprocess` | 数据预处理管线，写 random cache |
+| `pack` | random cache → packed cache（tar shard） |
 | `seed` | 初始化种子检查点 |
 | `launch` | 启动分布式训练（SFT / GRPO / NFT / AWM / RAM / VAE / Inference） |
 | `vae-server` | 独立 VAE 编码服务 |

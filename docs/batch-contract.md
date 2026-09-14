@@ -67,7 +67,7 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
    General inference merges decoded images but does **not** write endpoint latents
    there. A retained `clean_latents` may therefore still be an input/cache target.
 
-Sources: [coercion](../flow_control/datasets/coercion.py),
+Sources: [coercion](../flow_control/data/coercion.py),
 [offline preprocessing](../flow_control/scripts/preprocess.py) (`ProcessorStage.process`),
 [runtime preprocessing](../flow_control/training/mixins/data.py),
 [model leaf](../flow_control/samplers/prediction.py) (`ModelPrediction.bind`),
@@ -96,13 +96,13 @@ guesses by name. Plugins that cache another posterior field must declare it.
 | `__padding__` | `True` on plan-time padding rows (a short tail group repeats rows of the same block). Consumer memory only, never persisted. | `RowStream.__getitem__`. | `is_padding(row)`: SFT / VAE weigh the row 0, inference and validation forward it but write and log nothing. |
 | `image_size` | Optional requested size on raw input; actual target pixel `(H, W)` after task resizing. Required for model/sampler use. | Dataset/user, then processor. | Latent initialization, adapter geometry/position IDs, decode, tiling and resolution-dependent shift. |
 | `model_image_size` | Optional pixel `(H, W)` seen by one forward, e.g. a tile. Defaults to `image_size`. | `TiledT2IProcessor`. | `BaseShift._get_seq_len`; tiled prediction removes it from leaf conditions. |
-| `cost` | Integer token total from `processor.get_cost` (latent + text + reference); the plan sort key. It is not necessarily `noisy_latents.shape[1]`. | Offline `ProcessorStage.process`. | `RandomCacheWriter` records it in the cache index and grouping sorts on it. Resolution shift computes its own length and does not read this field. (The adapters' synthetic length-test batches still carry `latent_length` for SFT's latent-length test.) |
-| `clean_latents` | Normalized packed clean target; `[1, N, D]` at runtime, possibly `[2, N, D]` in a posterior cache. RL collection replaces it with the sampled endpoint. Optional for inference. | Training processor, rollout collector, or an adapter's length-test mock batch. | SFT/AWM/RAM/NFT target calculations; `Start` when selected as a source, including default SDEdit source. |
+| `cost` | Integer token total from `processor.get_cost` (latent + text + reference); the plan sort key. It is not necessarily `noisy_latents.shape[1]`. | Offline `ProcessorStage.process`, runtime `DataMixin.prepare_row`, or an adapter's `cost_test` mock batch. | `RandomCacheWriter` records it in the cache index and grouping sorts on it; `ReportWriter` writes it to `metrics.jsonl`; `SftTrainer.run_cost_test` reads it off the mock batches. Resolution shift computes its own length and does not read this field. |
+| `clean_latents` | Normalized packed clean target; `[1, N, D]` at runtime, possibly `[2, N, D]` in a posterior cache. RL collection replaces it with the sampled endpoint. Optional for inference. | Training processor, rollout collector, or an adapter's `cost_test` mock batch. | SFT/AWM/RAM/NFT target calculations; `Start` when selected as a source, including default SDEdit source. |
 | `noisy_latents` | Packed noisy state `[1, N, D]`, in the same coordinates as clean targets. Meaning is stage-dependent: initial noise/source in the run batch, current state in a model call, corrupted target in training. | `initialize_latents`, trainers, `ModelPrediction`. | `Start`, shift, all adapters; `DifferentialDiffusion` uses the run-batch tensor as reference noise. Solver state itself lives in `StepContext`. |
 | `negative` | Optional shallow condition override dictionary; see below. | Task processor when `save_negative=True`, or caller/cache. | `BaseProcessor.get_negative_batch` resolves it into the separate negative batch that CFG/CFG++ and training receive; `TiledT2IProcessor._add_tiles` rewrites it and `TiledPrediction` strips it from leaf conditions. |
 
-Sources: [training data wrappers](../flow_control/training/data.py),
-[bucket storage](../flow_control/datasets/bucket_directory.py),
+Sources: [row contract](../flow_control/data/rows.py), [plan / stream](../flow_control/data/stream.py)
+(`RowStream`, `RowCursor`), [grouping](../flow_control/data/grouping.py),
 [Start](../flow_control/samplers/sampler.py), [shift](../flow_control/samplers/shift.py),
 [reward execution](../flow_control/rewards/__init__.py).
 
@@ -178,7 +178,7 @@ embedding layout, latent normalization, geometry and special tokens.
 | `reference_latents` | Ordered list of `[1, Ni, D]` encoded references; entries may be posterior caches. HiDream entries are scaled packed pixels. | `TIEProcessor` / preset. | FLUX.1 Kontext, FLUX.2, LongCat Edit, Qwen Edit and HiDream adapters; static reference tokens accompany the noisy target. |
 | `reference_sizes` | Ordered list of reference pixel `(H, W)`, matching `reference_latents`. | `TIEProcessor` after resizing. | Reference geometry/position IDs in the same edit adapters. |
 | `image_latents` | Packed full source-image condition, `[1, Nimage, D]`; may be a posterior cache. Distinct from the generated layers. | Qwen/Efficient layered processors. | Layered adapters concatenate it with the noisy target stream. |
-| `input_ids` | HiDream int64 `[1, L]` chat-template token IDs, including editing placeholders and target/time markers. Resolution-dependent trailing vision tokens are appended by the adapter. | `HiDreamO1Encoder` / preset. | `HiDreamO1Adapter` jointly trained text/vision transformer; `HiDreamO1FullPreset.get_latent_length`. |
+| `input_ids` | HiDream int64 `[1, L]` chat-template token IDs, including editing placeholders and target/time markers. Resolution-dependent trailing vision tokens are appended by the adapter. | `HiDreamO1Encoder` / preset. | `HiDreamO1Adapter` jointly trained text/vision transformer; `HiDreamO1FullPreset.get_cost`. |
 | `pixel_values` | Optional HiDream editing thumbnail patches in the HF processor's native layout/normalization; not a BCHW `[0, 1]` batch image. | HiDream multimodal prompt encoding. | HiDream SigLIP condition path; paired with `image_grid_thw`. |
 | `image_grid_thw` | HiDream integer `[K, 3]` thumbnail grids `(T, H, W)`, corresponding to `pixel_values`. These are not target pixel sizes. | HiDream multimodal prompt encoding. | `HiDreamO1Adapter` forwards it with `pixel_values` to the SigLIP tower and uses it in `_build_sequence` positional indexing. |
 | `txt_ids` | Optional text positional-coordinate cache: typically `[L, 3]` for FLUX.1/LongCat, `[B, L, 4]` for FLUX.2. Not vocabulary IDs. | Adapter when absent. | The same adapter's positional embedding path. |

@@ -1,13 +1,17 @@
 {
   "$schema": "../../../schema/inference.schema.json",
-  "save_preview_dir": "./demo/inference_qwen_tie_preview",
+  "report": {
+    "path": "./demo/inference_qwen_tie",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 1,
   "model": {
     "arch": "qwen",
     "type": "edit"
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_qwen_tie"
   },
   "sampler": {

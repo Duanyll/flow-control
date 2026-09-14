@@ -17,7 +17,7 @@
     "default_resolution": [384, 384],
   },
   "output": {
-    "type": "pickle_directory",
     "path": "./data/pickscore_flux/train",
+    "backend": "directory"
   },
 }

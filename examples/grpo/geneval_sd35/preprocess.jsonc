@@ -17,7 +17,7 @@
     "default_resolution": [512, 512],
   },
   "output": {
-    "type": "pickle_directory",
     "path": "./data/geneval_sd35/train",
+    "backend": "directory"
   },
 }

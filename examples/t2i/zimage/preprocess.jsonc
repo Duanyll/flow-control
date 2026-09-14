@@ -17,7 +17,7 @@
     "preset": "zimage"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_zimage_t2i"
+    "path": "./demo/preprocess_zimage_t2i",
+    "backend": "directory"
   }
 }

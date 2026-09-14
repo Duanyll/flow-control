@@ -13,7 +13,10 @@ class BaseShift(BaseModel, ABC):
     type: Literal["base"] = "base"
     model_config = ConfigDict(extra="forbid")
 
-    latent_length_from: Literal["actual", "image_size"] = "actual"
+    image_seq_len_from: Literal["actual", "image_size"] = "actual"
+    """Image sequence length for resolution-dependent shift: ``actual`` reads it
+    off ``noisy_latents`` (scaled to ``model_image_size``), ``image_size`` assumes
+    16x16 pixels per token."""
     shift_terminal: float | None = None
 
     def apply(self, sigmas: torch.Tensor, batch: Batch, num_steps: int) -> torch.Tensor:
@@ -37,7 +40,7 @@ class BaseShift(BaseModel, ABC):
         model_h, model_w = cast(dict[str, Any], batch).get(
             "model_image_size", (height, width)
         )
-        if self.latent_length_from == "actual":
+        if self.image_seq_len_from == "actual":
             return (
                 batch["noisy_latents"].shape[1] * model_h * model_w // (height * width)
             )

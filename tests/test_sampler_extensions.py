@@ -19,6 +19,13 @@ from test_microbatching import FakeDenseAdapter, FakeSamplerModel, make_sampler_
 from torch.utils.checkpoint import checkpoint
 
 from flow_control.contrib.momentum_guidance import MomentumGuidance
+from flow_control.data import (
+    Index,
+    IndexEntry,
+    RowCursor,
+    expand_rollouts,
+    groups_shuffled,
+)
 from flow_control.processors import get_processor_input_typeddict, parse_processor
 from flow_control.processors.tasks.tiled_t2i import TiledT2IProcessor
 from flow_control.rewards import PairwiseReward, execute_pairwise_reward
@@ -37,10 +44,6 @@ from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGu
 from flow_control.samplers.plan import EvalRequest, StepContext
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import DDIMSolver, FlowSolver, SASolver
-from flow_control.training.data import (
-    DistributedKRepeatSampler,
-    PaddingAwareDatasetWrapper,
-)
 from flow_control.training.grpo_sampling import (
     GrpoCollector,
     ReplayItem,
@@ -732,7 +735,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         }
         for source in ("actual", "image_size"):
             with self.subTest(shift_source=source):
-                sampler = Sampler(steps=6, shift=LinearShift(latent_length_from=source))
+                sampler = Sampler(steps=6, shift=LinearShift(image_seq_len_from=source))
                 self.assertEqual(
                     sampler.make_sigmas(full), sampler.make_sigmas(reference)
                 )
@@ -740,80 +743,73 @@ class SamplerExtensionsTest(unittest.TestCase):
                     sampler.make_sigmas(whole), sampler.make_sigmas(reference)
                 )
 
-    def test_krepeat_buckets_counts_and_resume(self):
-        # R5 fixes resolution divergence between equal-position distributed
-        # samples and the iterator cursor repeating the last yielded item on resume.
-        class Dataset(PaddingAwareDatasetWrapper):
-            def __init__(self):
-                pass
-
-            bucket_lengths = [5, 7]
+    def test_cursor_rollouts_counts_and_resume(self):
+        # R5 fixed resolution divergence between equal-position distributed
+        # samples and the iterator cursor repeating the last yielded item on
+        # resume. The data rework moved both guarantees to RowCursor +
+        # expand_rollouts: every rank's i-th rollout comes from one plan group
+        # (cost-adjacent rows), an epoch's M prompts each get exactly K rollouts
+        # (all on one rank under a pairwise reward), and a restored cursor
+        # continues exactly where the saved one stopped.
+        class Store:
+            costs = [5] * 5 + [7] * 7
+            index = Index(
+                [
+                    IndexEntry(str(i), cost, "", None, str(i))
+                    for i, cost in enumerate(costs)
+                ],
+                {},
+            )
 
             def __len__(self):
-                return sum(self.bucket_lengths)
+                return len(self.costs)
 
-            def __getitem__(self, index):
-                return index
+            def get(self, row_id):
+                return {"__key__": str(row_id)}
 
-        for keep_local, repeats in ((False, 2), (True, 3)):
-
-            def make(rank, repeats=repeats, keep_local=keep_local):
-                return DistributedKRepeatSampler(
-                    Dataset(),
-                    num_batches_per_epoch=2,
-                    num_prompts_per_batch=8,
-                    num_rollouts_per_prompt=repeats,
-                    num_replicas=4,
-                    rank=rank,
-                    seed=17,
-                    keep_prompt_local=keep_local,
-                )
-
-            per_rank = [list(make(rank)) for rank in range(4)]
-            for block in zip(*per_rank, strict=True):
-                self.assertEqual(len({index >= 5 for index in block}), 1)
-            local_count = 8 * repeats // 4
-            for epoch_batch in range(2):
-                counts = Counter(
-                    index
-                    for rank in per_rank
-                    for index in rank[
-                        epoch_batch * local_count : (epoch_batch + 1) * local_count
-                    ]
-                )
-                self.assertEqual(len(counts), 8)
+        store: Any = Store()
+        n, world_size, prompts = 4, 4, 8
+        planner = partial(groups_shuffled, store.index, n, 3, 17)
+        walk = [{row for row, _ in g} for p in (0, 1) for g in planner(p)]
+        for whole_prompts, repeats in ((False, 2), (True, 3)):
+            cursor = RowCursor(store, planner, seed=17)
+            epochs = [cursor.take(prompts, epoch=epoch) for epoch in range(2)]
+            self.assertEqual(set(epochs[0]) | set(epochs[1][:4]), set(range(12)))
+            self.assertEqual(cursor.state_dict(), {"pass": 1, "position": 8})
+            for epoch, prompt_ids in enumerate(epochs):
+                self.assertEqual(len(set(prompt_ids)), prompts)
+                per_rank = [
+                    expand_rollouts(
+                        prompt_ids,
+                        repeats,
+                        rank,
+                        world_size,
+                        whole_prompts=whole_prompts,
+                    )
+                    for rank in range(world_size)
+                ]
+                local_count = prompts * repeats // world_size
+                self.assertEqual({len(share) for share in per_rank}, {local_count})
+                # Epoch 1 straddles two passes and de-duplicates across them
+                # (§15 14.3), which breaks group contiguity; within a pass the
+                # i-th rollout of every rank comes from one group.
+                for position in range(local_count if epoch == 0 else 0):
+                    block = {share[position][0] for share in per_rank}
+                    self.assertTrue(any(block <= group for group in walk))
+                counts = Counter(p for share in per_rank for p, _ in share)
+                self.assertEqual(set(counts), set(prompt_ids))
                 self.assertEqual(set(counts.values()), {repeats})
-                if keep_local:
-                    for index in counts:
+                if whole_prompts:
+                    for p in prompt_ids:
                         self.assertEqual(
-                            sum(
-                                index
-                                in rank[
-                                    epoch_batch * local_count : (epoch_batch + 1)
-                                    * local_count
-                                ]
-                                for rank in per_rank
-                            ),
-                            1,
+                            sum(p in {q for q, _ in share} for share in per_rank), 1
                         )
-            sampler = make(0)
-            iterator = iter(sampler)
-            next(iterator)
-            state = sampler.state_dict()
-            remaining = list(iterator)
-            restored = make(0)
+            state = cursor.state_dict()
+            remaining = [cursor.take(prompts, epoch=epoch) for epoch in (2, 3)]
+            restored = RowCursor(store, planner, seed=17)
             restored.load_state_dict(state)
-            self.assertEqual(list(restored), remaining)
-        dataset = Dataset()
-        dataset.bucket_lengths = [1, 1, 1, 1]
-        with self.assertRaisesRegex(ValueError, "bucket|resolution"):
-            list(
-                DistributedKRepeatSampler(
-                    dataset,
-                    num_batches_per_epoch=1,
-                    num_prompts_per_batch=2,
-                    num_rollouts_per_prompt=2,
-                    num_replicas=4,
-                    rank=0,
-                )
+            self.assertEqual(
+                [restored.take(prompts, epoch=epoch) for epoch in (2, 3)], remaining
             )
+        with self.assertRaisesRegex(ValueError, "distinct prompts"):
+            RowCursor(store, planner, seed=17).take(13, epoch=0)

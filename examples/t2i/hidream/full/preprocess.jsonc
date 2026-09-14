@@ -17,7 +17,7 @@
     "preset": "hidream_o1_full"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_hidream_full_t2i"
+    "path": "./demo/preprocess_hidream_full_t2i",
+    "backend": "directory"
   }
 }

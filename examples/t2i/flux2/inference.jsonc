@@ -1,14 +1,18 @@
 {
   "$schema": "../../../schema/inference.schema.json",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
-  "save_preview_dir": "./demo/inference_flux2_t2i_preview",
+  "report": {
+    "path": "./demo/inference_flux2_t2i",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 4,
   "model": {
     "arch": "flux2",
     "type": "base"
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_flux2_t2i"
   },
   "sampler": {

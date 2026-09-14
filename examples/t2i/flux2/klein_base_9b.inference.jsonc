@@ -1,7 +1,11 @@
 {
   "$schema": "../../../schema/inference.schema.json",
   "seed_checkpoint_dir": "./demo/seed/flux2_klein_base_9b",
-  "save_preview_dir": "./demo/inference_flux2_klein_base_9b_t2i_preview",
+  "report": {
+    "path": "./demo/inference_flux2_klein_base_9b_t2i",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 1,
   "model": {
     "arch": "flux2",
@@ -15,7 +19,7 @@
     }
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_flux2_klein_9b_t2i"
   },
   "sampler": {

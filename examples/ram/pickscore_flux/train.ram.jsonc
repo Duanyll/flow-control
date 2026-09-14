@@ -18,8 +18,7 @@
   "precompute_aux_model_outputs": true,
 
   // 12 x 4 = 48 unique prompts, x24 rollouts = 1152 rollouts.
-  "num_batches_per_epoch": 12,
-  "num_prompts_per_batch": 4,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // 1152 rollouts x K=8 loss targets -> 9216 items, 1 optimizer update per epoch.
@@ -68,7 +67,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux/train",
   },
 
@@ -115,7 +114,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux/validation_grpo",
     "limit": 256,
   },

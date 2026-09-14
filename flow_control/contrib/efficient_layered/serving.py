@@ -16,7 +16,7 @@ from typing import Any
 import gradio as gr
 from PIL import Image
 
-from flow_control.datasets.coercion import _coerce_to_image_tensor
+from flow_control.data.coercion import _coerce_to_image_tensor
 from flow_control.serving.tasks.base import task_template_registry
 
 

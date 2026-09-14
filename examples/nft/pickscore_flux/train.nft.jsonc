@@ -10,8 +10,7 @@
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 
-  "num_batches_per_epoch": 1,
-  "num_prompts_per_batch": 48,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 16,
   "num_inner_epochs": 1,
   "train_batch_size": 1536, // Only one optimizer step is taken per epoch -> Always on-policy updating
@@ -59,7 +58,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux_512/train",
   },
 
@@ -107,7 +106,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux_512/validation",
   },
 

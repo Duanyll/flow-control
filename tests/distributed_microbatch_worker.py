@@ -1,19 +1,22 @@
 from contextlib import nullcontext
+from functools import partial
 
 import torch
 import torch.distributed as dist
 from diffusers import ModelMixin
 from pydantic import PrivateAttr
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.data import (
+    Index,
+    IndexEntry,
+    RowStream,
+    build_loader,
+    groups_plain,
+    is_padding,
+)
 from flow_control.samplers import Executor, Sampler, SampleRequest
 from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
-from flow_control.training.data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    collate_fn,
-)
 
 
 def make_batch(tokens: int, value: float = 0.0) -> Batch:
@@ -208,39 +211,35 @@ def test_stream_drains_unequal_request_counts(rank: int) -> None:
         torch.testing.assert_close(run.ctx.latents, torch.zeros(1, 4, 2))
 
 
-class _TinyDataset:
+class _TinyStore:
+    index = Index([IndexEntry(str(i), 0, "", None, str(i)) for i in range(5)], {})
+
     def __len__(self) -> int:
         return 5
 
-    def __getitem__(self, index: int) -> dict[str, int]:
-        return {"index": index}
+    def get(self, row_id: int) -> dict[str, int]:
+        return {"index": row_id}
 
 
 def test_final_padded_microbatch(rank: int) -> None:
-    dataset = PaddingAwareDatasetWrapper(_TinyDataset())
-    sampler = DistributedBucketSampler(
-        dataset,
-        num_replicas=dist.get_world_size(),
-        rank=rank,
-        shuffle=False,
-        grad_acc_steps=4,
+    # Five rows over the ranks in one plan group of two microbatches per rank:
+    # the tail is padded with repeated rows flagged ``__padding__`` so every rank
+    # runs the same number of full microbatches (equal collectives), and the
+    # padding is counted, never dropped.
+    world_size = dist.get_world_size()
+    stream = RowStream(
+        _TinyStore(),
+        partial(groups_plain, 5, 4 * world_size, 0, shuffle=False),
+        rank,
+        world_size,
     )
-    loader = StatefulDataLoader(
-        dataset,
-        batch_size=2,
-        sampler=sampler,
-        collate_fn=collate_fn,
-    )
+    loader = build_loader(stream, batch_size=2, num_workers=0)
     batches = list(loader)
     assert [len(batch) for batch in batches] == [2, 2]
-    local_padding = sum(
-        int(item.get("_is_padding_sample", False))
-        for batch in batches
-        for item in batch
-    )
+    local_padding = sum(int(is_padding(item)) for batch in batches for item in batch)
     total_padding = torch.tensor(local_padding)
     dist.all_reduce(total_padding)
-    assert total_padding.item() == 3
+    assert total_padding.item() == 4 * world_size - 5
 
 
 def main() -> None:

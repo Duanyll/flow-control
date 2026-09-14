@@ -6,15 +6,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
 
-from flow_control.datasets.registry import dataset_registry
+from flow_control.data.sources import source_registry
 from flow_control.utils.logging import console
 from flow_control.utils.tensor import pil_to_tensor
 
 
-@dataset_registry.register("prism_layers_pro")
-class PrismLayersProDataset(Dataset):
+@source_registry.register("prism_layers_pro")
+class PrismLayersProSource:
+    """PrismLayersPro parquet shards as a raw source (``"type": "prism_layers_pro"``)."""
+
     _last_loaded_file: str | None = None
     _last_table: pa.Table
 

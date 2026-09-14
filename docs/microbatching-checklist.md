@@ -239,7 +239,7 @@ gradient_accumulation_steps = local_update_batch // M
 - [x] All ranks agree on dense collation versus sequential fallback.
 - [x] All ranks execute equal conditional/unconditional CFG forward counts.
 - [x] All ranks execute equal backward counts per optimizer update.
-- [x] Bucket padding produces equal final logical microbatch lengths.
+- [x] Plan-time padding (`__padding__` rows) produces equal final logical microbatch lengths.
 - [x] A rank with dense-compatible inputs safely follows another rank's fallback.
 - [x] Two-rank CPU collective tests cover fallback, cold empty ranks, CFG, and tails.
 - [x] Two-rank FSDP2/NCCL tests cover dense forward/backward, local fallback,

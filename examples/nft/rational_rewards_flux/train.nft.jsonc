@@ -16,8 +16,7 @@
 
   // 48 unique prompts x 16 rollouts = 768 rollouts/epoch (FF: unique_sample_num
   // _per_epoch=48, group_size=16).
-  "num_batches_per_epoch": 1,
-  "num_prompts_per_batch": 48,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 16,
   "num_inner_epochs": 1,
 
@@ -70,7 +69,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux_512/train",
   },
 
@@ -130,7 +129,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/pickscore_flux_512/validation",
     "limit": 256,
   },

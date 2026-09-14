@@ -9,7 +9,7 @@ self-registers:
   ``"qwen_efficient_layered"`` (the ``f"{arch}_{type}"`` discriminator for
   ``arch="qwen"``, ``type="efficient_layered"``).
 - ``EfficientLayeredProcessor`` under ``task_registry`` tag ``"efficient_layered"``.
-- ``PrismLayersProDataset`` under ``dataset_registry`` tag ``"prism_layers_pro"``.
+- ``PrismLayersProSource`` under ``source_registry`` tag ``"prism_layers_pro"``.
 
 Activate for training / preprocessing with, e.g.::
 

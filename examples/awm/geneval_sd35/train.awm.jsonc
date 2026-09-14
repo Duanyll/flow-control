@@ -28,8 +28,7 @@
   "precompute_aux_model_outputs": true,
 
   // 9 x 8 = 72 unique prompts, x24 rollouts = 1728 endpoints.
-  "num_batches_per_epoch": 9,
-  "num_prompts_per_batch": 8,
+  "num_prompts_per_epoch": 72,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // 1728 endpoints x 6 timesteps -> 10368 items, one optimizer update per epoch.
@@ -87,7 +86,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/train",
   },
 
@@ -140,7 +139,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/validation",
   },
 

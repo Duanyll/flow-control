@@ -1,13 +1,17 @@
 {
   "$schema": "../../../../schema/inference.schema.json",
-  "save_preview_dir": "./demo/inference_hidream_dev_t2i_preview",
+  "report": {
+    "path": "./demo/inference_hidream_dev_t2i",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 1,
   "model": {
     "arch": "hidream",
     "type": "dev"
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_hidream_dev_t2i"
   },
   "sampler": {

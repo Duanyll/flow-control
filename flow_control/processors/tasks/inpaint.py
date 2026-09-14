@@ -3,7 +3,7 @@ from typing import ClassVar, Literal, NotRequired
 import torch
 import torch.nn.functional as F
 
-from flow_control.datasets.coercion import ImageTensor
+from flow_control.data.coercion import ImageTensor
 from flow_control.utils.resize import resize_to_resolution
 
 from ..base import (

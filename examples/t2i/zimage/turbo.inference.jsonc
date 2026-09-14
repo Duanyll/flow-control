@@ -1,6 +1,10 @@
 {
   "$schema": "../../../schema/inference.schema.json",
-  "save_preview_dir": "./demo/inference_zimage_turbo_t2i_preview",
+  "report": {
+    "path": "./demo/inference_zimage_turbo_t2i",
+    "previews": true,
+    "records": false
+  },
   "seed": 1024,
   "hsdp_shard_dim": 1,
   "model": {
@@ -15,7 +19,7 @@
     }
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_zimage_t2i"
   },
   "sampler": {

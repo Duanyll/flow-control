@@ -48,12 +48,12 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/christian_boragine/flux1"
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/christian_boragine/flux1_validation"
   },
 

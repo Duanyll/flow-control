@@ -1,13 +1,17 @@
 {
   "$schema": "../../../../schema/inference.schema.json",
-  "save_preview_dir": "./demo/inference_krea2_turbo_t2i_preview",
+  "report": {
+    "path": "./demo/inference_krea2_turbo_t2i",
+    "previews": true,
+    "records": false
+  },
   "hsdp_shard_dim": 1,
   "model": {
     "arch": "krea2",
     "type": "turbo"
   },
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./demo/preprocess_krea2_turbo_t2i"
   },
   "sampler": {

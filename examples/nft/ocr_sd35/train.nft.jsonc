@@ -17,8 +17,7 @@
   "rollout_storage_device": "device",
   "precompute_aux_model_outputs": true,
 
-  "num_batches_per_epoch": 1,
-  "num_prompts_per_batch": 48,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // 1152 rollouts x 4 forward-process timesteps -> 4608 items, /2 optimizer updates.
@@ -68,7 +67,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/ocr_sd35/train",
   },
 
@@ -113,7 +112,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/ocr_sd35/validation",
   },
 

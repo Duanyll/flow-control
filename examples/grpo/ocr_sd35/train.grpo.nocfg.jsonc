@@ -10,8 +10,7 @@
 
   "train_micro_batch_size": 4,
 
-  "num_batches_per_epoch": 6,
-  "num_prompts_per_batch": 8,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   "train_batch_size": 1728,
@@ -49,7 +48,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/ocr_sd35/train",
   },
 
@@ -92,7 +91,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/ocr_sd35/validation",
   },
 

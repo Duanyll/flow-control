@@ -4,7 +4,7 @@ Opens the row store behind a ``DatasetConfig``, picks the grouping plan for it
 (§6.3) and turns a fetched row into a model-ready batch: move to device, run the
 processor online when the dataset is a raw source, then ``processor.resample``.
 Whether a dataset is preprocessed online is decided by the store type alone
-(``OnlineStore``), so there is no ``enable_preprocess`` switch.
+(``OnlineStore``); there is no separate switch for it.
 """
 
 import asyncio

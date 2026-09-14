@@ -6,8 +6,8 @@ import torch
 from einops import rearrange
 from pydantic import BaseModel, ConfigDict, Field
 
+from flow_control.data.coercion import JsonBeforeValidator
 from flow_control.data.rows import Row
-from flow_control.datasets.coercion import JsonBeforeValidator
 from flow_control.utils.device import default_device
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.registry import Registry
@@ -174,7 +174,7 @@ class BaseProcessor[
         """Compose ONE labeled preview image from a decoded output batch.
 
         ``decode_output`` returns the clean ``clean_image`` (used for reward scoring
-        and the datasink) plus any task-specific auxiliary tensors; ``annotate_output``
+        and the report records) plus any task-specific auxiliary tensors; ``annotate_output``
         merges those into a single image for logging/saving, leaving ``clean_image``
         untouched. The default returns ``clean_image`` unchanged.
         """

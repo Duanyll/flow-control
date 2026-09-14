@@ -6,8 +6,7 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_grpo_demo_debug",
 
-  "num_batches_per_epoch": 2,
-  "num_prompts_per_batch": 2,
+  "num_prompts_per_epoch": 4,
   "num_rollouts_per_prompt": 4,
   "num_inner_epochs": 1,
   "train_batch_size": 8,
@@ -45,7 +44,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_flux/train",
   },
 
@@ -88,7 +87,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_flux/validation",
     "limit": 8,
   },

@@ -11,7 +11,7 @@ from typing import Annotated, ClassVar, Literal, NotRequired, cast
 import torch
 from einops import repeat
 
-from flow_control.datasets.coercion import (
+from flow_control.data.coercion import (
     ImageTensor,
     ImageTensorList,
     JsonBeforeValidator,

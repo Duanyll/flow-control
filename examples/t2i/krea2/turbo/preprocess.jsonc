@@ -17,7 +17,7 @@
     "preset": "krea2_turbo"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_krea2_turbo_t2i"
+    "path": "./demo/preprocess_krea2_turbo_t2i",
+    "backend": "directory"
   }
 }

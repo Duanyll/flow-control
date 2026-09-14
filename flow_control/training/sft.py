@@ -88,7 +88,9 @@ class SftTrainer(
     clip_grad_norm: float = 1.0
 
     cfg_drop_prob: float = 0.0
-    latent_length_test_mode: bool = False
+    cost_test_mode: bool = False
+    """Memory probe instead of training: feed the adapter's synthetic ``cost_test``
+    batches of increasing token count until OOM."""
 
     # --------------------------------- Status bar ------------------------------- #
     _status_fields: dict[str, str] = {
@@ -309,8 +311,8 @@ class SftTrainer(
 
     @distributed_main
     def run(self):
-        if self.latent_length_test_mode:
-            self.run_latent_length_test()
+        if self.cost_test_mode:
+            self.run_cost_test()
             return
 
         self.set_seed()
@@ -386,10 +388,10 @@ class SftTrainer(
 
         console.rule("[bold green]Training completed[/bold green]")
 
-    def run_latent_length_test(self):
+    def run_cost_test(self):
         logger.warning(
-            "Running in latent length test mode since enabled in config. This will not perform training, but will test "
-            "increasing latent lengths until OOM. This is useful for finding the maximum latent length that fits in memory."
+            "Running in cost test mode since enabled in config. This will not perform training, but will test "
+            "increasing sequence costs (token totals) until OOM. This is useful for finding the maximum cost that fits in memory."
         )
 
         self.set_seed()
@@ -397,15 +399,15 @@ class SftTrainer(
         self.make_optimizer_and_scheduler()
         self.load_processor()
 
-        console.rule("[bold blue]Starting latent length test[/bold blue]")
+        console.rule("[bold blue]Starting cost test[/bold blue]")
 
         current_len = 0
         best_len = 0
         try:
-            for batch in self.model.latent_length_test():
-                current_len = batch["latent_length"]
+            for batch in self.model.cost_test():
+                current_len = batch["cost"]
                 start_time = time.time()
-                logger.info(f"Testing latent length: {current_len}")
+                logger.info(f"Testing cost: {current_len}")
                 batch = deep_cast_float_dtype(batch, self.model.dtype)
                 batch = deep_move_to_device(batch, self.device)
                 loss = self.train_step([batch])
@@ -414,16 +416,12 @@ class SftTrainer(
                 self._optimizer.zero_grad()
                 elapsed_time = time.time() - start_time
                 logger.info(
-                    f"Successfully trained with latent length {current_len} in {elapsed_time:.2f} seconds."
+                    f"Successfully trained with cost {current_len} in {elapsed_time:.2f} seconds."
                 )
                 best_len = current_len
-            logger.info(
-                f"Latent length test completed successfully up to length {current_len}."
-            )
+            logger.info(f"Cost test completed successfully up to cost {current_len}.")
         except torch.OutOfMemoryError:
-            logger.error(
-                f"Out of memory error encountered at latent length {current_len}."
-            )
+            logger.error(f"Out of memory error encountered at cost {current_len}.")
         finally:
-            console.rule("[bold red]Latent length test completed[/bold red]")
-            console.print(Panel.fit(f"Maximum latent length: [bold]{best_len}[/bold]"))
+            console.rule("[bold red]Cost test completed[/bold red]")
+            console.print(Panel.fit(f"Maximum cost: [bold]{best_len}[/bold]"))

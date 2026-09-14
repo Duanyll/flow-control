@@ -27,7 +27,7 @@
     }
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_flux2_t2i"
+    "path": "./demo/preprocess_flux2_t2i",
+    "backend": "directory"
   }
 }

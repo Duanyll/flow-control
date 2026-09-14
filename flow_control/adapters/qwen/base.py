@@ -203,7 +203,7 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
             device=prompt_embeds.device,
         )
 
-    def latent_length_test(self):
+    def cost_test(self):
         def mock_batch(image_size: tuple[int, int], text_length: int):
             img_len = (image_size[0] // 16) * (image_size[1] // 16)
             total_len = img_len + text_length
@@ -223,7 +223,7 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
                     device=self.device,
                     dtype=self.dtype,
                 ),
-                "latent_length": total_len,
+                "cost": total_len,
             }
 
         yield mock_batch((512, 512), 64)

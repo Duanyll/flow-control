@@ -17,8 +17,7 @@
   "precompute_aux_model_outputs": true,
 
   // On-policy: 1 batch of 48 unique prompts x 24 rollouts = 1152 rollouts, 1 optimizer step.
-  "num_batches_per_epoch": 1,
-  "num_prompts_per_batch": 48,
+  "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
   "num_inner_epochs": 1,
   // 1152 rollouts x 4 forward-process timesteps -> 4608 items, 1 update.
@@ -69,7 +68,7 @@
   },
 
   "dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/train",
   },
 
@@ -116,7 +115,7 @@
   },
 
   "validation_dataset": {
-    "type": "pickle_directory",
+    "type": "cache",
     "path": "./data/geneval_sd35/validation",
   },
 

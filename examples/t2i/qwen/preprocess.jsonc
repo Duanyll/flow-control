@@ -17,7 +17,7 @@
     "preset": "qwen_image"
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./demo/preprocess_qwen_t2i"
+    "path": "./demo/preprocess_qwen_t2i",
+    "backend": "directory"
   }
 }

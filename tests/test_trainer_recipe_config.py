@@ -47,8 +47,7 @@ class _ProbeOverrides(BaseModel):
     checkpoint_root: str = ""
     experiment_name: str = "probe"
     seed_checkpoint_dir: str = ""
-    num_batches_per_epoch: int = 1
-    num_prompts_per_batch: int = 1
+    num_prompts_per_epoch: int = 1
     num_rollouts_per_prompt: int = 1
     rollout_sampler: Sampler = Field(default_factory=Sampler)
     validation_sampler: Sampler = Field(default_factory=Sampler)
@@ -322,13 +321,8 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         # without a plan, so per-step variants and CFG++ failed during training.
         # Exercise real collection with only reward/decode/logging stubbed out.
         from test_microbatching import FakeSamplerModel, make_sampler_batch
-        from torchdata.stateful_dataloader import StatefulDataLoader
 
-        from flow_control.training.data import (
-            DistributedKRepeatSampler,
-            PaddingAwareDatasetWrapper,
-            collate_fn,
-        )
+        from flow_control.data import Index, IndexEntry, RowCursor
 
         model: Any = FakeSamplerModel()
         model.transformer = torch.nn.Identity()
@@ -346,13 +340,23 @@ class TrainerRolloutPlanTest(unittest.TestCase):
             initialize_latents=lambda batch, **kwargs: None,
             decode_output=lambda latents, batch: {},
             get_negative_batch=lambda batch: make_sampler_batch(-0.2),
+            resample=lambda row, generator: row,
         )
-        dataset = PaddingAwareDatasetWrapper([make_sampler_batch(0.3, 0.9)])
-        trainer._dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=1,
-            collate_fn=collate_fn,
-            sampler=DistributedKRepeatSampler(dataset, 1, 1, 1, num_replicas=1, rank=0),
+
+        class OneRowStore:
+            row = {**make_sampler_batch(0.3, 0.9), "__key__": "sample"}
+            index = Index([IndexEntry("sample", 1, "", None, "sample")], {})
+
+            def __len__(self):
+                return 1
+
+            def get(self, row_id):
+                return dict(self.row)
+
+        store: Any = OneRowStore()
+        trainer._store = store
+        trainer._cursor = RowCursor(
+            store, trainer.make_planner(store, shuffle=True), trainer.seed
         )
 
         def drain(reward, submitter, handler, profile):

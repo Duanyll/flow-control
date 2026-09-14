@@ -22,7 +22,7 @@
     }
   },
   "output": {
-    "type": "pickle_directory",
-    "path": "./data/christian_boragine/flux1"
+    "path": "./data/christian_boragine/flux1",
+    "backend": "directory"
   }
 }
