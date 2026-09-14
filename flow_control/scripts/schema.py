@@ -31,12 +31,13 @@ def generate_schemas() -> dict[str, dict]:
     """Return a mapping of config name -> JSON schema dict.
 
     One schema per registered trainer (``trainer_registry``) plus the standalone
-    ``preprocess`` / ``serve`` configs. ``import_builtin_trainers`` registers the
+    ``preprocess`` / ``pack`` / ``serve`` configs. ``import_builtin_trainers`` registers the
     built-ins; any plugin trainers loaded via a config's ``imports`` (see ``run``)
     are already in the registry and get a schema too. Importing a config class
     builds + caches its pydantic core schema, freezing the registry-backed unions,
     so plugins must be loaded before this.
     """
+    from flow_control.data.pack import PackConfig
     from flow_control.scripts.preprocess import PreprocessConfig
     from flow_control.serving.config import ServeConfig
     from flow_control.training import import_builtin_trainers
@@ -48,6 +49,7 @@ def generate_schemas() -> dict[str, dict]:
         for tag, cls in sorted(trainer_registry.members().items())
     }
     schemas["preprocess"] = TypeAdapter(PreprocessConfig).json_schema()
+    schemas["pack"] = TypeAdapter(PackConfig).json_schema()
     schemas["serve"] = TypeAdapter(ServeConfig).json_schema()
     return {name: _inject_schema_field(schema) for name, schema in schemas.items()}
 

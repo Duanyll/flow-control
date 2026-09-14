@@ -12,8 +12,8 @@ wheels/
 runs/
 runs
 logs/
-data/
-data
+/data/
+/data
 draft/
 local/
 notebooks/

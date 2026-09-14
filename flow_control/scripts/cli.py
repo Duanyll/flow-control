@@ -11,6 +11,7 @@ from flow_control.utils.registry import load_plugins
 # specially (it re-spawns subprocesses that re-load the file), so it is not here.
 CONFIG_COMMAND_MODULES = {
     "preprocess": "flow_control.scripts.preprocess",
+    "pack": "flow_control.scripts.pack",
     "seed": "flow_control.scripts.seed",
     "vae-server": "flow_control.scripts.vae_server",
     "reward-server": "flow_control.scripts.reward_server",
