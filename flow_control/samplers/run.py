@@ -37,8 +37,8 @@ type StepCollector = Callable[[SampleRun, StepRecord], None]
 @dataclass(slots=True)
 class SampleRun:
     sampler: Sampler
-    batch: Batch
-    negative_batch: Batch | None
+    row: Batch
+    negative_row: Batch | None
     plan: list[Transition]
     ctx: StepContext
     predictor: BasePrediction
@@ -49,13 +49,13 @@ class SampleRun:
         self._prediction = self._bind_prediction()
 
     def _bind_prediction(self) -> Predictor:
-        inner = self.predictor.bind(self.batch, self.negative_batch)
-        projectors, batch = self.sampler.projectors, self.batch
+        inner = self.predictor.bind(self.row, self.negative_row)
+        projectors, row = self.sampler.projectors, self.row
 
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
             velocity = yield from inner(request, ctx)
             for projector in projectors:
-                velocity = projector.post_combine(velocity, request, batch, ctx)
+                velocity = projector.post_combine(velocity, request, row, ctx)
             return velocity
 
         return predict
@@ -74,7 +74,7 @@ class SampleRun:
         for index, transition in enumerate(self.plan):
             ctx.item_index = index
             ctx.latents = apply_pre_transition(
-                self.sampler.projectors, self.batch, ctx, transition
+                self.sampler.projectors, self.row, ctx, transition
             )
             velocity = None
             result = yield from transition.run(ctx, observed)
@@ -88,7 +88,7 @@ class SampleRun:
             ctx.latents = result.next_latents
             if result.next_solver_state is not None:
                 ctx.solver_state = result.next_solver_state
-        ctx.latents = ctx.latents.to(self.batch["noisy_latents"].dtype)
+        ctx.latents = ctx.latents.to(self.row["noisy_latents"].dtype)
 
     def guided_velocity(
         self, latents: torch.Tensor, item_index: int

@@ -500,11 +500,11 @@ class HiDreamO1FullPreset(BaseModel):
             return self.encoder.encode_ids_with_images(prompt, images, system_prompt)
         return {"input_ids": self.encoder.encode_ids(prompt, system_prompt)}
 
-    def get_cost(self, batch: Mapping[str, Any]) -> int:
-        h, w = batch["image_size"]
+    def get_cost(self, row: Mapping[str, Any]) -> int:
+        h, w = row["image_size"]
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
-        length = (h * w) // ratio + batch["input_ids"].shape[1]
-        for rh, rw in batch.get("reference_sizes") or []:
+        length = (h * w) // ratio + row["input_ids"].shape[1]
+        for rh, rw in row.get("reference_sizes") or []:
             length += (rh * rw) // ratio
         return length
 

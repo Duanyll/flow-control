@@ -46,26 +46,26 @@ def deserialize_object(data: bytes, device: torch.device, dtype: torch.dtype) ->
     return deep_move_to_device(deep_cast_float_dtype(obj, dtype), device)
 
 
-def serialize_batch(batch: dict[str, Any]) -> bytes:
-    """Serialize a batch dict (tensors + strings + metadata) to bytes.
+def serialize_row(row: dict[str, Any]) -> bytes:
+    """Serialize a row dict (tensors + strings + metadata) to bytes.
 
     Tensors are converted to bf16 and moved to CPU before pickling.
     """
-    cpu_batch = deep_move_to_device(
-        deep_cast_float_dtype(batch, torch.bfloat16), torch.device("cpu")
+    cpu_row = deep_move_to_device(
+        deep_cast_float_dtype(row, torch.bfloat16), torch.device("cpu")
     )
     buffer = io.BytesIO()
-    pickle.dump(cpu_batch, buffer)
+    pickle.dump(cpu_row, buffer)
     return buffer.getvalue()
 
 
-def deserialize_batch(
+def deserialize_row(
     data: bytes, device: torch.device, dtype: torch.dtype
 ) -> dict[str, Any]:
-    """Deserialize a batch dict from bytes, moving all tensors to device/dtype."""
+    """Deserialize a row dict from bytes, moving all tensors to device/dtype."""
     buffer = io.BytesIO(data)
-    batch: dict[str, Any] = pickle.load(buffer)  # noqa: S301
-    return deep_move_to_device(deep_cast_float_dtype(batch, dtype), device)
+    row: dict[str, Any] = pickle.load(buffer)  # noqa: S301
+    return deep_move_to_device(deep_cast_float_dtype(row, dtype), device)
 
 
 class RemoteClient:
@@ -126,7 +126,7 @@ class RemoteOffloadable(BaseModel):
 
     Provides ``endpoint`` configuration, a ``RemoteClient`` instance, and helper
     methods for common remote call patterns (tensor-in/tensor-out and
-    batch-in/tensor-out).  Subclasses call ``_init_remote()`` during their
+    row-in/tensor-out).  Subclasses call ``_init_remote()`` during their
     ``load_model`` path to establish the connection and send their pydantic config
     to the server's ``/load`` endpoint.
     """
@@ -212,75 +212,75 @@ class RemoteOffloadable(BaseModel):
         result = await self._remote_client.async_post_bytes(path, data)
         return deserialize_tensor(result, self._remote_device, self._remote_dtype)
 
-    def _remote_batch_call(
+    def _remote_row_call(
         self,
         path: str,
-        batch: dict[str, Any],
+        row: dict[str, Any],
         fields: set[str] | None = None,
     ) -> torch.Tensor:
-        """Serialize batch dict (optionally filtered by ``fields``), POST to server,
+        """Serialize row dict (optionally filtered by ``fields``), POST to server,
         deserialize result tensor."""
         assert self._remote_client is not None
         assert self._remote_device is not None
         if fields is not None:
-            batch = {k: v for k, v in batch.items() if k in fields}
-        data = serialize_batch(batch)
+            row = {k: v for k, v in row.items() if k in fields}
+        data = serialize_row(row)
         logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB batch to {self.endpoint}{path}"
+            f"Sending {len(data) / 1024 / 1024:.2f} MB row to {self.endpoint}{path}"
         )
         result = self._remote_client.post_bytes(path, data)
         return deserialize_tensor(result, self._remote_device, self._remote_dtype)
 
-    async def _async_remote_batch_call(
+    async def _async_remote_row_call(
         self,
         path: str,
-        batch: dict[str, Any],
+        row: dict[str, Any],
         fields: set[str] | None = None,
     ) -> torch.Tensor:
-        """Async version of ``_remote_batch_call``."""
+        """Async version of ``_remote_row_call``."""
         assert self._remote_client is not None
         assert self._remote_device is not None
         if fields is not None:
-            batch = {k: v for k, v in batch.items() if k in fields}
-        data = serialize_batch(batch)
+            row = {k: v for k, v in row.items() if k in fields}
+        data = serialize_row(row)
         logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB batch to {self.endpoint}{path}"
+            f"Sending {len(data) / 1024 / 1024:.2f} MB row to {self.endpoint}{path}"
         )
         result = await self._remote_client.async_post_bytes(path, data)
         return deserialize_tensor(result, self._remote_device, self._remote_dtype)
 
-    def _remote_batch_object_call(
+    def _remote_row_object_call(
         self,
         path: str,
-        batch: dict[str, Any],
+        row: dict[str, Any],
         fields: set[str] | None = None,
     ) -> Any:
-        """Serialize a batch dict, POST to server, deserialize an object result."""
+        """Serialize a row dict, POST to server, deserialize an object result."""
         assert self._remote_client is not None
         assert self._remote_device is not None
         if fields is not None:
-            batch = {k: v for k, v in batch.items() if k in fields}
-        data = serialize_batch(batch)
+            row = {k: v for k, v in row.items() if k in fields}
+        data = serialize_row(row)
         logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB batch to {self.endpoint}{path}"
+            f"Sending {len(data) / 1024 / 1024:.2f} MB row to {self.endpoint}{path}"
         )
         result = self._remote_client.post_bytes(path, data)
         return deserialize_object(result, self._remote_device, self._remote_dtype)
 
-    async def _async_remote_batch_object_call(
+    async def _async_remote_row_object_call(
         self,
         path: str,
-        batch: dict[str, Any],
+        row: dict[str, Any],
         fields: set[str] | None = None,
     ) -> Any:
-        """Async version of ``_remote_batch_object_call``."""
+        """Async version of ``_remote_row_object_call``."""
         assert self._remote_client is not None
         assert self._remote_device is not None
         if fields is not None:
-            batch = {k: v for k, v in batch.items() if k in fields}
-        data = serialize_batch(batch)
+            row = {k: v for k, v in row.items() if k in fields}
+        data = serialize_row(row)
         logger.debug(
-            f"Sending {len(data) / 1024 / 1024:.2f} MB batch to {self.endpoint}{path}"
+            f"Sending {len(data) / 1024 / 1024:.2f} MB row to {self.endpoint}{path}"
         )
         result = await self._remote_client.async_post_bytes(path, data)
         return deserialize_object(result, self._remote_device, self._remote_dtype)

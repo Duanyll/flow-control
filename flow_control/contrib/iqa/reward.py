@@ -61,7 +61,7 @@ class PyIQAReward(BaseReward):
     so a single reward instance can report a full quality table (PSNR, SSIM,
     LPIPS, MUSIQ, ...) per sample.
 
-    Batch contract: ``clean_image`` is the image under evaluation as
+    Row contract: ``clean_image`` is the image under evaluation as
     ``[1, C, H, W]`` in ``[0, 1]``; full-reference (FR) metrics additionally
     read the :attr:`reference` condition image in the same format and size.
     No-reference (NR) metrics ignore the reference, so a battery of only NR
@@ -114,7 +114,7 @@ class PyIQAReward(BaseReward):
         return [spec.label or spec.name for spec in self.metrics]
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         fields = {"clean_image"}
         if any(
             _default_config(spec.name)["metric_mode"] == "FR" for spec in self.metrics
@@ -132,8 +132,8 @@ class PyIQAReward(BaseReward):
         ]
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
-        image = batch["clean_image"].to(device=self._device, dtype=torch.float32)
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+        image = row["clean_image"].to(device=self._device, dtype=torch.float32)
         reference: torch.Tensor | None = None
 
         scores = []
@@ -142,7 +142,7 @@ class PyIQAReward(BaseReward):
                 if reference is None:
                     reference = (
                         ConditionImage.parse(self.reference)
-                        .image(batch)
+                        .image(row)
                         .to(device=self._device, dtype=torch.float32)
                     )
                 if reference.shape != image.shape:
@@ -188,7 +188,7 @@ if __name__ == "__main__":
             PyIQAMetricSpec(name="musiq"),
         ]
     )
-    print(f"[bold]batch fields:[/] {reward._batch_fields}")
+    print(f"[bold]row fields:[/] {reward._row_fields}")
     print(f"[bold]component weights:[/] {reward.component_weights}")
     reward.load_model(device)
 
@@ -214,7 +214,7 @@ if __name__ == "__main__":
     )
 
     nr_only = PyIQAReward(metrics=[PyIQAMetricSpec(name="niqe")])
-    assert nr_only._batch_fields == {"clean_image"}
+    assert nr_only._row_fields == {"clean_image"}
     nr_only.load_model(device)
     nr_score = nr_only.score({"clean_image": very_noisy})
     print(f"[bold]NR-only niqe:[/] {nr_score.raw[0, 0].item():.4f}")

@@ -324,7 +324,7 @@ class OcrReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _load_model(self, device: torch.device) -> None:
@@ -332,14 +332,14 @@ class OcrReward(BaseReward):
         self._backend = RapidOcrBackend(device)
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         if self._backend is None:
             raise RuntimeError(
                 "OcrReward backend is not loaded; call load_model() first."
             )
 
-        image: torch.Tensor = batch["clean_image"]  # [1, C, H, W] in [0, 1]
-        prompt: str = batch["prompt"]
+        image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
+        prompt: str = row["prompt"]
         device = image.device
         dtype = image.dtype
 

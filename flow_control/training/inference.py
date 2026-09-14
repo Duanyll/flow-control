@@ -81,7 +81,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
     optimizer state.
     """
     save_extra: bool = False
-    """``records/`` rows hold the whole working batch (source fields, conditions,
+    """``records/`` rows hold the whole working row (source fields, conditions,
     decoded outputs) instead of only the decoded outputs plus key / cost /
     image_size."""
     annotate_output_image: bool = False
@@ -174,18 +174,18 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         for items in self.dataloader:
             for item in items:
                 with dump_if_failed(logger, item):
-                    batch = self.prepare_row(item, mode="inference", epoch=0)
-                    batch = deep_cast_float_dtype(batch, self.model.dtype)
+                    row = self.prepare_row(item, mode="inference", epoch=0)
+                    row = deep_cast_float_dtype(row, self.model.dtype)
                     generator = torch.Generator(device=self.device).manual_seed(
-                        derive_seed(self.seed, batch[KEY])
+                        derive_seed(self.seed, row[KEY])
                     )
                     self.processor.initialize_latents(
-                        batch,
+                        row,
                         generator=generator,
                         device=self.device,
                         dtype=self.model.dtype,
                     )
-                    request = self.build_sample_request(self.sampler, batch, generator)
+                    request = self.build_sample_request(self.sampler, row, generator)
                 yield request
 
     def _sample_submitter(
@@ -193,9 +193,9 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         progress: Progress,
         task: TaskID,
     ) -> Generator[tuple[dict[str, Any], _Output]]:
-        """Sample, decode and yield ``(batch, output)`` for scoring.
+        """Sample, decode and yield ``(row, output)`` for scoring.
 
-        ``batch`` (on device) is handed to ``execute_reward``, which snapshots
+        ``row`` (on device) is handed to ``execute_reward``, which snapshots
         the fields it needs for async scoring and lets sampling of later
         requests overlap with the reward request still in flight. ``output`` is
         the CPU payload written to the report once its score is known.
@@ -205,33 +205,33 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         """
         cpu = torch.device("cpu")
         for run in self.sampler.sample(self.model, self._requests()):
-            batch: Any = run.batch
-            decoded = self.processor.decode_output(run.ctx.latents, batch)
-            batch.update(decoded)
+            row: Any = run.row
+            decoded = self.processor.decode_output(run.ctx.latents, row)
+            row.update(decoded)
             progress.advance(task)
-            if is_padding(batch):
+            if is_padding(row):
                 continue
-            # Build the annotated preview while the full GPU batch (e.g. tie's
+            # Build the annotated preview while the full GPU row (e.g. tie's
             # reference_images) and decoded outputs are still available.
             preview = None
             if self.report.previews:
                 preview = (
-                    self.processor.annotate_output(decoded, batch)
+                    self.processor.annotate_output(decoded, row)
                     if self.annotate_output_image
                     else decoded["clean_image"]
                 ).to(cpu)
             record = deep_move_to_device(
-                batch
+                row
                 if self.save_extra
                 else {
-                    KEY: batch[KEY],
-                    COST: batch[COST],
-                    IMAGE_SIZE: batch[IMAGE_SIZE],
+                    KEY: row[KEY],
+                    COST: row[COST],
+                    IMAGE_SIZE: row[IMAGE_SIZE],
                     **decoded,
                 },
                 cpu,
             )
-            yield batch, _Output(record, preview)
+            yield row, _Output(record, preview)
 
     # ---------------------------------- Output ---------------------------------- #
 
@@ -358,7 +358,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
 
                 scored = execute_reward(self.reward, submitter, handler)
             else:
-                for _batch, output in submitter:
+                for _row, output in submitter:
                     self._write_output(writer, output, None)
                 scored = []
 

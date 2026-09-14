@@ -20,10 +20,10 @@ from flow_control.data.coercion import (
 from flow_control.processors import task_registry
 from flow_control.processors.base import (
     BaseProcessor,
-    DecodedBatch,
-    InputBatch,
-    ProcessedBatch,
-    TrainInputBatch,
+    DecodedRow,
+    InputRow,
+    ProcessedRow,
+    TrainInputRow,
 )
 from flow_control.processors.components.llm import parse_llm_json_output
 from flow_control.processors.components.prompts import PromptStr, parse_prompt
@@ -40,7 +40,7 @@ from flow_control.utils.tensor import ensure_alpha_channel
 logger = get_logger(__name__)
 
 
-class EfficientLayeredInputBatch(InputBatch):
+class EfficientLayeredInputRow(InputRow):
     clean_image: ImageTensor
     layer_boxes: NotRequired[
         Annotated[list[tuple[int, int, int, int]], JsonBeforeValidator] | None
@@ -50,30 +50,30 @@ class EfficientLayeredInputBatch(InputBatch):
     annotated_image: NotRequired[ImageTensor]
 
 
-class EfficientLayeredTrainInputBatch(TrainInputBatch):
+class EfficientLayeredTrainInputRow(TrainInputRow):
     clean_image: ImageTensor
     layer_boxes: Annotated[list[tuple[int, int, int, int]], JsonBeforeValidator]
     layer_images: ImageTensorList
     layer_prompts: NotRequired[JsonStrList | None]
 
 
-class EfficientLayeredProcessedBatch(ProcessedBatch):
+class EfficientLayeredProcessedRow(ProcessedRow):
     prompt_embeds: torch.Tensor
     layer_boxes: list[tuple[int, int, int, int]]
     image_latents: torch.Tensor
     text_lengths: list[int]
 
 
-class EfficientLayeredDecodedBatch(DecodedBatch):
+class EfficientLayeredDecodedRow(DecodedRow):
     layer_images: list[torch.Tensor]
 
 
 @task_registry.register("efficient_layered")
 class EfficientLayeredProcessor(
     BaseProcessor[
-        EfficientLayeredInputBatch,
-        EfficientLayeredTrainInputBatch,
-        EfficientLayeredProcessedBatch,
+        EfficientLayeredInputRow,
+        EfficientLayeredTrainInputRow,
+        EfficientLayeredProcessedRow,
     ]
 ):
     task: Literal["efficient_layered"] = "efficient_layered"
@@ -191,40 +191,40 @@ class EfficientLayeredProcessor(
             "text_lengths": text_lengths,
         }
 
-    async def prepare_inference_batch(
-        self, batch: EfficientLayeredInputBatch
-    ) -> EfficientLayeredProcessedBatch:
-        orig_size = batch["clean_image"].shape[2], batch["clean_image"].shape[3]
-        batch["clean_image"] = clean_image = self.resize_image(
-            ensure_alpha_channel(batch["clean_image"])
+    async def prepare_inference_row(
+        self, row: EfficientLayeredInputRow
+    ) -> EfficientLayeredProcessedRow:
+        orig_size = row["clean_image"].shape[2], row["clean_image"].shape[3]
+        row["clean_image"] = clean_image = self.resize_image(
+            ensure_alpha_channel(row["clean_image"])
         )
         image_size = clean_image.shape[2], clean_image.shape[3]
         image_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
 
-        layer_boxes = batch.get("layer_boxes", None)
-        layer_prompts = batch.get("layer_prompts", None)
+        layer_boxes = row.get("layer_boxes", None)
+        layer_prompts = row.get("layer_prompts", None)
         if (layer_boxes is None) ^ (layer_prompts is None):
             warn_once(
                 logger,
                 "Either both or neither of layer_boxes and layer_prompts should be provided. Ignoring both.",
             )
         if layer_boxes is None or layer_prompts is None:
-            batch["layer_boxes"], batch["layer_prompts"] = (
+            row["layer_boxes"], row["layer_prompts"] = (
                 layer_boxes,
                 layer_prompts,
             ) = await self.genearte_layer_boxes_prompts(clean_image)
             # No need to scale layer boxes as image is already resized
-            batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
+            row["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
                 layer_boxes, image_size, image_size
             )
         else:
-            batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
+            row["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
                 layer_boxes, orig_size, image_size
             )
         if self.save_annotated_image:
-            batch["annotated_image"] = draw_bbox_on_image(
+            row["annotated_image"] = draw_bbox_on_image(
                 clean_image,
                 layer_boxes[1:],
                 [str(i) for i in range(1, len(layer_boxes))],
@@ -237,7 +237,7 @@ class EfficientLayeredProcessor(
         prompt_embeds = torch.cat(prompt_embeds_list, dim=1)
         text_lengths = [embed.shape[1] for embed in prompt_embeds_list]
 
-        result = EfficientLayeredProcessedBatch(
+        result = EfficientLayeredProcessedRow(
             image_size=image_size,
             image_latents=image_latents,
             prompt_embeds=prompt_embeds,
@@ -250,38 +250,38 @@ class EfficientLayeredProcessor(
 
         return result
 
-    async def prepare_training_batch(
-        self, batch: EfficientLayeredTrainInputBatch
-    ) -> EfficientLayeredProcessedBatch:
-        if (layer_prompts := batch.get("layer_prompts", None)) is None:
-            batch["layer_prompts"] = layer_prompts = await asyncio.gather(
+    async def prepare_training_row(
+        self, row: EfficientLayeredTrainInputRow
+    ) -> EfficientLayeredProcessedRow:
+        if (layer_prompts := row.get("layer_prompts", None)) is None:
+            row["layer_prompts"] = layer_prompts = await asyncio.gather(
                 *(
                     [
                         self.chat_completion(
                             self.bg_caption_prompt,
-                            [batch["layer_images"][0]],
+                            [row["layer_images"][0]],
                         )
                     ]
                     + [
                         self.chat_completion(self.fg_caption_prompt, [img])
-                        for img in batch["layer_images"][1:]
+                        for img in row["layer_images"][1:]
                     ]
                 )
             )
         stacked_images = self._stack_all_images(
-            batch["clean_image"], batch["layer_boxes"], batch["layer_images"]
+            row["clean_image"], row["layer_boxes"], row["layer_images"]
         )
-        orig_size = batch["clean_image"].shape[2], batch["clean_image"].shape[3]
+        orig_size = row["clean_image"].shape[2], row["clean_image"].shape[3]
         resized_images = self.resize_image(stacked_images)
         new_size = resized_images.shape[2], resized_images.shape[3]
-        batch["clean_image"] = clean_image = resized_images[0:1]
+        row["clean_image"] = clean_image = resized_images[0:1]
         image_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
-        batch["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
-            batch["layer_boxes"], orig_size, new_size
+        row["layer_boxes"] = layer_boxes = self._scale_and_align_layer_boxes(
+            row["layer_boxes"], orig_size, new_size
         )
-        batch["layer_images"] = layer_images = self._crop_stacked_images(
+        row["layer_images"] = layer_images = self._crop_stacked_images(
             resized_images, layer_boxes
         )
         clean_latents = torch.cat(
@@ -298,7 +298,7 @@ class EfficientLayeredProcessor(
         prompt_embeds = torch.cat(prompt_embeds_list, dim=1)
         text_lengths = [embed.shape[1] for embed in prompt_embeds_list]
 
-        result = EfficientLayeredProcessedBatch(
+        result = EfficientLayeredProcessedRow(
             image_size=new_size,
             image_latents=image_latents,
             prompt_embeds=prompt_embeds,
@@ -312,26 +312,26 @@ class EfficientLayeredProcessor(
 
         return result
 
-    def get_cost(self, batch: EfficientLayeredProcessedBatch) -> int:
+    def get_cost(self, row: EfficientLayeredProcessedRow) -> int:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (
-            super().get_cost(batch)
-            + batch["prompt_embeds"].shape[1]
+            super().get_cost(row)
+            + row["prompt_embeds"].shape[1]
             + sum(
                 (bottom - top) * (right - left) // ratio
-                for (top, bottom, left, right) in batch["layer_boxes"]
+                for (top, bottom, left, right) in row["layer_boxes"]
             )
         )
 
     def decode_output(
         self,
         output_latent: torch.Tensor,
-        batch: EfficientLayeredProcessedBatch,
-    ) -> EfficientLayeredDecodedBatch:
+        row: EfficientLayeredProcessedRow,
+    ) -> EfficientLayeredDecodedRow:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         latent_len_per_image = [
             (bottom - top) * (right - left) // ratio
-            for (top, bottom, left, right) in batch["layer_boxes"]
+            for (top, bottom, left, right) in row["layer_boxes"]
         ]
         split_latents = torch.split(
             output_latent,
@@ -340,27 +340,27 @@ class EfficientLayeredProcessor(
         )
         decoded_layers: list[torch.Tensor] = []
         for i, latents in enumerate(split_latents):
-            layer_size = batch["layer_boxes"][i]
+            layer_size = row["layer_boxes"][i]
             decoded_layer = self.decode_latents(
                 latents, (layer_size[1] - layer_size[0], layer_size[3] - layer_size[2])
             )
             decoded_layers.append(decoded_layer)
-        return EfficientLayeredDecodedBatch(
+        return EfficientLayeredDecodedRow(
             clean_image=merge_images(decoded_layers),
             layer_images=decoded_layers,
         )
 
     def annotate_output(
         self,
-        decoded: DecodedBatch,
-        batch: EfficientLayeredProcessedBatch,
+        decoded: DecodedRow,
+        row: EfficientLayeredProcessedRow,
     ) -> torch.Tensor:
-        layer_images = cast(EfficientLayeredDecodedBatch, decoded)["layer_images"]
+        layer_images = cast(EfficientLayeredDecodedRow, decoded)["layer_images"]
         return merge_images(layer_images, border_width=4, draw_labels=True)
 
     def initialize_latents(
         self,
-        batch: EfficientLayeredProcessedBatch,
+        row: EfficientLayeredProcessedRow,
         generator=None,
         device=None,
         dtype=torch.bfloat16,
@@ -368,7 +368,7 @@ class EfficientLayeredProcessor(
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         latent_len_per_image = [
             (bottom - top) * (right - left) // ratio
-            for (top, bottom, left, right) in batch["layer_boxes"]
+            for (top, bottom, left, right) in row["layer_boxes"]
         ]
         total_latent_len = sum(latent_len_per_image)
         latents = torch.randn(
@@ -377,5 +377,5 @@ class EfficientLayeredProcessor(
             device=device or self.device,
             dtype=dtype,
         )
-        batch["noisy_latents"] = latents
+        row["noisy_latents"] = latents
         return latents

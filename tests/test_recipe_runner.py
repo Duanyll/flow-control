@@ -34,7 +34,7 @@ class SdeditRecipeTest(unittest.TestCase):
                     FakeSamplerModel(),
                     [
                         SampleRequest(
-                            batch=batch, generator=torch.Generator().manual_seed(seed)
+                            row=batch, generator=torch.Generator().manual_seed(seed)
                         )
                     ],
                     collector=collector,

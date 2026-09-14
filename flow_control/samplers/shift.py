@@ -19,8 +19,8 @@ class BaseShift(BaseModel, ABC):
     16x16 pixels per token."""
     shift_terminal: float | None = None
 
-    def apply(self, sigmas: torch.Tensor, batch: Batch, num_steps: int) -> torch.Tensor:
-        shift_factor = self._shift_factor(batch, num_steps)
+    def apply(self, sigmas: torch.Tensor, row: Batch, num_steps: int) -> torch.Tensor:
+        shift_factor = self._shift_factor(row, num_steps)
         if shift_factor != 1.0:
             sigmas = (shift_factor * sigmas) / (1 + (shift_factor - 1) * sigmas)
 
@@ -31,19 +31,17 @@ class BaseShift(BaseModel, ABC):
 
         return sigmas
 
-    def _shift_factor(self, batch: Batch, num_steps: int) -> float:
-        return self._calculate_shift_factor(self._get_seq_len(batch), num_steps)
+    def _shift_factor(self, row: Batch, num_steps: int) -> float:
+        return self._calculate_shift_factor(self._get_seq_len(row), num_steps)
 
-    def _get_seq_len(self, batch: Batch) -> int:
+    def _get_seq_len(self, row: Batch) -> int:
         # The model may see less than the whole image per forward (tiles).
-        height, width = batch["image_size"]
-        model_h, model_w = cast(dict[str, Any], batch).get(
+        height, width = row["image_size"]
+        model_h, model_w = cast(dict[str, Any], row).get(
             "model_image_size", (height, width)
         )
         if self.image_seq_len_from == "actual":
-            return (
-                batch["noisy_latents"].shape[1] * model_h * model_w // (height * width)
-            )
+            return row["noisy_latents"].shape[1] * model_h * model_w // (height * width)
         return model_h * model_w // 256  # assuming patch size 16x16
 
     @abstractmethod

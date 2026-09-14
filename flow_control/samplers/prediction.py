@@ -26,19 +26,19 @@ class BasePrediction(BaseModel, ABC):
     stateful: ClassVar[bool] = False
 
     @abstractmethod
-    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
+    def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
         """Return a predictor whose mutable history belongs only to this binding."""
 
     def velocity(
         self,
-        batch: Batch,
+        row: Batch,
         timestep: torch.Tensor,
-        negative_batch: Batch | None = None,
+        negative_row: Batch | None = None,
     ) -> Calls[torch.Tensor]:
         """Evaluate this tree at an independent timestep, without a solver plan."""
-        latents = batch["noisy_latents"].float()
+        latents = row["noisy_latents"].float()
         return (
-            yield from self.bind(batch, negative_batch)(
+            yield from self.bind(row, negative_row)(
                 EvalRequest(latents, timestep), StepContext(latents, None, None)
             )
         )
@@ -80,7 +80,7 @@ Prediction = SerializeAsAny[
 class ModelPrediction(BasePrediction):
     type: Literal["model"] = "model"
 
-    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
+    def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
             timestep = (
                 request.sigma.to(
@@ -91,7 +91,7 @@ class ModelPrediction(BasePrediction):
             )
             (velocity,) = yield [
                 ModelCall(
-                    {**batch, "noisy_latents": request.latents},
+                    {**row, "noisy_latents": request.latents},
                     timestep,
                     request.variant,
                 )

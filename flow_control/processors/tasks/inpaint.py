@@ -8,15 +8,15 @@ from flow_control.utils.resize import resize_to_resolution
 
 from ..base import (
     BaseProcessor,
-    InputBatch,
-    ProcessedBatch,
-    TrainInputBatch,
+    InputRow,
+    ProcessedRow,
+    TrainInputRow,
     task_registry,
 )
 from ..components.prompts import PromptStr, parse_prompt
 
 
-class InpaintInputBatch(InputBatch):
+class InpaintInputRow(InputRow):
     prompt: str
     negative_prompt: NotRequired[str | None]
     inpaint_image: ImageTensor
@@ -24,13 +24,13 @@ class InpaintInputBatch(InputBatch):
     inpaint_mask: ImageTensor
 
 
-class InpaintTrainInputBatch(TrainInputBatch):
+class InpaintTrainInputRow(TrainInputRow):
     prompt: NotRequired[str | None]
     inpaint_mask: ImageTensor
     clean_image: ImageTensor
 
 
-class InpaintProcessedBatch(ProcessedBatch):
+class InpaintProcessedRow(ProcessedRow):
     prompt_embeds: torch.Tensor
     pooled_prompt_embeds: torch.Tensor | None
     inpaint_latents: torch.Tensor
@@ -42,7 +42,7 @@ class InpaintProcessedBatch(ProcessedBatch):
 
 @task_registry.register("inpaint")
 class InpaintProcessor(
-    BaseProcessor[InpaintInputBatch, InpaintTrainInputBatch, InpaintProcessedBatch]
+    BaseProcessor[InpaintInputRow, InpaintTrainInputRow, InpaintProcessedRow]
 ):
     task: Literal["inpaint"] = "inpaint"
     encoder_prompt: PromptStr = ""
@@ -81,43 +81,39 @@ class InpaintProcessor(
         )
         return luminance, self._pack_latents(latent_mask)
 
-    async def prepare_inference_batch(
-        self, batch: InpaintInputBatch
-    ) -> InpaintProcessedBatch:
-        inpaint_image = batch["inpaint_image"] = self.resize_image(
-            batch["inpaint_image"]
-        )
+    async def prepare_inference_row(self, row: InpaintInputRow) -> InpaintProcessedRow:
+        inpaint_image = row["inpaint_image"] = self.resize_image(row["inpaint_image"])
         image_size = (inpaint_image.shape[2], inpaint_image.shape[3])
         inpaint_mask, inpaint_mask_latents = self._prepare_inpaint_mask(
-            batch["inpaint_mask"], image_size
+            row["inpaint_mask"], image_size
         )
-        batch["inpaint_mask"] = inpaint_mask
+        row["inpaint_mask"] = inpaint_mask
         inpaint_latents = self.encode_latents(
             inpaint_image, posterior=self.condition_posterior
         )
-        result = InpaintProcessedBatch(
+        result = InpaintProcessedRow(
             image_size=image_size,
             inpaint_latents=inpaint_latents,
             inpaint_mask=inpaint_mask,
             inpaint_mask_latents=inpaint_mask_latents,
-            **self.encode_prompt(batch["prompt"], system_prompt=self.encoder_prompt),
+            **self.encode_prompt(row["prompt"], system_prompt=self.encoder_prompt),
         )
 
         if self.save_negative:
             result["negative"] = self.encode_prompt(
-                batch.get("negative_prompt", None) or self.default_negative_prompt,
+                row.get("negative_prompt", None) or self.default_negative_prompt,
                 system_prompt=self.encoder_prompt,
             )
 
         return result
 
-    async def prepare_training_batch(
-        self, batch: InpaintTrainInputBatch
-    ) -> InpaintProcessedBatch:
-        batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
+    async def prepare_training_row(
+        self, row: InpaintTrainInputRow
+    ) -> InpaintProcessedRow:
+        row["clean_image"] = clean_image = self.resize_image(row["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
-        if (prompt := batch.get("prompt", None)) is None:
-            batch["prompt"] = prompt = await self.chat_completion(
+        if (prompt := row.get("prompt", None)) is None:
+            row["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
         clean_latents = self.encode_latents(
@@ -128,11 +124,11 @@ class InpaintProcessor(
             clean_image, posterior=self.condition_posterior
         )
         inpaint_mask, inpaint_mask_latents = self._prepare_inpaint_mask(
-            batch["inpaint_mask"], image_size
+            row["inpaint_mask"], image_size
         )
-        batch["inpaint_mask"] = inpaint_mask
+        row["inpaint_mask"] = inpaint_mask
 
-        result = InpaintProcessedBatch(
+        result = InpaintProcessedRow(
             image_size=image_size,
             clean_latents=clean_latents,
             inpaint_latents=inpaint_latents,
@@ -149,5 +145,5 @@ class InpaintProcessor(
 
         return result
 
-    def get_cost(self, batch: InpaintProcessedBatch) -> int:
-        return super().get_cost(batch) + batch["prompt_embeds"].shape[1]
+    def get_cost(self, row: InpaintProcessedRow) -> int:
+        return super().get_cost(row) + row["prompt_embeds"].shape[1]

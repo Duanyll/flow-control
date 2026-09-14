@@ -78,7 +78,7 @@ class RewardResult:
 class BaseReward(RemoteOffloadable, ABC):
     """Base class for reward functions.
 
-    The ``score`` method receives a single-sample batch dict that contains all
+    The ``score`` method receives a single-sample row dict that contains all
     information the trainer has about the sample (prompt text, generated image,
     model embeddings, etc.).  Each reward implementation extracts whatever
     fields it needs from the dict.
@@ -108,8 +108,8 @@ class BaseReward(RemoteOffloadable, ABC):
 
     @property
     @abstractmethod
-    def _batch_fields(self) -> set[str]:
-        """Set of expected batch keys for this reward."""
+    def _row_fields(self) -> set[str]:
+        """Set of expected row keys for this reward."""
         ...
 
     @abstractmethod
@@ -118,11 +118,11 @@ class BaseReward(RemoteOffloadable, ABC):
         ...
 
     @abstractmethod
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         """Compute reward score for a single sample.
 
         Args:
-            batch: dict containing sample information. Common keys include:
+            row: dict containing sample information. Common keys include:
                 - ``clean_image``: [1, C, H, W] tensor in [0, 1] range
                 - ``prompt``: str, the original prompt text
                 Other keys depend on the processor / task.
@@ -137,7 +137,7 @@ class BaseReward(RemoteOffloadable, ABC):
     def _unload_model(self) -> None:
         """Optional: unload reward model to free GPU memory."""
 
-    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
         """Async path for ``_score``.
 
         Default implementation just calls the synchronous ``_score``.
@@ -145,7 +145,7 @@ class BaseReward(RemoteOffloadable, ABC):
         gathering, etc.) override this instead of overriding ``async_score``,
         so that :attr:`normalize` is still applied by :meth:`async_score`.
         """
-        return self._score(batch)
+        return self._score(row)
 
     # ── Public API (handles remote dispatch transparently) ───────────────
 
@@ -182,31 +182,31 @@ class BaseReward(RemoteOffloadable, ABC):
             labels=self.component_labels,
         )
 
-    def score(self, batch: dict[str, Any]) -> RewardResult:
+    def score(self, row: dict[str, Any]) -> RewardResult:
         """Compute reward score.
 
-        If remote, filters batch by ``_batch_fields`` and sends only the
+        If remote, filters row by ``_row_fields`` and sends only the
         needed keys to save bandwidth.  The remote server applies
         :attr:`normalize` itself (same pydantic config is sent via
         ``/load``), so the client just returns the server response.
         """
         if self.is_remote:
-            result = self._remote_batch_object_call(
-                "/score", batch, fields=self._batch_fields
+            result = self._remote_row_object_call(
+                "/score", row, fields=self._row_fields
             )
             assert isinstance(result, RewardResult)
             return result
-        return self._make_result(self._score(batch))
+        return self._make_result(self._score(row))
 
-    async def async_score(self, batch: dict[str, Any]) -> RewardResult:
+    async def async_score(self, row: dict[str, Any]) -> RewardResult:
         """Async version of ``score`` for use in async RL loops."""
         if self.is_remote:
-            result = await self._async_remote_batch_object_call(
-                "/score", batch, fields=self._batch_fields
+            result = await self._async_remote_row_object_call(
+                "/score", row, fields=self._row_fields
             )
             assert isinstance(result, RewardResult)
             return result
-        raw = await self._async_score(batch)
+        raw = await self._async_score(row)
         return self._make_result(raw)
 
     def supports_rollout_overlap(self) -> bool:
@@ -219,10 +219,10 @@ class BaseReward(RemoteOffloadable, ABC):
         """
         return self.is_remote
 
-    def prepare_batch_for_async(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def prepare_row_for_async(self, row: dict[str, Any]) -> dict[str, Any]:
         """Create a CPU snapshot of the fields needed by ``async_score``."""
-        filtered_batch = {k: v for k, v in batch.items() if k in self._batch_fields}
-        return deep_move_to_device(filtered_batch, torch.device("cpu"))
+        filtered_row = {k: v for k, v in row.items() if k in self._row_fields}
+        return deep_move_to_device(filtered_row, torch.device("cpu"))
 
     def unload_model(self) -> None:
         """Unload reward model (local or remote)."""

@@ -3,19 +3,19 @@
 Updated 2026-09-12 for composable predictors with binding-local state.
 
 `Sampler` owns the sigma grid, solver, start, transforms, guidance and projectors.
-The processor stores the tile layout in each processed batch.
+The processor stores the tile layout in each processed row.
 `sample(model, requests, collector=...)` accepts a lazy iterable and yields completed
-`SampleRun` objects. Each request has its own batch, negative batch and RNG.
+`SampleRun` objects. Each request has its own row, negative row and RNG.
 The result exposes final latents through `run.ctx.latents` and the **executed**
 plan through `run.plan`; completion order may differ from submission order.
 
-The [batch dictionary contract](batch-contract.md) lists data fields, coordinate
-spaces and their producers/consumers. Execution state remains outside the batch.
+The [row dictionary contract](row-contract.md) lists data fields, coordinate
+spaces and their producers/consumers. Execution state remains outside the row.
 
 ## Execution
 
 1. Build the shifted/custom grid and solver plan. Resolution-dependent shift
-   reads `batch["model_image_size"]` (the size one forward sees, e.g. a tile)
+   reads `row["model_image_size"]` (the size one forward sees, e.g. a tile)
    and falls back to `image_size`.
 2. Slice for SDEdit, then apply transforms using the request generator.
 3. Initialize latents at the resulting plan's first sigma.
@@ -24,7 +24,7 @@ spaces and their producers/consumers. Execution state remains outside the batch.
 5. The solver calls its predictor with `yield from predict(request, ctx)`.
    Each component evaluates its children and finishes its own calculation in
    the same generator. Independent children join with `yield from gather(...)`;
-   the model leaf yields `ModelCall(batch, timestep, variant)` objects.
+   the model leaf yields `ModelCall(row, timestep, variant)` objects.
    `Executor` batches calls
    across runs, using the same variant order on every rank. The adapter chunks
    these calls by `model.micro_batch_size`, collates compatible inputs, and
@@ -39,7 +39,7 @@ spaces and their producers/consumers. Execution state remains outside the batch.
 
 `Transition` contains `(solver, sigma, sigma_next, eta)`. Execution position is
 `StepContext.item_index / num_items`; solver history lives in that context.
-Prediction history belongs to closures created by `bind(batch, negative_batch)`.
+Prediction history belongs to closures created by `bind(row, negative_row)`.
 Shared configuration objects hold no per-sample numerical state.
 SA retains its multi-evaluation generator and cross-request batching.
 
@@ -73,7 +73,7 @@ evaluation gets fresh state even when several evaluations share one run.
 
 SDEdit starts from a condition image's latents, selecting the first grid point
 at or below `strength`. Noise interpolation uses that selected sigma.
-`start.source` is a [condition-image selector](batch-contract.md#condition-image-roles)
+`start.source` is a [condition-image selector](row-contract.md#condition-image-roles)
 defaulting to `noisy_latents`, or to `clean` once `strength` is set:
 
 ```jsonc
@@ -138,14 +138,14 @@ introduced.
 
 The existing `guidance` field now accepts a recursive prediction tree. Core
 nodes are `model`, `tiled`, `cfg`, and `cfg_pp`; the Momentum plugin adds
-`momentum`. All use `bind(batch, negative_batch) -> Predictor`, where
+`momentum`. All use `bind(row, negative_row) -> Predictor`, where
 `Predictor(request, ctx) -> Calls[Tensor]`. Configuration declares children and
 execution requirements; a bound predictor owns its runtime history. Actual
 evaluation latents always come from `request.latents`, including SA substeps
 and tile slices, rather than the step-start latent in `ctx`.
 
 For compatibility, CFG's default child is `Tiled(Model)`: numeric guidance still
-handles tiled batches, and its renorm runs after whole-image reconstruction.
+handles tiled rows, and its renorm runs after whole-image reconstruction.
 This is a default configuration choice; CFG's execution never reads tile data.
 Set `inner="model"` to call the model directly, or place CFG inside tiling to
 guide each tile before stitching:
@@ -216,20 +216,20 @@ are at least `overlap` and every origin is token-aligned.
 
 The processor preserves the full output `image_size` and writes:
 
-- `batch["tiling"]`: a serialized `TileLayout` dictionary (`tile_size`, `overlap`, `stride`).
-- `batch["model_image_size"]`: the actual tile size. Resolution-dependent shift
+- `row["tiling"]`: a serialized `TileLayout` dictionary (`tile_size`, `overlap`, `stride`).
+- `row["model_image_size"]`: the actual tile size. Resolution-dependent shift
   reads it, so a 4096-pixel output in 1024-pixel tiles gets the 1024-pixel grid.
-- `batch["tiles"]`: complete row-major per-tile conditions. Inputs may supply a
+- `row["tiles"]`: complete row-major per-tile conditions. Inputs may supply a
   `tiles` list with individual prompts and negative prompts; otherwise the
   global encoded condition is shared by every tile without extra encoder calls
   (the list may also be omitted entirely). With `save_negative=true` the
-  per-tile negative conditions go to `batch["negative"]["tiles"]`, so
-  `get_negative_batch` needs no tile logic.
+  per-tile negative conditions go to `row["negative"]["tiles"]`, so
+  `get_negative_row` needs no tile logic.
 
 `TiledPrediction` in `samplers/tiling.py` owns tile expansion and merging for
 sampling and training trees that include it. It reads metadata, cuts
-`noisy_latents` on the token grid into per-tile batches (the tile's condition
-plus its latent slice and `image_size`), passes ordinary batches through, runs
+`noisy_latents` on the token grid into per-tile rows (the tile's condition
+plus its latent slice and `image_size`), passes ordinary rows through, runs
 child predictors through the executor and adapter, and stitches their results
 with `stitch_tiles`. CFG may run inside or outside this node. Stitching feathers
 only edges shared with a neighbour (Hann ramps over the actual overlap) and
@@ -249,13 +249,13 @@ all use this tree; rollout and validation keep their own sampler guidance.
 "train_predictor": "tiled" // conditional Tiled(Model), without CFG
 ```
 
-Use `"train_predictor": "model"` to call the model directly even when batch
+Use `"train_predictor": "model"` to call the model directly even when row
 metadata describes tiles. To keep training CFG, specify for example
 `{"type":"cfg","scale":4.5,"inner":"tiled"}`. Training resolves its own
 negative conditions regardless of whether rollout needed them; missing required
 negative data raises. SFT dropout retains the original negative condition.
 
-`BasePrediction.velocity(batch, timestep, negative_batch)` evaluates any tree
+`BasePrediction.velocity(row, timestep, negative_row)` evaluates any tree
 at an independent timestep, replacing the removed `conditional_velocity`.
 SFT and continuous training timesteps (`train_timesteps: continuous`, the RAM
 preset) use this through `TrainingPredictionMixin.predict_training`; they have
@@ -310,7 +310,7 @@ separately for each condition. Move Momentum's old inherited CFG fields under
 its `inner` CFG object. Predictor plugins register with `prediction_registry`
 and implement `bind`, replacing `guidance_registry` and `branches/combine`.
 For tiled configurations, move the old `sampler.tiled` fields to the processor
-and select `task="tiled_t2i"`; regenerate preprocessed batches to store their
+and select `task="tiled_t2i"`; regenerate preprocessed rows to store their
 layout. Plain `t2i` handles ordinary text-to-image preprocessing.
 
 DDNM, dual-weight training, time travel and SamplingPipeline are deferred. The adapter
@@ -352,7 +352,7 @@ clean-estimate projection without changing solver or executor interfaces.
 `sigma == 0` requires an explicit endpoint policy instead of this division.
 This algebra alone does not specify a DDNM+ transition or its noise covariance.
 
-The [batch contract's DDNM boundary](batch-contract.md#ddnm-inputoutput-boundary-planned)
+The [row contract's DDNM boundary](row-contract.md#ddnm-inputoutput-boundary-planned)
 records the remaining observation, normalization and noise-unit requirements.
 Sampler registration and richer/data-dependent transition streams are still
 future work; existing replay and plan consumers need an explicit compatibility

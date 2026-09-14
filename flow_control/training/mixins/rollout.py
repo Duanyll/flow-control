@@ -57,14 +57,14 @@ logger = get_logger(__name__)
 @dataclass
 class Rollout:
     sampling_plan: list[Transition]
-    """The plan the sampler executed; ``batch["clean_latents"]`` is its endpoint."""
+    """The plan the sampler executed; ``row["clean_latents"]`` is its endpoint."""
     reward: torch.Tensor
     raw_reward: torch.Tensor
     reward_weights: torch.Tensor
     reward_labels: list[str]
     key: str
-    batch: Batch
-    negative_batch: Batch | None
+    row: Batch
+    negative_row: Batch | None
     recorded_steps: list[RecordedStep] | None = None
 
 
@@ -207,34 +207,34 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             """Prepare lazily; the sampler pulls a request when it has room.
 
             A prompt is fetched and resampled once and its rollouts share that
-            batch through shallow copies: ``initialize_latents`` writes a fresh
+            row through shallow copies: ``initialize_latents`` writes a fresh
             ``noisy_latents`` into each copy and the sampler rebuilds the dict
             per run, so nothing downstream mutates the shared tensors.
             """
             for prompt_id, group in groupby(mine, key=itemgetter(0)):
-                batch = self.prepare_row(
+                row = self.prepare_row(
                     store.get(prompt_id), mode="inference", epoch=epoch
                 )
-                batch = deep_cast_float_dtype(batch, model.dtype)
+                row = deep_cast_float_dtype(row, model.dtype)
                 for _, k in group:
-                    rollout_batch = copy.copy(batch)
+                    rollout_row = copy.copy(row)
                     generator = torch.Generator(device=device).manual_seed(
                         derive_seed(self.seed, f"rollout:{epoch}:{prompt_id}:{k}")
                     )
                     processor.initialize_latents(
-                        rollout_batch,
+                        rollout_row,
                         generator=generator,
                         device=device,
                         dtype=model.dtype,
                     )
-                    yield self.build_sample_request(sampler, rollout_batch, generator)
+                    yield self.build_sample_request(sampler, rollout_row, generator)
 
         def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
             with progress, torch.no_grad():
                 for run in sampler.sample(model, requests(), collector=collector):
-                    batch: Any = run.batch
-                    batch["clean_latents"] = run.ctx.latents
-                    batch.update(processor.decode_output(run.ctx.latents, batch))
+                    row: Any = run.row
+                    row["clean_latents"] = run.ctx.latents
+                    row.update(processor.decode_output(run.ctx.latents, row))
                     rollouts.append(
                         Rollout(
                             sampling_plan=run.plan,
@@ -251,15 +251,15 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                             raw_reward=torch.zeros(1),  # placeholder
                             reward_weights=torch.ones(1),  # placeholder
                             reward_labels=["reward"],  # placeholder
-                            key=batch[KEY],
-                            batch=deep_move_to_device(batch, rollout_storage),
-                            negative_batch=deep_move_to_device(
-                                run.negative_batch, rollout_storage
+                            key=row[KEY],
+                            row=deep_move_to_device(row, rollout_storage),
+                            negative_row=deep_move_to_device(
+                                run.negative_row, rollout_storage
                             ),
                         )
                     )
                     progress.advance(rollout_task)
-                    yield batch, len(rollouts) - 1
+                    yield row, len(rollouts) - 1
 
         def reward_handler(idx: int, result: RewardResult) -> None:
             # Result is [1, C] for the single rollout sample.

@@ -48,7 +48,7 @@ class ImageRewardReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _load_model(self, device: torch.device) -> None:
@@ -88,18 +88,18 @@ class ImageRewardReward(BaseReward):
         self._model = model
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         """Compute ImageReward score for a single sample.
 
-        Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
-        ``batch["prompt"]`` (str).  Returns a raw, un-normalized ``[1]``
+        Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
+        ``row["prompt"]`` (str).  Returns a raw, un-normalized ``[1]``
         tensor on the image's device.
         """
         if self._model is None:
             raise RuntimeError("ImageRewardReward._load_model has not been called.")
 
-        image = batch["clean_image"]
-        prompt = batch["prompt"]
+        image = row["clean_image"]
+        prompt = row["prompt"]
 
         pil_image = tensor_to_pil(image)
         # ``score(prompt, [pil_image])`` follows the ``list`` branch

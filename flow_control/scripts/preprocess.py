@@ -70,10 +70,10 @@ class TorchDatasetLoaderStage(PipelineStage):
         self.reassign_keys = reassign_keys
 
     def process(self, item: Any) -> Any:
-        batch = self.source[item]
+        row = self.source[item]
         if self.reassign_keys:
-            batch[KEY] = str(item)
-        return [batch]
+            row[KEY] = str(item)
+        return [row]
 
 
 class ProcessorStage(PipelineStage):
@@ -110,9 +110,9 @@ class ProcessorStage(PipelineStage):
         with dump_if_failed(self.logger, item):
             item = deep_move_to_device(item, self.device)
             if self.processing_mode == "inference":
-                output = await self.processor.prepare_inference_batch(item)
+                output = await self.processor.prepare_inference_row(item)
             else:
-                output = await self.processor.prepare_training_batch(item)
+                output = await self.processor.prepare_training_row(item)
             output[COST] = self.processor.get_cost(output)
             if self.save_extra:
                 item.update(output)

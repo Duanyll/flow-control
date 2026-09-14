@@ -14,7 +14,7 @@ from .base import BaseReward, reward_registry
 class CLIPImageSimilarityReward(BaseReward):
     """CLIP-based image-to-image cosine similarity reward.
 
-    Encodes ``batch["clean_image"]`` and the :attr:`reference` condition image
+    Encodes ``row["clean_image"]`` and the :attr:`reference` condition image
     with a CLIP image encoder, L2-normalizes the embeddings, and returns their cosine
     similarity in ``[-1, 1]`` (typically in ``[0, 1]`` for natural images).
 
@@ -36,7 +36,7 @@ class CLIPImageSimilarityReward(BaseReward):
     _device: Any = PrivateAttr(default=None)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", ConditionImage.parse(self.reference).image_field}
 
     def _load_model(self, device: torch.device) -> None:
@@ -96,14 +96,14 @@ class CLIPImageSimilarityReward(BaseReward):
         return embeds
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         """Compute CLIP image-similarity score for a single sample.
 
-        Expects ``batch["clean_image"]`` and the :attr:`reference` image, both
+        Expects ``row["clean_image"]`` and the :attr:`reference` image, both
         ``[1, C, H, W]`` tensors in ``[0, 1]``.
         """
-        clean = batch["clean_image"]
-        reference = ConditionImage.parse(self.reference).image(batch)
+        clean = row["clean_image"]
+        reference = ConditionImage.parse(self.reference).image(row)
 
         clean_embeds = self._encode(clean)
         reference_embeds = self._encode(reference)

@@ -163,32 +163,30 @@ def test_unequal_counts_pad_with_dummy_forwards(rank: int) -> None:
 
 
 def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
-    # A rank with a negative batch and one without issue the same forward
+    # A rank with a negative row and one without issue the same forward
     # sequence: one predict_velocity_batched per variant per round, carrying
     # whatever branches the rank has (two here, one there); equal physical
     # forward counts are the adapter's job, so the fake only sees its own list.
     sampler = Sampler(guidance=ClassifierFreeGuidance(scale=2.0), steps=1)
     model = DistributedSamplerModel()
     batch = make_batch(1, value=3.0)
-    negative_batch = make_batch(1, value=1.0) if rank == 0 else None
-    run = sampler.make_run(
-        SampleRequest(batch, negative_batch), plan=sampler.plan(batch)
-    )
+    negative_row = make_batch(1, value=1.0) if rank == 0 else None
+    run = sampler.make_run(SampleRequest(batch, negative_row), plan=sampler.plan(batch))
     Executor(model, sampler.variant_keys()).evaluate(
         [run.guided_velocity(batch["noisy_latents"], 0)]
     )
     assert model.calls == ([2] if rank == 0 else [1])
 
     # CFG++ cannot fall back to a conditional-only velocity: a request without
-    # its negative batch is rejected when the run is built, before any
+    # its negative row is rejected when the run is built, before any
     # collective, so no rank can be left waiting in a forward.
     sampler = Sampler(guidance=CfgPlusPlusGuidance(), steps=1)
     try:
         sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
     except ValueError as error:
-        assert "negative batch" in str(error)
+        assert "negative row" in str(error)
     else:
-        raise AssertionError("Missing CFG++ negative batch was not rejected.")
+        raise AssertionError("Missing CFG++ negative row was not rejected.")
 
 
 def test_stream_drains_unequal_request_counts(rank: int) -> None:
@@ -202,7 +200,7 @@ def test_stream_drains_unequal_request_counts(rank: int) -> None:
     with torch.no_grad():
         runs = list(
             sampler.sample(
-                adapter, [SampleRequest(batch=make_batch(4, value)) for value in values]
+                adapter, [SampleRequest(row=make_batch(4, value)) for value in values]
             )
         )
     assert adapter._forward_batch_sizes == [1, 1]

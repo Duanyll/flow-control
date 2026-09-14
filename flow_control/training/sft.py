@@ -185,41 +185,41 @@ class SftTrainer(
 
     # ------------------------------- Training ----------------------------------- #
 
-    def train_step(self, batches: list[Any]) -> torch.Tensor:
+    def train_step(self, rows: list[Any]) -> torch.Tensor:
         timesteps: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
         weights: list[torch.Tensor] = []
-        model_batches: list[Any] = []
-        negative_batches: list[Batch | None] = []
+        model_rows: list[Any] = []
+        negative_rows: list[Batch | None] = []
 
-        for original_batch in batches:
-            batch: Any = original_batch
+        for original_batch in rows:
+            row: Any = original_batch
             # Preserve the original negative condition before CFG dropout can
-            # replace the positive batch (negative batches have no overlay).
+            # replace the positive row (negative rows have no overlay).
             negative = self.training_negative(original_batch)
-            negative_batches.append(negative)
+            negative_rows.append(negative)
             if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
-                negative_batch = (
+                negative_row = (
                     negative
                     if negative is not None
-                    else self.processor.get_negative_batch(batch)
+                    else self.processor.get_negative_row(row)
                 )
-                if negative_batch is not None:
-                    batch = negative_batch
+                if negative_row is not None:
+                    row = negative_row
                 else:
                     warn_once(
                         logger,
-                        f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) batch available.",
+                        f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) row available.",
                     )
 
             timestep = self.timestep_weighting.sample_timesteps(1).to(
                 device=self.device, dtype=torch.float32
             )
-            clean = batch["clean_latents"].float()
+            clean = row["clean_latents"].float()
             noise = torch.randn_like(clean, dtype=torch.float32)
-            batch["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
+            row["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
 
-            model_batches.append(batch)
+            model_rows.append(row)
             timesteps.append(timestep)
             targets.append(noise - clean)
             weights.append(
@@ -228,18 +228,18 @@ class SftTrainer(
                 )
             )
 
-        predictions = self.predict_training(model_batches, timesteps, negative_batches)
+        predictions = self.predict_training(model_rows, timesteps, negative_rows)
         # Padding rows are forwarded (FSDP collectives stay balanced) but weigh
         # nothing; the mean is over the real rows of the microbatch.
         per_sample_losses = [
             ((prediction - target) ** 2).mean()
             * weight.mean()
-            * (0.0 if is_padding(batch) else 1.0)
-            for prediction, target, weight, batch in zip(
-                predictions, targets, weights, batches, strict=True
+            * (0.0 if is_padding(row) else 1.0)
+            for prediction, target, weight, row in zip(
+                predictions, targets, weights, rows, strict=True
             )
         ]
-        real = max(1, sum(not is_padding(batch) for batch in batches))
+        real = max(1, sum(not is_padding(row) for row in rows))
         return torch.stack(per_sample_losses).sum() / real
 
     def _after_sync_step(self, total_loss: float):
@@ -319,7 +319,7 @@ class SftTrainer(
                 with dump_if_failed(logger, items):
                     self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                    batches = [
+                    rows = [
                         deep_cast_float_dtype(
                             self.prepare_row(item, mode="training", epoch=epoch),
                             self.model.dtype,
@@ -327,7 +327,7 @@ class SftTrainer(
                         for item in items
                     ]
 
-                    loss = self.train_step(batches)
+                    loss = self.train_step(rows)
                     self.check_loss(loss)
                     scaled_loss = loss / self.grad_acc_steps
                     scaled_loss.backward()

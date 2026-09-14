@@ -154,14 +154,14 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
         recorded: RecordedStep = deep_move_to_device(
             trajectory[timestep_idx], self.device
         )
-        batch = deep_move_to_device(rollout.batch, self.device)
+        row = deep_move_to_device(rollout.row, self.device)
         run = self.rollout_sampler.make_run(
             SampleRequest(
-                batch=batch,
-                negative_batch=self.training_negative(
-                    batch,
+                row=row,
+                negative_row=self.training_negative(
+                    row,
                     len(rollout.sampling_plan),
-                    deep_move_to_device(rollout.negative_batch, self.device),
+                    deep_move_to_device(rollout.negative_row, self.device),
                 ),
             ),
             plan=rollout.sampling_plan,

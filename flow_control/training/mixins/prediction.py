@@ -7,7 +7,7 @@ from pydantic import model_validator
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.processors.base import ProcessedBatch
+from flow_control.processors.base import ProcessedRow
 from flow_control.samplers import Executor, Prediction
 
 from .data import DataMixin
@@ -30,26 +30,26 @@ class TrainingPredictionMixin(DataMixin):
         return self
 
     def training_negative(
-        self, batch: Batch, num_items: int = 1, negative_batch: Batch | None = None
+        self, row: Batch, num_items: int = 1, negative_row: Batch | None = None
     ) -> Batch | None:
         """Resolve conditions from training requirements, even with unguided rollouts."""
         if not self.train_predictor.requires_negative(num_items):
             return None
-        if negative_batch is not None:
-            return negative_batch
-        negative = self.processor.get_negative_batch(cast(ProcessedBatch, batch))
+        if negative_row is not None:
+            return negative_row
+        negative = self.processor.get_negative_row(cast(ProcessedRow, row))
         if negative is None:
             raise ValueError(
-                "train_predictor requires a negative condition, but the batch has none; "
+                "train_predictor requires a negative condition, but the row has none; "
                 "preprocess with processor.save_negative=true."
             )
         return cast(Batch, negative)
 
     def predict_training(
         self,
-        batches: list[Batch],
+        rows: list[Batch],
         timesteps: list[torch.Tensor],
-        negative_batches: list[Batch | None] | None = None,
+        negative_rows: list[Batch | None] | None = None,
     ) -> list[torch.Tensor]:
         """Independent timestep predictions; preserve the caller's weight/grad scope."""
         return Executor(
@@ -57,16 +57,14 @@ class TrainingPredictionMixin(DataMixin):
         ).evaluate(
             [
                 self.train_predictor.velocity(
-                    batch,
+                    row,
                     timestep,
-                    self.training_negative(batch, negative_batch=negative),
+                    self.training_negative(row, negative_row=negative),
                 )
-                for batch, timestep, negative in zip(
-                    batches,
+                for row, timestep, negative in zip(
+                    rows,
                     timesteps,
-                    [None] * len(batches)
-                    if negative_batches is None
-                    else negative_batches,
+                    [None] * len(rows) if negative_rows is None else negative_rows,
                     strict=True,
                 )
             ]

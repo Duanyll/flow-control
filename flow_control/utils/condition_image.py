@@ -1,10 +1,10 @@
-"""Select a condition image from a batch by role.
+"""Select a condition image from a row by role.
 
 Tasks store condition images under their own names, split between the pixel
 image and its packed latents, and references form ordered lists. Samplers and
 rewards that need one condition image are configured with a selector such as
 ``"reference[1]"`` and resolve it through :class:`ConditionImage` instead of
-naming batch keys.
+naming row keys.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class ConditionImage(BaseModel):
     """A parsed condition-image selector.
 
     Known roles map to a task's pixel field and packed-latent field; any other
-    name is a literal batch key holding whichever representation is requested.
+    name is a literal row key holding whichever representation is requested.
     An index picks one entry of a list-valued field and defaults to ``0``.
     """
 
@@ -42,7 +42,7 @@ class ConditionImage(BaseModel):
         match = _SPEC.fullmatch(spec.strip())
         if match is None:
             raise ValueError(
-                f"Condition image {spec!r} must be a role or batch key, optionally "
+                f"Condition image {spec!r} must be a role or row key, optionally "
                 f"indexed like 'reference[1]'; roles: {sorted(_ROLES)}."
             )
         role, index = match.groups()
@@ -53,22 +53,22 @@ class ConditionImage(BaseModel):
 
     @property
     def image_field(self) -> str:
-        """Top-level batch key holding the ``[1, C, H, W]`` pixel image."""
+        """Top-level row key holding the ``[1, C, H, W]`` pixel image."""
         return _ROLES.get(self.role, (self.role, self.role))[0]
 
     @property
     def latents_field(self) -> str:
-        """Top-level batch key holding the packed ``[1, N, D]`` latents."""
+        """Top-level row key holding the packed ``[1, N, D]`` latents."""
         return _ROLES.get(self.role, (self.role, self.role))[1]
 
-    def image(self, batch: Mapping[str, Any]) -> torch.Tensor:
-        return self._select(batch, self.image_field)
+    def image(self, row: Mapping[str, Any]) -> torch.Tensor:
+        return self._select(row, self.image_field)
 
-    def latents(self, batch: Mapping[str, Any]) -> torch.Tensor:
-        return self._select(batch, self.latents_field)
+    def latents(self, row: Mapping[str, Any]) -> torch.Tensor:
+        return self._select(row, self.latents_field)
 
-    def _select(self, batch: Mapping[str, Any], field: str) -> torch.Tensor:
-        value = batch.get(field)
+    def _select(self, row: Mapping[str, Any], field: str) -> torch.Tensor:
+        value = row.get(field)
         if isinstance(value, list):
             index = self.index or 0
             if index >= len(value):
@@ -78,12 +78,12 @@ class ConditionImage(BaseModel):
             value = value[index]
         elif self.index is not None:
             raise TypeError(
-                f"Condition image {self} indexes {field!r}, which is not a list in the batch."
+                f"Condition image {self} indexes {field!r}, which is not a list in the row."
             )
         if not isinstance(value, torch.Tensor):
             raise KeyError(
                 f"Condition image {self} requires tensor field {field!r}; "
-                f"available fields: {sorted(batch)}."
+                f"available fields: {sorted(row)}."
             )
         return value
 
@@ -101,16 +101,16 @@ checked at validation time and parsed with :meth:`ConditionImage.parse` at use."
 if __name__ == "__main__":
     from rich import print
 
-    batch = {
+    row = {
         "reference_images": [torch.zeros(1, 3, 8, 8), torch.ones(1, 3, 4, 4)],
         "reference_latents": [torch.zeros(1, 4, 16), torch.ones(1, 1, 16)],
         "control_image": torch.zeros(1, 3, 8, 8),
         "custom_latents": torch.zeros(1, 4, 16),
     }
-    assert ConditionImage.parse("reference").image(batch).shape == (1, 3, 8, 8)
-    assert ConditionImage.parse("reference[1]").latents(batch).shape == (1, 1, 16)
+    assert ConditionImage.parse("reference").image(row).shape == (1, 3, 8, 8)
+    assert ConditionImage.parse("reference[1]").latents(row).shape == (1, 1, 16)
     assert ConditionImage.parse("control").image_field == "control_image"
-    assert ConditionImage.parse("custom_latents").latents(batch).shape == (1, 4, 16)
+    assert ConditionImage.parse("custom_latents").latents(row).shape == (1, 4, 16)
     for spec, error in (
         ("reference[2]", IndexError),
         ("control[0]", TypeError),
@@ -118,7 +118,7 @@ if __name__ == "__main__":
         ("bad spec", ValueError),
     ):
         try:
-            ConditionImage.parse(spec).image(batch)
+            ConditionImage.parse(spec).image(row)
         except error as e:
             print(f"[green]{spec!r}[/green]: {e}")
         else:

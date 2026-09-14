@@ -41,9 +41,9 @@ class T2ITemplate:
         height: float,
         width: float,
     ) -> dict[str, Any]:
-        batch: dict[str, Any] = {"prompt": prompt}
+        row: dict[str, Any] = {"prompt": prompt}
         if negative_prompt:
-            batch["negative_prompt"] = negative_prompt
+            row["negative_prompt"] = negative_prompt
         if height > 0 and width > 0:
-            batch["image_size"] = (int(height), int(width))
-        return batch
+            row["image_size"] = (int(height), int(width))
+        return row

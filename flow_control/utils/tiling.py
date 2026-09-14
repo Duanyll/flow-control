@@ -57,7 +57,7 @@ class TileSpec:
 
 
 class TileLayout(BaseModel):
-    """Tile layout a processor stores in ``batch["tiling"]``; lengths are pixels.
+    """Tile layout a processor stores in ``row["tiling"]``; lengths are pixels.
 
     Layouts are planned on the packed token grid so every tile origin is
     aligned to ``stride`` pixels, i.e. to whole packed tokens.

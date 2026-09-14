@@ -17,7 +17,7 @@ class TaskTemplate(Protocol):
     """Protocol for a task UI template.
 
     ``render()`` creates Gradio components and returns them as a list.
-    ``coerce()`` takes the Gradio component values and returns an InputBatch dict.
+    ``coerce()`` takes the Gradio component values and returns an InputRow dict.
     Concrete implementations define typed signatures; the protocol uses ``Any``
     for compatibility.
     """

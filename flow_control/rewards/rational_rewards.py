@@ -275,7 +275,7 @@ class _RationalRewardsReward(BaseReward):
     components for logging when :attr:`expose_aspects` is set.
 
     Subclasses provide the supported-aspect table, the judge system prompt, the
-    consumed batch fields, and the interleaved user content (which images to
+    consumed row fields, and the interleaved user content (which images to
     send); the retry / parse / aggregate machinery lives here.
     """
 
@@ -319,13 +319,13 @@ class _RationalRewardsReward(BaseReward):
     def _load_model(self, device: torch.device) -> None:
         pass
 
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         raise NotImplementedError(
             f"{type(self).__name__} is async-only. Use async_score() instead."
         )
 
     def _build_user_content(
-        self, batch: dict[str, Any]
+        self, row: dict[str, Any]
     ) -> list[TextContent | ImageContent] | None:
         """Build the interleaved judge user content for one sample.
 
@@ -345,8 +345,8 @@ class _RationalRewardsReward(BaseReward):
     def _zero_scores(self) -> torch.Tensor:
         return torch.zeros(len(self.component_weights), dtype=torch.float32)
 
-    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
-        user_content = self._build_user_content(batch)
+    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
+        user_content = self._build_user_content(row)
         if user_content is None:
             return self._zero_scores()
 
@@ -420,16 +420,16 @@ class RationalRewardsT2IReward(_RationalRewardsReward):
     _system_prompt: ClassVar[str] = RATIONAL_T2I_SYSTEM_PROMPT
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _build_user_content(
-        self, batch: dict[str, Any]
+        self, row: dict[str, Any]
     ) -> list[TextContent | ImageContent]:
         # Match Flow-Factory exactly: the image is sandwiched between the
         # ``text_before`` preamble and the rubric suffix.
-        prompt: str = batch["prompt"]
-        image: torch.Tensor = batch["clean_image"]
+        prompt: str = row["prompt"]
+        image: torch.Tensor = row["clean_image"]
         text_before = (
             f"User Instruction: {prompt}\n"
             "You are provided with one image:\n"
@@ -465,27 +465,27 @@ class RationalRewardsEditReward(_RationalRewardsReward):
     _system_prompt: ClassVar[str] = RATIONAL_EDIT_SYSTEM_PROMPT
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt", "reference_images"}
 
-    def _source_image(self, batch: dict[str, Any]) -> torch.Tensor | None:
-        references = batch.get("reference_images")
+    def _source_image(self, row: dict[str, Any]) -> torch.Tensor | None:
+        references = row.get("reference_images")
         if not references:
             return None
         return references[0]
 
     def _build_user_content(
-        self, batch: dict[str, Any]
+        self, row: dict[str, Any]
     ) -> list[TextContent | ImageContent] | None:
-        source = self._source_image(batch)
+        source = self._source_image(row)
         if source is None:
             logger.warning(
                 "%s got a sample without a source image; scoring 0.0.", self.type
             )
             return None
 
-        prompt: str = batch["prompt"]
-        edited: torch.Tensor = batch["clean_image"]
+        prompt: str = row["prompt"]
+        edited: torch.Tensor = row["clean_image"]
         head = (
             f"User Instruction: {prompt}\n"
             "You are provided with two images:\n"

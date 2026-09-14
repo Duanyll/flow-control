@@ -253,7 +253,7 @@ def capture_e2e() -> None:
             model,
             sampler,
             SampleRequest(
-                batch=make_request_batch(initial_latents),
+                row=make_request_batch(initial_latents),
                 generator=torch.Generator().manual_seed(777),
             ),
         )

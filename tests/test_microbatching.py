@@ -199,17 +199,17 @@ def guided_velocities(
 ) -> list[torch.Tensor]:
     """Training-style evaluation of plan item 0 for every request, batched."""
     runs = [
-        sampler.make_run(request, plan=sampler.plan(request.batch))
+        sampler.make_run(request, plan=sampler.plan(request.row))
         for request in requests
     ]
     return Executor(model, sampler.variant_keys()).evaluate(
-        [run.guided_velocity(run.batch["noisy_latents"], 0) for run in runs]
+        [run.guided_velocity(run.row["noisy_latents"], 0) for run in runs]
     )
 
 
 class SamplerBatchingTest(unittest.TestCase):
     def test_mixed_cfg_batches_only_the_branches_present(self) -> None:
-        # A request without a negative batch skips the optional branch instead
+        # A request without a negative row skips the optional branch instead
         # of getting a dummy forward; the present branches share one forward
         # and the missing one falls back to the conditional velocity.
         sampler = Sampler(steps=1, guidance=ClassifierFreeGuidance(scale=2.0))
@@ -258,8 +258,8 @@ class SamplerBatchingTest(unittest.TestCase):
         short, long = sampler.sample(
             FakeSamplerModel(),
             [
-                SampleRequest(batch=make_sampler_batch(0.0)),
-                SampleRequest(batch=long_batch),
+                SampleRequest(row=make_sampler_batch(0.0)),
+                SampleRequest(row=long_batch),
             ],
         )
         self.assertNotEqual(
@@ -274,11 +274,11 @@ class SamplerBatchingTest(unittest.TestCase):
                 model,
                 [
                     SampleRequest(
-                        batch=make_sampler_batch(0.0),
+                        row=make_sampler_batch(0.0),
                         generator=torch.Generator().manual_seed(7),
                     ),
                     SampleRequest(
-                        batch=make_sampler_batch(0.0),
+                        row=make_sampler_batch(0.0),
                         generator=torch.Generator().manual_seed(19),
                     ),
                 ],
@@ -293,7 +293,7 @@ class SamplerBatchingTest(unittest.TestCase):
                         FakeSamplerModel(),
                         [
                             SampleRequest(
-                                batch=make_sampler_batch(0.0),
+                                row=make_sampler_batch(0.0),
                                 generator=torch.Generator().manual_seed(seed),
                             )
                         ],

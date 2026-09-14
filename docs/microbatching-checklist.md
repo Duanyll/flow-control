@@ -24,8 +24,8 @@ records the stable boundary intended for future padding and sequence packing.
 - [x] (superseded by plan-as-data) SA-Solver now batches across requests through
       the plan executor's rendezvous loop; no sequential special case remains.
 - [x] Keep sequence packing out of the original microbatching change. Sampler-rethink
-      expands tiled batches inside `TiledPrediction` into shared leaf generators; the `tiled_t2i` processor writes the layout into each
-      batch and the sampler has no independent tile configuration. Unequal
+      expands tiled rows inside `TiledPrediction` into shared leaf generators; the `tiled_t2i` processor writes the layout into each
+      row and the sampler has no independent tile configuration. Unequal
       tile counts are padded with dummy forwards by the adapter.
 - [x] Do not require bitwise identity between dense and singleton GPU kernels.
 
@@ -68,8 +68,8 @@ representation.
 ```python
 @dataclass(slots=True)
 class SampleRequest:
-    batch: Batch
-    negative_batch: Batch | None = None
+    row: Batch
+    negative_row: Batch | None = None
     generator: torch.Generator | None = None
 
 
@@ -85,15 +85,15 @@ def sample(
 
 `sample()` executes all sampling configurations through one path. `start`
 handles direct latent initialization and SDEdit; `transforms` applies SDE
-windows to each request's plan. Named branch evaluation, batch-described tile forwards,
+windows to each request's plan. Named branch evaluation, row-described tile forwards,
 whole-image guidance/projectors, and solver steps preserve cross-request batching
 and FSDP alignment. Completed runs expose `ctx.latents` and `plan`; the
 optional caller collector `(run, step)` consumes each completed transition
 without the sampler retaining step tensors.
-Dynamic shift reads `model_image_size` (the tile size for tiled batches), so a
+Dynamic shift reads `model_image_size` (the tile size for tiled rows), so a
 4k output with 1k tiles follows the same sigma schedule as a real 1k model
 input. Each request can carry its own layout; tiles are feathered with the
-shared `utils.tiling.stitch_tiles` window; ordinary batches pass through.
+shared `utils.tiling.stitch_tiles` window; ordinary rows pass through.
 Tile-specific negative prompts require processor `save_negative=true`
 (default: false). Training explicitly configures `train_predictor`; include
 `tiled` in both trees when rollout and training should use the same tiling.

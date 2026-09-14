@@ -31,13 +31,13 @@ class PairwiseReward(BaseReward):
     model_config = ConfigDict(extra="forbid")
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _load_model(self, device: torch.device) -> None:
         pass
 
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         raise NotImplementedError(
             "PairwiseReward does not support single-sample scoring. "
             "Use the pairwise execution path via execute_pairwise_reward()."
@@ -45,7 +45,7 @@ class PairwiseReward(BaseReward):
 
     @abstractmethod
     async def async_score_pair(
-        self, batch_a: dict[str, Any], batch_b: dict[str, Any]
+        self, row_a: dict[str, Any], row_b: dict[str, Any]
     ) -> float:
         """Return a score in ``[0, 1]`` indicating preference of *a* over *b*.
 
@@ -77,12 +77,12 @@ if __name__ == "__main__":
         type: Literal["pairwise"] = "pairwise"
 
         async def async_score_pair(
-            self, batch_a: dict[str, Any], batch_b: dict[str, Any]
+            self, row_a: dict[str, Any], row_b: dict[str, Any]
         ) -> float:
             import math
 
-            qa: float = batch_a.get("quality", 0.5)
-            qb: float = batch_b.get("quality", 0.5)
+            qa: float = row_a.get("quality", 0.5)
+            qb: float = row_b.get("quality", 0.5)
             # Simple sigmoid-like preference
             diff = qa - qb
             return 1.0 / (1.0 + math.exp(-diff * 5.0))
@@ -105,11 +105,9 @@ if __name__ == "__main__":
             if i == j:
                 win_matrix[i, j] = 0.5
             else:
-                batch_a = {"quality": qualities[i]}
-                batch_b = {"quality": qualities[j]}
-                win_matrix[i, j] = asyncio.run(
-                    reward.async_score_pair(batch_a, batch_b)
-                )
+                row_a = {"quality": qualities[i]}
+                row_b = {"quality": qualities[j]}
+                win_matrix[i, j] = asyncio.run(reward.async_score_pair(row_a, row_b))
 
     rprint(f"  Qualities: {qualities}")
     rprint(f"  Win matrix:\n{win_matrix}")

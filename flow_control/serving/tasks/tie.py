@@ -50,10 +50,10 @@ class TIETemplate:
         for file_data in reference_images:
             pil_img = Image.open(file_data)
             images.append(_coerce_to_image_tensor(pil_img))
-        batch: dict[str, Any] = {
+        row: dict[str, Any] = {
             "prompt": prompt,
             "reference_images": images,
         }
         if negative_prompt:
-            batch["negative_prompt"] = negative_prompt
-        return batch
+            row["negative_prompt"] = negative_prompt
+        return row

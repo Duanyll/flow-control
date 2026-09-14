@@ -97,7 +97,7 @@ class LLMClient(BaseModel):
     def _reset_loop_bound_state_if_needed(self) -> None:
         """Drop session/semaphore/lock when the running event loop changed.
 
-        ``execute_reward`` scores each batch in a fresh ``_RewardLoopThread``
+        ``execute_reward`` scores each row in a fresh ``_RewardLoopThread``
         event loop and closes it afterwards, but this client is long-lived and
         caches its aiohttp session and asyncio primitives. Those bind to the
         loop they were created on, so reusing them from a later loop raises

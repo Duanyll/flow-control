@@ -76,17 +76,17 @@ class CompositeReward(BaseReward):
         return labels
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         fields = set()
         for reward in self._reward_instances:
-            fields.update(reward._batch_fields)
+            fields.update(reward._row_fields)
         return fields
 
     def _load_model(self, device: torch.device) -> None:
         for reward in self._reward_instances:
             reward.load_model(device)
 
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         raise NotImplementedError(
             "CompositeReward.score() returns RewardResult directly."
         )
@@ -138,30 +138,30 @@ class CompositeReward(BaseReward):
             labels=labels,
         )
 
-    def score(self, batch: dict[str, Any]) -> RewardResult:
+    def score(self, row: dict[str, Any]) -> RewardResult:
         if self.is_remote:
-            result = self._remote_batch_object_call(
-                "/score", batch, fields=self._batch_fields
+            result = self._remote_row_object_call(
+                "/score", row, fields=self._row_fields
             )
             assert isinstance(result, RewardResult)
             return result
         return self._combine_results(
-            [reward.score(batch) for reward in self._reward_instances]
+            [reward.score(row) for reward in self._reward_instances]
         )
 
-    async def async_score(self, batch: dict[str, Any]) -> RewardResult:
+    async def async_score(self, row: dict[str, Any]) -> RewardResult:
         if self.is_remote:
-            result = await self._async_remote_batch_object_call(
-                "/score", batch, fields=self._batch_fields
+            result = await self._async_remote_row_object_call(
+                "/score", row, fields=self._row_fields
             )
             assert isinstance(result, RewardResult)
             return result
-        return self._combine_results(await self._async_score_children(batch))
+        return self._combine_results(await self._async_score_children(row))
 
-    async def _async_score_children(self, batch: dict[str, Any]) -> list[RewardResult]:
+    async def _async_score_children(self, row: dict[str, Any]) -> list[RewardResult]:
         """Score children concurrently before ``_combine_results`` concatenates."""
         scores = await asyncio.gather(
-            *(r.async_score(batch) for r in self._reward_instances)
+            *(r.async_score(row) for r in self._reward_instances)
         )
         return list(scores)
 

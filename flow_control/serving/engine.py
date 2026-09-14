@@ -492,7 +492,7 @@ class ServingEngine:
 
     async def generate(
         self,
-        input_batch: dict[str, Any],
+        input_row: dict[str, Any],
         *,
         seed: int | None = None,
         steps: int | None = None,
@@ -539,11 +539,11 @@ class ServingEngine:
             seed = seed if seed is not None else self.sampler.seed
 
             # --- encode on processor_device (async) ---
-            batch = deep_move_to_device(input_batch, self.processor_device)
-            batch = await self.processor.prepare_inference_batch(batch)
+            row = deep_move_to_device(input_row, self.processor_device)
+            row = await self.processor.prepare_inference_row(row)
 
             # --- sample & decode (sync GPU work) ---
-            return await asyncio.to_thread(self._sample_and_decode, batch, seed)
+            return await asyncio.to_thread(self._sample_and_decode, row, seed)
 
     async def reload(
         self,
@@ -576,20 +576,20 @@ class ServingEngine:
     @torch.no_grad()
     def _sample_and_decode(
         self,
-        batch: Any,
+        row: Any,
         seed: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Sample and decode, returning ``(result_dict, info_dict)``.
 
-        ``result_dict`` is the :class:`DecodedBatch` from the processor
+        ``result_dict`` is the :class:`DecodedRow` from the processor
         (tensors on CPU).  ``info_dict`` contains non-tensor metadata
-        extracted from the processed batch for display.
+        extracted from the processed row for display.
         """
         t0 = time.perf_counter()
 
-        batch = deep_cast_float_dtype(batch, self.model.dtype)
-        negative_batch: Any = (
-            self.processor.get_negative_batch(batch)
+        row = deep_cast_float_dtype(row, self.model.dtype)
+        negative_row: Any = (
+            self.processor.get_negative_row(row)
             if self.sampler.guidance.requires_negative(self.sampler.steps)
             else None
         )
@@ -602,7 +602,7 @@ class ServingEngine:
             # --- sample on model_device ---
             generator = torch.Generator(device=self.model_device).manual_seed(seed)
             self.processor.initialize_latents(
-                batch,
+                row,
                 generator=generator,
                 device=self.model_device,
                 dtype=self.model.dtype,
@@ -614,8 +614,8 @@ class ServingEngine:
                         self.model,
                         [
                             SampleRequest(
-                                batch=batch,
-                                negative_batch=negative_batch,
+                                row=row,
+                                negative_row=negative_row,
                                 generator=generator,
                             )
                         ],
@@ -634,7 +634,7 @@ class ServingEngine:
             # --- decode on processor_device ---
             report_progress(1.0, "Decoding...")
             output_latent = run.ctx.latents.to(self.processor_device)
-            result = self.processor.decode_output(output_latent, batch)
+            result = self.processor.decode_output(output_latent, row)
             result = deep_move_to_device(result, torch.device("cpu"))
         finally:
             if self.offload_processor:
@@ -642,14 +642,14 @@ class ServingEngine:
 
         elapsed = time.perf_counter() - t0
 
-        # Build info dict: sampler stats + non-tensor fields from the batch
+        # Build info dict: sampler stats + non-tensor fields from the row
         info: dict[str, Any] = {
             "seed": seed,
             "steps": self.sampler.steps,
             "cfg_scale": cfg_scale_for_display(self.sampler),
             "time": f"{elapsed:.1f}s",
         }
-        for k, v in batch.items():
+        for k, v in row.items():
             if isinstance(v, torch.Tensor):
                 continue
             if isinstance(v, list) and v and isinstance(v[0], torch.Tensor):

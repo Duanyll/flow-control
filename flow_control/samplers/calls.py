@@ -11,7 +11,7 @@ from flow_control.adapters.base import Batch
 
 @dataclass(slots=True)
 class ModelCall:
-    batch: Batch
+    row: Batch
     timestep: torch.Tensor
     variant: str | None = None
 

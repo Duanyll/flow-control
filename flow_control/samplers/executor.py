@@ -110,7 +110,7 @@ class Executor:
             ]
             with self.model.use_variant(variant):
                 velocities = self.model.predict_velocity_batched(
-                    [entry.calls[index].batch for entry, index in slots],
+                    [entry.calls[index].row for entry, index in slots],
                     [entry.calls[index].timestep for entry, index in slots],
                     dummy_outputs=dummies,
                 )

@@ -102,7 +102,7 @@ class AestheticReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image"}
 
     def _resolve_checkpoint_path(self) -> str:
@@ -133,10 +133,10 @@ class AestheticReward(BaseReward):
         logger.info(f"Loaded AestheticReward MLP head from {ckpt_path} on {device}")
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         """Compute raw aesthetic score for a single sample.
 
-        Expects ``batch["clean_image"]`` of shape ``[1, C, H, W]`` in ``[0, 1]``.
+        Expects ``row["clean_image"]`` of shape ``[1, C, H, W]`` in ``[0, 1]``.
         Returns a ``[1]`` tensor with the raw scalar score (NOT normalised --
         ``BaseReward.score`` applies the configured normalize transform).
         """
@@ -145,7 +145,7 @@ class AestheticReward(BaseReward):
                 "AestheticReward is not loaded; call load_model(device) first."
             )
 
-        image: torch.Tensor = batch["clean_image"]  # [1, C, H, W] in [0, 1]
+        image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
 
         pil_image = tensor_to_pil(image)
         processor: Any = self.processor.model

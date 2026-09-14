@@ -3,7 +3,7 @@
 Each task module exports:
 - ``render()``: creates Gradio components, returns a list of component references.
 - ``coerce(…)``: converts Gradio outputs into a dict suitable for
-  ``processor.prepare_inference_batch()``.
+  ``processor.prepare_inference_row()``.
 """
 
 from __future__ import annotations

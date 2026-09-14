@@ -156,8 +156,8 @@ def image_transform_tensor(
 class HPSv2Reward(BaseReward):
     """Human Preference Score v2.1 reward.
 
-    Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
-    ``batch["prompt"]`` (str).  Returns a single-component ``[1]`` tensor
+    Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
+    ``row["prompt"]`` (str).  Returns a single-component ``[1]`` tensor
     holding the raw paired dot-product (typically ~0.20-0.35).
     """
 
@@ -180,7 +180,7 @@ class HPSv2Reward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _resolve_checkpoint_path(self) -> str:
@@ -241,12 +241,12 @@ class HPSv2Reward(BaseReward):
         logger.info("HPSv2.1 reward loaded.")
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         assert self._model is not None, "HPSv2Reward not loaded; call load_model first."
         assert self._device is not None
 
-        image: torch.Tensor = batch["clean_image"]  # [1, C, H, W] in [0, 1]
-        prompt: str = batch["prompt"]
+        image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
+        prompt: str = row["prompt"]
 
         image = image.to(device=self._device, dtype=self.dtype, non_blocking=True)
         pixels = self._transform(image)

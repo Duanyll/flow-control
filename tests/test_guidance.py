@@ -51,8 +51,8 @@ class _CountingGuidance(WrappedPrediction):
     _seen: list[int] = PrivateAttr(default_factory=list)
     _indices: list[int] = PrivateAttr(default_factory=list)
 
-    def bind(self, batch, negative_batch=None) -> Predictor:
-        inner = self.inner.bind(batch, negative_batch)
+    def bind(self, row, negative_row=None) -> Predictor:
+        inner = self.inner.bind(row, negative_row)
         count = 0
 
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
@@ -77,7 +77,7 @@ class GuidedVelocityCompatibilityTest(unittest.TestCase):
         )
         cond = microbatching.make_sampler_batch(3.0)
         negative = microbatching.make_sampler_batch(1.0)
-        request = SampleRequest(batch=cond, negative_batch=negative)
+        request = SampleRequest(row=cond, negative_row=negative)
 
         run = sampler.make_run(request, plan=sampler.plan(cond))
         velocity = Executor(
@@ -110,8 +110,8 @@ class DifferentialDiffusionTest(unittest.TestCase):
         return SampleRun(
             sampler=Sampler(),
             predictor=ClassifierFreeGuidance(),
-            batch=batch,
-            negative_batch=None,
+            row=batch,
+            negative_row=None,
             plan=FlowSolver().plan([1.0, 0.5, 0.0]),
             ctx=StepContext(
                 latents=batch["noisy_latents"].float(),
@@ -137,17 +137,13 @@ class DifferentialDiffusionTest(unittest.TestCase):
         guidance = DifferentialDiffusion()
         run = self._make_run()
 
-        first = guidance.pre_transition(
-            run.ctx.latents, run.batch, run.ctx, run.plan[0]
-        )
+        first = guidance.pre_transition(run.ctx.latents, run.row, run.ctx, run.plan[0])
         # At sigma=1 the noised reference is exactly the fixed initial noise.
         torch.testing.assert_close(first, torch.full((1, 4, 2), 10.0))
 
         run.ctx.latents = torch.full((1, 4, 2), 20.0)
         run.ctx.item_index = 1
-        second = guidance.pre_transition(
-            run.ctx.latents, run.batch, run.ctx, run.plan[1]
-        )
+        second = guidance.pre_transition(run.ctx.latents, run.row, run.ctx, run.plan[1])
         # At progress=1/2, edit strengths 0 and .25 still follow the
         # reference (which is 6 at sigma=.5); .75 and 1 have been released.
         torch.testing.assert_close(
@@ -190,9 +186,9 @@ class DifferentialDiffusionTest(unittest.TestCase):
 
         run = self._make_run()
         run.ctx.latents = torch.zeros(1, 1, 8)
-        batch: Any = run.batch
-        batch["inpaint_mask_latents"] = packed[:, :1]
-        expanded = DifferentialDiffusion._edit_strength(run.batch, run.ctx.latents)
+        row: Any = run.row
+        row["inpaint_mask_latents"] = packed[:, :1]
+        expanded = DifferentialDiffusion._edit_strength(run.row, run.ctx.latents)
         torch.testing.assert_close(
             expanded,
             torch.tensor([[[0.0, 0.25, 0.5, 0.75] * 2]]),
@@ -202,12 +198,12 @@ class DifferentialDiffusionTest(unittest.TestCase):
         run = self._make_run()
         run.plan = FlowSolver().plan([0.75, 0.5])
         run.ctx.latents = torch.full((1, 4, 2), 20.0)
-        batch: Any = run.batch
-        batch["inpaint_mask_latents"] = torch.tensor([[[0.0], [0.25], [0.75], [1.0]]])
+        row: Any = run.row
+        row["inpaint_mask_latents"] = torch.tensor([[[0.0], [0.25], [0.75], [1.0]]])
 
         run.ctx.num_items = len(run.plan)
         projected = DifferentialDiffusion().pre_transition(
-            run.ctx.latents, run.batch, run.ctx, run.plan[0]
+            run.ctx.latents, run.row, run.ctx, run.plan[0]
         )
 
         # A sliced plan defines its own editing interval. At its first step,
@@ -240,7 +236,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
             batch: Any = microbatching.make_sampler_batch(0.0, initial=10.0)
             batch["inpaint_latents"] = torch.full((1, 1, 1), 2.0)
             batch["inpaint_mask_latents"] = torch.tensor([[[strength]]])
-            runs.append(SampleRequest(batch=batch))
+            runs.append(SampleRequest(row=batch))
 
         model = RecordingModel()
         list(sampler.sample(model, runs))
@@ -266,7 +262,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
                     steps=4,
                     guidance=ClassifierFreeGuidance(),
                     solver=DPMSolver(order=2),
-                ).sample(model, [SampleRequest(batch=batch)])
+                ).sample(model, [SampleRequest(row=batch)])
             )
         )
         differential = next(
@@ -275,7 +271,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
                     steps=4,
                     projectors=[DifferentialDiffusion()],
                     solver=DPMSolver(order=2),
-                ).sample(model, [SampleRequest(batch=batch)])
+                ).sample(model, [SampleRequest(row=batch)])
             )
         )
 
@@ -298,7 +294,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
                     microbatching.FakeSamplerModel(),
                     [
                         SampleRequest(
-                            batch=batch, generator=torch.Generator().manual_seed(5)
+                            row=batch, generator=torch.Generator().manual_seed(5)
                         )
                     ],
                     collector=collector,

@@ -31,8 +31,8 @@ class MomentumGuidance(WrappedPrediction):
     beta: float
     stateful: ClassVar[bool] = True
 
-    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
-        inner = self.inner.bind(batch, negative_batch)
+    def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
+        inner = self.inner.bind(row, negative_row)
         momentum: torch.Tensor | None = None
         in_flight = False
 

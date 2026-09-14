@@ -70,13 +70,13 @@ class UnifiedReward(BaseReward):
         return [tag.name.lower().replace(" ", "_") for tag in self.score_tags]
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _load_model(self, device: torch.device) -> None:
         pass
 
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         raise NotImplementedError(
             "UnifiedReward is async-only. Use async_score() instead."
         )
@@ -98,7 +98,7 @@ class UnifiedReward(BaseReward):
                 scores[tag.name] = 0.0
         return scores
 
-    async def _async_score(self, batch: dict[str, Any]) -> torch.Tensor:
+    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
         """Score an image using the LLM judge.
 
         Returns:
@@ -107,8 +107,8 @@ class UnifiedReward(BaseReward):
             ``normalize`` with e.g. ``{"type": "affine", "scale": 0.2}`` to
             land back in ``[0.2, 1.0]`` as before.
         """
-        prompt_text: str = batch["prompt"]
-        image: torch.Tensor = batch["clean_image"]
+        prompt_text: str = row["prompt"]
+        image: torch.Tensor = row["clean_image"]
 
         user_prompt = self.prompt_template.format(prompt=prompt_text)
         llm_output, _ = await self.llm.generate(user_prompt, images=[image])

@@ -68,7 +68,7 @@ class GenevalReward(BaseReward):
     """GenEval reward based on Mask2Former object detection and CLIP color
     classification.
 
-    Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and the
+    Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and the
     top-level GenEval fields ``tag``, ``include`` and ``exclude``.
     """
 
@@ -108,7 +108,7 @@ class GenevalReward(BaseReward):
     _color_classifiers: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "tag", "include", "exclude"}
 
     def _load_model(self, device: torch.device) -> None:
@@ -429,15 +429,15 @@ class GenevalReward(BaseReward):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
-        image = batch["clean_image"]  # [1, C, H, W] in [0, 1]
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+        image = row["clean_image"]  # [1, C, H, W] in [0, 1]
 
         # Run detection
         results = self._detector(image.to(self._device))
         result = results[0]
 
         # Group detections by class
-        metadata = cast(GenEvalMetadata, batch)
+        metadata = cast(GenEvalMetadata, row)
         detected = self._postprocess_detections(result, metadata)
 
         # Convert to PIL for color classification
@@ -734,11 +734,11 @@ if __name__ == "__main__":
         )
         reward.load_model(device)
         for desc, metadata in test_cases:
-            batch: dict[str, Any] = {
+            row: dict[str, Any] = {
                 "clean_image": image_tensor.to(device),
                 **metadata,
             }
-            score = reward._score(batch)
+            score = reward._score(row)
             rprint(f"  {desc:<32s} → score = {score.item():.4f}")
         reward.unload_model()
 

@@ -165,11 +165,11 @@ class EndpointTrainItem:
 
 @dataclass(slots=True)
 class _Prepared:
-    """One item on device: the batch already carries ``noisy_latents = x_t``."""
+    """One item on device: the row already carries ``noisy_latents = x_t``."""
 
     item: EndpointTrainItem
     rollout: Rollout
-    batch: Batch
+    row: Batch
     negative: Batch | None
     point: TrainPoint
 
@@ -267,9 +267,9 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
     # ------------------------------- Prediction --------------------------------- #
 
     def _make_point(
-        self, item: EndpointTrainItem, batch: Batch, advantage: torch.Tensor
+        self, item: EndpointTrainItem, row: Batch, advantage: torch.Tensor
     ) -> TrainPoint:
-        x0 = batch["clean_latents"].float()
+        x0 = row["clean_latents"].float()
         noise = (
             torch.randn_like(x0)
             if item.noise is None
@@ -291,15 +291,15 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
         prepared: list[_Prepared] = []
         for item in items:
             rollout = rollouts[item.rollout_idx]
-            batch = deep_move_to_device(rollout.batch, self.device)
-            point = self._make_point(item, batch, advantages[item.rollout_idx])
-            batch["noisy_latents"] = point.xt
+            row = deep_move_to_device(rollout.row, self.device)
+            point = self._make_point(item, row, advantages[item.rollout_idx])
+            row["noisy_latents"] = point.xt
             prepared.append(
                 _Prepared(
                     item,
                     rollout,
-                    batch,
-                    deep_move_to_device(rollout.negative_batch, self.device),
+                    row,
+                    deep_move_to_device(rollout.negative_row, self.device),
                     point,
                 )
             )
@@ -315,21 +315,21 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
         """
         if prepared[0].item.grid_index is None:
             return self.predict_training(
-                [entry.batch for entry in prepared],
+                [entry.row for entry in prepared],
                 [entry.point.t for entry in prepared],
                 [entry.negative for entry in prepared],
             )
         gens: list[Calls[torch.Tensor]] = []
         for entry in prepared:
-            batch, negative, plan = (
-                entry.batch,
+            row, negative, plan = (
+                entry.row,
                 entry.negative,
                 entry.rollout.sampling_plan,
             )
             run = self.rollout_sampler.make_run(
                 SampleRequest(
-                    batch=batch,
-                    negative_batch=self.training_negative(batch, len(plan), negative),
+                    row=row,
+                    negative_row=self.training_negative(row, len(plan), negative),
                 ),
                 plan=plan,
                 predictor=self.train_predictor,
@@ -337,7 +337,7 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
             assert entry.item.grid_index is not None, "homogeneous microbatch"
             gens.append(run.guided_velocity(entry.point.xt, entry.item.grid_index))
         # Enumerate the configured grid, not this rank's executed plan: an
-        # SDEdit-sliced plan is batch dependent, and every rank must run the
+        # SDEdit-sliced plan is row dependent, and every rank must run the
         # same variant collectives (same rule as GRPO's replay_steps).
         variants = self.train_predictor.variant_keys(self.rollout_sampler.steps)
         return Executor(self.model, variants or [None]).evaluate(gens)
@@ -400,7 +400,7 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
             # the update loop will train on.
             for item in flat_items:
                 item.noise = torch.randn_like(
-                    rollouts[item.rollout_idx].batch["clean_latents"],
+                    rollouts[item.rollout_idx].row["clean_latents"],
                     device=self.device,
                     dtype=torch.float32,
                 )

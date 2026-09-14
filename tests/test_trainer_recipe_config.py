@@ -183,7 +183,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
                 iter(
                     trainer.rollout_sampler.sample(
                         FakeSamplerModel(),
-                        [SampleRequest(batch=self.BATCH)],
+                        [SampleRequest(row=self.BATCH)],
                         collector=collector,
                     )
                 )
@@ -212,7 +212,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
 
         # A stateful behavior tree is legal: the actual rollout score is already
         # recorded. Test step 1, after Momentum has a history, with a separate
-        # stateless training tree and an unguided rollout missing negative_batch.
+        # stateless training tree and an unguided rollout missing negative_row.
         for rollout_scale, train_scale in ((1, 3), (3, 1)):
             model = _ConditionModel()
             batch: Any = {
@@ -222,7 +222,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
             }
             processor = parse_processor({"task": "t2i", "preset": "flux1"})
             negative: Any = (
-                processor.get_negative_batch(batch) if rollout_scale > 1 else None
+                processor.get_negative_row(batch) if rollout_scale > 1 else None
             )
             sampler = Sampler(
                 steps=4,
@@ -302,8 +302,8 @@ class TrainerRolloutPlanTest(unittest.TestCase):
             reward_weights=torch.ones(1),
             reward_labels=["reward"],
             key="sample",
-            batch=self.BATCH,
-            negative_batch=None,
+            row=self.BATCH,
+            negative_row=None,
         )
 
         plan = trainer._build_train_plan([rollout])
@@ -337,9 +337,9 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         )
         trainer.train_predictor = trainer.rollout_sampler.guidance
         trainer.processor = SimpleNamespace(
-            initialize_latents=lambda batch, **kwargs: None,
-            decode_output=lambda latents, batch: {},
-            get_negative_batch=lambda batch: make_sampler_batch(-0.2),
+            initialize_latents=lambda row, **kwargs: None,
+            decode_output=lambda latents, row: {},
+            get_negative_row=lambda row: make_sampler_batch(-0.2),
             resample=lambda row, generator: row,
         )
 
@@ -387,9 +387,9 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         # objective sees them, so a bf16 cache trains bitwise like an fp32 one.
         trainer.objective = NftObjective(beta=0.3, kl_beta=0.2)
         trainer.model = _ConditionModel()
-        conditioned: Any = collected.batch
+        conditioned: Any = collected.row
         conditioned["prompt_embeds"] = torch.tensor([[[3.0]]])
-        negative_conditioned: Any = collected.negative_batch
+        negative_conditioned: Any = collected.negative_row
         negative_conditioned["prompt_embeds"] = torch.tensor([[[1.0]]])
         cached = EndpointTrainItem(
             rollout_idx=0,

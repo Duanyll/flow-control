@@ -82,7 +82,7 @@ def get_processor_input_typeddict(
 ) -> type | None:
     """Extract the TypedDict type from a processor class's generic parameters.
 
-    Returns the InputBatch (mode="inference") or TrainInputBatch (mode="training")
+    Returns the InputRow (mode="inference") or TrainInputRow (mode="training")
     TypedDict class, or None if it cannot be determined.
     """
     from flow_control.processors.base import BaseProcessor

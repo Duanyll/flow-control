@@ -56,13 +56,13 @@ class QwenLayeredTemplate:
     ) -> dict[str, Any]:
         if clean_image is None:
             raise gr.Error("Input image is required.")
-        batch: dict[str, Any] = {
+        row: dict[str, Any] = {
             "clean_image": _coerce_to_image_tensor(clean_image),
         }
         if prompt:
-            batch["prompt"] = prompt
+            row["prompt"] = prompt
         if negative_prompt:
-            batch["negative_prompt"] = negative_prompt
+            row["negative_prompt"] = negative_prompt
         if num_layers > 0:
-            batch["num_layers"] = int(num_layers)
-        return batch
+            row["num_layers"] = int(num_layers)
+        return row

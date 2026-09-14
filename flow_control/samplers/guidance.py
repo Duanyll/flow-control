@@ -69,7 +69,7 @@ class ClassifierFreeGuidance(WrappedPrediction):
             )
         )
 
-    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
+    def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
         if self.inner.requires_negative(1) or any(
             isinstance(node, ClassifierFreeGuidance) for node in self.inner.walk()
         ):
@@ -78,20 +78,18 @@ class ClassifierFreeGuidance(WrappedPrediction):
                 "inner cannot request another negative condition. Place combined "
                 "guidance outside this CFG, or put CFG inside Tiled instead."
             )
-        positive = self.inner.bind(batch)
-        negative_source = (
-            batch if self.negative_condition == "positive" else negative_batch
-        )
+        positive = self.inner.bind(row)
+        negative_source = row if self.negative_condition == "positive" else negative_row
         negative = None
         if self._needs_unconditional():
             if negative_source is None:
                 if self.negative_required:
                     raise ValueError(
-                        "CFG++ requires a negative batch; enable the processor's negative conditioning."
+                        "CFG++ requires a negative row; enable the processor's negative conditioning."
                     )
                 warn_once(
                     logger,
-                    "CFG has no negative batch; falling back to conditional prediction.",
+                    "CFG has no negative row; falling back to conditional prediction.",
                 )
             else:
                 negative = self.inner.bind(negative_source)

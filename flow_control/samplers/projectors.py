@@ -21,7 +21,7 @@ class BaseProjector(BaseModel):
     def pre_transition(
         self,
         latents: torch.Tensor,
-        batch: Batch,
+        row: Batch,
         ctx: StepContext,
         transition: Transition,
     ) -> torch.Tensor:
@@ -31,7 +31,7 @@ class BaseProjector(BaseModel):
         self,
         velocity: torch.Tensor,
         request: EvalRequest,
-        batch: Batch,
+        row: Batch,
         ctx: StepContext,
     ) -> torch.Tensor:
         """Project x0 = request.latents - request.sigma * velocity.
@@ -48,21 +48,21 @@ Projector = Annotated[BaseProjector, RegistryUnion(projector_registry, "type")]
 
 def apply_pre_transition(
     projectors: Sequence[BaseProjector],
-    batch: Batch,
+    row: Batch,
     ctx: StepContext,
     transition: Transition,
 ) -> torch.Tensor:
     latents = ctx.latents
     for projector in projectors:
-        latents = projector.pre_transition(latents, batch, ctx, transition)
+        latents = projector.pre_transition(latents, row, ctx, transition)
     return latents
 
 
-def _batch_tensor(batch: Batch, field: str) -> torch.Tensor:
-    value = cast(dict[str, Any], batch).get(field)
+def _row_tensor(row: Batch, field: str) -> torch.Tensor:
+    value = cast(dict[str, Any], row).get(field)
     if not isinstance(value, torch.Tensor):
         raise KeyError(
-            f"Differential diffusion requires tensor field {field!r}; available fields: {sorted(batch)}."
+            f"Differential diffusion requires tensor field {field!r}; available fields: {sorted(row)}."
         )
     return value
 
@@ -82,12 +82,12 @@ class DifferentialDiffusion(BaseProjector):
     ``"reference[0]"``; it must match the generated latent geometry."""
 
     @staticmethod
-    def _edit_strength(batch: Batch, latents: torch.Tensor) -> torch.Tensor:
+    def _edit_strength(row: Batch, latents: torch.Tensor) -> torch.Tensor:
         if latents.ndim != 3:
             raise ValueError(
                 f"Differential diffusion requires packed BND latents, got {tuple(latents.shape)}."
             )
-        mask = _batch_tensor(batch, "inpaint_mask_latents")
+        mask = _row_tensor(row, "inpaint_mask_latents")
         if mask.ndim != 3:
             raise ValueError(
                 f"Differential diffusion expects inpaint_mask_latents in BND format, got {tuple(mask.shape)}."
@@ -109,12 +109,12 @@ class DifferentialDiffusion(BaseProjector):
     def pre_transition(
         self,
         latents: torch.Tensor,
-        batch: Batch,
+        row: Batch,
         ctx: StepContext,
         transition: Transition,
     ) -> torch.Tensor:
-        source = ConditionImage.parse(self.source).latents(batch).to(latents)
-        noise = _batch_tensor(batch, "noisy_latents").to(latents)
+        source = ConditionImage.parse(self.source).latents(row).to(latents)
+        noise = _row_tensor(row, "noisy_latents").to(latents)
         if source.shape != latents.shape or noise.shape != latents.shape:
             raise ValueError(
                 f"Differential diffusion requires source {self.source} and noisy_latents to match the current "
@@ -123,6 +123,6 @@ class DifferentialDiffusion(BaseProjector):
         sigma = latents.new_tensor(transition.sigma)
         reference = (1.0 - sigma) * source + sigma * noise
         keep_reference = (
-            1.0 - self._edit_strength(batch, latents)
+            1.0 - self._edit_strength(row, latents)
         ) > ctx.item_index / ctx.num_items
         return torch.where(keep_reference, reference, latents)

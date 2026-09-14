@@ -24,7 +24,7 @@ from .components.llm import LLMClient
 from .components.vae import VAE, Flux1VAE, PosteriorMode
 
 
-class InputBatch(TypedDict):
+class InputRow(TypedDict):
     # Pydantic reads this out of the class body; ty only expects annotations.
     __pydantic_config__ = ConfigDict(  # ty: ignore[invalid-typed-dict-statement]
         extra="allow", arbitrary_types_allowed=True
@@ -32,7 +32,7 @@ class InputBatch(TypedDict):
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
-class TrainInputBatch(TypedDict):
+class TrainInputRow(TypedDict):
     # Pydantic reads this out of the class body; ty only expects annotations.
     __pydantic_config__ = ConfigDict(  # ty: ignore[invalid-typed-dict-statement]
         extra="allow", arbitrary_types_allowed=True
@@ -40,9 +40,9 @@ class TrainInputBatch(TypedDict):
     image_size: NotRequired[Annotated[tuple[int, int], JsonBeforeValidator] | None]
 
 
-class ProcessedBatch(TypedDict):
+class ProcessedRow(TypedDict):
     image_size: tuple[int, int]
-    """Height and width of the images in the batch in pixels. Used for initializing latents."""
+    """Height and width of the images in the row in pixels. Used for initializing latents."""
     __key__: NotRequired[str]
     """Sample identifier carried over from the source dataset, used to name outputs."""
     cost: NotRequired[int]
@@ -50,7 +50,7 @@ class ProcessedBatch(TypedDict):
     noisy_latents: NotRequired[torch.Tensor]
     """Noisy latents input to the model."""
     clean_latents: NotRequired[torch.Tensor]
-    """Clean latents corresponding to the images in the batch, as training targets."""
+    """Clean latents corresponding to the images in the row, as training targets."""
 
     negative: NotRequired[Mapping[str, Any]]
     model_image_size: NotRequired[tuple[int, int]]
@@ -58,11 +58,11 @@ class ProcessedBatch(TypedDict):
     ``image_size``. Resolution-dependent shifts read this, not ``image_size``."""
     tiling: NotRequired[dict[str, Any]]
     """Serialized ``TileLayout``; model evaluation tiles this image on the token grid."""
-    tiles: NotRequired[list["ProcessedBatch"]]
-    """Complete per-tile conditioning batches in row-major order, when sampling tiled."""
+    tiles: NotRequired[list["ProcessedRow"]]
+    """Complete per-tile conditioning rows in row-major order, when sampling tiled."""
 
 
-class DecodedBatch(TypedDict):
+class DecodedRow(TypedDict):
     clean_image: torch.Tensor
     """Primary clean image decoded from the latents."""
 
@@ -78,15 +78,15 @@ def sample_posterior(latents: torch.Tensor, generator: torch.Generator) -> torch
     return mean + std * eps
 
 
-TInput = TypeVar("TInput", bound=InputBatch)
-TTrainInput = TypeVar("TTrainInput", bound=TrainInputBatch)
-TProcessed = TypeVar("TProcessed", bound=ProcessedBatch)
+TInput = TypeVar("TInput", bound=InputRow)
+TTrainInput = TypeVar("TTrainInput", bound=TrainInputRow)
+TProcessed = TypeVar("TProcessed", bound=ProcessedRow)
 
 
 class BaseProcessor[
-    TInput: InputBatch,
-    TTrainInput: TrainInputBatch,
-    TProcessed: ProcessedBatch,
+    TInput: InputRow,
+    TTrainInput: TrainInputRow,
+    TProcessed: ProcessedRow,
 ](BaseModel, ABC):
     task: str
     preset: str = ""
@@ -126,52 +126,50 @@ class BaseProcessor[
     # --------------------------- Processing Interfaces -------------------------- #
 
     @abstractmethod
-    async def prepare_inference_batch(self, batch: TInput) -> ProcessedBatch:
+    async def prepare_inference_row(self, row: TInput) -> ProcessedRow:
         """
-        Prepares the input batch for inference.
-        Should return a ProcessedBatch with all necessary fields.
+        Prepares the input row for inference.
+        Should return a ProcessedRow with all necessary fields.
         """
         raise NotImplementedError()
 
-    def get_negative_batch(self, batch: ProcessedBatch) -> ProcessedBatch | None:
+    def get_negative_row(self, row: ProcessedRow) -> ProcessedRow | None:
         """
-        Retrieves the negative batch from the processed batch if it exists.
+        Retrieves the negative row from the processed row if it exists.
 
         Returns:
-            A ProcessedBatch representing the negative batch, or None if not present.
+            A ProcessedRow representing the negative row, or None if not present.
         """
-        negative: Any = batch.get("negative", None)
+        negative: Any = row.get("negative", None)
         if negative is not None:
-            batch = batch.copy()
-            batch.pop("negative")
-            batch.update(negative)
-            return batch
+            row = row.copy()
+            row.pop("negative")
+            row.update(negative)
+            return row
         else:
             return None
 
     @abstractmethod
-    async def prepare_training_batch(self, batch: TTrainInput) -> ProcessedBatch:
+    async def prepare_training_row(self, row: TTrainInput) -> ProcessedRow:
         """
-        Prepares the input batch for training.
-        Should return a ProcessedBatch with all necessary fields.
+        Prepares the input row for training.
+        Should return a ProcessedRow with all necessary fields.
         """
         raise NotImplementedError()
 
-    def decode_output(
-        self, output_latent: torch.Tensor, batch: TProcessed
-    ) -> DecodedBatch:
+    def decode_output(self, output_latent: torch.Tensor, row: TProcessed) -> DecodedRow:
         """
         Decodes the output latents from the model into images.
 
         Should return a primary image tensor of shape (B, C, H, W), and optionally
-        save extra data into the batch if needed.
+        save extra data into the row if needed.
         """
         return {
-            "clean_image": self.decode_latents(output_latent, size=batch["image_size"])
+            "clean_image": self.decode_latents(output_latent, size=row["image_size"])
         }
 
-    def annotate_output(self, decoded: DecodedBatch, batch: TProcessed) -> torch.Tensor:
-        """Compose ONE labeled preview image from a decoded output batch.
+    def annotate_output(self, decoded: DecodedRow, row: TProcessed) -> torch.Tensor:
+        """Compose ONE labeled preview image from a decoded output row.
 
         ``decode_output`` returns the clean ``clean_image`` (used for reward scoring
         and the report records) plus any task-specific auxiliary tensors; ``annotate_output``
@@ -180,15 +178,15 @@ class BaseProcessor[
         """
         return decoded["clean_image"]
 
-    def get_cost(self, batch: TProcessed) -> int:
-        """Token total of one forward on ``batch``; the plan sort key (design D4).
+    def get_cost(self, row: TProcessed) -> int:
+        """Token total of one forward on ``row``; the plan sort key (design D4).
 
         The default counts latent tokens from ``image_size``; tasks add their text
         (``prompt_embeds.shape[1]``) and reference tokens. It is a work estimate
         for grouping rows of similar cost, not necessarily the transformer's
         exact input length.
         """
-        h, w = batch["image_size"]
+        h, w = row["image_size"]
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (h * w) // ratio
 
@@ -253,20 +251,20 @@ class BaseProcessor[
 
     def initialize_latents(
         self,
-        batch: TProcessed,
+        row: TProcessed,
         generator: torch.Generator | None = None,
         device=None,
         dtype=torch.float32,
     ) -> torch.Tensor:
         """
-        Initializes noisy latents for the given batch based on its image size.
+        Initializes noisy latents for the given row based on its image size.
 
-        Modifies the batch in-place to add the "noisy_latents" key and returns the
+        Modifies the row in-place to add the "noisy_latents" key and returns the
         initialized latents.
         """
         if device is None:
             device = self.device
-        h, w = batch["image_size"]
+        h, w = row["image_size"]
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
@@ -275,7 +273,7 @@ class BaseProcessor[
         )
         if self.initial_noise_scale != 1.0:
             latents = (latents.float() * self.initial_noise_scale).to(dtype)
-        noisy_latents = batch["noisy_latents"] = self._pack_latents(latents)
+        noisy_latents = row["noisy_latents"] = self._pack_latents(latents)
         return noisy_latents
 
     def _adapt_image_channels(self, image: torch.Tensor) -> torch.Tensor:

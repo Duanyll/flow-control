@@ -1,4 +1,4 @@
-"""Square tile layout configured on tiled processors and stored in batches."""
+"""Square tile layout configured on tiled processors and stored in rows."""
 
 from pydantic import BaseModel, ConfigDict, model_validator
 

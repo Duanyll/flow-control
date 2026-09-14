@@ -37,7 +37,7 @@ class PickScoreReward(BaseReward):
     )
 
     @property
-    def _batch_fields(self) -> set[str]:
+    def _row_fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _load_model(self, device: torch.device) -> None:
@@ -46,16 +46,16 @@ class PickScoreReward(BaseReward):
         self.model.load_model(device=device)
 
     @torch.no_grad()
-    def _score(self, batch: dict[str, Any]) -> torch.Tensor:
+    def _score(self, row: dict[str, Any]) -> torch.Tensor:
         """Compute PickScore for a single sample.
 
-        Expects ``batch["clean_image"]`` ([1, C, H, W] in [0, 1]) and
-        ``batch["prompt"]`` (str).
+        Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
+        ``row["prompt"]`` (str).
         """
         from flow_control.utils.tensor import tensor_to_pil
 
-        image = batch["clean_image"]  # [1, C, H, W]
-        prompt = batch["prompt"]
+        image = row["clean_image"]  # [1, C, H, W]
+        prompt = row["prompt"]
 
         # PickScore processor expects PIL images
         pil_image = tensor_to_pil(image)
@@ -118,20 +118,20 @@ if __name__ == "__main__":
     reward = PickScoreReward()
     reward.load_model(devutil.default_device())
 
-    batch = {
+    row = {
         "clean_image": image_tensor,
         "prompt": "A dog playing with a ball in the park.",
     }
-    score = reward.score(batch)
+    score = reward.score(row)
     rprint(
         f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
     )  # should be low
 
-    batch = {
+    row = {
         "clean_image": image_tensor,
         "prompt": "Two cats lying on a couch with two tv remotes.",
     }
-    score = reward.score(batch)
+    score = reward.score(row)
     rprint(
         f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
     )  # should be higher than the previous one

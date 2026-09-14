@@ -49,7 +49,7 @@ def _apply_background(image: Image.Image, bg: str) -> Image.Image:
 
 
 def _extract_images(result: dict[str, Any]) -> list[tuple[str, torch.Tensor]]:
-    """Extract ``(label, tensor)`` pairs from a decoded-batch dict."""
+    """Extract ``(label, tensor)`` pairs from a decoded-row dict."""
     images: list[tuple[str, torch.Tensor]] = []
     if "clean_image" in result:
         images.append(("Output", result["clean_image"]))
@@ -223,7 +223,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         bg_mode = str(args[n_task + 7])
 
                         try:
-                            input_batch = template.coerce(*task_args)
+                            input_row = template.coerce(*task_args)
                         except gr.Error:
                             raise
                         except Exception as e:
@@ -235,7 +235,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         token = progress_var.set(_report)
                         try:
                             result, info = await engine.generate(
-                                input_batch,
+                                input_row,
                                 seed=seed,
                                 steps=steps,
                                 cfg_scale=cfg_scale,

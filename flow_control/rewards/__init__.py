@@ -79,11 +79,11 @@ class _RewardLoopThread:
         self._loop.close()
 
 
-def _score_blocking(reward: BaseReward, batch: dict[str, Any]) -> RewardResult:
+def _score_blocking(reward: BaseReward, row: dict[str, Any]) -> RewardResult:
     try:
-        return reward.score(batch)
+        return reward.score(row)
     except NotImplementedError:
-        return asyncio.run(reward.async_score(batch))
+        return asyncio.run(reward.async_score(row))
 
 
 @dataclass
@@ -205,16 +205,16 @@ def reduce_reward_profiles(payloads: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def execute_reward[TBatch: dict, TTag, TResult](
+def execute_reward[TRow: dict, TTag, TResult](
     reward: BaseReward,
-    submitter: Generator[tuple[TBatch, TTag]],
+    submitter: Generator[tuple[TRow, TTag]],
     handler: Callable[[TTag, RewardResult], TResult],
     profile: RewardProfile | None = None,
 ) -> list[TResult]:
-    """Score batches from *submitter* and pass each reward to *handler*.
+    """Score rows from *submitter* and pass each reward to *handler*.
 
     When the reward supports rollout overlap (i.e. remote rewards), scoring is
-    launched asynchronously so that the generator can continue producing batches
+    launched asynchronously so that the generator can continue producing rows
     while earlier rewards are still in flight.  Otherwise scoring is synchronous.
 
     When *profile* is given and the overlap path is taken, submit/complete
@@ -227,16 +227,16 @@ def execute_reward[TBatch: dict, TTag, TResult](
     results: list[TResult] = []
 
     try:
-        for batch, tag in submitter:
+        for row, tag in submitter:
             if reward_loop is not None:
-                async_batch = reward.prepare_batch_for_async(batch)
+                async_row = reward.prepare_row_for_async(row)
                 idx = profile.on_submit() if profile is not None else None
-                future = reward_loop.submit(reward.async_score(async_batch))
+                future = reward_loop.submit(reward.async_score(async_row))
                 if profile is not None and idx is not None:
                     future.add_done_callback(lambda _f, i=idx: profile.on_done(i))
                 pending.append((tag, future))
             else:
-                reward_value = _score_blocking(reward, batch)
+                reward_value = _score_blocking(reward, row)
                 results.append(handler(tag, reward_value))
 
         # Collect async results in submission order
@@ -269,9 +269,9 @@ def execute_pairwise_reward[TTag, TResult](
     handler: Callable[[TTag, RewardResult], TResult],
     num_rollouts_per_prompt: int,
 ) -> list[TResult]:
-    """Score batches using the pairwise execution path.
+    """Score rows using the pairwise execution path.
 
-    Groups by the original batch's ``__key__`` so rollouts may arrive in
+    Groups by the original row's ``__key__`` so rollouts may arrive in
     completion order. All K rollouts for a prompt must stay on the same rank.
 
     For a CompositeReward with mixed children, non-pairwise children are scored
@@ -281,7 +281,7 @@ def execute_pairwise_reward[TTag, TResult](
     Args:
         reward: The reward (may be PairwiseReward, CompositeReward with
             pairwise children, or a regular reward).
-        submitter: Yields ``(batch, tag)`` pairs, K per prompt in any order.
+        submitter: Yields ``(row, tag)`` pairs, K per prompt in any order.
         handler: Called with ``(tag, reward_tensor)`` for each sample.
         num_rollouts_per_prompt: K value for grouping.
 
@@ -298,31 +298,31 @@ def execute_pairwise_reward[TTag, TResult](
             prompt_group: list[tuple[dict[str, Any], TTag]],
         ) -> None:
             """Process a completed prompt group of K rollouts."""
-            batches = [b for b, _ in prompt_group]
+            rows = [b for b, _ in prompt_group]
             tags = [t for _, t in prompt_group]
 
             if isinstance(reward, PairwiseReward):
-                scores = _score_pairwise_group(reward, reward_loop, batches)
+                scores = _score_pairwise_group(reward, reward_loop, rows)
             elif isinstance(reward, CompositeReward):
-                scores = _score_composite_pairwise_group(reward, reward_loop, batches)
+                scores = _score_composite_pairwise_group(reward, reward_loop, rows)
             else:
                 # No pairwise children, score independently
                 scores = []
-                for batch in batches:
-                    scores.append(_score_blocking(reward, batch))
+                for row in rows:
+                    scores.append(_score_blocking(reward, row))
 
             for tag, score in zip(tags, scores, strict=True):
                 results.append(handler(tag, score))
 
-        for batch, tag in submitter:
-            key = batch.get("__key__")
+        for row, tag in submitter:
+            key = row.get("__key__")
             if not isinstance(key, str):
                 raise ValueError(
                     "Pairwise rewards require a string __key__ for each prompt."
                 )
-            async_batch = reward.prepare_batch_for_async(batch)
+            async_row = reward.prepare_row_for_async(row)
             prompt_group = prompt_groups.setdefault(key, [])
-            prompt_group.append((async_batch, tag))
+            prompt_group.append((async_row, tag))
 
             if len(prompt_group) == num_rollouts_per_prompt:
                 _flush_prompt_group(prompt_groups.pop(key))
@@ -342,17 +342,15 @@ def execute_pairwise_reward[TTag, TResult](
 def _score_pairwise_group(
     reward: PairwiseReward,
     loop: _RewardLoopThread,
-    batches: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
 ) -> list[RewardResult]:
     """Build win matrix for a prompt group and aggregate."""
-    K = len(batches)
+    K = len(rows)
     # Launch pairwise comparisons incrementally
     futures: dict[tuple[int, int], concurrent.futures.Future[Any]] = {}
     for i in range(K):
         for j in range(i):
-            futures[(i, j)] = loop.submit(
-                reward.async_score_pair(batches[i], batches[j])
-            )
+            futures[(i, j)] = loop.submit(reward.async_score_pair(rows[i], rows[j]))
 
     # Build win matrix
     win_matrix = torch.full((K, K), 0.5)
@@ -370,27 +368,27 @@ def _score_pairwise_group(
 def _score_composite_pairwise_group(
     reward: CompositeReward,
     loop: _RewardLoopThread,
-    batches: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
 ) -> list[RewardResult]:
     """Score a composite reward with mixed pairwise and non-pairwise children."""
-    K = len(batches)
+    K = len(rows)
     # Per-child scores: list of K results per child
     child_scores: list[list[RewardResult]] = []
 
     for child in reward._reward_instances:  # noqa: SLF001
         if isinstance(child, PairwiseReward):
-            child_scores.append(_score_pairwise_group(child, loop, batches))
+            child_scores.append(_score_pairwise_group(child, loop, rows))
         else:
-            # Score each batch independently
-            per_batch: list[RewardResult] = []
+            # Score each row independently
+            per_row: list[RewardResult] = []
             if child.supports_rollout_overlap():
-                futs = [loop.submit(child.async_score(b)) for b in batches]
+                futs = [loop.submit(child.async_score(b)) for b in rows]
                 for fut in futs:
-                    per_batch.append(fut.result())
+                    per_row.append(fut.result())
             else:
-                for b in batches:
-                    per_batch.append(_score_blocking(child, b))
-            child_scores.append(per_batch)
+                for b in rows:
+                    per_row.append(_score_blocking(child, b))
+            child_scores.append(per_row)
 
     # Concatenate per-child results for each sample.
     result: list[RewardResult] = []

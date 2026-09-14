@@ -96,7 +96,7 @@ def run_recorded(model, sampler, batch, generator, transforms=None):
         iter(
             sampler.sample(
                 model,
-                [SampleRequest(batch=batch, generator=generator)],
+                [SampleRequest(row=batch, generator=generator)],
                 collector=collector,
             )
         )
@@ -107,7 +107,7 @@ def run_recorded(model, sampler, batch, generator, transforms=None):
 def replay_run(sampler: Sampler, batch, plan=None):
     """A training-side run for replaying records against ``sampler``."""
     return sampler.make_run(
-        SampleRequest(batch=batch), plan=sampler.plan(batch) if plan is None else plan
+        SampleRequest(row=batch), plan=sampler.plan(batch) if plan is None else plan
     )
 
 
@@ -187,7 +187,7 @@ def run_e2e_fixture(fixture: dict) -> tuple[capture.TraceOutput, Any]:
         model,
         sampler_from_fixture(fixture),
         SampleRequest(
-            batch=make_request_batch(fixture["initial_latents"]),
+            row=make_request_batch(fixture["initial_latents"]),
             generator=torch.Generator().manual_seed(777),
         ),
     )
@@ -670,7 +670,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 microbatching.FakeSamplerModel(),
                 [
                     SampleRequest(
-                        batch=microbatching.make_sampler_batch(0.5),
+                        row=microbatching.make_sampler_batch(0.5),
                         generator=generator,
                     )
                 ],
@@ -696,7 +696,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
             run = next(
                 iter(
                     sampler.sample(
-                        model, [SampleRequest(batch=batch, generator=generator)]
+                        model, [SampleRequest(row=batch, generator=generator)]
                     )
                 )
             )
@@ -954,7 +954,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
                 for plan in (tail_sliced, tail_fresh):
                     steps = []
                     run = sampler.make_run(
-                        SampleRequest(batch=make_request_batch(initial)),
+                        SampleRequest(row=make_request_batch(initial)),
                         plan=plan,
                         collector=lambda run, step, steps=steps: steps.append(step),
                     )
@@ -979,7 +979,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
             state_before = generator.get_state().clone()
             steps = []
             run = sampler.make_run(
-                SampleRequest(batch=make_request_batch(initial), generator=generator),
+                SampleRequest(row=make_request_batch(initial), generator=generator),
                 plan=plan,
                 collector=lambda run, step, steps=steps: steps.append(step),
             )
@@ -996,7 +996,7 @@ class ExecutorSemanticsTest(unittest.TestCase):
         # actually stochastic (different seeds diverge).
         def sample_full(seed: int) -> torch.Tensor:
             request = SampleRequest(
-                batch=make_request_batch(initial),
+                row=make_request_batch(initial),
                 generator=torch.Generator().manual_seed(seed),
             )
             model = RecordingModel()
@@ -1013,8 +1013,8 @@ class ExecutorSemanticsTest(unittest.TestCase):
             sampler.sample(
                 model,
                 [
-                    SampleRequest(batch=microbatching.make_sampler_batch(1.0)),
-                    SampleRequest(batch=microbatching.make_sampler_batch(2.0)),
+                    SampleRequest(row=microbatching.make_sampler_batch(1.0)),
+                    SampleRequest(row=microbatching.make_sampler_batch(2.0)),
                 ],
             )
         )

@@ -24,13 +24,13 @@ class TiledPrediction(WrappedPrediction):
 
     type: Literal["tiled"] = "tiled"
 
-    def bind(self, batch: Batch, negative_batch: Batch | None = None) -> Predictor:
-        source = cast(dict[str, Any], batch)
+    def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
+        source = cast(dict[str, Any], row)
         if "tiling" not in source:
-            return self.inner.bind(batch, negative_batch)
+            return self.inner.bind(row, negative_row)
         layout = TileLayout.model_validate(source["tiling"])
-        specs = layout.token_specs(batch["image_size"])
-        height, width = (length // layout.stride for length in batch["image_size"])
+        specs = layout.token_specs(row["image_size"])
+        height, width = (length // layout.stride for length in row["image_size"])
 
         def condition(original: Batch | None, index: int) -> Batch | None:
             if original is None:
@@ -58,9 +58,7 @@ class TiledPrediction(WrappedPrediction):
             return cast(Batch, tile)
 
         children = [
-            self.inner.bind(
-                cast(Batch, condition(batch, i)), condition(negative_batch, i)
-            )
+            self.inner.bind(cast(Batch, condition(row, i)), condition(negative_row, i))
             for i in range(len(specs))
         ]
 
@@ -69,7 +67,7 @@ class TiledPrediction(WrappedPrediction):
             if x.ndim != 3 or x.shape[:2] != (1, height * width):
                 raise ValueError(
                     "Tiled prediction requires one packed BND image matching image_size; "
-                    f"got {tuple(x.shape)}, image_size={batch['image_size']}, stride={layout.stride}."
+                    f"got {tuple(x.shape)}, image_size={row['image_size']}, stride={layout.stride}."
                 )
             grid = rearrange(x, "b (h w) d -> b d h w", h=height, w=width)
             velocities = yield from gather(

@@ -9,37 +9,37 @@ from flow_control.utils.resize import resize_to_resolution
 
 from ..base import (
     BaseProcessor,
-    DecodedBatch,
-    InputBatch,
-    ProcessedBatch,
-    TrainInputBatch,
+    DecodedRow,
+    InputRow,
+    ProcessedRow,
+    TrainInputRow,
     task_registry,
 )
 from ..components.prompts import PromptStr, parse_prompt
 from ..components.vae import PosteriorMode
 
 
-class QwenLayeredInputBatch(InputBatch):
+class QwenLayeredInputRow(InputRow):
     clean_image: ImageTensor
     prompt: NotRequired[str | None]
     negative_prompt: NotRequired[str | None]
     num_layers: NotRequired[int]
 
 
-class QwenLayeredTrainInputBatch(TrainInputBatch):
+class QwenLayeredTrainInputRow(TrainInputRow):
     clean_image: ImageTensor
     prompt: NotRequired[str | None]
     layer_images: ImageTensorList
 
 
-class QwenLayeredProcessedBatch(ProcessedBatch):
+class QwenLayeredProcessedRow(ProcessedRow):
     prompt_embeds: torch.Tensor
     pooled_prompt_embeds: torch.Tensor | None
     image_latents: torch.Tensor
     num_layers: int
 
 
-class QwenLayeredDecodedBatch(DecodedBatch):
+class QwenLayeredDecodedRow(DecodedRow):
     base_image: torch.Tensor
     layer_images: list[torch.Tensor]
 
@@ -47,7 +47,7 @@ class QwenLayeredDecodedBatch(DecodedBatch):
 @task_registry.register("qwen_layered")
 class QwenImageLayeredProcessor(
     BaseProcessor[
-        QwenLayeredInputBatch, QwenLayeredTrainInputBatch, QwenLayeredProcessedBatch
+        QwenLayeredInputRow, QwenLayeredTrainInputRow, QwenLayeredProcessedRow
     ]
 ):
     task: Literal["qwen_layered"] = "qwen_layered"
@@ -101,23 +101,23 @@ class QwenImageLayeredProcessor(
             pw=self.patch_size,
         )
 
-    async def prepare_inference_batch(
-        self, batch: QwenLayeredInputBatch
-    ) -> QwenLayeredProcessedBatch:
-        batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
+    async def prepare_inference_row(
+        self, row: QwenLayeredInputRow
+    ) -> QwenLayeredProcessedRow:
+        row["clean_image"] = clean_image = self.resize_image(row["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
-        if (prompt := batch.get("prompt", None)) is None:
-            batch["prompt"] = prompt = await self.chat_completion(
+        if (prompt := row.get("prompt", None)) is None:
+            row["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
         image_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
-        num_layers = batch.get("num_layers")
+        num_layers = row.get("num_layers")
         if num_layers is None:
             num_layers = self.default_num_layers
 
-        result = QwenLayeredProcessedBatch(
+        result = QwenLayeredProcessedRow(
             image_size=image_size,
             image_latents=image_latents,
             **self.encode_prompt(prompt, system_prompt=self.encoder_prompt),
@@ -126,34 +126,34 @@ class QwenImageLayeredProcessor(
 
         if self.save_negative:
             result["negative"] = self.encode_prompt(
-                batch.get("negative_prompt", None) or self.default_negative_prompt,
+                row.get("negative_prompt", None) or self.default_negative_prompt,
                 system_prompt=self.encoder_prompt,
             )
 
         return result
 
-    async def prepare_training_batch(
-        self, batch: QwenLayeredTrainInputBatch
-    ) -> QwenLayeredProcessedBatch:
-        batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
+    async def prepare_training_row(
+        self, row: QwenLayeredTrainInputRow
+    ) -> QwenLayeredProcessedRow:
+        row["clean_image"] = clean_image = self.resize_image(row["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
-        if (prompt := batch.get("prompt", None)) is None:
-            batch["prompt"] = prompt = await self.chat_completion(
+        if (prompt := row.get("prompt", None)) is None:
+            row["prompt"] = prompt = await self.chat_completion(
                 self.caption_prompt, images=[clean_image]
             )
         image_latents = self.encode_latents(
             clean_image, posterior=self.condition_posterior
         )
-        num_layers = len(batch["layer_images"])
+        num_layers = len(row["layer_images"])
         for i in range(num_layers):
-            batch["layer_images"][i] = resize_to_resolution(
-                batch["layer_images"][i], image_size
+            row["layer_images"][i] = resize_to_resolution(
+                row["layer_images"][i], image_size
             )
         clean_latents = self._encode_latents_layered(
-            [batch["clean_image"], *batch["layer_images"]],
+            [row["clean_image"], *row["layer_images"]],
             posterior=self.target_posterior,
         )
-        result = QwenLayeredProcessedBatch(
+        result = QwenLayeredProcessedRow(
             image_size=image_size,
             image_latents=image_latents,
             clean_latents=clean_latents,
@@ -167,30 +167,28 @@ class QwenImageLayeredProcessor(
             )
         return result
 
-    def get_cost(self, batch: QwenLayeredProcessedBatch) -> int:
+    def get_cost(self, row: QwenLayeredProcessedRow) -> int:
         # Source image + (num_layers + 1) generated images share one sequence.
-        return (batch["num_layers"] + 2) * super().get_cost(batch) + batch[
+        return (row["num_layers"] + 2) * super().get_cost(row) + row[
             "prompt_embeds"
         ].shape[1]
 
     def decode_output(
         self,
         output_latent: torch.Tensor,
-        batch: ProcessedBatch,
-    ) -> QwenLayeredDecodedBatch:
+        row: ProcessedRow,
+    ) -> QwenLayeredDecodedRow:
         base_image, layer_images = self.decode_latents_layered(
-            output_latent, batch["image_size"]
+            output_latent, row["image_size"]
         )
-        return QwenLayeredDecodedBatch(
+        return QwenLayeredDecodedRow(
             clean_image=merge_images([base_image, *layer_images]),
             base_image=base_image,
             layer_images=layer_images,
         )
 
-    def annotate_output(
-        self, decoded: DecodedBatch, batch: ProcessedBatch
-    ) -> torch.Tensor:
-        layered = cast(QwenLayeredDecodedBatch, decoded)
+    def annotate_output(self, decoded: DecodedRow, row: ProcessedRow) -> torch.Tensor:
+        layered = cast(QwenLayeredDecodedRow, decoded)
         return merge_images(
             [layered["base_image"], *layered["layer_images"]],
             border_width=4,
@@ -199,20 +197,20 @@ class QwenImageLayeredProcessor(
 
     def initialize_latents(
         self,
-        batch: QwenLayeredProcessedBatch,
+        row: QwenLayeredProcessedRow,
         generator=None,
         device=None,
         dtype=torch.bfloat16,
     ):
         if device is None:
             device = self.device
-        h, w = batch["image_size"]
+        h, w = row["image_size"]
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
-        f = batch["num_layers"] + 1
+        f = row["num_layers"] + 1
         latents = torch.randn(
             (f, c, h, w), generator=generator, device=device, dtype=dtype
         )
-        batch["noisy_latents"] = self._pack_latents_layered(latents)
-        return batch["noisy_latents"]
+        row["noisy_latents"] = self._pack_latents_layered(latents)
+        return row["noisy_latents"]

@@ -56,8 +56,8 @@ class OtherPrediction(ModelPrediction):
     def variant_keys(self, num_items):
         return ["other"]
 
-    def bind(self, batch, negative_batch=None):
-        inner = super().bind(batch, negative_batch)
+    def bind(self, row, negative_row=None):
+        inner = super().bind(row, negative_row)
 
         def predict(request, ctx):
             return (yield from inner(replace(request, variant="other"), ctx))
@@ -147,7 +147,7 @@ def _preprocess(processor: TiledT2IProcessor, *inputs: Any) -> tuple[list[Any], 
         TiledT2IProcessor, "encode_prompt", autospec=True, side_effect=_encode_prompt
     ) as encode:
         batches = [
-            asyncio.run(processor.prepare_inference_batch(deepcopy(item)))
+            asyncio.run(processor.prepare_inference_row(deepcopy(item)))
             for item in inputs
         ]
     return batches, encode.call_count
@@ -219,8 +219,8 @@ class SamplerExtensionsTest(unittest.TestCase):
                         FakeSamplerModel(),
                         [
                             SampleRequest(
-                                batch=batch,
-                                negative_batch=negative,
+                                row=batch,
+                                negative_row=negative,
                                 generator=torch.Generator().manual_seed(3),
                             )
                         ],
@@ -394,7 +394,7 @@ class SamplerExtensionsTest(unittest.TestCase):
                 for tile in shared["tiles"]
             )
         )
-        negative: Any = processor.get_negative_batch(batch)
+        negative: Any = processor.get_negative_row(batch)
         self.assertEqual(negative["tiling"], batch["tiling"])
         self.assertNotIn("negative", negative)
         self.assertEqual(negative["prompt_embeds"].item(), -1)
@@ -402,7 +402,7 @@ class SamplerExtensionsTest(unittest.TestCase):
             [tile["prompt_embeds"].item() for tile in negative["tiles"]],
             [-1, -2, -3, -4],
         )
-        shared_negative: Any = processor.get_negative_batch(shared)
+        shared_negative: Any = processor.get_negative_row(shared)
         self.assertEqual(
             [tile["prompt_embeds"].item() for tile in shared_negative["tiles"]], [0] * 4
         )
@@ -474,7 +474,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         processor = _tiled_processor()
         (batch,), _ = _preprocess(processor, _VARIED)
         batch["noisy_latents"] = _tiled_latents(processor, batch)
-        negative: Any = processor.get_negative_batch(batch)
+        negative: Any = processor.get_negative_row(batch)
         sampler = Sampler(
             steps=3,
             solver=FlowSolver(eta=0.5),
@@ -489,8 +489,8 @@ class SamplerExtensionsTest(unittest.TestCase):
                         leaf,
                         [
                             SampleRequest(
-                                batch=batch,
-                                negative_batch=negative,
+                                row=batch,
+                                negative_row=negative,
                                 generator=torch.Generator().manual_seed(5),
                             )
                         ],
@@ -610,7 +610,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         # never depend on who shares the forward.
         (tiled,), _ = _preprocess(processor, _VARIED)
         tiled["noisy_latents"] = _tiled_latents(processor, tiled)
-        negative: Any = processor.get_negative_batch(tiled)
+        negative: Any = processor.get_negative_row(tiled)
         plain["clean_latents"] = torch.zeros_like(plain["noisy_latents"])
         samplers = [
             Sampler(
@@ -678,13 +678,11 @@ class SamplerExtensionsTest(unittest.TestCase):
             torch.testing.assert_close(value, count * (2 * plain["noisy_latents"] + 7))
 
         # S2 streamed completions interleave prompt groups. The reward layer
-        # must group by __key__ BEFORE prepare_batch_for_async drops metadata.
+        # must group by __key__ BEFORE prepare_row_for_async drops metadata.
         class SamePromptReward(PairwiseReward):
-            async def async_score_pair(self, batch_a, batch_b) -> float:
-                assert batch_a["prompt"] == batch_b["prompt"]
-                return float(
-                    batch_a["clean_image"].mean() > batch_b["clean_image"].mean()
-                )
+            async def async_score_pair(self, row_a, row_b) -> float:
+                assert row_a["prompt"] == row_b["prompt"]
+                return float(row_a["clean_image"].mean() > row_b["clean_image"].mean())
 
         pair_runs = []
         for index, steps in enumerate((3, 4, 1, 5)):
@@ -704,7 +702,7 @@ class SamplerExtensionsTest(unittest.TestCase):
                     i for i, candidate in enumerate(pair_runs) if candidate is run
                 )
                 completions.append(index)
-                yield dict(run.batch), index
+                yield dict(run.row), index
 
         scored = dict(
             execute_pairwise_reward(

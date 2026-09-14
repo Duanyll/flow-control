@@ -28,7 +28,7 @@ class RecipeBuildTest(unittest.TestCase):
                         FakeSamplerModel(),
                         [
                             SampleRequest(
-                                batch=batch, generator=torch.Generator().manual_seed(5)
+                                row=batch, generator=torch.Generator().manual_seed(5)
                             )
                         ],
                         collector=lambda run, step, steps=steps: steps.append(step),

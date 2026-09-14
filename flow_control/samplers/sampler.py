@@ -32,8 +32,8 @@ def derive_seed(base_seed: int, key: str) -> int:
 
 @dataclass(slots=True)
 class SampleRequest:
-    batch: Batch
-    negative_batch: Batch | None = None
+    row: Batch
+    negative_row: Batch | None = None
     generator: torch.Generator | None = None
 
 
@@ -43,7 +43,7 @@ class Start(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: ConditionImageSpec | None = None
     """Condition image whose latents to start from, e.g. ``"inpaint"`` or
-    ``"reference[0]"``, or a literal batch key. Defaults to ``noisy_latents``
+    ``"reference[0]"``, or a literal row key. Defaults to ``noisy_latents``
     (pure noise), or to ``clean`` when ``strength`` is set (SDEdit)."""
     strength: float | None = Field(default=None, gt=0.0, le=1.0)
 
@@ -60,16 +60,16 @@ class Start(BaseModel):
         )
 
     def latents(
-        self, batch: Batch, sigma: float, generator: torch.Generator | None
+        self, row: Batch, sigma: float, generator: torch.Generator | None
     ) -> torch.Tensor:
         spec = ConditionImage.parse(
             self.source or ("noisy_latents" if self.strength is None else "clean")
         )
-        source = spec.latents(batch).float()
-        if source.shape != batch["noisy_latents"].shape:
+        source = spec.latents(row).float()
+        if source.shape != row["noisy_latents"].shape:
             raise ValueError(
                 f"Start source {spec} has shape {tuple(source.shape)}, but the "
-                f"model expects {tuple(batch['noisy_latents'].shape)}."
+                f"model expects {tuple(row['noisy_latents'].shape)}."
             )
         if self.strength is None:
             return source
@@ -110,7 +110,7 @@ class Sampler(BaseModel):
 
     def _make_sigmas(
         self,
-        batch: Batch,
+        row: Batch,
         t_start: float,
         t_end: float,
     ) -> torch.Tensor:
@@ -135,30 +135,30 @@ class Sampler(BaseModel):
                 self.num_train_timesteps,
             )
             shifted_training_grid = self.shift.apply(
-                training_grid, batch, self.num_train_timesteps
+                training_grid, row, self.num_train_timesteps
             )
             inference_grid = torch.linspace(
                 shifted_training_grid[0], shifted_training_grid[-1], self.steps
             )
-            inference_grid = self.shift.apply(inference_grid, batch, self.steps)
+            inference_grid = self.shift.apply(inference_grid, row, self.steps)
             return torch.cat([inference_grid, inference_grid.new_zeros(1)])
 
         sigmas = torch.linspace(t_start, t_end, self.steps + 1)
-        return self.shift.apply(sigmas, batch, self.steps)
+        return self.shift.apply(sigmas, row, self.steps)
 
     def make_sigmas(
         self,
-        batch: Batch,
+        row: Batch,
         t_start: float = 1.0,
         t_end: float = 0.0,
     ) -> list[float]:
-        """The actual (shifted) sigma grid for one batch; canonical-time args."""
-        return self._make_sigmas(batch, t_start, t_end).tolist()
+        """The actual (shifted) sigma grid for one row; canonical-time args."""
+        return self._make_sigmas(row, t_start, t_end).tolist()
 
     def plan(
-        self, batch: Batch, generator: torch.Generator | None = None
+        self, row: Batch, generator: torch.Generator | None = None
     ) -> SamplingPlan:
-        plan = self.start.slice(self.solver.plan(self.make_sigmas(batch)))
+        plan = self.start.slice(self.solver.plan(self.make_sigmas(row)))
         for transform in self.transforms:
             plan = transform.apply(plan, generator)
         return plan
@@ -178,17 +178,17 @@ class Sampler(BaseModel):
         """Bind a request to a plan and fresh per-run state.
 
         Without ``plan`` this is a sampling run: the plan is built for the
-        batch and latents start per ``start``. Training passes the executed
+        row and latents start per ``start``. Training passes the executed
         ``plan`` back and supplies latents through ``guided_velocity``.
         ``predictor`` explicitly selects an alternative tree, such as training's
         configured predictor, while preserving the executed plan and projectors.
         """
-        batch, negative = request.batch, request.negative_batch
+        row, negative = request.row, request.negative_row
         if plan is None:
-            plan = self.plan(batch, request.generator)
-            latents = self.start.latents(batch, plan[0].sigma, request.generator)
+            plan = self.plan(row, request.generator)
+            latents = self.start.latents(row, plan[0].sigma, request.generator)
         else:
-            latents = batch["noisy_latents"].float()
+            latents = row["noisy_latents"].float()
         ctx = StepContext(
             latents=latents,
             generator=request.generator,
@@ -197,7 +197,7 @@ class Sampler(BaseModel):
         )
         return SampleRun(
             self,
-            batch,
+            row,
             negative,
             plan,
             ctx,
@@ -218,9 +218,9 @@ class Sampler(BaseModel):
             for request in requests:
                 moved = replace(
                     request,
-                    batch=deep_move_to_device(request.batch, model.device),
-                    negative_batch=deep_move_to_device(
-                        request.negative_batch, model.device
+                    row=deep_move_to_device(request.row, model.device),
+                    negative_row=deep_move_to_device(
+                        request.negative_row, model.device
                     ),
                 )
                 yield self.make_run(moved, collector=collector)

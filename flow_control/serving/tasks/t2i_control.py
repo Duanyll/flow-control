@@ -55,12 +55,12 @@ class T2IControlTemplate:
     ) -> dict[str, Any]:
         if control_image is None:
             raise gr.Error("Control image is required.")
-        batch: dict[str, Any] = {
+        row: dict[str, Any] = {
             "prompt": prompt,
             "control_image": _coerce_to_image_tensor(control_image),
         }
         if negative_prompt:
-            batch["negative_prompt"] = negative_prompt
+            row["negative_prompt"] = negative_prompt
         if height > 0 and width > 0:
-            batch["image_size"] = (int(height), int(width))
-        return batch
+            row["image_size"] = (int(height), int(width))
+        return row

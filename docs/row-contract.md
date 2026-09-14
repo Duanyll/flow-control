@@ -1,7 +1,13 @@
-# Batch dictionary contract
+# Row dictionary contract
+
+Vocabulary used throughout `flow_control`:
+
+- **Row**: any single-sample dictionary, at every stage (raw dataset item, processor output, decoded record, the sampler's working dict, a reward's input, a serving request). Type alias: `flow_control.data.rows.Row`.
+- **microbatch**: a `list[Row]`, the chunk an adapter receives in one `predict_velocity_batched` call (variables are named `rows` or `microbatch`).
+- **Batch**: only the physical payload an adapter collates from a microbatch (leading dimension `B`; the `Batch` TypedDicts under `flow_control/adapters`). It exists inside the adapter and never leaves it.
 
 This is the field inventory for dataset items, processed samples, model-call
-batches and decoded/output records in `flow_control`. These are open dictionaries:
+rows and decoded/output records in `flow_control`. These are open dictionaries:
 dataset columns and plugins may add fields. The tables cover names interpreted or
 produced by the in-tree code, including `contrib`; they are not a universal
 `TypedDict` or a requirement that every sample contain every field.
@@ -24,7 +30,7 @@ inputs. Sampling execution is described in [sampler-plan-design.md](sampler-plan
   concatenate frames/crops along `N`; their stream is not one rectangular image.
 - Latents are in the processor's **normalized model coordinates**, not raw VAE
   outputs or necessarily pixels. VAE scale/shift/normalization, `f`, `p` and `Cz`
-  live in processor/adapter configuration; they are not batch fields.
+  live in processor/adapter configuration; they are not row fields.
 - For the sampler/training interface, low-precision model computation stays inside
   the adapter: `predict_velocity_batched` casts the call's float tensors to the
   model dtype on entry and returns **fp32 velocity**. Start, predictor, projector,
@@ -33,8 +39,8 @@ inputs. Sampling execution is described in [sampler-plan-design.md](sampler-plan
   inference and rollout draw the initial noise in the model dtype, and
   `SampleRun.run` casts the final latents back to the dtype of the stored
   `noisy_latents`. VAE/text preprocessing uses its own configured dtype.
-- The adapter accepts a list of logical dictionaries. Per microbatch chunk it
-  either collates the declared `dense_batch_fields` into a physical batch with
+- The adapter accepts a microbatch (a list of rows). Per microbatch chunk it
+  either collates the declared `dense_batch_fields` into a physical `Batch` with
   leading dimension `B` (list-valued fields become lists of `[B, ...]` tensors)
   or forwards each dictionary sequentially. The dense path builds a new
   dictionary holding only the declared fields and requires non-tensor values to
@@ -50,20 +56,20 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
 | Stage | Contract |
 | --- | --- |
 | Dataset input | Raw images, prompts and arbitrary columns. Task input coercion accepts supported paths/PIL/arrays/tensors and JSON forms for annotated structured fields; unknown columns pass through. Tensor-file attachments load their native tensor representation, so their shape/range must already be correct. |
-| Processor output / offline cache | `prepare_training_batch` adds clean targets and conditions; `prepare_inference_batch` adds conditions. The offline `ProcessorStage.process` adds `cost`. `save_extra` merges original fields with processed fields taking precedence; `__key__` is carried separately. Processors also rewrite inputs in place (resized `clean_image`, enhanced or generated `prompt`), so retained extras hold the rewritten values. |
+| Processor output / offline cache | `prepare_training_row` adds clean targets and conditions; `prepare_inference_row` adds conditions. The offline `ProcessorStage.process` adds `cost`. `save_extra` merges original fields with processed fields taking precedence; `__key__` is carried separately. Processors also rewrite inputs in place (resized `clean_image`, enhanced or generated `prompt`), so retained extras hold the rewritten values. |
 | Runtime preprocessing | `DataMixin.prepare_row` moves the row to the device, runs the processor only when the store is an `OnlineStore` (raw source; a cache row is used as is), carries `__key__` / `__padding__` over, adds `cost`, then calls `processor.resample`. Inference and validation keep the raw fields next to the processed ones; SFT training does not. Sampling callers initialize `noisy_latents` in the model dtype; training builds noisy inputs from its targets. |
-| Model call | `ModelPrediction` overlays the current request's latents as `noisy_latents` on a fresh shallow copy of the whole working dictionary. Predictor branches and tiles select their own condition dictionaries. Only dense collation narrows the call to declared fields; the sequential path sees every key. |
-| Decode | `decode_output(final_latents, batch)` returns a new decoded dictionary. Inference and rollout callers merge it into their working batch, replacing names such as `clean_image`. |
-| Persist / score | Inference scores the merged batch; its `save_extra` only decides whether the record holds the decoded fields or the whole merged batch, and reward fields are added to it. Raw fields needed for scoring must survive any earlier offline cache as well. |
+| Model call | `ModelPrediction` overlays the current request's latents as `noisy_latents` on a fresh shallow copy of the whole working row. Predictor branches and tiles select their own condition rows. The adapter receives a microbatch (`list[Row]`); the physical `Batch` with a leading `B` dimension exists only inside its collate step. Only dense collation narrows the call to declared fields; the sequential path sees every key. |
+| Decode | `decode_output(final_latents, row)` returns a new decoded row. Inference and rollout callers merge it into their working row, replacing names such as `clean_image`. |
+| Persist / score | Inference scores the merged row; its `save_extra` only decides whether the record holds the decoded fields or the whole merged row, and reward fields are added to it. Raw fields needed for scoring must survive any earlier offline cache as well. |
 
 **Two overwrite rules matter:**
 
-1. `run.batch["noisy_latents"]` is the initial/source tensor. The evolving state is
+1. `run.row["noisy_latents"]` is the initial/source tensor. The evolving state is
    `run.ctx.latents`, and only the model-call copy receives the current value.
    The one exception is `EndpointTrainer._prepare`, which writes the re-noised
-   training input `x_t` into `batch["noisy_latents"]` before `make_run` /
+   training input `x_t` into `row["noisy_latents"]` before `make_run` /
    `guided_velocity` re-evaluates the rollout step on it.
-2. RL rollout collection writes the sampled endpoint into `batch["clean_latents"]`.
+2. RL rollout collection writes the sampled endpoint into `row["clean_latents"]`.
    General inference merges decoded images but does **not** write endpoint latents
    there. A retained `clean_latents` may therefore still be an input/cache target.
 
@@ -98,8 +104,8 @@ guesses by name. Plugins that cache another posterior field must declare it.
 | `model_image_size` | Optional pixel `(H, W)` seen by one forward, e.g. a tile. Defaults to `image_size`. | `TiledT2IProcessor`. | `BaseShift._get_seq_len`; tiled prediction removes it from leaf conditions. |
 | `cost` | Integer token total from `processor.get_cost` (latent + text + reference); the plan sort key. It is not necessarily `noisy_latents.shape[1]`. | Offline `ProcessorStage.process`, runtime `DataMixin.prepare_row`, or an adapter's `cost_test` mock batch. | `RandomCacheWriter` records it in the cache index and grouping sorts on it; `ReportWriter` writes it to `metrics.jsonl`; `SftTrainer.run_cost_test` reads it off the mock batches. Resolution shift computes its own length and does not read this field. |
 | `clean_latents` | Normalized packed clean target; `[1, N, D]` at runtime, possibly `[2, N, D]` in a posterior cache. RL collection replaces it with the sampled endpoint. Optional for inference. | Training processor, rollout collector, or an adapter's `cost_test` mock batch. | SFT/AWM/RAM/NFT target calculations; `Start` when selected as a source, including default SDEdit source. |
-| `noisy_latents` | Packed noisy state `[1, N, D]`, in the same coordinates as clean targets. Meaning is stage-dependent: initial noise/source in the run batch, current state in a model call, corrupted target in training. | `initialize_latents`, trainers, `ModelPrediction`. | `Start`, shift, all adapters; `DifferentialDiffusion` uses the run-batch tensor as reference noise. Solver state itself lives in `StepContext`. |
-| `negative` | Optional shallow condition override dictionary; see below. | Task processor when `save_negative=True`, or caller/cache. | `BaseProcessor.get_negative_batch` resolves it into the separate negative batch that CFG/CFG++ and training receive; `TiledT2IProcessor._add_tiles` rewrites it and `TiledPrediction` strips it from leaf conditions. |
+| `noisy_latents` | Packed noisy state `[1, N, D]`, in the same coordinates as clean targets. Meaning is stage-dependent: initial noise/source in the run row, current state in a model call, corrupted target in training. | `initialize_latents`, trainers, `ModelPrediction`. | `Start`, shift, all adapters; `DifferentialDiffusion` uses the run-row tensor as reference noise. Solver state itself lives in `StepContext`. |
+| `negative` | Optional shallow condition override dictionary; see below. | Task processor when `save_negative=True`, or caller/cache. | `BaseProcessor.get_negative_row` resolves it into the separate negative row that CFG/CFG++ and training receive; `TiledT2IProcessor._add_tiles` rewrites it and `TiledPrediction` strips it from leaf conditions. |
 
 Sources: [row contract](../flow_control/data/rows.py), [plan / stream](../flow_control/data/stream.py)
 (`RowStream`, `RowCursor`), [grouping](../flow_control/data/grouping.py),
@@ -108,14 +114,14 @@ Sources: [row contract](../flow_control/data/rows.py), [plan / stream](../flow_c
 
 ### Negative conditions
 
-`get_negative_batch` copies the positive dictionary, removes `negative`, and
+`get_negative_row` copies the positive dictionary, removes `negative`, and
 overlays its contents. The merge is **shallow**: unchanged tensors/metadata are
 shared, and a list such as `negative["tiles"]` replaces the positive list entirely.
 The model leaf later injects the same current noisy state into either branch.
 
 Ordinary negative dictionaries contain encoded text fields. Efficient-layered
 negatives also replace `text_lengths`; tiled negatives replace `tiles` with
-complete per-tile conditions, and are emitted only when the whole-image batch
+complete per-tile conditions, and are emitted only when the whole-image row
 has a `negative`, otherwise per-tile negative prompts are dropped. HiDream editing negatives can also contain
 `pixel_values` and `image_grid_thw` when `negative_with_images` is enabled.
 These nested dictionaries reuse the field contracts below; they are not
@@ -133,7 +139,7 @@ configured independently.
 ## Raw inputs and decoded images
 
 Image shapes below follow the `[1, C, H, W]`, nominal `[0, 1]` convention unless
-specified. Raw fields survive into the live batch for inference, rollout and
+specified. Raw fields survive into the live row for inference, rollout and
 validation, which always merge extras, and into records or caches only with
 `save_extra`.
 
@@ -232,10 +238,10 @@ reward (pixels) and a sampler component (latents) alike.
 | `control` | `control_image` | `control_latents` |
 | `inpaint` | `inpaint_image` | `inpaint_latents` |
 | `clean` | `clean_image` | `clean_latents` |
-| any other name, optionally `[i]` | `batch[name]` | `batch[name]` |
+| any other name, optionally `[i]` | `row[name]` | `row[name]` |
 
 A missing index on a list-valued field selects entry 0. Unknown names are literal
-batch keys: a processor extension that must supply its own condition image for a
+row keys: a processor extension that must supply its own condition image for a
 stacked sampling trick writes it under a new key and names that key. The selector
 only fetches; it never resizes or re-encodes. Latent consumers compare the result
 with `noisy_latents` and report the selector in the error; full-reference IQA
@@ -259,7 +265,7 @@ generated image, and after RL collection its latent side is the sampled endpoint
 | `negative.tiles` | Complete row-major negative tile conditions, replacing the positive list under shallow negative overlay. | Tiled processor with `save_negative=True`. | Negative tiled predictor branches. |
 
 `tile_size`, `overlap` and the whole-image `image_size` must align to `stride`; origins and blend weights are
-derived from the layout and whole-image size, not stored as additional batch keys.
+derived from the layout and whole-image size, not stored as additional row keys.
 The tiled predictor slices the **current request latents**, invokes its children,
 and stitches their fp32 velocities. It does not generically crop every tensor in
 the condition dictionary: control, reference and mask inputs need a producer that
@@ -293,9 +299,9 @@ Sources: [tiled processor](../flow_control/processors/tasks/tiled_t2i.py),
 Image-only rewards read `clean_image`; text-image rewards also read `prompt`.
 Reference-based rewards select their reference by
 [condition-image role](#condition-image-roles) and declare that role's pixel
-field in `_batch_fields`. Rewards that overlap with rollout (remote ones, and the
+field in `_row_fields`. Rewards that overlap with rollout (remote ones, and the
 local `PairwiseReward`, `UnifiedReward` and Rational rewards) and every pairwise
-scoring path receive a CPU copy filtered to their declared `_batch_fields`, so
+scoring path receive a CPU copy filtered to their declared `_row_fields`, so
 retaining a dataset column does not by itself make it available to them. Remote
 transport additionally casts float tensors to bf16.
 
@@ -311,7 +317,7 @@ Sources: [GenEval](../flow_control/rewards/geneval.py),
 [IQA](../flow_control/contrib/iqa/reward.py), [reward base](../flow_control/rewards/base.py),
 [inference output](../flow_control/training/inference.py).
 
-## Values that are not batch fields
+## Values that are not row fields
 
 `ModelCall` carries `timestep` and `variant` as separate arguments. `EvalRequest`
 carries the current latents, sigma, next sigma, solver evaluation parameters and
@@ -322,9 +328,9 @@ return values. The executed plan belongs to `SampleRun`, and collector records
 are separate objects.
 
 RL `Rollout` objects own reward results, recorded steps and their own copy of
-the rollout `batch`/`negative_batch`; advantages are computed separately and
+the rollout `row`/`negative_row`; advantages are computed separately and
 passed to the per-algorithm train items, and replay plans live on `ReplayItem`.
-None of these are injected into `batch`.
+None of these are injected into `row`.
 The persisted inference `reward*` fields above are a separate output contract.
 Likewise, model outputs such as `image_features`, LLM response keys such as
 `bbox_2d`, and raw-directory attachment descriptors (`__type__`, `file`, `shape`,
@@ -340,7 +346,7 @@ time travel. The latter can restrict its solver/parameterization support.
 The future observation contract must specify a retained measurement tensor,
 its shape and coordinate space, the degradation operator and pseudoinverse, and
 the units of measurement noise. Operator behavior belongs in configuration;
-sample-dependent measurements belong in the batch and should be chosen by a
+sample-dependent measurements belong in the row and should be chosen by a
 [condition-image role](#condition-image-roles): `inpaint`, `control`,
 `reference[i]` or a processor-supplied custom key. `clean` is not an immutable
 observation, since decode overwrites its pixel side and RL collection its latent

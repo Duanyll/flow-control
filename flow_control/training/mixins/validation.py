@@ -102,22 +102,20 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         online = isinstance(self._validation_store, OnlineStore)
         for items in self.validation_dataloader:
             for item in items:
-                batch = self.prepare_row(
+                row = self.prepare_row(
                     item, mode="inference", epoch=epoch, online=online
                 )
-                batch = deep_cast_float_dtype(batch, model.dtype)
+                row = deep_cast_float_dtype(row, model.dtype)
                 generator = torch.Generator(device=self.device).manual_seed(
-                    derive_seed(base_seed, batch[KEY])
+                    derive_seed(base_seed, row[KEY])
                 )
                 self.processor.initialize_latents(
-                    batch,
+                    row,
                     generator=generator,
                     device=self.device,
                     dtype=model.dtype,
                 )
-                yield self.build_sample_request(
-                    self.validation_sampler, batch, generator
-                )
+                yield self.build_sample_request(self.validation_sampler, row, generator)
 
     @staticmethod
     def _reward_metrics(
@@ -197,23 +195,23 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                 for run in self.validation_sampler.sample(
                     model, self._validation_requests(model, step)
                 ):
-                    batch: Any = run.batch
-                    key = batch[KEY]
-                    padding = is_padding(batch)
-                    decoded = self.processor.decode_output(run.ctx.latents, batch)
-                    batch.update(decoded)
+                    row: Any = run.row
+                    key = row[KEY]
+                    padding = is_padding(row)
+                    decoded = self.processor.decode_output(run.ctx.latents, row)
+                    row.update(decoded)
 
                     if (
                         self.validation_log_images is True
                         or image_count < self.validation_log_images
                     ):
-                        prompt = batch.get("prompt")
+                        prompt = row.get("prompt")
                         image = (
                             None
                             if padding
-                            else self.processor.annotate_output(decoded, batch)
+                            else self.processor.annotate_output(decoded, row)
                             if self.validation_annotate_images
-                            else batch["clean_image"]
+                            else row["clean_image"]
                         )
                         # Collective on every rank; None skips the emit.
                         self.log_image(
@@ -227,7 +225,7 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
                     progress.advance(task)
                     if not padding:
-                        yield batch, key
+                        yield row, key
 
         metric_reward = (
             None

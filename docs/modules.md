@@ -2,7 +2,7 @@
 
 `flow_control` 是一个用于训练和推理 Flow-matching Diffusion Transformer (DiT) 的工具包。以下按子模块介绍其功能和主要接口。
 
-跨模块的数据约定见 [Batch 字典总览](batch-contract.md)：列出输入、缓存、模型调用与输出阶段的字段、形状、坐标空间、生产者和消费者。
+跨模块的数据约定见 [Row 字典总览](row-contract.md)：列出输入、缓存、模型调用与输出阶段的字段、形状、坐标空间、生产者和消费者。
 
 ---
 
@@ -46,7 +46,7 @@ raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directo
 
 ## processors — 数据处理
 
-负责将原始数据编码为模型可用的 batch，以及将模型输出解码回图像。包含 VAE、文本编码器、LLM 等组件。
+负责将原始数据编码为模型可用的 row，以及将模型输出解码回图像。包含 VAE、文本编码器、LLM 等组件。
 
 | 接口 | 说明 |
 |------|------|
@@ -93,15 +93,15 @@ raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directo
 | `SampleRun` | `ctx.latents` 是最终结果，`plan` 是实际执行计划；`run()` 生成完整轨迹的叶子调用，`guided_velocity()` 为训练重算单步，每次创建独立 context |
 | `Executor` / `ModelCall` | 收集各 run 的分支、tile 调用，固定 variant 顺序，交给 adapter 按 `model.micro_batch_size` 分块；排空 rank 继续 collective |
 | `StepCollector` / `StepRecord` | 调用方提供 `(run, step)` 回调，消费每步 latents、velocity 和结果；sampler 不保留历史 |
-| `BasePrediction` / `Predictor` | `bind(batch, negative_batch)` 返回独立运行闭包；闭包在同一生成器内调用子节点并完成本算法。`guidance` 配置可嵌套 `model`、`tiled`、`cfg`、`cfg_pp` 及插件；数字仍表示 CFG scale。CFG++ 的 scale 等参数直接放自身字段 |
+| `BasePrediction` / `Predictor` | `bind(row, negative_row)` 返回独立运行闭包；闭包在同一生成器内调用子节点并完成本算法。`guidance` 配置可嵌套 `model`、`tiled`、`cfg`、`cfg_pp` 及插件；数字仍表示 CFG scale。CFG++ 的 scale 等参数直接放自身字段 |
 | `Calls[T]` / `gather()` | 生成器 yield 叶子调用列表，接收同序 fp32 velocity，return 算法结果；`gather` 仅汇合独立子生成器，支持多轮和嵌套，不处理模型、microbatch 或 collective |
 | `TiledPrediction` / `MomentumGuidance` | tiling 在自身生成器内切片、求值、拼接；Momentum 包装任意 child，每次求值后更新闭包中的 EMA。CFG 分支、tile、sample 各自 bind，状态自然隔离；同一 Momentum binding 并发求值会报错 |
 | `BaseProjector` / `DifferentialDiffusion` | `pre_transition` 每步执行一次；`post_combine` 每次模型求值后执行。Differential diffusion 使用整幅 inpaint mask，控制 `source`（默认 `inpaint`，条件图像选择器）latent 的释放时机 |
-| `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段 `tile_size`/`overlap`（正方形像素，需为 packed stride 倍数），布局用 `utils.tiling.plan_tiles` 在 token 网格上规划；写入 `batch["tiling"]`（序列化的 `TileLayout` 字典）、`batch["model_image_size"]`（单 tile 实际尺寸）与逐 tile 条件 `tiles`；`save_negative=true` 时逐 tile 负条件写入 `negative["tiles"]`（默认关闭） |
+| `TiledT2IProcessor` / `TileConfig` | `task="tiled_t2i"` 的顶层字段 `tile_size`/`overlap`（正方形像素，需为 packed stride 倍数），布局用 `utils.tiling.plan_tiles` 在 token 网格上规划；写入 `row["tiling"]`（序列化的 `TileLayout` 字典）、`row["model_image_size"]`（单 tile 实际尺寸）与逐 tile 条件 `tiles`；`save_negative=true` 时逐 tile 负条件写入 `negative["tiles"]`（默认关闭） |
 | `BasePrediction.velocity()` | 任意预测树的独立 timestep 求值入口；不认识 tiling，也不推断训练模式。SFT 经 `TrainingPredictionMixin.predict_training()`、`EndpointTrainer` 的连续 timestep 直接调用它，都使用显式 `train_predictor` |
 | `derive_seed()` | 确定性种子派生 |
 
-`plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 读取 `batch["model_image_size"]`（缺省等于 `image_size`），tiled batch 因而按单 tile 的尺寸/序列长度计算。
+`plan.py` 包含 `Transition(solver, sigma, sigma_next, eta)`、求值协议、`StepContext` 和 Euler 原语。执行位置由 `StepContext.item_index/num_items` 提供；solver 的运行历史与逐步公式在 `solver/<name>.py`。`shift` 支持裸数字（`"shift": 3.0` 即 constant shift），默认因子 1.0。分辨率相关 shift 读取 `row["model_image_size"]`（缺省等于 `image_size`），tiled row 因而按单 tile 的尺寸/序列长度计算。
 
 **Solver** (`solver.type`)：`flow`（Flow-GRPO SDE/Euler）, `dance`, `ddim`, `cps`, `dpm`（确定性多步 DPM）, `flow_unipc`（UniPC 多步 + UniC 校正）, `sa`（SA-Solver 随机 PEC）, `flash`（逐步重加噪与可选噪声截断）。
 
@@ -173,12 +173,12 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `tensor` | 张量操作：`deep_move_to_device()`, `tensor_to_pil()`, `pil_to_tensor()` 等 |
 | `hf_model` | HuggingFace 模型加载器 `HfModelLoader` |
 | `resize` | 图像缩放：`resize_to_closest_resolution()`, `ResolutionList` |
-| `condition_image` | 条件图像选择器 `ConditionImage`/`ConditionImageSpec`：`reference[i]`/`control`/`inpaint`/`clean` 或字面键，同时给出像素键与 latent 键；Start、DifferentialDiffusion、CLIP/IQA reward 共用（契约见 docs/batch-contract.md） |
+| `condition_image` | 条件图像选择器 `ConditionImage`/`ConditionImageSpec`：`reference[i]`/`control`/`inpaint`/`clean` 或字面键，同时给出像素键与 latent 键；Start、DifferentialDiffusion、CLIP/IQA reward 共用（契约见 docs/row-contract.md） |
 | `upcasting` | 混合精度：`apply_layerwise_upcasting()`, `cast_trainable_parameters()` |
 | `lora` | LoRA 适配器工具 |
 | `remote` | 远程模型卸载 `RemoteOffloadable` |
 | `pipeline` | 数据处理管线框架：`Pipeline`, `PipelineStage`, `DataSource`, `DataSink` |
-| `tiling` | 重叠 tile 布局与融合：`plan_tiles()`（均匀铺排、边缘贴齐）、`extract_tiles()`、`stitch_tiles()`（邻边 Hann ramp、归一化）、`TileLayout`（`batch["tiling"]` 契约）；processors 与 samplers 共用 |
+| `tiling` | 重叠 tile 布局与融合：`plan_tiles()`（均匀铺排、边缘贴齐）、`extract_tiles()`、`stitch_tiles()`（邻边 Hann ramp、归一化）、`TileLayout`（`row["tiling"]` 契约）；processors 与 samplers 共用 |
 
 ---
 

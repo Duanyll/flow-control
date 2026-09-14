@@ -1,7 +1,7 @@
 """``DataMixin``: the consumer side of the data stack (design §9.1).
 
 Opens the row store behind a ``DatasetConfig``, picks the grouping plan for it
-(§6.3) and turns a fetched row into a model-ready batch: move to device, run the
+(§6.3) and turns a fetched row into a model-ready row: move to device, run the
 processor online when the dataset is a raw source, then ``processor.resample``.
 Whether a dataset is preprocessed online is decided by the store type alone
 (``OnlineStore``); there is no separate switch for it.
@@ -33,7 +33,7 @@ from flow_control.data import (
     open_store,
 )
 from flow_control.processors import Processor
-from flow_control.processors.base import ProcessedBatch
+from flow_control.processors.base import ProcessedRow
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_move_to_device
@@ -69,7 +69,7 @@ class DataMixin(BaseTrainer):
     _store: RowStore | None = None
     """The consumer's main store (training set / inference set / rollout prompts)."""
     _loop: asyncio.AbstractEventLoop | None = None
-    """Event loop for the processor's async ``prepare_*_batch``; created together
+    """Event loop for the processor's async ``prepare_*_row``; created together
     with the encode models the first time a raw-source store is opened."""
 
     @property
@@ -154,9 +154,9 @@ class DataMixin(BaseTrainer):
             )
         processed: Row = dict(
             self._loop.run_until_complete(
-                self.processor.prepare_training_batch(row)
+                self.processor.prepare_training_row(row)
                 if mode == "training"
-                else self.processor.prepare_inference_batch(row)
+                else self.processor.prepare_inference_row(row)
             )
         )
         if mode == "inference":
@@ -166,7 +166,7 @@ class DataMixin(BaseTrainer):
         for name in (KEY, PADDING):
             if name in row:
                 processed[name] = row[name]
-        processed[COST] = self.processor.get_cost(cast(ProcessedBatch, processed))
+        processed[COST] = self.processor.get_cost(cast(ProcessedRow, processed))
         return processed
 
     def prepare_row(
@@ -176,8 +176,8 @@ class DataMixin(BaseTrainer):
         mode: Literal["training", "inference"],
         epoch: int,
         online: bool | None = None,
-    ) -> ProcessedBatch:
-        """Fetched row -> batch on ``self.device``: online preprocessing when the
+    ) -> ProcessedRow:
+        """Fetched row -> row on ``self.device``: online preprocessing when the
         row's store is a raw source (``online`` defaults to ``online_preprocess``,
         i.e. the main store; pass it for rows of another store), then the
         processor's ``resample`` with a generator seeded by ``(epoch, key)`` so the
@@ -188,22 +188,22 @@ class DataMixin(BaseTrainer):
         generator = torch.Generator(device=self.device).manual_seed(
             derive_seed(self.seed, f"{epoch}:{row[KEY]}")
         )
-        return cast(ProcessedBatch, self.processor.resample(row, generator))
+        return cast(ProcessedRow, self.processor.resample(row, generator))
 
     def build_sample_request(
         self,
         sampler: Sampler,
-        batch: Batch,
+        row: Batch,
         generator: torch.Generator,
     ) -> SampleRequest:
-        negative_batch = (
-            self.processor.get_negative_batch(cast(ProcessedBatch, batch))
+        negative_row = (
+            self.processor.get_negative_row(cast(ProcessedRow, row))
             if sampler.guidance.requires_negative(sampler.steps)
             else None
         )
         return SampleRequest(
-            batch=batch,
-            negative_batch=cast(Batch | None, negative_batch),
+            row=row,
+            negative_row=cast(Batch | None, negative_row),
             generator=generator,
         )
 
@@ -260,17 +260,17 @@ if __name__ == "__main__":
         loader = build_loader(stream, batch_size=2, num_workers=0)
         rows = [row for items in loader for row in items]
         assert len(rows) == 8 and sum(bool(r.get(PADDING)) for r in rows) == 1
-        batch = probe.prepare_row(rows[0], mode="training", epoch=0)
+        row = probe.prepare_row(rows[0], mode="training", epoch=0)
         again = probe.prepare_row(
             store.get(int(rows[0][KEY][1:])), mode="training", epoch=0
         )
         other = probe.prepare_row(
             store.get(int(rows[0][KEY][1:])), mode="training", epoch=1
         )
-        print(rows[0][KEY], batch["clean_latents"].shape)
-        assert batch["clean_latents"].shape == (1, 4, 3)
-        assert torch.equal(batch["clean_latents"], again["clean_latents"])
-        assert not torch.equal(batch["clean_latents"], other["clean_latents"])
+        print(rows[0][KEY], row["clean_latents"].shape)
+        assert row["clean_latents"].shape == (1, 4, 3)
+        assert torch.equal(row["clean_latents"], again["clean_latents"])
+        assert not torch.equal(row["clean_latents"], other["clean_latents"])
 
         for bad in ({"micro_batch_size": 3}, {"world_size": 3}):
             probe._world_size = bad.get("world_size", 1)
@@ -304,11 +304,11 @@ if __name__ == "__main__":
 
     # No cache: the raw row goes through the processor on this rank, keeps its
     # key / padding flag and gets a cost.
-    async def fake_prepare(self, batch):
+    async def fake_prepare(self, row):
         return {"image_size": (32, 32), "prompt_embeds": torch.zeros(1, 5, 3)}
 
     with (
-        patch.object(T2IProcessor, "prepare_inference_batch", fake_prepare),
+        patch.object(T2IProcessor, "prepare_inference_row", fake_prepare),
         patch.object(T2IProcessor, "load_models", lambda self, mode, device=None: None),
     ):
         online_probe = Probe(

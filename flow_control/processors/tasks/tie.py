@@ -13,10 +13,10 @@ from flow_control.utils.resize import (
 
 from ..base import (
     BaseProcessor,
-    DecodedBatch,
-    InputBatch,
-    ProcessedBatch,
-    TrainInputBatch,
+    DecodedRow,
+    InputRow,
+    ProcessedRow,
+    TrainInputRow,
     task_registry,
 )
 from ..components.prompts import PromptStr, parse_prompt
@@ -24,19 +24,19 @@ from ..components.prompts import PromptStr, parse_prompt
 logger = get_logger(__name__)
 
 
-class TIEInputBatch(InputBatch):
+class TIEInputRow(InputRow):
     prompt: str
     negative_prompt: NotRequired[str | None]
     reference_images: ImageTensorList
 
 
-class TIETrainInputBatch(TrainInputBatch):
+class TIETrainInputRow(TrainInputRow):
     prompt: str
     reference_images: ImageTensorList
     clean_image: ImageTensor
 
 
-class TIEProcessedBatch(ProcessedBatch):
+class TIEProcessedRow(ProcessedRow):
     prompt_embeds: torch.Tensor
     pooled_prompt_embeds: torch.Tensor | None
     reference_latents: list[torch.Tensor]
@@ -44,7 +44,7 @@ class TIEProcessedBatch(ProcessedBatch):
 
 
 @task_registry.register("tie")
-class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessedBatch]):
+class TIEProcessor(BaseProcessor[TIEInputRow, TIETrainInputRow, TIEProcessedRow]):
     task: Literal["tie"] = "tie"
     encoder_prompt: PromptStr = ""
     tie_enhance_prompt: PromptStr = parse_prompt("@default_tie_enhance")
@@ -54,7 +54,7 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
     """Encode the negative prompt together with the reference images. Models
     whose unconditional pass still conditions on the references (e.g.
     HiDream-O1) need this so the negative overlay stays consistent with the
-    positive batch's image tensors."""
+    positive row's image tensors."""
     enable_enhance: bool = False
     max_reference_images: int = 0
     posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "reference_latents")
@@ -122,100 +122,94 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
             images=reference_images,
         )
 
-    async def prepare_inference_batch(self, batch: TIEInputBatch) -> TIEProcessedBatch:
-        batch["reference_images"] = self.trim_reference_images(
-            batch["reference_images"]
-        )
-        if (image_size := batch.get("image_size", None)) is None:
-            if len(batch["reference_images"]) > 0:
-                batch["reference_images"][0] = self.resize_image(
-                    batch["reference_images"][0]
+    async def prepare_inference_row(self, row: TIEInputRow) -> TIEProcessedRow:
+        row["reference_images"] = self.trim_reference_images(row["reference_images"])
+        if (image_size := row.get("image_size", None)) is None:
+            if len(row["reference_images"]) > 0:
+                row["reference_images"][0] = self.resize_image(
+                    row["reference_images"][0]
                 )
-                batch["image_size"] = image_size = (
-                    batch["reference_images"][0].shape[2],
-                    batch["reference_images"][0].shape[3],
+                row["image_size"] = image_size = (
+                    row["reference_images"][0].shape[2],
+                    row["reference_images"][0].shape[3],
                 )
             else:
-                batch["image_size"] = image_size = self.default_resolution
-        batch["reference_images"] = self.resize_reference_images(
-            batch["reference_images"], image_size
+                row["image_size"] = image_size = self.default_resolution
+        row["reference_images"] = self.resize_reference_images(
+            row["reference_images"], image_size
         )
 
-        batch["prompt"] = await self.enhance_prompt(
-            batch["prompt"], batch["reference_images"]
+        row["prompt"] = await self.enhance_prompt(
+            row["prompt"], row["reference_images"]
         )
 
-        result = TIEProcessedBatch(
+        result = TIEProcessedRow(
             image_size=image_size,
             **self.encode_prompt(
-                batch["prompt"],
-                images=batch["reference_images"],
+                row["prompt"],
+                images=row["reference_images"],
                 system_prompt=self.encoder_prompt,
             ),
-            **self.encode_reference_images(batch["reference_images"]),
+            **self.encode_reference_images(row["reference_images"]),
         )
 
         if self.save_negative:
             result["negative"] = self.encode_prompt(
-                batch.get("negative_prompt", None) or self.default_negative_prompt,
-                images=batch["reference_images"] if self.negative_with_images else None,
+                row.get("negative_prompt", None) or self.default_negative_prompt,
+                images=row["reference_images"] if self.negative_with_images else None,
                 system_prompt=self.encoder_prompt,
             )
 
         return result
 
-    async def prepare_training_batch(
-        self, batch: TIETrainInputBatch
-    ) -> TIEProcessedBatch:
-        batch["reference_images"] = self.trim_reference_images(
-            batch["reference_images"]
-        )
+    async def prepare_training_row(self, row: TIETrainInputRow) -> TIEProcessedRow:
+        row["reference_images"] = self.trim_reference_images(row["reference_images"])
 
-        batch["clean_image"] = clean_image = self.resize_image(batch["clean_image"])
+        row["clean_image"] = clean_image = self.resize_image(row["clean_image"])
         image_size = clean_image.shape[2], clean_image.shape[3]
         clean_latents = self.encode_latents(
             clean_image, posterior=self.target_posterior
         )
 
-        batch["reference_images"] = self.resize_reference_images(
-            batch["reference_images"], image_size
+        row["reference_images"] = self.resize_reference_images(
+            row["reference_images"], image_size
         )
 
-        batch["prompt"] = await self.enhance_prompt(
-            batch["prompt"], batch["reference_images"]
+        row["prompt"] = await self.enhance_prompt(
+            row["prompt"], row["reference_images"]
         )
 
-        result = TIEProcessedBatch(
+        result = TIEProcessedRow(
             image_size=image_size,
             clean_latents=clean_latents,
             **self.encode_prompt(
-                batch["prompt"],
-                images=batch["reference_images"],
+                row["prompt"],
+                images=row["reference_images"],
                 system_prompt=self.encoder_prompt,
             ),
-            **self.encode_reference_images(batch["reference_images"]),
+            **self.encode_reference_images(row["reference_images"]),
         )
 
         if self.save_negative:
             result["negative"] = self.encode_prompt(
                 self.default_negative_prompt,
-                images=batch["reference_images"] if self.negative_with_images else None,
+                images=row["reference_images"] if self.negative_with_images else None,
                 system_prompt=self.encoder_prompt,
             )
         return result
 
-    def get_cost(self, batch: TIEProcessedBatch) -> int:
+    def get_cost(self, row: TIEProcessedRow) -> int:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (
-            super().get_cost(batch)
-            + batch["prompt_embeds"].shape[1]
-            + sum((h * w) // ratio for h, w in batch["reference_sizes"])
+            super().get_cost(row)
+            + row["prompt_embeds"].shape[1]
+            + sum((h * w) // ratio for h, w in row["reference_sizes"])
         )
 
     def annotate_output(
-        self, decoded: DecodedBatch, batch: TIEProcessedBatch
+        self, decoded: DecodedRow, row: TIEProcessedRow
     ) -> torch.Tensor:
-        references = batch.get("reference_images")
+        references = row.get("reference_images")
         if not references:
             return decoded["clean_image"]
         return merge_images(
