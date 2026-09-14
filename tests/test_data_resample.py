@@ -5,8 +5,11 @@ from every ``posterior_fields`` tensor cached as a ``[2, ...]`` (mean, std)
 posterior -- tensors become ``[1, ...]``, TIE's ``reference_latents`` list is
 sampled element-wise -- using only the caller's generator (same seed, same draw;
 independent of the global RNG), leaves rows cached with
-``target_posterior="mode"`` untouched, and never touches a field that is not
-declared (no name guessing: an undeclared ``foo_latents`` keeps its ``[2, ...]``).
+``target_posterior="mode"`` untouched, never touches a field that is not
+declared (no name guessing: an undeclared ``foo_latents`` keeps its ``[2, ...]``),
+and draws in fp32 even from a bf16 cache: with a VAE-sized ``std`` the bf16 sum
+rounds back to ``mean`` (every VAE but Qwen-Image's), silently disabling the
+posterior, which is what the pre-2026-09 ``randn_like(mean)`` draw did.
 ``get_cost`` is the token total ``ProcessorStage`` writes for the cache index:
 latent + text for T2I, plus every reference for TIE.
 """
@@ -61,6 +64,20 @@ class ResampleTest(unittest.TestCase):
             {"clean_latents": clean.clone()}, torch.Generator().manual_seed(8)
         )
         self.assertFalse(torch.allclose(other["clean_latents"], out["clean_latents"]))
+
+        # fp32 draw from a bf16 cache. std = 2e-4 is below bf16's half-ulp at 1.0
+        # (2^-9), so a bf16 draw would be exactly the mean.
+        ones = torch.ones(1, 4, 8)
+        tiny: Any = {
+            "clean_latents": torch.cat([ones, torch.full((1, 4, 8), 2e-4)]).bfloat16()
+        }
+        drawn = t2i.resample(tiny, torch.Generator().manual_seed(7))["clean_latents"]
+        self.assertEqual(drawn.dtype, torch.float32)
+        self.assertFalse(torch.equal(drawn, ones), "posterior draw must survive")
+        self.assertTrue(
+            torch.equal(drawn.bfloat16(), ones.bfloat16()),
+            "the same draw rounded to bf16 collapses to the mean",
+        )
 
         # target_posterior="mode" caches a [1, ...] sample: nothing to do.
         sample = torch.randn(1, 4, 8, generator=g)

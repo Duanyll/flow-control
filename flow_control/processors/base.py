@@ -68,12 +68,18 @@ class DecodedRow(TypedDict):
 
 
 def sample_posterior(latents: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
-    """``[2, ...]`` (mean, std) -> one ``[1, ...]`` draw; any other shape unchanged."""
+    """``[2, ...]`` (mean, std) -> one fp32 ``[1, ...]`` draw; other shapes unchanged.
+
+    The draw is made and kept in fp32 on purpose: caches hold the posterior in the
+    VAE dtype (bf16), where ``std * eps`` is below the resolution of ``mean`` for
+    every VAE except Qwen-Image's, so a bf16 draw (or an fp32 draw cast back to
+    bf16) collapses to the mean. Consumers promote targets to fp32 anyway.
+    """
     if latents.shape[0] != 2:
         return latents
-    mean, std = latents[0:1], latents[1:2]
+    mean, std = latents[0:1].float(), latents[1:2].float()
     eps = torch.randn(
-        mean.shape, generator=generator, device=mean.device, dtype=mean.dtype
+        mean.shape, generator=generator, device=mean.device, dtype=torch.float32
     )
     return mean + std * eps
 
@@ -211,8 +217,8 @@ class BaseProcessor[
         """Per-fetch randomization of ``row`` (design §8); modifies and returns it.
 
         Every ``posterior_fields`` tensor whose first dim is 2 is replaced by one
-        draw ``mean + std * eps`` of shape ``[1, ...]``; list fields are sampled
-        element-wise. Fields already holding a sample (first dim 1, which is what
+        fp32 draw ``mean + std * eps`` of shape ``[1, ...]`` (see
+        ``sample_posterior``); list fields are sampled element-wise. Fields already holding a sample (first dim 1, which is what
         ``target_posterior="mode"`` caches) pass through untouched. Only the
         declared fields are looked at, never a name pattern. ``generator`` must
         live on the row's device. Subclasses stack data augmentation on top.

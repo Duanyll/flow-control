@@ -35,7 +35,10 @@ inputs. Sampling execution is described in [sampler-plan-design.md](sampler-plan
   the adapter: `predict_velocity_batched` casts the call's float tensors to the
   model dtype on entry and returns **fp32 velocity**. Start, predictor, projector,
   solver, tile accumulation and loss arithmetic use fp32. Stored inputs, targets
-  and records may have lower precision and are promoted before arithmetic;
+  and records may have lower precision and are promoted before arithmetic (the
+  posterior draw in `processor.resample` is made and kept in fp32: in a bf16
+  cache `std * eps` is below the resolution of `mean` for every VAE except
+  Qwen-Image's, so a bf16 draw collapses to the mean);
   inference and rollout draw the initial noise in the model dtype, and
   `SampleRun.run` casts the final latents back to the dtype of the stored
   `noisy_latents`. VAE/text preprocessing uses its own configured dtype.
