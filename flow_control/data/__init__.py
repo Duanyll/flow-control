@@ -8,8 +8,20 @@ from typing import Annotated, Any, Literal
 
 from pydantic import WithJsonSchema
 
+from .grouping import (
+    Group,
+    PlannedRow,
+    expand_rollouts,
+    groups_packed,
+    groups_plain,
+    groups_shuffled,
+    groups_sorted,
+    rank_rows,
+    sort_key,
+)
 from .index import Index, IndexEntry
 from .pack import PackConfig, pack
+from .reports import ReportConfig, ReportWriter
 from .rows import COST, IMAGE_SIZE, KEY, PADDING, Row, is_padding, shape_signature
 from .sources import RawSource, open_source, source_registry
 from .store import (
@@ -19,6 +31,15 @@ from .store import (
     PackedStore,
     RowStore,
     open_cache,
+)
+from .stream import (
+    Planner,
+    PromptSampling,
+    RowCursor,
+    RowStream,
+    build_loader,
+    identity_collate,
+    seed_worker,
 )
 from .writer import CacheOutputConfig, RandomCacheWriter, finalize_cache
 
@@ -91,22 +112,40 @@ __all__ = [
     "CacheOutputConfig",
     "DatasetConfig",
     "DirectoryStore",
+    "Group",
     "Index",
     "IndexEntry",
     "LmdbStore",
     "OnlineStore",
     "PackConfig",
     "PackedStore",
+    "PlannedRow",
+    "Planner",
+    "PromptSampling",
     "RandomCacheWriter",
     "RawSource",
+    "ReportConfig",
+    "ReportWriter",
     "Row",
+    "RowCursor",
     "RowStore",
+    "RowStream",
+    "build_loader",
+    "expand_rollouts",
     "finalize_cache",
+    "groups_packed",
+    "groups_plain",
+    "groups_shuffled",
+    "groups_sorted",
+    "identity_collate",
     "is_padding",
     "open_cache",
     "open_source",
     "open_store",
     "pack",
+    "rank_rows",
+    "seed_worker",
     "shape_signature",
+    "sort_key",
     "source_registry",
 ]
