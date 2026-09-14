@@ -1,5 +1,5 @@
 from collections.abc import Generator, Iterator
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel
@@ -15,31 +15,29 @@ from rich.progress import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import DatasetConfig
-from flow_control.processors import Processor
+from flow_control.data import (
+    KEY,
+    DatasetConfig,
+    OnlineStore,
+    RowStore,
+    RowStream,
+    build_loader,
+    is_padding,
+)
 from flow_control.rewards import Reward, execute_reward
-from flow_control.rewards.base import BaseReward
+from flow_control.rewards.base import BaseReward, RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import console, get_logger
-from flow_control.utils.tensor import (
-    deep_cast_float_dtype,
-    deep_move_to_device,
-)
+from flow_control.utils.tensor import deep_cast_float_dtype
 
-from ..data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    collate_fn,
-    seed_worker,
-)
 from .base import BaseTrainer
+from .data import DataMixin
 from .logging import LoggingMixin
-from .preprocess import PreprocessMixin
 
 logger = get_logger(__name__)
 
 
-class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
+class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     Mixin that provides validation: sampling images and optionally scoring rewards.
     """
@@ -57,11 +55,12 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     validation_reward: Reward | Literal[False] | None = None
     seed: int = 42
 
-    processor: Processor  # Shared property
     validation_sampler: Sampler
 
     # -------------------------------- Properties -------------------------------- #
 
+    _validation_store: RowStore | None = None
+    _validation_stream: RowStream | None = None
     _validation_dataloader: StatefulDataLoader | None = None
 
     @property
@@ -75,43 +74,40 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     def make_validation_dataloader(
         self,
     ) -> None:
-        """Create the validation dataloader, loading decode models on the processor."""
+        """Create the validation dataloader (cost-sorted plan, never shuffled)."""
         if self.validation_dataset is None:
             logger.info("No validation dataset configured, skipping.")
             return
 
-        dataset = PaddingAwareDatasetWrapper(
-            self.parse_inference_dataset(self.validation_dataset)
+        store = self.open_inference_store(self.validation_dataset)
+        self._validation_store = store
+        self._validation_stream = RowStream(
+            store, self.make_planner(store, shuffle=False), self.rank, self.world_size
         )
-        sampler = DistributedBucketSampler(
-            dataset=dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=False,
-            seed=self.seed,
-            grad_acc_steps=1,
-        )
-        self._validation_dataloader = StatefulDataLoader(
-            dataset,
+        self._validation_dataloader = build_loader(
+            self._validation_stream,
             batch_size=1,
-            sampler=sampler,
             num_workers=self.validation_num_workers,
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
         )
-        logger.info(f"Validation dataloader created with {len(dataset)} samples.")
+        logger.info(
+            f"Validation dataloader created with {len(store)} samples "
+            f"({len(self._validation_stream)} per rank)."
+        )
 
     def _validation_requests(
         self, model: ModelAdapter, step: int
     ) -> Iterator[SampleRequest]:
         base_seed = self.seed if self.validation_same_seed else self.seed + step
+        epoch = 0 if self.validation_same_seed else step
+        online = isinstance(self._validation_store, OnlineStore)
         for items in self.validation_dataloader:
             for item in items:
-                batch = deep_move_to_device(item, self.device)
-                batch = self.preprocess_for_inference(batch, save_extra=True)
+                batch = self.prepare_row(
+                    item, mode="inference", epoch=epoch, online=online
+                )
                 batch = deep_cast_float_dtype(batch, model.dtype)
                 generator = torch.Generator(device=self.device).manual_seed(
-                    derive_seed(base_seed, batch.get("__key__", "unknown"))
+                    derive_seed(base_seed, batch[KEY])
                 )
                 self.processor.initialize_latents(
                     batch,
@@ -122,6 +118,39 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                 yield self.build_sample_request(
                     self.validation_sampler, batch, generator
                 )
+
+    @staticmethod
+    def _reward_metrics(
+        reward_values: list[RewardResult], metric_prefix: str
+    ) -> dict[str, float]:
+        """Per-rank reward statistics; empty when this rank scored nothing (all
+        its rows were padding), so ``log_metrics`` still runs as a collective."""
+        if not reward_values:
+            return {}
+        normalized = torch.cat([r.normalized for r in reward_values], dim=0)
+        raw = torch.cat([r.raw for r in reward_values], dim=0)
+        weights = reward_values[0].weights.to(
+            device=normalized.device,
+            dtype=normalized.dtype,
+        )
+        labels = reward_values[0].labels
+        aggregate = (normalized * weights).sum(dim=-1)
+        metrics: dict[str, float] = {
+            f"{metric_prefix}/reward_mean": aggregate.mean().item(),
+            f"{metric_prefix}/reward_std": aggregate.std(correction=0).item(),
+        }
+        for i, label in enumerate(labels):
+            metrics[f"{metric_prefix}/raw/{label}_mean"] = raw[:, i].mean().item()
+            metrics[f"{metric_prefix}/raw/{label}_std"] = (
+                raw[:, i].std(correction=0).item()
+            )
+            metrics[f"{metric_prefix}/normalized/{label}_mean"] = (
+                normalized[:, i].mean().item()
+            )
+            metrics[f"{metric_prefix}/normalized/{label}_std"] = (
+                normalized[:, i].std(correction=0).item()
+            )
+        return metrics
 
     @torch.no_grad()
     def validate_and_log(
@@ -137,12 +166,13 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
 
         Args:
             model: The model adapter (with transformer) to sample from.
-            sampler: The sampler to use for generating images.
-            processor: The processor for latent init, negative batch, and decoding.
             step: Current training step, used for logging.
             reward: If provided, score each sample and log mean reward.
+
+        Padding rows are sampled like every other row (the ranks' collectives
+        stay balanced) but are neither logged nor scored.
         """
-        if self._validation_dataloader is None:
+        if self._validation_dataloader is None or self._validation_stream is None:
             return
 
         logger.info(f"Validating at step {step}...")
@@ -157,15 +187,9 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
             TimeRemainingColumn(),
             console=console,
             transient=True,
-            disable=len(self.validation_dataloader) <= 1,
+            disable=len(self._validation_stream) <= 1,
         )
-        task = progress.add_task(
-            "Validating",
-            # ``make_validation_dataloader`` builds this sampler, and it is Sized.
-            total=len(
-                cast(DistributedBucketSampler, self.validation_dataloader.sampler)
-            ),
-        )
+        task = progress.add_task("Validating", total=len(self._validation_stream))
 
         def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:
             image_count = 0
@@ -174,7 +198,8 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                     model, self._validation_requests(model, step)
                 ):
                     batch: Any = run.batch
-                    key = batch.get("__key__", "unknown")
+                    key = batch[KEY]
+                    padding = is_padding(batch)
                     decoded = self.processor.decode_output(run.ctx.latents, batch)
                     batch.update(decoded)
 
@@ -184,10 +209,13 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                     ):
                         prompt = batch.get("prompt")
                         image = (
-                            self.processor.annotate_output(decoded, batch)
+                            None
+                            if padding
+                            else self.processor.annotate_output(decoded, batch)
                             if self.validation_annotate_images
                             else batch["clean_image"]
                         )
+                        # Collective on every rank; None skips the emit.
                         self.log_image(
                             image,
                             key,
@@ -198,7 +226,8 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                         image_count += self.world_size
 
                     progress.advance(task)
-                    yield batch, key
+                    if not padding:
+                        yield batch, key
 
         metric_reward = (
             None
@@ -212,34 +241,9 @@ class ValidationMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                 sample_submitter(),
                 lambda _tag, r: r,
             )
-
-            if reward_values:
-                normalized = torch.cat([r.normalized for r in reward_values], dim=0)
-                raw = torch.cat([r.raw for r in reward_values], dim=0)
-                weights = reward_values[0].weights.to(
-                    device=normalized.device,
-                    dtype=normalized.dtype,
-                )
-                labels = reward_values[0].labels
-                aggregate = (normalized * weights).sum(dim=-1)
-                metrics: dict[str, float] = {
-                    f"{metric_prefix}/reward_mean": aggregate.mean().item(),
-                    f"{metric_prefix}/reward_std": aggregate.std(correction=0).item(),
-                }
-                for i, label in enumerate(labels):
-                    metrics[f"{metric_prefix}/raw/{label}_mean"] = (
-                        raw[:, i].mean().item()
-                    )
-                    metrics[f"{metric_prefix}/raw/{label}_std"] = (
-                        raw[:, i].std(correction=0).item()
-                    )
-                    metrics[f"{metric_prefix}/normalized/{label}_mean"] = (
-                        normalized[:, i].mean().item()
-                    )
-                    metrics[f"{metric_prefix}/normalized/{label}_std"] = (
-                        normalized[:, i].std(correction=0).item()
-                    )
-                self.log_metrics(metrics, step=step)
+            self.log_metrics(
+                self._reward_metrics(reward_values, metric_prefix), step=step
+            )
         else:
             # Just iterate to generate and log images, no reward scoring
             for _ in sample_submitter():

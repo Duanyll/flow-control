@@ -187,11 +187,13 @@ def resize_short_side_and_random_crop(
     image: torch.Tensor,
     crop_size: int,
     multiple: int = 1,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Resize the shorter side to ``crop_size``, then take a random square crop.
 
-    Matches the AlphaVAE preprocessing path used for VAE training.
+    Matches the AlphaVAE preprocessing path used for VAE training. ``generator``
+    (on ``image.device``) makes the crop offset reproducible per sample.
     """
     if image.dim() != 4:
         raise ValueError("Image tensor must have 4 dimensions (B, C, H, W).")
@@ -222,11 +224,19 @@ def resize_short_side_and_random_crop(
     top = (
         0
         if max_top == 0
-        else int(torch.randint(0, max_top + 1, (1,), device=image.device).item())
+        else int(
+            torch.randint(
+                0, max_top + 1, (1,), device=image.device, generator=generator
+            ).item()
+        )
     )
     left = (
         0
         if max_left == 0
-        else int(torch.randint(0, max_left + 1, (1,), device=image.device).item())
+        else int(
+            torch.randint(
+                0, max_left + 1, (1,), device=image.device, generator=generator
+            ).item()
+        )
     )
     return image[:, :, top : top + crop_size, left : left + crop_size]

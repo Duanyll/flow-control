@@ -296,17 +296,20 @@ class LoggingMixin(BaseModel):
 
     def log_image(
         self,
-        image: torch.Tensor,
+        image: torch.Tensor | None,
         image_key: str,
         step: int,
         name: str = "validation",
         caption: str | None = None,
     ):
+        """Collective: every rank calls it once per logged sample. ``image=None``
+        means this rank has nothing to emit (a plan-time padding row)."""
         is_main: bool = getattr(self, "is_main_process", True)
         world_size: int = getattr(self, "world_size", 1)
 
         if world_size == 1:
-            self._emit_image(image, image_key, step, name, caption)
+            if image is not None:
+                self._emit_image(image, image_key, step, name, caption)
             return
 
         if is_main:
@@ -317,7 +320,7 @@ class LoggingMixin(BaseModel):
             dist.gather_object(image_key, keys, dst=0)
             dist.gather_object(caption, captions, dst=0)
             for k, img, cap in zip(keys, images, captions, strict=True):
-                if k == "__padding__":
+                if img is None:
                     continue
                 assert isinstance(img, torch.Tensor) and isinstance(k, str)
                 self._emit_image(img, k, step, name, cap)

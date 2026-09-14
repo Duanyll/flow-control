@@ -7,6 +7,7 @@ from .base import (
     main_process_only,
     trainer_registry,
 )
+from .data import DataMixin
 from .dcp import CheckpointingMixin, DcpMixin
 from .logging import LoggingMixin
 from .microbatch import MicrobatchTrainMixin, MicroUpdate
@@ -19,6 +20,7 @@ __all__ = [
     "CheckpointingMixin",
     "DcpMixin",
     "BaseTrainer",
+    "DataMixin",
     "LaunchConfig",
     "TorchCompileConfig",
     "LoggingMixin",

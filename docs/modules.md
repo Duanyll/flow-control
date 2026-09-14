@@ -123,7 +123,7 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `AwmTrainer` | Advantage Weighted Matching（优势加权的 flow-matching 策略梯度）：`EndpointTrainer` preset，`AwmObjective` + `GridTimesteps(count=6, window=0.9, exclude_first, stratified)` + TRPO-EMA |
 | `RamTrainer` | Reinforce Adjoint Matching（KL 正则最优控制的闭式回归目标）：`EndpointTrainer` preset，`RamObjective` + `ContinuousTimesteps(count=8, power_law)` + lagged EMA，不裁剪梯度 |
 | `VaeTrainer` | VAE 训练 |
-| `Inference` | 批量推理 + 评测（DCP/EMA 权重加载、reward 汇总与逐样本 CSV、datasink/预览输出）。新任务先写 config 走 `launch`，不要另写推理脚本 |
+| `Inference` | 批量推理 + 评测（DCP/EMA 权重加载、reward 汇总；输出走 `report: ReportConfig` → `metrics.jsonl` 逐样本分数、`previews/`、可选 `records/` random cache）。新任务先写 config 走 `launch`，不要另写推理脚本 |
 
 ### RL trainer 分层（`rollout_trainer.py` / `endpoint.py` / `train_timesteps.py`）
 
@@ -140,7 +140,8 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `CheckpointingMixin` | DCP 分布式检查点 |
 | `HsdpMixin` | HSDP 分布式训练支持 |
 | `LoggingMixin` | 训练日志 |
-| `PreprocessMixin` | 数据预处理 |
+| `DataMixin` | 数据接入：打开 store、选分组 plan（`make_planner`）、`prepare_row`（上设备 → 无 cache 时在线 processor → `resample`） |
+| `PreprocessMixin` | 过渡：rollout 家族仍用的旧 `enable_preprocess` 路径（叠在 `DataMixin` 上，下阶段删除） |
 | `RolloutMixin` | RL 训练的 rollout 生成 |
 | `ValidationMixin` | 验证循环 |
 | `LaunchConfig` | 分布式启动配置 |

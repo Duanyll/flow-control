@@ -7,6 +7,7 @@ training, gradient accumulation, and optional PatchGAN discriminator.
 import math
 import os
 from contextlib import nullcontext
+from functools import partial
 from typing import Any, TypedDict, cast
 
 import torch
@@ -25,17 +26,22 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from flow_control.datasets import DatasetConfig, parse_dataset
-from flow_control.datasets.coercion import ImageTensor
-from flow_control.processors.components.vae import VAE, BaseVAE
-from flow_control.training.data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    VaeTargetDatasetWrapper,
-    collate_fn,
-    prepare_vae_target_image,
-    seed_worker,
+from flow_control.data import (
+    KEY,
+    DatasetConfig,
+    OnlineStore,
+    Row,
+    RowStore,
+    RowStream,
+    build_loader,
+    groups_plain,
+    is_padding,
+    open_cache,
+    open_source,
 )
+from flow_control.data.coercion import ImageTensor
+from flow_control.processors.components.vae import VAE, BaseVAE
+from flow_control.samplers import derive_seed
 from flow_control.training.mixins import (
     BaseTrainer,
     CheckpointingMixin,
@@ -46,6 +52,7 @@ from flow_control.training.mixins.logging import LoggingMixin
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import console, dump_if_failed, get_logger
+from flow_control.utils.tensor import deep_move_to_device
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
@@ -55,6 +62,7 @@ from flow_control.utils.types import (
 )
 
 from .convert import convert_to_rgba
+from .data import TARGET_IMAGE, VaeTargetResample
 from .loss import RGBAVAELoss
 
 logger = get_logger(__name__)
@@ -147,7 +155,9 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
     _vae_model: Any
     _ref_vae_model: Any = None
     _loss_module: RGBAVAELoss
+    _stream: RowStream
     _dataloader: StatefulDataLoader
+    _validation_stream: RowStream | None = None
     _validation_dataloader: StatefulDataLoader | None = None
     _optimizer_gen: torch.optim.Optimizer
     _optimizer_disc: torch.optim.Optimizer | None = None
@@ -167,18 +177,18 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         return self.train_batch_size // self.world_size
 
     @property
+    def steps_per_epoch(self) -> int:
+        """Optimizer steps per epoch; the rows after the last complete update of
+        an epoch are skipped (a different tail every epoch)."""
+        return len(self._dataloader) // self.grad_acc_steps
+
+    @property
     def total_epochs(self) -> int:
-        steps_per_epoch = len(self._dataloader) // self.grad_acc_steps
-        if steps_per_epoch == 0:
-            return 1
-        return math.ceil(self.train_steps / steps_per_epoch)
+        return math.ceil(self.train_steps / self.steps_per_epoch)
 
     @property
     def current_epoch(self) -> int:
-        steps_per_epoch = len(self._dataloader) // self.grad_acc_steps
-        if steps_per_epoch == 0:
-            return 0
-        return self._current_step // steps_per_epoch
+        return self._current_step // self.steps_per_epoch
 
     @property
     def compute_dtype(self) -> torch.dtype:
@@ -386,66 +396,54 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
             )
             logger.info("Created discriminator optimizer.")
 
+    @staticmethod
+    def _open_store(config: DatasetConfig) -> RowStore:
+        """A cache (e.g. an inference report's ``records/``) or, for any raw
+        source, images read online and coerced to ``VaeTrainInput``."""
+        if config.get("type") == "cache":
+            return open_cache(config["path"], limit=config.get("limit"))
+        return OnlineStore(open_source(config, coerce_to=VaeTrainInput))
+
+    def _make_stream(self, store: RowStore, *, shuffle: bool) -> RowStream:
+        # Cost-blind plan (VAE rows carry no cost): a group is one row per rank
+        # and ``groups_plain`` pads the tail group per §6.4.
+        planner = partial(
+            groups_plain, len(store), self.world_size, self.seed, shuffle=shuffle
+        )
+        return RowStream(store, planner, self.rank, self.world_size)
+
     def make_train_dataloader(self) -> None:
-        dataset = VaeTargetDatasetWrapper(
-            PaddingAwareDatasetWrapper(
-                parse_dataset(self.dataset, coerce_to=VaeTrainInput)
-            ),
-            random_crop_size=self.random_crop_size,
-            resize_multiple=self.resize_multiple,
-            resize_pixels=self.resize_pixels,
-            blend_prob=self.blend_prob,
+        store = self._open_store(self.dataset)
+        self._stream = self._make_stream(store, shuffle=True)
+        self._dataloader = build_loader(
+            self._stream, batch_size=1, num_workers=self.num_dataloader_workers
         )
-        sampler = DistributedBucketSampler(
-            dataset=dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=True,
-            seed=self.seed,
-            grad_acc_steps=self.grad_acc_steps,
+        if self.steps_per_epoch == 0:
+            raise ValueError(
+                f"Each rank gets {len(self._stream)} rows per epoch, fewer than one "
+                f"optimizer update needs ({self.grad_acc_steps}); use a larger "
+                "dataset or lower train_batch_size."
+            )
+        logger.info(
+            f"Training dataloader created with {len(store)} samples "
+            f"({len(self._stream)} per rank)."
         )
-        self._dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=1,
-            sampler=sampler,
-            num_workers=self.num_dataloader_workers,
-            pin_memory=devutil.is_available(),
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
-        )
-        logger.info(f"Training dataloader created with {len(dataset)} samples.")
 
     def make_validation_dataloader(self) -> None:
         if self.validation_dataset is None:
             logger.info("No validation dataset configured, skipping.")
             return
-        dataset = VaeTargetDatasetWrapper(
-            PaddingAwareDatasetWrapper(
-                parse_dataset(self.validation_dataset, coerce_to=VaeTrainInput)
-            ),
-            random_crop_size=self.random_crop_size,
-            resize_multiple=self.resize_multiple,
-            resize_pixels=self.resize_pixels,
-            blend_prob=self.blend_prob,
-        )
-        sampler = DistributedBucketSampler(
-            dataset=dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=False,
-            seed=self.seed,
-            grad_acc_steps=1,
-        )
-        self._validation_dataloader = StatefulDataLoader(
-            dataset,
+        store = self._open_store(self.validation_dataset)
+        self._validation_stream = self._make_stream(store, shuffle=False)
+        self._validation_dataloader = build_loader(
+            self._validation_stream,
             batch_size=1,
-            sampler=sampler,
             num_workers=self.validation_num_workers,
-            pin_memory=devutil.is_available(),
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
         )
-        logger.info(f"Validation dataloader created with {len(dataset)} samples.")
+        logger.info(
+            f"Validation dataloader created with {len(store)} samples "
+            f"({len(self._validation_stream)} per rank)."
+        )
 
     # ------------------------------ Checkpointing --------------------------- #
 
@@ -502,26 +500,21 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
 
     # ------------------------------ Training -------------------------------- #
 
-    def _prepare_target(self, batch: dict) -> torch.Tensor:
-        """Extract clean_image, resize, and normalize to [-1, 1]."""
-        if "target_image" in batch:
-            return batch["target_image"].float()
-
-        target = batch["clean_image"].float()
-        if target.shape[1] not in {3, 4}:
-            key = batch.get("__key__", "unknown")
-            raise ValueError(
-                f"Expected clean_image to have 3 or 4 channels, got shape {tuple(target.shape)} "
-                f"for sample {key!r}."
-            )
-        return prepare_vae_target_image(
-            target,
-            key=batch.get("__key__", "unknown"),
+    def prepare_row(self, row: Row, *, epoch: int) -> Row:
+        """Move the row to the device and build ``target_image`` (crop, blend,
+        ``[-1, 1]``) with a generator seeded by ``(epoch, key)``: the same row
+        gets the same crop whichever worker fetched it."""
+        row = deep_move_to_device(row, self.device)
+        generator = torch.Generator(device=self.device).manual_seed(
+            derive_seed(self.seed, f"{epoch}:{row[KEY]}")
+        )
+        resample = VaeTargetResample(
             random_crop_size=self.random_crop_size,
             resize_multiple=self.resize_multiple,
             resize_pixels=self.resize_pixels,
             blend_prob=self.blend_prob,
         )
+        return resample(row, generator)
 
     def train_step(
         self, target: torch.Tensor
@@ -664,6 +657,7 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         target: torch.Tensor,
         pred: torch.Tensor,
         is_sync_step: bool,
+        loss_weight: float,
         metrics: dict[str, torch.Tensor],
     ) -> None:
         """Run discriminator forward+backward for one micro-batch (if active)."""
@@ -676,7 +670,7 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         with self._autocast_context():
             d_loss = self._loss_module.discriminator_loss(target, pred)
         d_loss = d_loss * self.discriminator_loss_weight
-        d_loss_scaled = d_loss / self.grad_acc_steps
+        d_loss_scaled = d_loss * loss_weight / self.grad_acc_steps
         d_loss_scaled.backward()
         metrics["train/d_loss"] = d_loss.detach()
 
@@ -732,10 +726,12 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         logger.info(f"Validating at step {step}...")
         self._vae_model.eval()
 
-        for batch in self._validation_dataloader:
-            target = self._prepare_target(batch)
-            target = target.to(self.device, non_blocking=True)
+        for items in self._validation_dataloader:
+            (row,) = items
+            row = self.prepare_row(row, epoch=0)
+            target = row[TARGET_IMAGE]
 
+            # Padding rows are encoded too (FSDP collectives), never logged.
             with self._autocast_context():
                 pred = self._vae_model.decode(
                     self._vae_model.encode(target).latent_dist.sample()
@@ -747,8 +743,12 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
 
             # Side by side: input | output
             combined = torch.cat([target_01, pred_01], dim=-1).clamp(0, 1)
-            key = batch.get("__key__", "unknown")
-            self.log_image(combined, key, step=step, name="vae_validation")
+            self.log_image(
+                None if is_padding(row) else combined,
+                row[KEY],
+                step=step,
+                name="vae_validation",
+            )
 
         self._vae_model.train()
         logger.info(f"Completed validation at step {step}.")
@@ -789,24 +789,35 @@ class VaeTrainer(LoggingMixin, BaseTrainer, CheckpointingMixin):
         with self.status_bar("VAE Training"), progress:
             starting_epoch = self.current_epoch
             for _ in range(starting_epoch, self.total_epochs):
-                set_epoch = getattr(self._dataloader.sampler, "set_epoch", None)
-                if set_epoch is not None:
-                    set_epoch(self.current_epoch)
+                epoch = self.current_epoch
+                # Rows are pickled into the workers when the iterator starts.
+                self._stream.set_epoch(epoch)
+                epoch_rows = self.steps_per_epoch * self.grad_acc_steps
 
-                for i, batch in enumerate(self._dataloader):
-                    with dump_if_failed(logger, batch):
+                for i, items in enumerate(self._dataloader):
+                    if i >= epoch_rows:
+                        # Tail short of one update: let the iterator run out so
+                        # the StatefulDataLoader epoch boundary stays clean.
+                        continue
+                    (row,) = items
+                    with dump_if_failed(logger, row):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
-                        target = self._prepare_target(batch)
-                        target = target.to(self.device, non_blocking=True)
+                        row = self.prepare_row(row, epoch=epoch)
+                        target = row[TARGET_IMAGE]
+                        # Padding rows run forward and backward like any other
+                        # (FSDP collectives) but contribute nothing (§6.4).
+                        loss_weight = 0.0 if is_padding(row) else 1.0
 
                         # Generator forward + backward
                         self._vae_model.set_requires_gradient_sync(is_sync_step)
                         gen_loss, target_d, pred_d, metrics = self.train_step(target)
                         self.check_loss(gen_loss)
-                        (gen_loss / self.grad_acc_steps).backward()
+                        (gen_loss * loss_weight / self.grad_acc_steps).backward()
 
                         # Discriminator forward + backward (if active)
-                        self._disc_micro_step(target_d, pred_d, is_sync_step, metrics)
+                        self._disc_micro_step(
+                            target_d, pred_d, is_sync_step, loss_weight, metrics
+                        )
 
                     if not is_sync_step:
                         continue

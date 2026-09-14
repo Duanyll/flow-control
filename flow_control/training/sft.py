@@ -18,7 +18,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.datasets import DatasetConfig
+from flow_control.data import RowStream, build_loader, is_padding
 from flow_control.processors import Processor
 from flow_control.samplers import Sampler
 from flow_control.utils.logging import (
@@ -38,12 +38,6 @@ from flow_control.utils.types import (
     parse_scheduler,
 )
 
-from .data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    collate_fn,
-    seed_worker,
-)
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
@@ -75,10 +69,8 @@ class SftTrainer(
     validation_sampler: Sampler
     processor: Processor
 
-    dataset: DatasetConfig
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
-    num_dataloader_workers: int = 1
 
     optimizer_config: OptimizerConfig = {"class_name": "AdamW", "lr": 1e-4}
     scheduler_config: SchedulerConfig = {"class_name": "ConstantLR", "factor": 1.0}
@@ -105,6 +97,7 @@ class SftTrainer(
     }
 
     # ------------------------------- Lazy state --------------------------------- #
+    _stream: RowStream
     _dataloader: StatefulDataLoader
     _optimizer: torch.optim.Optimizer
     _scheduler: Any
@@ -116,14 +109,18 @@ class SftTrainer(
         return self.model.transformer
 
     @property
+    def steps_per_epoch(self) -> int:
+        """Optimizer steps per epoch; the microbatches after the last complete
+        update of an epoch are skipped (a different tail every epoch)."""
+        return len(self._dataloader) // self.grad_acc_steps
+
+    @property
     def total_epochs(self):
-        return math.ceil(
-            self.train_steps / (len(self._dataloader) // self.grad_acc_steps)
-        )
+        return math.ceil(self.train_steps / self.steps_per_epoch)
 
     @property
     def current_epoch(self):
-        return self._current_step // (len(self._dataloader) // self.grad_acc_steps)
+        return self._current_step // self.steps_per_epoch
 
     # ------------------------------- Setup methods ------------------------------ #
 
@@ -141,25 +138,30 @@ class SftTrainer(
             self._ema_optimizer = EMAOptimizer(params, self.ema)
 
     def make_train_dataloader(self):
-        # The sampler pads logical items to a complete optimizer update, while
-        # the DataLoader groups those items into physical microbatches.
-        dataset = PaddingAwareDatasetWrapper(self.parse_training_dataset(self.dataset))
-        sampler = DistributedBucketSampler(
-            dataset=dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=True,
-            seed=self.seed,
-            grad_acc_steps=self.local_train_batch_size,
+        # The plan hands every rank the same number of rows per epoch (padding
+        # rows included); the DataLoader cuts them into physical microbatches.
+        self._store = self.open_train_store()
+        self._stream = RowStream(
+            self._store,
+            self.make_planner(
+                self._store,
+                shuffle=True,
+                micro_batch_size=self.train_micro_batch_size,
+            ),
+            self.rank,
+            self.world_size,
         )
-        self._dataloader = StatefulDataLoader(
-            dataset,
+        self._dataloader = build_loader(
+            self._stream,
             batch_size=self.train_micro_batch_size,
-            sampler=sampler,
             num_workers=self.num_dataloader_workers,
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
         )
+        if self.steps_per_epoch == 0:
+            raise ValueError(
+                f"Each rank gets {len(self._stream)} rows per epoch, fewer than one "
+                f"optimizer update needs ({self.local_train_batch_size}); raise "
+                "group_size (the plan pads groups) or lower train_batch_size."
+            )
 
     # ------------------------------- Checkpointing ------------------------------ #
 
@@ -252,13 +254,18 @@ class SftTrainer(
             )
 
         predictions = self.predict_training(model_batches, timesteps, negative_batches)
+        # Padding rows are forwarded (FSDP collectives stay balanced) but weigh
+        # nothing; the mean is over the real rows of the microbatch.
         per_sample_losses = [
-            ((prediction - target) ** 2).mean() * weight.mean()
-            for prediction, target, weight in zip(
-                predictions, targets, weights, strict=True
+            ((prediction - target) ** 2).mean()
+            * weight.mean()
+            * (0.0 if is_padding(batch) else 1.0)
+            for prediction, target, weight, batch in zip(
+                predictions, targets, weights, batches, strict=True
             )
         ]
-        return torch.stack(per_sample_losses).mean()
+        real = max(1, sum(not is_padding(batch) for batch in batches))
+        return torch.stack(per_sample_losses).sum() / real
 
     def _after_sync_step(self, total_loss: float):
         """Handle optimizer step, logging, checkpointing after a gradient sync."""
@@ -335,18 +342,23 @@ class SftTrainer(
             starting_epoch = self.current_epoch
             accumulated_loss = 0.0
             for _ in range(starting_epoch, self.total_epochs):
-                set_epoch = getattr(self._dataloader.sampler, "set_epoch", None)
-                if set_epoch is not None:
-                    set_epoch(self.current_epoch)
+                epoch = self.current_epoch
+                # Rows are pickled into the workers when the iterator starts.
+                self._stream.set_epoch(epoch)
+                epoch_micro_batches = self.steps_per_epoch * self.grad_acc_steps
                 for i, items in enumerate(self._dataloader):
+                    if i >= epoch_micro_batches:
+                        # Tail short of one update: let the iterator run out so
+                        # the StatefulDataLoader epoch boundary stays clean.
+                        continue
                     with dump_if_failed(logger, items):
                         is_sync_step = (i + 1) % self.grad_acc_steps == 0
                         self.transformer.set_requires_gradient_sync(is_sync_step)
 
-                        items = deep_move_to_device(items, self.device)
                         batches = [
                             deep_cast_float_dtype(
-                                self.preprocess_for_training(item), self.model.dtype
+                                self.prepare_row(item, mode="training", epoch=epoch),
+                                self.model.dtype,
                             )
                             for item in items
                         ]

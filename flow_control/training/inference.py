@@ -1,7 +1,6 @@
-import csv
-import os
 from collections.abc import Generator, Iterator
-from typing import Any, Literal, cast
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -18,7 +17,16 @@ from torch.distributed.checkpoint.state_dict import (
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
-from flow_control.datasets import DatasetConfig, DatasinkConfig, parse_datasink
+from flow_control.data import (
+    COST,
+    IMAGE_SIZE,
+    KEY,
+    ReportConfig,
+    ReportWriter,
+    RowStream,
+    build_loader,
+    is_padding,
+)
 from flow_control.processors import Processor
 from flow_control.rewards import Reward, execute_reward
 from flow_control.rewards.base import RewardResult
@@ -27,21 +35,14 @@ from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
-    tensor_to_pil,
 )
 
-from .data import (
-    DistributedBucketSampler,
-    PaddingAwareDatasetWrapper,
-    collate_fn,
-    seed_worker,
-)
 from .ema import EMAConfig, EMAOptimizer
 from .mixins import (
     BaseTrainer,
+    DataMixin,
     DcpMixin,
     LoggingMixin,
-    PreprocessMixin,
     distributed_main,
     trainer_registry,
 )
@@ -49,15 +50,26 @@ from .mixins import (
 logger = get_logger(__name__)
 
 
+@dataclass(slots=True)
+class _Output:
+    """One finished sample waiting for its score: the CPU record that goes to
+    the report plus the preview image (None when previews are off)."""
+
+    record: dict[str, Any]
+    preview: torch.Tensor | None
+
+
 @trainer_registry.register("inference")
-class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
+class Inference(DataMixin, BaseTrainer, DcpMixin):
     model_config = ConfigDict(extra="forbid")
 
     model: ModelAdapter
     sampler: Sampler
     processor: Processor
-    dataset: DatasetConfig
-    datasink: DatasinkConfig | None = None
+    report: ReportConfig
+    """Where the outputs go (design §10): ``metrics.jsonl`` with one line per
+    sample, ``previews/<key>.png`` and optionally ``records/`` (a random cache of
+    the full result rows)."""
     reward: Reward | None = None
 
     seed_checkpoint_dir: str | None = None
@@ -70,33 +82,17 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     require a checkpoint produced by a trainer that saves the corresponding
     optimizer state.
     """
-    save_preview_dir: str | None = None
     save_extra: bool = False
+    """``records/`` rows hold the whole working batch (source fields, conditions,
+    decoded outputs) instead of only the decoded outputs plus key / cost /
+    image_size."""
     annotate_output_image: bool = False
     """Save the processor's annotated preview image (e.g. tie source + edit, or layered
-    layers merged with labels) to ``save_preview_dir`` instead of the bare clean image.
-    The datasink always receives the clean ``clean_image``."""
-    reward_csv_path: str | None = None
-    """Optional path to write per-sample reward scores as a CSV.
-
-    The terminal only shows the aggregated summary; set this to keep the
-    full per-image breakdown. Written by the main process after gathering
-    scores from all ranks.
-    """
+    layers merged with labels) as the preview instead of the bare clean image.
+    Records and rewards always see the clean ``clean_image``."""
 
     @model_validator(mode="after")
-    def check_save_preview_dir(self):
-        if (
-            self.datasink is None
-            and self.save_preview_dir is None
-            and self.reward_csv_path is None
-        ):
-            raise ValueError(
-                "At least one of datasink, save_preview_dir, or reward_csv_path "
-                "must be specified."
-            )
-        if self.reward_csv_path is not None and self.reward is None:
-            raise ValueError("reward_csv_path requires reward to be specified.")
+    def check_checkpoint_weights(self):
         if self.checkpoint_weights != "current" and self.checkpoint_dir is None:
             raise ValueError(
                 f"checkpoint_weights={self.checkpoint_weights!r} requires "
@@ -105,6 +101,7 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         return self
 
     # ------------------------------- Lazy state --------------------------------- #
+    _stream: RowStream | None = None
     _dataloader: StatefulDataLoader | None = None
     _checkpoint_ema_optimizer: EMAOptimizer | None = None
 
@@ -119,21 +116,15 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         return self._dataloader
 
     def make_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(self.parse_inference_dataset(self.dataset))
-        sampler = DistributedBucketSampler(
-            dataset=dataset,
-            num_replicas=self.world_size,
-            rank=self.rank,
-            shuffle=False,
-            seed=self.seed,
-            grad_acc_steps=1,
+        self._store = self.open_inference_store(self.dataset)
+        self._stream = RowStream(
+            self._store,
+            self.make_planner(self._store, shuffle=False),
+            self.rank,
+            self.world_size,
         )
-        self._dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=1,
-            sampler=sampler,
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
+        self._dataloader = build_loader(
+            self._stream, batch_size=1, num_workers=self.num_dataloader_workers
         )
 
     # ------------------------------- Checkpointing ------------------------------ #
@@ -181,15 +172,14 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     # ---------------------------------- Sampling -------------------------------- #
 
     def _requests(self) -> Iterator[SampleRequest]:
-        """Preprocess one dataset item at a time as the sampler asks for it."""
+        """Prepare one row at a time as the sampler asks for it."""
         for items in self.dataloader:
             for item in items:
                 with dump_if_failed(logger, item):
-                    batch = deep_move_to_device(item, self.device)
-                    batch = self.preprocess_for_inference(batch, save_extra=True)
+                    batch = self.prepare_row(item, mode="inference", epoch=0)
                     batch = deep_cast_float_dtype(batch, self.model.dtype)
                     generator = torch.Generator(device=self.device).manual_seed(
-                        derive_seed(self.seed, batch.get("__key__", "unknown"))
+                        derive_seed(self.seed, batch[KEY])
                     )
                     self.processor.initialize_latents(
                         batch,
@@ -204,46 +194,51 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         self,
         progress: Progress,
         task: TaskID,
-    ) -> Generator[tuple[dict[str, Any], tuple[dict[str, Any], str]]]:
-        """Sample, decode and yield ``(batch, (record, key))`` for scoring.
+    ) -> Generator[tuple[dict[str, Any], _Output]]:
+        """Sample, decode and yield ``(batch, output)`` for scoring.
 
         ``batch`` (on device) is handed to ``execute_reward``, which snapshots
         the fields it needs for async scoring and lets sampling of later
-        requests overlap with the reward request still in flight. ``record`` is
-        the CPU payload written to the datasink / preview once its score is known.
+        requests overlap with the reward request still in flight. ``output`` is
+        the CPU payload written to the report once its score is known.
 
-        Padding samples still run the model (to keep FSDP collectives balanced
+        Padding rows still run the model (to keep FSDP collectives balanced
         across ranks) but are not yielded for scoring or output.
         """
+        cpu = torch.device("cpu")
         for run in self.sampler.sample(self.model, self._requests()):
             batch: Any = run.batch
-            key = batch.get("__key__", "unknown")
             decoded = self.processor.decode_output(run.ctx.latents, batch)
             batch.update(decoded)
+            progress.advance(task)
+            if is_padding(batch):
+                continue
             # Build the annotated preview while the full GPU batch (e.g. tie's
             # reference_images) and decoded outputs are still available.
-            preview = (
-                self.processor.annotate_output(decoded, batch)
-                if (self.annotate_output_image and key != "__padding__")
-                else None
+            preview = None
+            if self.report.previews:
+                preview = (
+                    self.processor.annotate_output(decoded, batch)
+                    if self.annotate_output_image
+                    else decoded["clean_image"]
+                ).to(cpu)
+            record = deep_move_to_device(
+                batch
+                if self.save_extra
+                else {
+                    KEY: batch[KEY],
+                    COST: batch[COST],
+                    IMAGE_SIZE: batch[IMAGE_SIZE],
+                    **decoded,
+                },
+                cpu,
             )
-            record = (
-                None
-                if key == "__padding__"
-                else deep_move_to_device(
-                    batch if self.save_extra else decoded,
-                    torch.device("cpu"),
-                )
-            )
-            if record is not None and preview is not None:
-                record["__preview_image__"] = preview.to(torch.device("cpu"))
-            progress.advance(task)
-            if record is not None:
-                yield batch, (record, key)
+            yield batch, _Output(record, preview)
 
     # ---------------------------------- Output ---------------------------------- #
 
-    def _reward_fields(self, result: RewardResult) -> dict[str, Any]:
+    @staticmethod
+    def _reward_fields(result: RewardResult) -> dict[str, Any]:
         raw = result.raw.detach().cpu()
         normalized = result.normalized.detach().cpu()
         return {
@@ -256,33 +251,18 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
             },
         }
 
-    def _write_record(
-        self,
-        record: dict[str, Any],
-        key: str,
-        datasink: Any,
-        reward_result: RewardResult | None,
+    def _write_output(
+        self, writer: ReportWriter, output: _Output, result: RewardResult | None
     ) -> None:
-        """Write a single CPU ``record`` to the datasink and preview dir."""
-        # Pop the preview before the datasink write so the sink only stores the clean
-        # ``clean_image``; the annotated preview is for the saved PNG only.
-        preview = record.pop("__preview_image__", None)
-        if reward_result is not None:
-            record.update(self._reward_fields(reward_result))
-        if datasink is not None:
-            datasink.write(record)
-        if self.save_preview_dir is not None:
-            image = tensor_to_pil(
-                preview if preview is not None else record["clean_image"]
-            )
-            image.save(os.path.join(self.save_preview_dir, f"{key}.png"))
+        """One sample into the report; its scores go to ``metrics.jsonl`` and,
+        so that ``records/`` can be filtered by reward, into the record too."""
+        metrics = self._reward_fields(result) if result is not None else {}
+        output.record.update(metrics)
+        writer.write(output.record, output.preview, metrics)
 
     # ---------------------------------- Rewards --------------------------------- #
 
-    def _gather_scored(
-        self,
-        scored: list[tuple[str, RewardResult]],
-    ) -> list[tuple[str, RewardResult]] | None:
+    def _gather_scored(self, scored: list[RewardResult]) -> list[RewardResult] | None:
         """Gather per-sample scores onto the main process (None elsewhere)."""
         if self.world_size <= 1:
             return scored
@@ -293,38 +273,11 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
         dist.gather_object(scored, None, dst=0)
         return None
 
-    def _write_reward_csv(
-        self,
-        scored: list[tuple[str, RewardResult]],
-        path: str,
-    ) -> None:
-        labels = scored[0][1].labels
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            header = ["key", "reward"]
-            for label in labels:
-                header.extend([f"raw/{label}", f"normalized/{label}"])
-            writer.writerow(header)
-            for key, result in scored:
-                raw = result.raw.flatten().tolist()
-                normalized = result.normalized.flatten().tolist()
-                row = [key, f"{result.aggregate().item():.6f}"]
-                for r, n in zip(raw, normalized, strict=True):
-                    row.extend([f"{r:.6f}", f"{n:.6f}"])
-                writer.writerow(row)
-        logger.info(f"Wrote per-sample reward scores to {path}")
-
-    def _print_reward_summary(
-        self,
-        scored: list[tuple[str, RewardResult]],
-    ) -> None:
-        normalized = torch.cat([r.normalized for _, r in scored], dim=0)
-        raw = torch.cat([r.raw for _, r in scored], dim=0)
-        weights = scored[0][1].weights.to(dtype=normalized.dtype)
-        labels = scored[0][1].labels
+    def _print_reward_summary(self, scored: list[RewardResult]) -> None:
+        normalized = torch.cat([r.normalized for r in scored], dim=0)
+        raw = torch.cat([r.raw for r in scored], dim=0)
+        weights = scored[0].weights.to(dtype=normalized.dtype)
+        labels = scored[0].labels
         aggregate = (normalized * weights).sum(dim=-1)
 
         console.rule("[bold green]Reward Summary[/bold green]")
@@ -352,14 +305,12 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
             )
         console.print(table)
 
-    def _report_rewards(self, scored: list[tuple[str, RewardResult]]) -> None:
-        """Gather scores across ranks, then print the summary and write CSV."""
+    def _report_rewards(self, scored: list[RewardResult]) -> None:
+        """Gather scores across ranks and print the summary (the per-sample
+        breakdown is already in the report's ``metrics.jsonl``)."""
         all_scored = self._gather_scored(scored)
-        if all_scored is None or not all_scored:
-            return
-        if self.reward_csv_path is not None:
-            self._write_reward_csv(all_scored, self.reward_csv_path)
-        self._print_reward_summary(all_scored)
+        if all_scored:
+            self._print_reward_summary(all_scored)
 
     # ------------------------------- Main loop ---------------------------------- #
 
@@ -367,6 +318,8 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
     @distributed_main
     def run(self):
         self.set_seed()
+        # Dump the run description before any weights load (as init_tracker does).
+        meta = {"config": self.model_dump(mode="json", warnings="none")}
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.load_processor()
         self.make_dataloader()
@@ -383,11 +336,8 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
                     "inference."
                 )
 
-        datasink = parse_datasink(self.datasink) if self.datasink is not None else None
-
-        if self.save_preview_dir is not None:
-            os.makedirs(self.save_preview_dir, exist_ok=True)
-            logger.info(f"Saving preview images to {self.save_preview_dir}")
+        writer = self.report.open(self.rank)
+        logger.info(f"Writing the report to {self.report.path}")
 
         self.transformer.eval()
         console.rule("[bold green]Starting Inference[/bold green]")
@@ -396,31 +346,26 @@ class Inference(PreprocessMixin, BaseTrainer, DcpMixin):
             *LoggingMixin.get_progress_columns(),
             console=console,
         )
-        task = progress.add_task(
-            "Inference",
-            # ``make_dataloader`` above builds this sampler, and it is Sized.
-            total=len(cast(DistributedBucketSampler, self.dataloader.sampler)),
-        )
+        assert self._stream is not None
+        task = progress.add_task("Inference", total=len(self._stream))
 
         with progress:
             submitter = self._sample_submitter(progress, task)
             if self.reward is not None:
 
-                def handler(
-                    tag: tuple[dict[str, Any], str],
-                    result: RewardResult,
-                ) -> tuple[str, RewardResult]:
-                    record, key = tag
+                def handler(output: _Output, result: RewardResult) -> RewardResult:
                     cpu_result = deep_move_to_device(result, torch.device("cpu"))
-                    self._write_record(record, key, datasink, cpu_result)
-                    return key, cpu_result
+                    self._write_output(writer, output, cpu_result)
+                    return cpu_result
 
                 scored = execute_reward(self.reward, submitter, handler)
             else:
-                for _batch, (record, key) in submitter:
-                    self._write_record(record, key, datasink, None)
+                for _batch, output in submitter:
+                    self._write_output(writer, output, None)
                 scored = []
 
+        # Collective: every rank closes its part, rank 0 merges.
+        writer.finalize(meta=meta)
         if self.reward is not None:
             self._report_rewards(scored)
         console.rule("[bold green]Inference Completed[/bold green]")

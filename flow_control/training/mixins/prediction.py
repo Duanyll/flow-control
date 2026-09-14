@@ -10,10 +10,10 @@ from flow_control.adapters.base import Batch
 from flow_control.processors.base import ProcessedBatch
 from flow_control.samplers import Executor, Prediction
 
-from .preprocess import PreprocessMixin
+from .data import DataMixin
 
 
-class TrainingPredictionMixin(PreprocessMixin):
+class TrainingPredictionMixin(DataMixin):
     model: ModelAdapter
     train_predictor: Prediction
     """Required tree for all loss/teacher/reference predictions, independent of

@@ -51,7 +51,7 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
 | --- | --- |
 | Dataset input | Raw images, prompts and arbitrary columns. Task input coercion accepts supported paths/PIL/arrays/tensors and JSON forms for annotated structured fields; unknown columns pass through. Tensor-file attachments load their native tensor representation, so their shape/range must already be correct. |
 | Processor output / offline cache | `prepare_training_batch` adds clean targets and conditions; `prepare_inference_batch` adds conditions. The offline `ProcessorStage.process` adds `cost`. `save_extra` merges original fields with processed fields taking precedence; `__key__` is carried separately. Processors also rewrite inputs in place (resized `clean_image`, enhanced or generated `prompt`), so retained extras hold the rewritten values. |
-| Runtime preprocessing | `PreprocessMixin._finalize_processed_batch` merges extras when requested, carries `__key__` over from the source item and samples cached posterior distributions. Inference, rollout and validation always merge extras; SFT does not. With `enable_preprocess` off the processor is skipped and the cached item is used as is. Sampling callers initialize `noisy_latents` in the model dtype; training builds noisy inputs from its targets. |
+| Runtime preprocessing | `DataMixin.prepare_row` moves the row to the device, runs the processor only when the store is an `OnlineStore` (raw source; a cache row is used as is), carries `__key__` / `__padding__` over, adds `cost`, then calls `processor.resample`. Inference and validation keep the raw fields next to the processed ones; SFT training does not. (The rollout family still goes through the transitional `PreprocessMixin`.) Sampling callers initialize `noisy_latents` in the model dtype; training builds noisy inputs from its targets. |
 | Model call | `ModelPrediction` overlays the current request's latents as `noisy_latents` on a fresh shallow copy of the whole working dictionary. Predictor branches and tiles select their own condition dictionaries. Only dense collation narrows the call to declared fields; the sequential path sees every key. |
 | Decode | `decode_output(final_latents, batch)` returns a new decoded dictionary. Inference and rollout callers merge it into their working batch, replacing names such as `clean_image`. |
 | Persist / score | Inference scores the merged batch; its `save_extra` only decides whether the record holds the decoded fields or the whole merged batch, and reward fields are added to it. Raw fields needed for scoring must survive any earlier offline cache as well. |
@@ -69,10 +69,10 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
 
 Sources: [coercion](../flow_control/datasets/coercion.py),
 [offline preprocessing](../flow_control/scripts/preprocess.py) (`ProcessorStage.process`),
-[runtime preprocessing](../flow_control/training/mixins/preprocess.py),
+[runtime preprocessing](../flow_control/training/mixins/data.py),
 [model leaf](../flow_control/samplers/prediction.py) (`ModelPrediction.bind`),
 [rollout collection](../flow_control/training/mixins/rollout.py) (`_collect_rollouts`),
-[inference](../flow_control/training/inference.py) (`_sample_submitter`, `_write_record`).
+[inference](../flow_control/training/inference.py) (`_sample_submitter`, `_write_output`).
 
 ### Cached posterior distributions
 
@@ -83,18 +83,17 @@ leading dimension. After packing a logical singleton, `[2, N, D]` means
 `[mean, std]`, not two samples and not mean/log-variance. Mode/sample caches are
 already `[1, N, D]`; some VAE implementations always use the mode.
 
-`PreprocessMixin._sample_latent_distributions` checks top-level names ending in
-`latents`: tensors with leading size 2 become `mean + std * noise`. It also handles
-lists of such tensors, e.g. `reference_latents`. It does **not** recurse into
-`negative` or `tiles`. This is a name/shape convention, with no separate posterior
-tag; plugins must respect it when introducing another `*latents` field.
+`processor.resample` draws `mean + std * noise` for every field named in the
+processor's `posterior_fields` whose leading size is 2 (lists element-wise, e.g.
+`reference_latents`); it does **not** recurse into `negative` or `tiles` and never
+guesses by name. Plugins that cache another posterior field must declare it.
 
 ## Identity, geometry and sampling tensors
 
 | Key | Meaning / representation | Producer | Consumers |
 | --- | --- | --- | --- |
-| `__key__` | String source-sample identifier. K rollouts of one prompt share it. `"__padding__"` is a reserved padding sentinel. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity, `execute_pairwise_reward` grouping and padding filtering. |
-| `_is_padding_sample` | Optional bool marker set to `True` on repeated padding samples. | `PaddingAwareDatasetWrapper`. | No reader in `flow_control`; only `tests/distributed_microbatch_worker.py` checks it. Sampling/output paths check the `__key__` sentinel. |
+| `__key__` | String source-sample identifier. K rollouts of one prompt share it. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity, `execute_pairwise_reward` grouping. |
+| `__padding__` | `True` on plan-time padding rows (a short tail group repeats rows of the same block). Consumer memory only, never persisted. | `RowStream.__getitem__`. | `is_padding(row)`: SFT / VAE weigh the row 0, inference and validation forward it but write and log nothing. |
 | `image_size` | Optional requested size on raw input; actual target pixel `(H, W)` after task resizing. Required for model/sampler use. | Dataset/user, then processor. | Latent initialization, adapter geometry/position IDs, decode, tiling and resolution-dependent shift. |
 | `model_image_size` | Optional pixel `(H, W)` seen by one forward, e.g. a tile. Defaults to `image_size`. | `TiledT2IProcessor`. | `BaseShift._get_seq_len`; tiled prediction removes it from leaf conditions. |
 | `cost` | Integer token total from `processor.get_cost` (latent + text + reference); the plan sort key. It is not necessarily `noisy_latents.shape[1]`. | Offline `ProcessorStage.process`. | `RandomCacheWriter` records it in the cache index and grouping sorts on it. Resolution shift computes its own length and does not read this field. (The adapters' synthetic length-test batches still carry `latent_length` for SFT's latent-length test.) |
@@ -285,10 +284,9 @@ Sources: [tiled processor](../flow_control/processors/tasks/tiled_t2i.py),
 | `include` | Optional list of expected object groups. Each has `class: str`, `count: int`, optional `color: str` and `position: (relation, target_group_index)`. | Dataset extra. | `GenevalReward` object/count/color/position checks. |
 | `exclude` | Optional list of forbidden object-count specs, each with `class: str`, `count: int`. | Dataset extra. | GenEval original scoring mode; reward-server mode does not apply exclude penalties. |
 | `style_category` | Prism source style/category metadata. | `PrismLayersProDataset`. | Retained extras/generic sinks; no current algorithm consumer. |
-| `reward` | Aggregate CPU tensor, normally `[1]`, in an inference output record. | `Inference._reward_fields` from `RewardResult.aggregate`. | Datasink/downstream only; in-tree reporting works from `RewardResult` objects. |
-| `reward_raw` | Dictionary of component label to raw CPU tensor `[1]`. Labels come from reward configuration. | `Inference._reward_fields`. | Datasink/downstream analysis. |
-| `reward_normalized` | Same label mapping, with normalized component values before weighted aggregation. | `Inference._reward_fields`. | Datasink/downstream analysis. |
-| `__preview_image__` | Temporary CPU annotated montage/image in a pending inference record. | `Inference._sample_submitter`. | `_write_record` pops it before datasink writing and uses it for the preview PNG when `save_preview_dir` is set, otherwise discards it. |
+| `reward` | Aggregate CPU tensor, normally `[1]`, in an inference report record. | `Inference._reward_fields` from `RewardResult.aggregate`. | `ReportWriter` flattens it into `metrics.jsonl`; `records/` rows keep it for downstream filtering. |
+| `reward_raw` | Dictionary of component label to raw CPU tensor `[1]`. Labels come from reward configuration. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_raw.<label>`; downstream analysis. |
+| `reward_normalized` | Same label mapping, with normalized component values before weighted aggregation. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_normalized.<label>`; downstream analysis. |
 | Other dataset/plugin columns | Open-ended names and values, preserved according to `save_extra`. | Dataset or extension. | Only explicitly configured consumers; add any new in-tree contract to this document. |
 
 Image-only rewards read `clean_image`; text-image rewards also read `prompt`.

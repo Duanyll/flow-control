@@ -1,19 +1,23 @@
+"""Transitional overlay for the rollout family (GRPO / endpoint trainers).
+
+Still drives the old ``flow_control.datasets`` readers and the
+``enable_preprocess`` switch; SFT, inference and validation already run on
+``DataMixin``. Migrated and deleted in the rollout stage of the data rework.
+"""
+
 import asyncio
 from typing import Any, cast
 
 import torch
 
-from flow_control.adapters.base import Batch
 from flow_control.datasets import DatasetConfig, parse_dataset
-from flow_control.processors import Processor, get_processor_input_typeddict
+from flow_control.processors import get_processor_input_typeddict
 from flow_control.processors.base import ProcessedBatch
-from flow_control.samplers import Sampler, SampleRequest
 
-from .base import BaseTrainer
+from .data import DataMixin
 
 
-class PreprocessMixin(BaseTrainer):
-    processor: Processor
+class PreprocessMixin(DataMixin):
     enable_preprocess: bool = False
     """
     Whether to enable online preprocessing using the processor. Will load processor models
@@ -23,7 +27,6 @@ class PreprocessMixin(BaseTrainer):
     If disabled, you should load a preprocessed dataset with `flow-control preprocess` command.
     """
     enable_coercion: bool = True
-    _processor_loop: asyncio.AbstractEventLoop
 
     @staticmethod
     def _sample_if_distribution(t: torch.Tensor) -> torch.Tensor:
@@ -60,11 +63,16 @@ class PreprocessMixin(BaseTrainer):
         self._sample_latent_distributions(processed_batch)
         return cast(ProcessedBatch, processed_batch)
 
-    def load_processor(self):
+    def load_processor(self) -> None:
+        super().load_processor()
         if self.enable_preprocess:
             self.processor.load_models("encode", self.device)
-            self._processor_loop = asyncio.new_event_loop()
-        self.processor.load_models("decode", self.device)
+            self._loop = asyncio.new_event_loop()
+
+    def _run_processor(self, coro: Any) -> Any:
+        if self._loop is None:
+            raise RuntimeError("load_processor() must run before online preprocessing.")
+        return self._loop.run_until_complete(coro)
 
     def parse_training_dataset(self, config: DatasetConfig):
         return parse_dataset(
@@ -90,9 +98,7 @@ class PreprocessMixin(BaseTrainer):
         self, batch: dict, save_extra: bool = False
     ) -> ProcessedBatch:
         if self.enable_preprocess:
-            res = self._processor_loop.run_until_complete(
-                self.processor.prepare_training_batch(batch)
-            )
+            res = self._run_processor(self.processor.prepare_training_batch(batch))
         else:
             res = batch
         return self._finalize_processed_batch(batch, res, save_extra=save_extra)
@@ -101,26 +107,7 @@ class PreprocessMixin(BaseTrainer):
         self, batch: dict, save_extra: bool = False
     ) -> ProcessedBatch:
         if self.enable_preprocess:
-            res = self._processor_loop.run_until_complete(
-                self.processor.prepare_inference_batch(batch)
-            )
+            res = self._run_processor(self.processor.prepare_inference_batch(batch))
         else:
             res = batch
         return self._finalize_processed_batch(batch, res, save_extra=save_extra)
-
-    def build_sample_request(
-        self,
-        sampler: Sampler,
-        batch: Batch,
-        generator: torch.Generator,
-    ) -> SampleRequest:
-        negative_batch = (
-            self.processor.get_negative_batch(cast(ProcessedBatch, batch))
-            if sampler.guidance.requires_negative(sampler.steps)
-            else None
-        )
-        return SampleRequest(
-            batch=batch,
-            negative_batch=cast(Batch | None, negative_batch),
-            generator=generator,
-        )
