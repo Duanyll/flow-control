@@ -207,6 +207,7 @@ if __name__ == "__main__":
 
     with tempfile.TemporaryDirectory() as tmp:
         writers = [ReportWriter(tmp, r, previews=True, records=True) for r in range(2)]
+        rows: list[Row] = []
         for i in range(5):
             row: Row = {
                 KEY: f"k{i}",
@@ -214,6 +215,7 @@ if __name__ == "__main__":
                 IMAGE_SIZE: (8, 8),
                 "clean_image": torch.rand(1, 3, 8, 8),
             }
+            rows.append(row)
             writers[i % 2].write(
                 row,
                 row["clean_image"],
@@ -248,7 +250,7 @@ if __name__ == "__main__":
             assert json.load(f) == {"note": "smoke", "rows": 5, "ranks": 2}
         records = open_cache(os.path.join(tmp, RECORDS_DIR))
         assert [e.key for e in records.index.entries] == [f"k{i}" for i in range(5)]
-        assert torch.equal(records.get(0)["clean_image"], records.get(0)["clean_image"])
+        assert torch.equal(records.get(0)["clean_image"], rows[0]["clean_image"])
 
     # A crashed 2-rank run (rank 1 closed its parts, rank 0 never merged) followed
     # by a 1-rank run into the same directory: the stale parts are not merged.

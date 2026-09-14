@@ -1,0 +1,11 @@
+{
+  "$schema": "../../../schema/pack.schema.json",
+  // Turns the random cache written by preprocess.jsonc into tar shards for
+  // sequential reads. Point train.sft.jsonc's dataset.path at "output" to use it.
+  "input": "./data/christian_boragine/flux1",
+  "output": "./data/christian_boragine/flux1_packed",
+  "shard_size": 480,
+  "group_size": 16,
+  "seed": 0,
+  "num_workers": 8
+}
