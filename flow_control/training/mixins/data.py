@@ -52,9 +52,11 @@ class DataMixin(BaseTrainer):
     processor: Processor
     dataset: DatasetConfig
     group_size: int = 16
-    """Rows per plan group (§6.1): ``world_size`` must divide it and, for trainers
-    with microbatches, ``train_micro_batch_size`` must divide ``group_size /
-    world_size`` so one microbatch never straddles two groups."""
+    """Rows per plan group (§6.1) of shuffled plans (training, rollout prompts):
+    ``world_size`` must divide it and, for trainers with microbatches,
+    ``train_micro_batch_size`` must divide ``group_size / world_size`` so one
+    microbatch never straddles two groups. Unshuffled plans (inference,
+    validation) are cost-sorted and take one row per rank per group instead."""
     megabatch_groups: int = 64
     """random cache: groups per megabatch; rows are cost-sorted inside a megabatch
     and megabatches are shuffled against each other."""
@@ -103,23 +105,30 @@ class DataMixin(BaseTrainer):
     def make_planner(
         self, store: RowStore, *, shuffle: bool, micro_batch_size: int = 1
     ) -> Planner:
-        """Pick the ``groups_*`` plan for ``store`` (§6.3) after checking that the
-        ranks and microbatches tile ``group_size``. ``micro_batch_size`` is passed
-        by trainers that own ``train_micro_batch_size``."""
-        n = self.group_size
-        if n % self.world_size != 0:
-            raise ValueError(
-                f"group_size ({n}) must be divisible by world_size "
-                f"({self.world_size}); every rank takes group_size / world_size rows "
-                "of each group."
-            )
-        per_rank = n // self.world_size
-        if per_rank % micro_batch_size != 0:
-            raise ValueError(
-                f"train_micro_batch_size ({micro_batch_size}) must divide "
-                f"group_size / world_size ({per_rank}); otherwise one microbatch "
-                "spans two groups of different cost."
-            )
+        """Pick the ``groups_*`` plan for ``store`` (§6.3). Shuffled plans group
+        ``group_size`` rows after checking that the ranks and microbatches tile it
+        (``micro_batch_size`` is passed by trainers that own
+        ``train_micro_batch_size``). Unshuffled plans keep the whole set in cost
+        order, so one row per rank per group is already balanced: ``group_size``
+        would only add padding (up to ``group_size - 1`` rows) and a needless
+        ``world_size | group_size`` constraint."""
+        if shuffle:
+            n = self.group_size
+            if n % self.world_size != 0:
+                raise ValueError(
+                    f"group_size ({n}) must be divisible by world_size "
+                    f"({self.world_size}); every rank takes group_size / world_size "
+                    "rows of each group."
+                )
+            per_rank = n // self.world_size
+            if per_rank % micro_batch_size != 0:
+                raise ValueError(
+                    f"train_micro_batch_size ({micro_batch_size}) must divide "
+                    f"group_size / world_size ({per_rank}); otherwise one microbatch "
+                    "spans two groups of different cost."
+                )
+        else:
+            n = self.world_size
         if isinstance(store, OnlineStore):
             return partial(groups_plain, len(store), n, self.seed, shuffle=shuffle)
         if not shuffle:
@@ -273,7 +282,18 @@ if __name__ == "__main__":
                 print("rejected:", e)
             else:
                 raise AssertionError(bad)
+        # Unshuffled plans: one row per rank per group, no group_size constraint
+        # (7 rows on 3 ranks -> 3 groups of 3, 2 padding rows; 1 rank -> none).
+        probe._world_size = 3
+        plan = probe.make_planner(store, shuffle=False)(0)
+        assert [len(g) for g in plan] == [3, 3, 3]
+        assert sum(padding for g in plan for _, padding in g) == 2
         probe._world_size = 1
+        assert not any(
+            padding
+            for g in probe.make_planner(store, shuffle=False)(0)
+            for _, padding in g
+        )
         probe.shuffle_mode = "shard"
         try:
             probe.make_planner(store, shuffle=True)

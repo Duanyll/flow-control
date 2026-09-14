@@ -11,7 +11,9 @@ Layout::
 
 Every rank writes its own ``metrics-<rank>.jsonl`` (and, with ``records``, its
 own index part through ``RandomCacheWriter``); ``finalize`` is a collective that
-merges them on rank 0.
+merges them on rank 0. Construction is a collective too: rank 0 first removes the
+parts an earlier run left in the same directory (e.g. a crashed run with more
+ranks), which the merge would otherwise silently include.
 """
 
 import glob
@@ -84,6 +86,18 @@ def _metrics_part(root: str, rank: int) -> str:
     return os.path.join(root, f"metrics-{rank}.jsonl")
 
 
+def _stale_parts(root: str) -> list[str]:
+    """Per-rank parts left under ``root`` by an earlier run."""
+    return glob.glob(os.path.join(root, "metrics-*.jsonl")) + glob.glob(
+        os.path.join(root, RECORDS_DIR, "index-*.jsonl")
+    )
+
+
+def _barrier() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
 class ReportWriter:
     def __init__(self, root: str, rank: int, *, previews: bool, records: bool):
         self.root = root
@@ -92,7 +106,18 @@ class ReportWriter:
         os.makedirs(root, exist_ok=True)
         if previews:
             os.makedirs(os.path.join(root, PREVIEWS_DIR), exist_ok=True)
-        # Truncate this rank's part: a stale one from an earlier run would be merged.
+        if rank == 0:
+            # Parts of ranks this run does not have would survive the per-rank
+            # truncation below and be merged by finalize; clear every part before
+            # any rank opens its own.
+            stale = _stale_parts(root)
+            for part in stale:
+                os.remove(part)
+            if stale:
+                logger.warning(
+                    f"Removed {len(stale)} part file(s) of an earlier run under {root}"
+                )
+        _barrier()
         open(_metrics_part(root, rank), "w", encoding="utf-8").close()
         self._records = (
             RandomCacheWriter(rank, os.path.join(root, RECORDS_DIR), "directory")
@@ -145,8 +170,7 @@ class ReportWriter:
         (``meta`` + row / rank counts) and finalizes ``records/`` as a cache."""
         if self._records is not None:
             self._records.cleanup()
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
+        _barrier()
         if self.rank != 0:
             return
 
@@ -225,3 +249,21 @@ if __name__ == "__main__":
         records = open_cache(os.path.join(tmp, RECORDS_DIR))
         assert [e.key for e in records.index.entries] == [f"k{i}" for i in range(5)]
         assert torch.equal(records.get(0)["clean_image"], records.get(0)["clean_image"])
+
+    # A crashed 2-rank run (rank 1 closed its parts, rank 0 never merged) followed
+    # by a 1-rank run into the same directory: the stale parts are not merged.
+    with tempfile.TemporaryDirectory() as tmp:
+        crashed = ReportWriter(tmp, 1, previews=False, records=True)
+        crashed.write({KEY: "a", COST: 1}, None, {"reward": 0.0})
+        crashed.finalize()
+        assert sorted(os.listdir(tmp)) == ["metrics-1.jsonl", "records"]
+        fresh = ReportWriter(tmp, 0, previews=False, records=True)
+        fresh.write({KEY: "b", COST: 1}, None, {"reward": 1.0})
+        fresh.finalize()
+        with open(os.path.join(tmp, METRICS_FILE)) as f:
+            assert [json.loads(line)["key"] for line in f] == ["b"]
+        with open(os.path.join(tmp, META_FILE)) as f:
+            assert json.load(f) == {"rows": 1, "ranks": 1}
+        records = open_cache(os.path.join(tmp, RECORDS_DIR))
+        assert [e.key for e in records.index.entries] == ["b"]
+        print("stale parts of the crashed run were dropped")
