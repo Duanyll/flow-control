@@ -1,23 +1,27 @@
 """Rollout collection and advantage computation mixin.
 
 Extracted from GrpoTrainer so that NFT and other RL trainers can reuse the
-rollout / reward / advantage pipeline.
+rollout / reward / advantage pipeline. Prompts come from a ``RowCursor`` over
+the trainer's store (design §7.3): every RL epoch takes ``num_prompts_per_epoch``
+distinct prompts, identical on every rank, and ``expand_rollouts`` (§9.3)
+stripes their ``num_rollouts_per_prompt`` rollouts across the ranks.
 """
 
+import copy
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, cast
+from itertools import groupby
+from operator import itemgetter
+from typing import Any, ClassVar, Literal
 
 import torch
 import torch.distributed as dist
 from pydantic import BaseModel
 from rich.progress import Progress
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
 from flow_control.adapters.base import Batch
-from flow_control.datasets import DatasetConfig
-from flow_control.processors import Processor
+from flow_control.data import KEY, PromptSampling, RowCursor, expand_rollouts
 from flow_control.rewards import (
     Reward,
     RewardProfile,
@@ -36,16 +40,10 @@ from flow_control.utils.tensor import (
 )
 
 from ..advantage import Advantage, PerPromptAdvantage
-from ..data import (
-    DistributedKRepeatSampler,
-    PaddingAwareDatasetWrapper,
-    collate_fn,
-    seed_worker,
-)
 from ..grpo_sampling import GrpoCollector, RecordedStep
 from .base import BaseTrainer
+from .data import DataMixin
 from .logging import LoggingMixin
-from .preprocess import PreprocessMixin
 
 
 @dataclass
@@ -62,28 +60,31 @@ class Rollout:
     recorded_steps: list[RecordedStep] | None = None
 
 
-class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
+class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     """Mixin providing rollout collection and advantage computation.
 
     Subclasses must implement :pyattr:`rollout_sampler_instance` and provide the
-    fields consumed here (``num_batches_per_epoch``, ``reward``, etc.).
+    fields consumed here (``num_prompts_per_epoch``, ``reward``, etc.).
     """
 
     # ---------------------------------- Configs --------------------------------- #
-    num_batches_per_epoch: int
+    num_prompts_per_epoch: int
     """
-    Number of "batches" to generate per epoch. The actual micro batch size on GPU is
-    always 1. This means in each epoch, we will select `num_prompts_per_batch` unique
-    prompts for `num_batches_per_epoch` times, that is `num_batches_per_epoch *
-    num_prompts_per_batch` prompts in total (may have duplicates across batches).
-    """
-    num_prompts_per_batch: int
-    """
-    Number of unique prompts to select for each batch. See `num_batches_per_epoch` for details.
+    Distinct prompts drawn per epoch (``M``). Each gets ``num_rollouts_per_prompt``
+    rollouts, so an epoch collects ``M * K`` rollouts globally and ``M * K /
+    world_size`` per rank; ``M * K`` must be divisible by ``world_size`` (``M``
+    itself when the reward is pairwise, which keeps a prompt's rollouts on one rank).
     """
     num_rollouts_per_prompt: int
     """
-    Number of rollouts to generate for each prompt.
+    Number of rollouts to generate for each prompt (``K``).
+    """
+    prompt_sampling: PromptSampling = "chunked"
+    """
+    How the epoch's prompts are drawn. ``chunked``: consecutive rows of the
+    grouped plan, no repeats within a pass over the dataset, cost-adjacent.
+    ``independent``: a fresh random subset every epoch (repeats across epochs;
+    baseline reproduction), random / raw-source datasets only.
     """
     rollout_storage_device: Literal["cpu", "device"] = "cpu"
     """
@@ -93,54 +94,54 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     advantage: Advantage = PerPromptAdvantage()
 
-    dataset: DatasetConfig
-    num_dataloader_workers: int = 1
-
     model: ModelAdapter
-    processor: Processor
     reward: Reward
     rollout_sampler: Sampler
     _ROLLOUT_RECORD_STEPS: ClassVar[bool] = False
     """Whether rollouts keep GRPO's stochastic-step records for replay."""
 
-    _dataloader: StatefulDataLoader
+    _cursor: RowCursor
 
     # -------------------------------- Properties -------------------------------- #
 
     @property
-    def rollout_batch_per_rank(self) -> int:
-        """Number of rollouts per rank per batch (derived from global settings)."""
-        total = self.num_prompts_per_batch * self.num_rollouts_per_prompt
-        world_size: int = getattr(self, "world_size", 1)
-        if total % world_size != 0:
+    def rollouts_per_rank(self) -> int:
+        """``M * K / world_size`` after checking that the rollouts tile the ranks."""
+        prompts, per_prompt = self.num_prompts_per_epoch, self.num_rollouts_per_prompt
+        total = prompts * per_prompt
+        if _has_pairwise_child(self.reward):
+            if prompts % self.world_size != 0:
+                raise ValueError(
+                    f"A pairwise reward keeps all {per_prompt} rollouts of a prompt on "
+                    f"one rank, so num_prompts_per_epoch ({prompts}) must be divisible "
+                    f"by world_size ({self.world_size})."
+                )
+        elif total % self.world_size != 0:
             raise ValueError(
-                f"num_prompts_per_batch * num_rollouts_per_prompt ({total}) "
-                f"must be divisible by world_size ({world_size})."
+                f"num_prompts_per_epoch * num_rollouts_per_prompt ({total}) must be "
+                f"divisible by world_size ({self.world_size}) so every rank collects "
+                "the same number of rollouts."
             )
-        return total // world_size
+        return total // self.world_size
 
     # ----------------------------- Rollout phase ----------------------------- #
 
-    def make_rollout_dataloader(self):
-        dataset = PaddingAwareDatasetWrapper(self.parse_inference_dataset(self.dataset))
-        use_pairwise = _has_pairwise_child(self.reward)
-        sampler = DistributedKRepeatSampler(
-            dataset=dataset,
-            num_batches_per_epoch=self.num_batches_per_epoch,
-            num_prompts_per_batch=self.num_prompts_per_batch,
-            num_rollouts_per_prompt=self.num_rollouts_per_prompt,
-            num_replicas=self.world_size,
-            rank=self.rank,
+    def make_rollout_cursor(self) -> None:
+        """Open the prompt store and the cursor over it; fails on a layout the
+        ranks cannot share before any model work starts."""
+        store = self.open_inference_store(self.dataset)
+        self._store = store
+        if self.num_prompts_per_epoch > len(store):
+            raise ValueError(
+                f"num_prompts_per_epoch ({self.num_prompts_per_epoch}) exceeds the "
+                f"{len(store)} rows of the dataset; prompts within an epoch are distinct."
+            )
+        _ = self.rollouts_per_rank
+        self._cursor = RowCursor(
+            store,
+            planner=self.make_planner(store, shuffle=True),
             seed=self.seed,
-            keep_prompt_local=use_pairwise,
-        )
-        self._dataloader = StatefulDataLoader(
-            dataset,
-            batch_size=1,
-            sampler=sampler,
-            num_workers=self.num_dataloader_workers,
-            collate_fn=collate_fn,
-            worker_init_fn=seed_worker,
+            sampling=self.prompt_sampling,
         )
 
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
@@ -154,40 +155,53 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
         rollout_storage = (
             device if self.rollout_storage_device == "device" else torch.device("cpu")
         )
-        dataloader = self._dataloader
+        store = self._store
+        assert store is not None, "make_rollout_cursor() runs before the first epoch"
 
         model.transformer.eval()
 
-        total_rollouts = self.num_batches_per_epoch * self.rollout_batch_per_rank
+        # Same seed and cursor state everywhere -> every rank draws the same ids.
+        prompt_ids = self._cursor.take(self.num_prompts_per_epoch, epoch=epoch)
+        mine = expand_rollouts(
+            prompt_ids,
+            self.num_rollouts_per_prompt,
+            self.rank,
+            self.world_size,
+            whole_prompts=_has_pairwise_child(self.reward),
+        )
+
         progress = Progress(
             *self.get_progress_columns(),
             console=console,
             transient=True,
         )
-        rollout_task = progress.add_task("Rollout", total=total_rollouts)
-
-        # ``make_rollout_dataloader`` above always builds this sampler.
-        cast(DistributedKRepeatSampler, dataloader.sampler).set_epoch(epoch)
+        rollout_task = progress.add_task("Rollout", total=len(mine))
 
         def requests() -> Iterator[SampleRequest]:
-            """Preprocess lazily; the sampler pulls a request when it has room."""
-            ordinal = 0
-            for items in dataloader:
-                for item in items:
-                    batch = deep_move_to_device(item, device)
-                    batch = self.preprocess_for_inference(batch, save_extra=True)
-                    batch = deep_cast_float_dtype(batch, model.dtype)
-                    key = batch.get("__key__", "unknown")
+            """Prepare lazily; the sampler pulls a request when it has room.
+
+            A prompt is fetched and resampled once and its rollouts share that
+            batch through shallow copies: ``initialize_latents`` writes a fresh
+            ``noisy_latents`` into each copy and the sampler rebuilds the dict
+            per run, so nothing downstream mutates the shared tensors.
+            """
+            for prompt_id, group in groupby(mine, key=itemgetter(0)):
+                batch = self.prepare_row(
+                    store.get(prompt_id), mode="inference", epoch=epoch
+                )
+                batch = deep_cast_float_dtype(batch, model.dtype)
+                for _, k in group:
+                    rollout_batch = copy.copy(batch)
                     generator = torch.Generator(device=device).manual_seed(
-                        derive_seed(
-                            self.seed, f"rollout:{epoch}:{self.rank}:{ordinal}:{key}"
-                        )
+                        derive_seed(self.seed, f"rollout:{epoch}:{prompt_id}:{k}")
                     )
-                    ordinal += 1
                     processor.initialize_latents(
-                        batch, generator=generator, device=device, dtype=model.dtype
+                        rollout_batch,
+                        generator=generator,
+                        device=device,
+                        dtype=model.dtype,
                     )
-                    yield self.build_sample_request(sampler, batch, generator)
+                    yield self.build_sample_request(sampler, rollout_batch, generator)
 
         def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
             with progress, torch.no_grad():
@@ -211,7 +225,7 @@ class RolloutMixin(PreprocessMixin, LoggingMixin, BaseTrainer, BaseModel):
                             raw_reward=torch.zeros(1),  # placeholder
                             reward_weights=torch.ones(1),  # placeholder
                             reward_labels=["reward"],  # placeholder
-                            key=batch.get("__key__", "unknown"),
+                            key=batch[KEY],
                             batch=deep_move_to_device(batch, rollout_storage),
                             negative_batch=deep_move_to_device(
                                 run.negative_batch, rollout_storage

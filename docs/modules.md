@@ -141,8 +141,7 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `HsdpMixin` | HSDP 分布式训练支持 |
 | `LoggingMixin` | 训练日志 |
 | `DataMixin` | 数据接入：打开 store、选分组 plan（`make_planner`）、`prepare_row`（上设备 → 无 cache 时在线 processor → `resample`） |
-| `PreprocessMixin` | 过渡：rollout 家族仍用的旧 `enable_preprocess` 路径（叠在 `DataMixin` 上，下阶段删除） |
-| `RolloutMixin` | RL 训练的 rollout 生成 |
+| `RolloutMixin` | RL 训练的 rollout 生成：`RowCursor` 每 epoch 取 `num_prompts_per_epoch` 条 prompt，`expand_rollouts` 按 rank 跨步切片 |
 | `ValidationMixin` | 验证循环 |
 | `LaunchConfig` | 分布式启动配置 |
 | `distributed_main()` | 分布式训练入口 |

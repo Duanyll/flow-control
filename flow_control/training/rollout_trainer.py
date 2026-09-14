@@ -216,7 +216,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
             "optimizer": get_optimizer_state_dict(
                 self.transformer, self._optimizer, options=opts
             ),
-            "dataloader": self._dataloader.state_dict(),
+            "cursor": self._cursor.state_dict(),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
             "current_epoch": self._current_epoch,
@@ -261,7 +261,13 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
                 state_dict["optim_init_backup"],
                 options=opts,
             )
-        self._dataloader.load_state_dict(state_dict["dataloader"])
+        if "cursor" in state_dict:
+            self._cursor.load_state_dict(state_dict["cursor"])
+        else:
+            logger.warning(
+                "Checkpoint has no prompt cursor state (written before the data "
+                "rework); rollout prompts restart from the beginning of the plan."
+            )
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
         self._current_epoch = state_dict.get("current_epoch", 0)
@@ -373,7 +379,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
         self.make_optimizer_and_scheduler()
         self.load_processor()
-        self.make_rollout_dataloader()
+        self.make_rollout_cursor()
         self.make_validation_dataloader()
 
         self.reward.load_model(self.device)
@@ -387,16 +393,14 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
         name = self.training_type.upper()
         logger.info(
-            "%s rollouts in each epoch will randomly select %d unique prompts "
-            "for %d times, and generate %d rollouts for each prompt. That is "
-            "%d rollouts in total (may have duplicates across batches).",
+            "%s draws %d distinct prompts per epoch (%s sampling) with %d rollouts "
+            "each: %d rollouts per epoch, %d per rank.",
             name,
-            self.num_prompts_per_batch,
-            self.num_batches_per_epoch,
+            self.num_prompts_per_epoch,
+            self.prompt_sampling,
             self.num_rollouts_per_prompt,
-            self.num_batches_per_epoch
-            * self.num_prompts_per_batch
-            * self.num_rollouts_per_prompt,
+            self.num_prompts_per_epoch * self.num_rollouts_per_prompt,
+            self.rollouts_per_rank,
         )
         logger.info(
             "%s optimization uses train_batch_size=%d, world_size=%d, "
