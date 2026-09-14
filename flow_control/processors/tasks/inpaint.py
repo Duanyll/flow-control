@@ -1,4 +1,4 @@
-from typing import Literal, NotRequired
+from typing import ClassVar, Literal, NotRequired
 
 import torch
 import torch.nn.functional as F
@@ -49,6 +49,7 @@ class InpaintProcessor(
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "inpaint_latents")
 
     def _prepare_inpaint_mask(
         self,
@@ -148,5 +149,5 @@ class InpaintProcessor(
 
         return result
 
-    def get_latent_length(self, batch: InpaintProcessedBatch):
-        return super().get_latent_length(batch) + batch["prompt_embeds"].shape[1]
+    def get_cost(self, batch: InpaintProcessedBatch) -> int:
+        return super().get_cost(batch) + batch["prompt_embeds"].shape[1]

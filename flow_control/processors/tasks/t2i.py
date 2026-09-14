@@ -97,5 +97,5 @@ class T2IProcessor(BaseProcessor[T2IInputBatch, T2ITrainInputBatch, T2IProcessed
             )
         return result
 
-    def get_latent_length(self, batch: T2IProcessedBatch):
-        return super().get_latent_length(batch) + batch["prompt_embeds"].shape[1]
+    def get_cost(self, batch: T2IProcessedBatch) -> int:
+        return super().get_cost(batch) + batch["prompt_embeds"].shape[1]

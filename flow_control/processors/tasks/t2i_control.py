@@ -1,4 +1,4 @@
-from typing import Literal, NotRequired
+from typing import ClassVar, Literal, NotRequired
 
 import torch
 
@@ -44,6 +44,7 @@ class T2IControlProcessor(
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "control_latents")
 
     async def prepare_inference_batch(
         self, batch: T2IControlInputBatch
@@ -106,5 +107,5 @@ class T2IControlProcessor(
             )
         return result
 
-    def get_latent_length(self, batch: T2IControlProcessedBatch):
-        return super().get_latent_length(batch) + batch["prompt_embeds"].shape[1]
+    def get_cost(self, batch: T2IControlProcessedBatch) -> int:
+        return super().get_cost(batch) + batch["prompt_embeds"].shape[1]

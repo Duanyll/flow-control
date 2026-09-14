@@ -1,11 +1,12 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, NotRequired, TypedDict, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, NotRequired, TypedDict, TypeVar
 
 import torch
 from einops import rearrange
 from pydantic import BaseModel, ConfigDict, Field
 
+from flow_control.data.rows import Row
 from flow_control.datasets.coercion import JsonBeforeValidator
 from flow_control.utils.device import default_device
 from flow_control.utils.hf_model import HfModelLoader
@@ -44,8 +45,8 @@ class ProcessedBatch(TypedDict):
     """Height and width of the images in the batch in pixels. Used for initializing latents."""
     __key__: NotRequired[str]
     """Sample identifier carried over from the source dataset, used to name outputs."""
-    latent_length: NotRequired[int]
-    """Length of the latents in the batch. Used for bucket samplers."""
+    cost: NotRequired[int]
+    """Token total (latent + text + reference) from ``get_cost``; the plan sort key."""
     noisy_latents: NotRequired[torch.Tensor]
     """Noisy latents input to the model."""
     clean_latents: NotRequired[torch.Tensor]
@@ -64,6 +65,17 @@ class ProcessedBatch(TypedDict):
 class DecodedBatch(TypedDict):
     clean_image: torch.Tensor
     """Primary clean image decoded from the latents."""
+
+
+def sample_posterior(latents: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+    """``[2, ...]`` (mean, std) -> one ``[1, ...]`` draw; any other shape unchanged."""
+    if latents.shape[0] != 2:
+        return latents
+    mean, std = latents[0:1], latents[1:2]
+    eps = torch.randn(
+        mean.shape, generator=generator, device=mean.device, dtype=mean.dtype
+    )
+    return mean + std * eps
 
 
 TInput = TypeVar("TInput", bound=InputBatch)
@@ -168,19 +180,17 @@ class BaseProcessor[
         """
         return decoded["clean_image"]
 
-    def get_latent_length(self, batch: TProcessed) -> int:
-        """
-        Computes the latent length for the given batch based on its image size. The
-        result has not to be the actual length of the transfomer's input, but should be
-        useful for bucketing batches of similar sizes (computationally) together.
+    def get_cost(self, batch: TProcessed) -> int:
+        """Token total of one forward on ``batch``; the plan sort key (design D4).
 
-        Returns:
-            The latent length as an integer.
+        The default counts latent tokens from ``image_size``; tasks add their text
+        (``prompt_embeds.shape[1]``) and reference tokens. It is a work estimate
+        for grouping rows of similar cost, not necessarily the transformer's
+        exact input length.
         """
         h, w = batch["image_size"]
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
-        latent_length = (h * w) // ratio
-        return latent_length
+        return (h * w) // ratio
 
     # ----------------------------- Latent Utilities ----------------------------- #
 
@@ -193,6 +203,32 @@ class BaseProcessor[
     official pipeline initializes at 7.5/8 = 0.9375 of its noise scale)."""
     target_posterior: PosteriorMode = "distribution"
     condition_posterior: PosteriorMode = "mode"
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents",)
+    """Row fields that may hold a cached VAE posterior ``[2, ...]`` (mean, std)
+    instead of a sample ``[1, ...]``; ``resample`` draws from them. Tasks extend
+    this with every field they encode through the VAE (TIE adds
+    ``reference_latents``)."""
+
+    def resample(self, row: Row, generator: torch.Generator) -> Row:
+        """Per-fetch randomization of ``row`` (design §8); modifies and returns it.
+
+        Every ``posterior_fields`` tensor whose first dim is 2 is replaced by one
+        draw ``mean + std * eps`` of shape ``[1, ...]``; list fields are sampled
+        element-wise. Fields already holding a sample (first dim 1, which is what
+        ``target_posterior="mode"`` caches) pass through untouched. Only the
+        declared fields are looked at, never a name pattern. ``generator`` must
+        live on the row's device. Subclasses stack data augmentation on top.
+        """
+        for name in self.posterior_fields:
+            value = row.get(name)
+            if isinstance(value, torch.Tensor):
+                row[name] = sample_posterior(value, generator)
+            elif isinstance(value, list):
+                row[name] = [
+                    sample_posterior(v, generator) if isinstance(v, torch.Tensor) else v
+                    for v in value
+                ]
+        return row
 
     def _pack_latents(self, latents) -> torch.Tensor:
         return rearrange(

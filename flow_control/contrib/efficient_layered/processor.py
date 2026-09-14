@@ -6,7 +6,7 @@ Importing this module self-registers ``EfficientLayeredProcessor`` under
 
 import asyncio
 import math
-from typing import Annotated, Literal, NotRequired, cast
+from typing import Annotated, ClassVar, Literal, NotRequired, cast
 
 import torch
 from einops import repeat
@@ -86,6 +86,7 @@ class EfficientLayeredProcessor(
     detection_prompt: PromptStr = parse_prompt("@efficient_layered_detection_en")
     detection_coord_type: Literal["qwen25vl", "qwen3vl"] = "qwen3vl"
     save_annotated_image: bool = False
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "image_latents")
 
     def resize_image(self, image: torch.Tensor) -> torch.Tensor:
         # Cropping is disabled to make resizing layer box calculation easier
@@ -311,10 +312,10 @@ class EfficientLayeredProcessor(
 
         return result
 
-    def get_latent_length(self, batch: EfficientLayeredProcessedBatch):
+    def get_cost(self, batch: EfficientLayeredProcessedBatch) -> int:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (
-            super().get_latent_length(batch)
+            super().get_cost(batch)
             + batch["prompt_embeds"].shape[1]
             + sum(
                 (bottom - top) * (right - left) // ratio

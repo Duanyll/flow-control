@@ -1,4 +1,4 @@
-from typing import Literal, NotRequired, TypedDict
+from typing import ClassVar, Literal, NotRequired, TypedDict
 
 import torch
 
@@ -57,6 +57,7 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
     positive batch's image tensors."""
     enable_enhance: bool = False
     max_reference_images: int = 0
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "reference_latents")
 
     reference_image_resize_mode: Literal["multiple_of", "list", "match_latent"] = (
         "match_latent"
@@ -203,10 +204,10 @@ class TIEProcessor(BaseProcessor[TIEInputBatch, TIETrainInputBatch, TIEProcessed
             )
         return result
 
-    def get_latent_length(self, batch: TIEProcessedBatch):
+    def get_cost(self, batch: TIEProcessedBatch) -> int:
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         return (
-            super().get_latent_length(batch)
+            super().get_cost(batch)
             + batch["prompt_embeds"].shape[1]
             + sum((h * w) // ratio for h, w in batch["reference_sizes"])
         )

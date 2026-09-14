@@ -1,4 +1,4 @@
-from typing import Literal, NotRequired, cast
+from typing import ClassVar, Literal, NotRequired, cast
 
 import torch
 from einops import rearrange
@@ -56,6 +56,7 @@ class QwenImageLayeredProcessor(
     caption_prompt: PromptStr = parse_prompt("@qwen_layered_caption_en")
     default_negative_prompt: str = " "
     save_negative: bool = False
+    posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents", "image_latents")
 
     @torch.no_grad()
     def _encode_latents_layered(
@@ -166,8 +167,11 @@ class QwenImageLayeredProcessor(
             )
         return result
 
-    def get_latent_length(self, batch: QwenLayeredProcessedBatch):
-        return (batch["num_layers"] + 1) * super().get_latent_length(batch)
+    def get_cost(self, batch: QwenLayeredProcessedBatch) -> int:
+        # Source image + (num_layers + 1) generated images share one sequence.
+        return (batch["num_layers"] + 2) * super().get_cost(batch) + batch[
+            "prompt_embeds"
+        ].shape[1]
 
     def decode_output(
         self,

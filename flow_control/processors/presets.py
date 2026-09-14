@@ -460,7 +460,7 @@ class HiDreamO1FullPreset(BaseModel):
     trainable transformer, so :meth:`encode_prompt` emits ``input_ids`` (plus
     ``pixel_values``/``image_grid_thw`` SigLIP-condition thumbnails on the
     editing path) instead of embeddings — which is also why
-    :meth:`get_latent_length` is overridden (the task implementations read
+    :meth:`get_cost` is overridden (the task implementations read
     ``prompt_embeds``).
 
     The full checkpoint is undistilled: true CFG 5.0 with ``" "`` as the
@@ -500,7 +500,7 @@ class HiDreamO1FullPreset(BaseModel):
             return self.encoder.encode_ids_with_images(prompt, images, system_prompt)
         return {"input_ids": self.encoder.encode_ids(prompt, system_prompt)}
 
-    def get_latent_length(self, batch: Mapping[str, Any]) -> int:
+    def get_cost(self, batch: Mapping[str, Any]) -> int:
         h, w = batch["image_size"]
         ratio = (self.vae_scale_factor * self.patch_size) ** 2
         length = (h * w) // ratio + batch["input_ids"].shape[1]

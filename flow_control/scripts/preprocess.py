@@ -4,11 +4,14 @@ from typing import Any, Literal
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.datasets import (
+from flow_control.data import (
+    COST,
+    KEY,
+    CacheOutputConfig,
     DatasetConfig,
-    DatasinkConfig,
-    datasink_registry,
-    parse_dataset,
+    RandomCacheWriter,
+    finalize_cache,
+    open_source,
 )
 from flow_control.processors import (
     ProcessorConfig,
@@ -19,7 +22,6 @@ from flow_control.processors.base import task_registry
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import dump_if_failed, get_logger
 from flow_control.utils.pipeline import (
-    DataSink,
     DataSource,
     Pipeline,
     PipelineStage,
@@ -31,11 +33,11 @@ from flow_control.utils.tensor import deep_move_to_device
 
 
 class TorchDatasetSource(DataSource):
+    """Yields row indices; the loader stage reads the rows. The source is opened
+    once, only to learn its length."""
+
     def __init__(self, dataset_args: dict | None = None):
-        if dataset_args is None:
-            dataset_args = {}
-        self.dataset = parse_dataset(dataset_args)
-        self.total = len(self.dataset)
+        self.total = len(open_source(dataset_args or {}, coerce_to=None))
 
     def scan(self) -> Iterator[tuple[Any, int | None]]:
         for idx in range(self.total):
@@ -50,29 +52,27 @@ class TorchDatasetLoaderStage(PipelineStage):
         dataset_args: dict | None = None,
         processor_args: dict | None = None,
         processing_mode: Literal["inference", "training"] = "training",
-        enable_coercion: bool = True,
         reassign_keys: bool = False,
     ):
-        if dataset_args is None:
-            dataset_args = {}
         self.worker_id = worker_id
         self.logger = get_logger(f"TorchDatasetLoaderStage-{worker_id}")
 
-        coerce_to: type | None = None
-        if enable_coercion and processor_args:
-            task_name = processor_args.get("task")
-            processor_class = task_registry.get(task_name) if task_name else None
-            if processor_class is not None:
-                mode: Literal["training", "inference"] = processing_mode
-                coerce_to = get_processor_input_typeddict(processor_class, mode)
-
-        self.dataset = parse_dataset(dataset_args, coerce_to=coerce_to)
+        # Coercion to the processor's input TypedDict is always on (design §3).
+        task_name = (processor_args or {})["task"]
+        processor_class = task_registry.get(task_name)
+        if processor_class is None:
+            raise ValueError(
+                f"Unknown processor task {task_name!r}; "
+                f"registered: {sorted(task_registry.members())}"
+            )
+        coerce_to = get_processor_input_typeddict(processor_class, processing_mode)
+        self.source = open_source(dataset_args or {}, coerce_to=coerce_to)
         self.reassign_keys = reassign_keys
 
     def process(self, item: Any) -> Any:
-        batch = self.dataset[item]
+        batch = self.source[item]
         if self.reassign_keys:
-            batch["__key__"] = str(item)
+            batch[KEY] = str(item)
         return [batch]
 
 
@@ -113,12 +113,12 @@ class ProcessorStage(PipelineStage):
                 output = await self.processor.prepare_inference_batch(item)
             else:
                 output = await self.processor.prepare_training_batch(item)
-            output["latent_length"] = self.processor.get_latent_length(output)
+            output[COST] = self.processor.get_cost(output)
             if self.save_extra:
                 item.update(output)
                 output = item
-            if "__key__" not in output:
-                output["__key__"] = item.get("__key__", None)
+            if KEY not in output:
+                output[KEY] = item.get(KEY, None)
             output = deep_move_to_device(output, torch.device("cpu"))
         return [output]
 
@@ -132,8 +132,11 @@ class PreprocessConfig(BaseModel):
     never via an env var."""
 
     dataset: DatasetConfig
+    """A raw source (csv, jsonl, lines, ...); a ``cache`` is already preprocessed."""
     processor: ProcessorConfig
-    output: DatasinkConfig
+    output: CacheOutputConfig
+    """Random cache written by ``RandomCacheWriter``; ``flow-control pack`` can
+    turn it into a packed cache afterwards."""
 
     num_loader_workers: int = 1
     num_sink_workers: int = 1
@@ -152,7 +155,6 @@ class PreprocessConfig(BaseModel):
     only save the processor output fields which is necessary for training/inference. Most RL training pipelines should
     enable this since the reward model need access to the original prompts.
     """
-    enable_coercion: bool = True
     reassign_keys: bool = False
     """
     Whether to reassign keys to numeric indices in the loader stage. This can be useful when the original keys are not
@@ -160,20 +162,15 @@ class PreprocessConfig(BaseModel):
     """
 
 
-def resolve_datasink(tag: str) -> type[DataSink]:
-    sink = datasink_registry.get(tag)
-    if sink is None:
-        raise ValueError(
-            f"Unknown datasink type {tag!r}. "
-            f"Available: {sorted(datasink_registry.members())}"
-        )
-    return sink
-
-
 def run(config_data: dict) -> None:
     """Run preprocessing pipeline with the given config."""
     config = PreprocessConfig(**config_data)
-    datasink_type = config.output.pop("type")
+    if config.dataset.get("type") == "cache":
+        raise ValueError(
+            "preprocess reads raw sources; a {'type': 'cache'} dataset is already "
+            "preprocessed (use `flow-control pack` to repack it)."
+        )
+    output_path = config.output.prepare()
 
     if config.processor_devices == "all":
         num_gpus = devutil.device_count()
@@ -204,7 +201,6 @@ def run(config_data: dict) -> None:
                     "dataset_args": config.dataset,
                     "processor_args": config.processor,
                     "processing_mode": config.processing_mode,
-                    "enable_coercion": config.enable_coercion,
                     "reassign_keys": config.reassign_keys,
                 },
                 plugin_modules=config.imports,
@@ -226,17 +222,30 @@ def run(config_data: dict) -> None:
             ),
         ],
         sink=SinkConfig(
-            sink=resolve_datasink(datasink_type),
+            sink=RandomCacheWriter,
             name="Saving",
             num_workers=config.num_sink_workers,
             queue_size=config.queue_size,
-            init_kwargs=config.output,
+            init_kwargs={"path": output_path, "backend": config.output.backend},
             plugin_modules=config.imports,
         ),
     )
 
     result = pipeline.run()
+    if result.aborted:
+        raise RuntimeError(
+            f"Pipeline aborted ({result.error_message}); the partial cache at "
+            f"{output_path} was not finalized."
+        )
     if result.sink_success == 0:
         raise RuntimeError(
             "Pipeline failed: No items were successfully processed and saved."
         )
+    finalize_cache(
+        output_path,
+        meta={
+            "backend": config.output.backend,
+            "mode": config.processing_mode,
+            "processor": config.processor,
+        },
+    )
