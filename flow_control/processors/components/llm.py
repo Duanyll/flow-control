@@ -97,12 +97,16 @@ class LLMClient(BaseModel):
     def _reset_loop_bound_state_if_needed(self) -> None:
         """Drop session/semaphore/lock when the running event loop changed.
 
-        ``execute_reward`` scores each row in a fresh ``_RewardLoopThread``
-        event loop and closes it afterwards, but this client is long-lived and
-        caches its aiohttp session and asyncio primitives. Those bind to the
-        loop they were created on, so reusing them from a later loop raises
-        "Event loop is closed". Recreate them whenever the running loop differs
-        from the one the cached state belongs to.
+        A trainer scores rollouts and validation on one run-long
+        ``RewardLoopThread``, but ``execute_reward`` without ``loop=``
+        (inference), ``execute_pairwise_reward`` and the ``asyncio.run``
+        fallback each open a short-lived loop and close it, while this client
+        is long-lived and caches its aiohttp session and asyncio primitives.
+        Those bind to the loop they were created on, so reusing them from a
+        later loop raises "Event loop is closed". Recreate them whenever the
+        running loop differs from the one the cached state belongs to; that
+        must never happen while another loop still has this client's requests
+        in flight.
         """
         try:
             loop = asyncio.get_running_loop()

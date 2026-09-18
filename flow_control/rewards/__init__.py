@@ -2,7 +2,7 @@ import asyncio
 import concurrent.futures
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Coroutine, Generator
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
@@ -48,8 +48,13 @@ def parse_reward(conf: dict[str, Any] | list[Any] | str) -> BaseReward:
     return _reward_ta.validate_python(conf)
 
 
-class _RewardLoopThread:
-    """Run async reward requests in a dedicated event loop thread."""
+class RewardLoopThread:
+    """Run async reward requests in a dedicated event loop thread.
+
+    ``execute_reward`` opens one per call unless handed a caller-owned instance;
+    a trainer that keeps reward futures in flight across epochs owns one loop for
+    the whole run and closes it at the end.
+    """
 
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -93,8 +98,9 @@ class RewardProfile:
     Records when each reward request is submitted and when it completes, so we
     can tell whether the reward backend (e.g. a vLLM judge) keeps up with rollout
     production.  Submissions happen on the main thread; completions are recorded
-    by a ``Future`` done-callback on the reward-loop thread.  Each index is
-    written exactly once, so no lock is needed.
+    on the reward-loop thread as each request's coroutine returns, before its
+    result is published to the waiter.  Each index is written exactly once, so
+    no lock is needed.
 
     Only populated on the overlap path; left empty (``count == 0``) otherwise.
     """
@@ -115,6 +121,10 @@ class RewardProfile:
     @property
     def count(self) -> int:
         return len(self._submit_times)
+
+    def timestamps(self) -> dict[str, list[float]]:
+        """Raw ``perf_counter`` submit/done times (done ``0.0`` = still pending)."""
+        return {"submit": list(self._submit_times), "done": list(self._done_times)}
 
     @staticmethod
     def _max_in_flight(submits: list[float], dones: list[float]) -> int:
@@ -205,50 +215,101 @@ def reduce_reward_profiles(payloads: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
+class PendingRewards[TTag]:
+    """Reward requests launched by :func:`submit_reward`, waiting to be handled.
+
+    On the overlap path each entry is a ``Future`` still running on the reward
+    loop; on the blocking path scoring already happened during submission and
+    the future is complete.  Either way :meth:`wait` hands results to the
+    handler in submission order.  The loop stays open: it belongs to the caller.
+    """
+
+    def __init__(
+        self, futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]]
+    ) -> None:
+        self._futures = futures
+
+    def wait[TResult](
+        self, handler: Callable[[TTag, RewardResult], TResult]
+    ) -> list[TResult]:
+        """Block until every result is in; call *handler* in submission order."""
+        return [handler(tag, future.result()) for tag, future in self._futures]
+
+
+async def _record_done(
+    coro: Coroutine[Any, Any, RewardResult], profile: RewardProfile, idx: int
+) -> RewardResult:
+    """Stamp completion on the loop thread before the result reaches the waiter.
+
+    A ``Future`` done-callback would fire *after* ``set_result`` has woken
+    ``future.result()`` on the main thread, so a profile read right after
+    :meth:`PendingRewards.wait` could still miss the last rows.
+    """
+    try:
+        return await coro
+    finally:
+        profile.on_done(idx)
+
+
+def submit_reward[TRow: dict, TTag](
+    reward: BaseReward,
+    submitter: Generator[tuple[TRow, TTag]],
+    loop: RewardLoopThread,
+    profile: RewardProfile | None = None,
+) -> PendingRewards[TTag]:
+    """Drive *submitter* to completion, launching one reward request per row.
+
+    A reward that supports rollout overlap (i.e. remote rewards) has its
+    ``async_score`` submitted to *loop*, so the generator keeps producing rows
+    while earlier rewards are in flight, and *profile* records the
+    submit/complete timestamps.  A local reward is scored blocking as each row
+    is yielded and the profile stays empty.  The returned
+    :class:`PendingRewards` collects the results; the loop is left open.
+    """
+    overlap = reward.supports_rollout_overlap()
+    futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]] = []
+
+    for row, tag in submitter:
+        if overlap:
+            coro = reward.async_score(reward.prepare_row_for_async(row))
+            if profile is not None:
+                coro = _record_done(coro, profile, profile.on_submit())
+            future = loop.submit(coro)
+        else:
+            future = concurrent.futures.Future()
+            future.set_result(_score_blocking(reward, row))
+        futures.append((tag, future))
+
+    return PendingRewards(futures)
+
+
 def execute_reward[TRow: dict, TTag, TResult](
     reward: BaseReward,
     submitter: Generator[tuple[TRow, TTag]],
     handler: Callable[[TTag, RewardResult], TResult],
     profile: RewardProfile | None = None,
+    loop: RewardLoopThread | None = None,
 ) -> list[TResult]:
     """Score rows from *submitter* and pass each reward to *handler*.
 
-    When the reward supports rollout overlap (i.e. remote rewards), scoring is
-    launched asynchronously so that the generator can continue producing rows
-    while earlier rewards are still in flight.  Otherwise scoring is synchronous.
-
-    When *profile* is given and the overlap path is taken, submit/complete
-    timestamps are recorded into it for throughput analysis.
+    A local reward is scored and handled row by row, so a streaming consumer
+    (the inference report) never holds more than one row.  For a reward that
+    supports rollout overlap this is :func:`submit_reward` followed by
+    :meth:`PendingRewards.wait`; when *loop* is None a :class:`RewardLoopThread`
+    is opened for this call and closed afterwards, a caller-provided one is left
+    open.
     """
-    overlap = reward.supports_rollout_overlap()
-    reward_loop = _RewardLoopThread() if overlap else None
+    if not reward.supports_rollout_overlap():
+        return [handler(tag, _score_blocking(reward, row)) for row, tag in submitter]
 
-    pending: list[tuple[TTag, concurrent.futures.Future[RewardResult] | None]] = []
-    results: list[TResult] = []
-
+    owned_loop = None
+    if loop is None:
+        loop = owned_loop = RewardLoopThread()
     try:
-        for row, tag in submitter:
-            if reward_loop is not None:
-                async_row = reward.prepare_row_for_async(row)
-                idx = profile.on_submit() if profile is not None else None
-                future = reward_loop.submit(reward.async_score(async_row))
-                if profile is not None and idx is not None:
-                    future.add_done_callback(lambda _f, i=idx: profile.on_done(i))
-                pending.append((tag, future))
-            else:
-                reward_value = _score_blocking(reward, row)
-                results.append(handler(tag, reward_value))
-
-        # Collect async results in submission order
-        for tag, future in pending:
-            assert future is not None
-            reward_value = future.result()
-            results.append(handler(tag, reward_value))
+        return submit_reward(reward, submitter, loop, profile).wait(handler)
     finally:
-        if reward_loop is not None:
-            reward_loop.close()
-
-    return results
+        if owned_loop is not None:
+            owned_loop.close()
 
 
 def _has_pairwise_child(reward: BaseReward) -> bool:
@@ -288,7 +349,7 @@ def execute_pairwise_reward[TTag, TResult](
     Returns:
         List of handler results.
     """
-    reward_loop = _RewardLoopThread()
+    reward_loop = RewardLoopThread()
     results: list[TResult] = []
 
     try:
@@ -341,7 +402,7 @@ def execute_pairwise_reward[TTag, TResult](
 
 def _score_pairwise_group(
     reward: PairwiseReward,
-    loop: _RewardLoopThread,
+    loop: RewardLoopThread,
     rows: list[dict[str, Any]],
 ) -> list[RewardResult]:
     """Build win matrix for a prompt group and aggregate."""
@@ -367,7 +428,7 @@ def _score_pairwise_group(
 
 def _score_composite_pairwise_group(
     reward: CompositeReward,
-    loop: _RewardLoopThread,
+    loop: RewardLoopThread,
     rows: list[dict[str, Any]],
 ) -> list[RewardResult]:
     """Score a composite reward with mixed pairwise and non-pairwise children."""
@@ -414,10 +475,12 @@ __all__ = [
     "Normalize",
     "OcrReward",
     "PairwiseReward",
+    "PendingRewards",
     "PickScoreReward",
     "RationalRewardsEditReward",
     "RationalRewardsT2IReward",
     "Reward",
+    "RewardLoopThread",
     "RewardProfile",
     "RewardResult",
     "SigmoidNormalize",
@@ -428,6 +491,7 @@ __all__ = [
     "parse_reward",
     "reduce_reward_profiles",
     "reward_registry",
+    "submit_reward",
 ]
 
 
@@ -485,4 +549,91 @@ if __name__ == "__main__":
     assert reduce_reward_profiles([]) == {}
     assert reduce_reward_profiles([{"count": 0, "latencies": []}]) == {}
 
-    print("[green]reward profile self-test passed[/green]")
+    # (c) submit/wait split. A fake reward whose async path finishes rows in
+    # REVERSE submission order (later rows sleep less) must still reach the
+    # handler in submission order, on the overlap path and the blocking one.
+    class _FakeReward(BaseReward):
+        type: str = "fake"
+        overlap: bool = True
+
+        @property
+        def _row_fields(self) -> set[str]:
+            return {"value"}
+
+        def _load_model(self, device: torch.device) -> None:
+            pass
+
+        def _score(self, row: dict[str, Any]) -> torch.Tensor:
+            return torch.tensor([float(row["value"])])
+
+        async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
+            await asyncio.sleep(0.002 * (8 - row["value"] % 8))
+            return self._score(row)
+
+        def supports_rollout_overlap(self) -> bool:
+            return self.overlap
+
+    def rows(start: int, count: int) -> Generator[tuple[dict[str, Any], int]]:
+        for value in range(start, start + count):
+            yield {"value": value, "dropped": torch.zeros(1)}, value
+
+    def handler(tag: int, result: RewardResult) -> int:
+        assert result.raw.item() == float(tag), (tag, result.raw)
+        return tag
+
+    for overlap in (True, False):
+        prof3 = RewardProfile()
+        got = execute_reward(_FakeReward(overlap=overlap), rows(0, 8), handler, prof3)
+        assert got == list(range(8)), (overlap, got)
+        assert prof3.count == (8 if overlap else 0), (overlap, prof3.count)
+        # Every completion is stamped by the time wait() returns.
+        assert prof3.local_payload()["count"] == prof3.count, prof3.timestamps()
+
+    # A local reward streams: each row is handled before the next one is drawn
+    # (the inference report writes rows as they come instead of buffering).
+    order: list[str] = []
+
+    def traced_rows() -> Generator[tuple[dict[str, Any], int]]:
+        for value in range(3):
+            order.append(f"yield{value}")
+            yield {"value": value}, value
+
+    def traced_handler(tag: int, result: RewardResult) -> int:
+        order.append(f"handle{tag}")
+        return tag
+
+    execute_reward(_FakeReward(overlap=False), traced_rows(), traced_handler)
+    assert order == [
+        "yield0",
+        "handle0",
+        "yield1",
+        "handle1",
+        "yield2",
+        "handle2",
+    ], order
+
+    # A persistent loop survives interleaved rounds: submit A, submit B, wait A,
+    # wait B; then execute_reward(loop=...) leaves it open for one more round.
+    loop = RewardLoopThread()
+    prof4 = RewardProfile()
+    try:
+        reward = _FakeReward()
+        pending_a = submit_reward(reward, rows(0, 8), loop, prof4)
+        pending_b = submit_reward(reward, rows(100, 4), loop, prof4)
+        assert prof4.count == 12, prof4.count
+        assert pending_a.wait(handler) == list(range(8))
+        assert pending_b.wait(handler) == list(range(100, 104))
+        assert prof4.local_payload()["count"] == 12, prof4.local_payload()
+        assert execute_reward(reward, rows(200, 3), handler, loop=loop) == [
+            200,
+            201,
+            202,
+        ]
+        assert submit_reward(reward, rows(300, 2), loop).wait(handler) == [300, 301]
+        # A local reward on the persistent loop scores blocking during submit.
+        pending_local = submit_reward(_FakeReward(overlap=False), rows(0, 3), loop)
+        assert pending_local.wait(handler) == [0, 1, 2]
+    finally:
+        loop.close()
+
+    print("[green]reward self-test passed[/green]")
