@@ -397,7 +397,13 @@ class LoggingMixin(BaseModel):
         metrics: dict[str, float] = {}
         for task in progress.tasks:
             slug = re.sub(r"\W+", "_", task.description.strip().lower()).strip("_")
-            elapsed = float(task.elapsed or 0.0)
+            # Rich stores the elapsed time *at completion* in ``finished_time``;
+            # ``elapsed`` keeps counting until the Progress exits, so a task that
+            # finished early would otherwise be charged for every later task.
+            elapsed = task.finished_time
+            if elapsed is None:
+                elapsed = task.elapsed
+            elapsed = float(elapsed or 0.0)
             metrics[f"{prefix}/{slug}_elapsed_s"] = elapsed
             if elapsed > 0:
                 metrics[f"{prefix}/{slug}_items_per_s"] = task.completed / elapsed
