@@ -50,23 +50,39 @@ class ModeTimestepWeighting(BaseTimestepWeighting):
         return u
 
 
+def _timeshift(shift: float, t: torch.Tensor) -> torch.Tensor:
+    """Apply timeshift: s(α, t) = αt / (1 + (α-1)t)."""
+    return shift * t / (1.0 + (shift - 1.0) * t)
+
+
 @timestep_weighting_registry.register("power_law")
 class PowerLawTimestepWeighting(BaseTimestepWeighting):
-    """Power-law density ``p(t) ∝ t^alpha`` on ``[0, 1]`` (RAM's timestep sampler).
+    """RAM's timestep sampler: a power law on the *unshifted* grid, then the
+    sampler's timeshift.
 
-    Inverse-CDF sampling: ``F(t) = t^(alpha+1)`` → ``t = u^(1/(alpha+1))``. With
-    ``alpha=1`` the density is ``∝ t`` (linearly increasing), placing more mass on
-    the noise end (``t→1``). This matches the reference RAM implementation, which
-    draws grid indices with weight ``t_grid^alpha`` (``AndreasBergmeister/ram``,
-    ``scripts/training_sd3.py::sample_timesteps``).
+    The reference (``AndreasBergmeister/ram``,
+    ``scripts/training_sd3.py::sample_timesteps``) draws a rank ``i`` of the
+    1000-point scheduler grid with weight ``(1 - i/1000)^alpha`` and trains at
+    the scheduler's timestep at that rank, which for SD3.5 is the *shifted*
+    sigma ``3σ / (1 + 2σ)``. On that grid the rank weight is exactly the
+    unshifted ``σ_i^alpha``, so the continuous limit is ``σ ~ p(σ) ∝ σ^alpha``
+    on ``[0, 1]`` (inverse CDF ``σ = u^(1/(alpha+1))``) followed by
+    ``t = shift·σ / (1 + (shift-1)·σ)``. ``shift`` must therefore repeat the
+    rollout sampler's constant shift factor (SD3.5: ``3.0``; a
+    resolution-dependent shift is its factor at the training resolution and
+    rollout step count). ``shift = 1.0`` keeps the bare power law on ``t``,
+    which puts far less mass at the noise end than the reference on a shifted
+    model (``p(t > 0.7)`` ≈ 0.51 vs ≈ 0.81 at shift 3).
     """
 
     type: Literal["power_law"] = "power_law"
     alpha: float = 1.0
+    shift: float = 1.0
+    """Timeshift factor applied after the power-law draw; ``1.0`` = none."""
 
     def sample_timesteps(self, batch_size: int) -> torch.Tensor:
         u = torch.rand(batch_size)
-        return u ** (1.0 / (self.alpha + 1.0))
+        return _timeshift(self.shift, u ** (1.0 / (self.alpha + 1.0)))
 
 
 # -------------------- Flux2 blog training distributions ---------------------- #
@@ -75,11 +91,6 @@ class PowerLawTimestepWeighting(BaseTimestepWeighting):
 # These distributions use the timeshift function s(α, t) = αt / (1 + (α-1)t)
 # to bias timestep sampling towards higher noise levels (t→1), which is
 # beneficial for higher-dimensional latent spaces.
-
-
-def _timeshift(shift: float, t: torch.Tensor) -> torch.Tensor:
-    """Apply timeshift: s(α, t) = αt / (1 + (α-1)t)."""
-    return shift * t / (1.0 + (shift - 1.0) * t)
 
 
 @timestep_weighting_registry.register("shifted_uniform")
@@ -256,6 +267,7 @@ if __name__ == "__main__":
         {"type": "plateau_logit_normal", "shift": 1.0},
         {"type": "power_law", "alpha": 1.0},
         {"type": "power_law", "alpha": 2.0},
+        {"type": "power_law", "alpha": 1.0, "shift": 3.0},
     ]
 
     from pydantic import TypeAdapter
@@ -271,3 +283,21 @@ if __name__ == "__main__":
             f"min={samples.min():.4f}  max={samples.max():.4f}  "
             f"in [0,1]: {(samples >= 0).all() and (samples <= 1).all()}"
         )
+
+    # Power law, alpha = 1: P(t > 0.7) is 1 - 0.7^2 = 0.51 unshifted; with the
+    # SD3.5 shift 3 the same event is sigma > 0.4375, i.e. 1 - 0.4375^2 = 0.809
+    # (the reference sampler's noise-end mass).
+    torch.manual_seed(0)
+    plain = PowerLawTimestepWeighting(alpha=1.0).sample_timesteps(N)
+    shifted = PowerLawTimestepWeighting(alpha=1.0, shift=3.0).sample_timesteps(N)
+    assert abs((plain > 0.7).float().mean().item() - 0.51) < 0.01
+    assert abs((shifted > 0.7).float().mean().item() - 0.809) < 0.01
+    # Rank-weighted draw on the shifted 1000-point grid (the reference), for
+    # comparison: same mass at the noise end.
+    grid = torch.linspace(1.0, 1e-3, 1000)
+    grid = _timeshift(3.0, grid)
+    weights = 1.0 - torch.arange(1000, dtype=torch.float32) / 1000
+    ranks = torch.multinomial(weights / weights.sum(), N, replacement=True)
+    reference = grid[ranks]
+    assert abs((reference > 0.7).float().mean().item() - 0.809) < 0.01
+    assert abs(reference.mean().item() - shifted.mean().item()) < 0.01

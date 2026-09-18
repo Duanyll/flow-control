@@ -26,7 +26,10 @@
   "train_timesteps": {
     "type": "continuous",
     "count": 8,
-    "weighting": { "type": "power_law", "alpha": 1.0 },
+    // RAM draws grid ranks with weight (1 - i/n)^alpha but trains at the scheduler's
+    // shifted sigma at that rank: shift = the linear FLUX.1 shift at 512x512
+    // (1024 tokens, mu = 0.63, e^mu = 1.8776) applied after the draw.
+    "weighting": { "type": "power_law", "alpha": 1.0, "shift": 1.8776 },
   },
 
   "objective": {

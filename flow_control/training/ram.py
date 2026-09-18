@@ -3,9 +3,11 @@
 :class:`RamObjective` is the math, :class:`RamTrainer` the
 :class:`~flow_control.training.endpoint.EndpointTrainer` preset. Rollouts are
 sampled by the lagged EMA policy, which also supplies ``v_old``; training
-timesteps are continuous power-law draws (``p(t) ∝ t``), ``K = 8`` per endpoint
-(reference ``num_loss_targets_per_sample``). Reference RAM does not clip
-gradients.
+timesteps are continuous power-law draws, ``K = 8`` per endpoint (reference
+``num_loss_targets_per_sample``). The reference draws them on the scheduler's
+*shifted* grid, so a faithful config sets ``train_timesteps.weighting.shift``
+to the rollout sampler's shift factor (SD3.5: ``3.0``); the preset default
+keeps ``shift = 1.0``. Reference RAM does not clip gradients.
 """
 
 from typing import Literal

@@ -26,7 +26,10 @@
   "train_timesteps": {
     "type": "continuous",
     "count": 8,
-    "weighting": { "type": "power_law", "alpha": 1.0 },
+    // RAM draws grid ranks with weight (1 - i/n)^alpha but trains at the scheduler's
+    // shifted sigma at that rank, so the power law lives on the unshifted grid and
+    // the rollout sampler's constant shift (3.0) is applied after the draw.
+    "weighting": { "type": "power_law", "alpha": 1.0, "shift": 3.0 },
   },
 
   "objective": {
