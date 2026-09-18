@@ -91,6 +91,10 @@ class SquaredShift(BaseShift):
 
 @shift_registry.register("flux2")
 class Flux2Shift(BaseShift):
+    """FLUX.2's empirical ``mu`` (diffusers ``compute_empirical_mu``), applied
+    through the scheduler's ``exponential`` time shift
+    ``e^mu / (e^mu + 1/σ - 1)``, i.e. a shift factor of ``e^mu``."""
+
     type: Literal["flux2"] = "flux2"
     a1: float = 8.73809524e-05
     b1: float = 1.89833333
@@ -101,6 +105,9 @@ class Flux2Shift(BaseShift):
     d: float = 200.0
 
     def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+        return math.exp(self._empirical_mu(seq_len, num_steps))
+
+    def _empirical_mu(self, seq_len: int, num_steps: int) -> float:
         if seq_len > self.image_seq_len_threshold:
             return self.a2 * seq_len + self.b2
 
@@ -116,3 +123,41 @@ Shift = Annotated[
     # A bare number is a constant shift factor: ``"shift": 3.0``.
     RegistryUnion(shift_registry, "type", number_as=("constant", "shift_value")),
 ]
+
+
+if __name__ == "__main__":
+    from rich import print
+
+    # Golden grids from diffusers' FlowMatchEulerDiscreteScheduler with
+    # ``time_shift_type="exponential"`` and ``mu = compute_empirical_mu(...)``
+    # (the FLUX.2 Klein scheduler config), sigmas = linspace(1, 1/steps, steps).
+    golden = {
+        (1024, 20): (6.796091, [1.0, 0.992315, 0.983914, 0.974691], 0.263454),
+        (1024, 28): (6.418449, [1.0, 0.994263, 0.988157, 0.981647], 0.192063),
+        (4096, 50): (7.563629, [1.0, 0.997309, 0.994521, 0.991632], 0.133719),
+    }
+    shift = Flux2Shift()
+    for (seq_len, steps), (factor, head, last) in golden.items():
+        assert abs(shift._calculate_shift_factor(seq_len, steps) - factor) < 1e-5
+        sigmas = torch.linspace(1.0, 1.0 / steps, steps, dtype=torch.float64)
+        row = cast(
+            Batch,
+            {
+                "image_size": (16 * int(seq_len**0.5), 16 * int(seq_len**0.5)),
+                "noisy_latents": torch.zeros(1, seq_len, 1),
+            },
+        )
+        shifted = shift.apply(sigmas, row, steps)
+        assert torch.allclose(
+            shifted[:4], torch.tensor(head, dtype=torch.float64), atol=2e-6
+        ), (seq_len, steps, shifted[:4])
+        assert abs(shifted[-1].item() - last) < 2e-6, (seq_len, steps, shifted[-1])
+        print(f"flux2 shift seq_len={seq_len} steps={steps}: factor={factor:.4f} ok")
+
+    # Bare-number shorthand parses to a constant shift.
+    from pydantic import TypeAdapter
+
+    constant = TypeAdapter(Shift).validate_python(3.0)
+    assert isinstance(constant, ConstantShift)
+    assert constant._calculate_shift_factor(1024, 20) == 3.0
+    print("[green]shift checks passed[/green]")
