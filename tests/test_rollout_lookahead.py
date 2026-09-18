@@ -292,11 +292,27 @@ class RolloutLookaheadTest(unittest.TestCase):
             self.assertEqual(state["cursor"], in_flight.cursor_state_before)
             self.assertNotEqual(state["cursor"], trainer._cursor.state_dict())
             self.assertEqual(state["current_epoch"], 2)
+            # DCP's get_optimizer_state_dict keeps only state / param_groups and
+            # bypasses EMAOptimizer.state_dict(), so the step counter restarted
+            # at 0 on every resume and a linear_ramp warmup fell back to decay 0
+            # (old policy == current policy again). Stepped once per epoch here.
+            self.assertEqual(state["ema_old_step_count"], 2)
 
             resumed = _make_trainer(
                 _ScheduleProbe, config, _RowStore(8), _GainModel(), _KeyReward()
             )
             resumed.load_state_dict(state)
+            self.assertEqual(resumed._old_ema.ema_step_count, 2)
+            # Checkpoints written before the counter was saved resume it from
+            # the epoch count, which is exact for the per-epoch old EMA.
+            legacy = _make_trainer(
+                _ScheduleProbe, config, _RowStore(8), _GainModel(), _KeyReward()
+            )
+            legacy.load_state_dict(
+                {k: v for k, v in state.items() if k != "ema_old_step_count"}
+            )
+            self.assertEqual(legacy._old_ema.ema_step_count, 2)
+            legacy.close_reward_loop()
             resumed._prime_rollouts()
             self._run_to_end(trainer)
             self._run_to_end(resumed)

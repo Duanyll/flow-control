@@ -159,6 +159,9 @@ class SftTrainer(
             state["optim_ema"] = get_optimizer_state_dict(
                 self.transformer, self._ema_optimizer, options=opts
             )
+            # DCP keeps only ``state`` / ``param_groups``; the warmup schedule
+            # needs the step counter too.
+            state["ema_step_count"] = self._ema_optimizer.ema_step_count
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]):
@@ -178,6 +181,11 @@ class SftTrainer(
                 options=opts,
             )
             self._ema_optimizer.coerce_buffer_dtype()
+            # Stepped once per optimizer step, so older checkpoints without the
+            # counter resume it from the step count.
+            self._ema_optimizer.ema_step_count = state_dict.get(
+                "ema_step_count", state_dict["current_step"]
+            )
         self._dataloader.load_state_dict(state_dict["dataloader"])
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]

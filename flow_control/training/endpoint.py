@@ -237,7 +237,10 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
         return {
             "optim_ema_old": get_optimizer_state_dict(
                 self.transformer, self._old_ema, options=opts
-            )
+            ),
+            # DCP keeps only ``state`` / ``param_groups``; the warmup ramp needs
+            # the step counter too.
+            "ema_old_step_count": self._old_ema.ema_step_count,
         }
 
     def _load_aux_state_dict(
@@ -251,6 +254,11 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
                 options=opts,
             )
             self._old_ema.coerce_buffer_dtype()
+            # Stepped once per outer epoch, so older checkpoints without the
+            # counter resume it from the epoch count.
+            self._old_ema.ema_step_count = state_dict.get(
+                "ema_old_step_count", state_dict.get("current_epoch", 0)
+            )
 
     def _rollout_scope(self) -> AbstractContextManager[None]:
         if self.objective.rollout_policy() == "old":
