@@ -8,7 +8,9 @@ stripes their ``num_rollouts_per_prompt`` rollouts across the ranks.
 """
 
 import copy
-from collections.abc import Generator, Iterator
+import json
+import time
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from itertools import groupby
 from operator import itemgetter
@@ -29,12 +31,14 @@ from flow_control.data import (
     expand_rollouts,
 )
 from flow_control.rewards import (
+    PendingRewards,
     Reward,
+    RewardLoopThread,
     RewardProfile,
     _has_pairwise_child,
     execute_pairwise_reward,
-    execute_reward,
     reduce_reward_profiles,
+    submit_reward,
 )
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
@@ -66,6 +70,38 @@ class Rollout:
     row: Batch
     negative_row: Batch | None
     recorded_steps: list[RecordedStep] | None = None
+
+
+@dataclass
+class PendingRollouts:
+    """One epoch's rollouts whose rewards may still be in flight."""
+
+    epoch: int
+    """The batch's own epoch number: seeds its prompts and rollout noise."""
+    policy_version: int
+    """``_current_epoch`` when sampled; ``rollout/policy_lag`` is the gap to the
+    epoch that trains on it (0 without ``rollout_lookahead``)."""
+    rollouts: list[Rollout]
+    rewards: PendingRewards[int]
+    """Reward futures tagged by index into ``rollouts``."""
+    profile: RewardProfile
+    cursor_state_before: dict[str, int]
+    """``RowCursor`` state before this batch took its prompts; the checkpoint
+    saves the oldest in-flight batch's so a resume re-takes the same prompts."""
+    train_plan: list[list[Any]] | None = None
+    """Prebuilt train plan (teacher outputs cached at sampling time), if any."""
+
+
+def _reward_writer(rollouts: list[Rollout]) -> Callable[[int, RewardResult], None]:
+    def write(idx: int, result: RewardResult) -> None:
+        # Result is [1, C] for the single rollout sample.
+        rollout = rollouts[idx]
+        rollout.reward = result.normalized.squeeze(0).detach().cpu()
+        rollout.raw_reward = result.raw.squeeze(0).detach().cpu()
+        rollout.reward_weights = result.weights.detach().cpu()
+        rollout.reward_labels = result.labels
+
+    return write
 
 
 class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
@@ -101,6 +137,12 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     tensors on the current training device to avoid host-device transfers.
     """
     advantage: Advantage = PerPromptAdvantage()
+    profile_dump: bool = False
+    """
+    Also write every finished batch's raw reward submit/done timestamps as one
+    JSON per (epoch, rank) under ``<run_dir>/reward_profiles`` for offline
+    in-flight plots; ``profile/reward/*`` only logs the reduced summary.
+    """
 
     model: ModelAdapter
     reward: Reward
@@ -109,6 +151,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     """Whether rollouts keep GRPO's stochastic-step records for replay."""
 
     _cursor: RowCursor
+    _reward_loop: RewardLoopThread | None = None
 
     # -------------------------------- Properties -------------------------------- #
 
@@ -131,6 +174,32 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                 "the same number of rollouts."
             )
         return total // self.world_size
+
+    @property
+    def rollout_storage(self) -> torch.device:
+        """Where a batch's rollouts, and anything cached alongside them, live
+        between sampling and training (``rollout_storage_device``)."""
+        if self.rollout_storage_device == "device":
+            return self.device
+        return torch.device("cpu")
+
+    @property
+    def reward_loop(self) -> RewardLoopThread:
+        """The run-long reward event loop, opened on first use.
+
+        Every reward request of the run (rollouts and validation) goes through
+        this one loop: a remote reward client drops its connection pool whenever
+        the loop changes, which would cut off requests still in flight for a
+        batch sampled ahead. :meth:`close_reward_loop` ends it.
+        """
+        if self._reward_loop is None:
+            self._reward_loop = RewardLoopThread()
+        return self._reward_loop
+
+    def close_reward_loop(self) -> None:
+        if self._reward_loop is not None:
+            self._reward_loop.close()
+            self._reward_loop = None
 
     # ----------------------------- Rollout phase ----------------------------- #
 
@@ -172,21 +241,26 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
     def _collect_rollouts(self, epoch: int) -> list[Rollout]:
         """Rollout phase: sample, decode, then score rewards as each sample finishes."""
+        return self._finish_rollouts(self._start_rollouts(epoch))
+
+    def _start_rollouts(self, epoch: int) -> PendingRollouts:
+        """Sample and decode batch *epoch*, submit its rewards and return without
+        waiting for them; ``Rollout.reward`` holds a placeholder until
+        :meth:`_finish_rollouts`. Pairwise rewards are scored blocking here."""
         rollouts: list[Rollout] = []
         model = self.model
         processor = self.processor
         sampler = self.rollout_sampler
         collector = GrpoCollector(sampler) if self._ROLLOUT_RECORD_STEPS else None
         device = self.device
-        rollout_storage = (
-            device if self.rollout_storage_device == "device" else torch.device("cpu")
-        )
+        rollout_storage = self.rollout_storage
         store = self._store
         assert store is not None, "make_rollout_cursor() runs before the first epoch"
 
         model.transformer.eval()
 
         # Same seed and cursor state everywhere -> every rank draws the same ids.
+        cursor_state_before = self._cursor.state_dict()
         prompt_ids = self._cursor.take(self.num_prompts_per_epoch, epoch=epoch)
         mine = expand_rollouts(
             prompt_ids,
@@ -261,35 +335,73 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                     progress.advance(rollout_task)
                     yield row, len(rollouts) - 1
 
-        def reward_handler(idx: int, result: RewardResult) -> None:
-            # Result is [1, C] for the single rollout sample.
-            rollouts[idx].reward = result.normalized.squeeze(0).detach().cpu()
-            rollouts[idx].raw_reward = result.raw.squeeze(0).detach().cpu()
-            rollouts[idx].reward_weights = result.weights.detach().cpu()
-            rollouts[idx].reward_labels = result.labels
-
         reward_profile = RewardProfile()
+        pending_rewards: PendingRewards[int] = PendingRewards([])
         if _has_pairwise_child(self.reward):
             execute_pairwise_reward(
                 self.reward,
                 rollout_submitter(),
-                reward_handler,
+                _reward_writer(rollouts),
                 num_rollouts_per_prompt=self.num_rollouts_per_prompt,
             )
         else:
-            execute_reward(
-                self.reward, rollout_submitter(), reward_handler, profile=reward_profile
+            pending_rewards = submit_reward(
+                self.reward,
+                rollout_submitter(),
+                profile=reward_profile,
+                loop=self.reward_loop,
             )
 
-        # Drain the (now-finished) Rollout progress bar -> GPU production timing,
-        # plus the async reward profile (the part the progress bar cannot see).
+        # Drain the (now-finished) Rollout progress bar -> GPU production timing.
         step = getattr(self, "_current_step", 0)
         self.log_progress_timing(progress, step, prefix="profile/rollout")
-        self.log_reduced_metrics(
-            reward_profile.local_payload(), reduce_reward_profiles, step
+
+        return PendingRollouts(
+            epoch=epoch,
+            policy_version=getattr(self, "_current_epoch", epoch),
+            rollouts=rollouts,
+            rewards=pending_rewards,
+            profile=reward_profile,
+            cursor_state_before=cursor_state_before,
         )
 
-        return rollouts
+    def _finish_rollouts(self, pending: PendingRollouts) -> list[Rollout]:
+        """Wait for the batch's rewards, write them into its rollouts and log the
+        reward profile (the part the progress bar cannot see) plus how long the
+        wait actually blocked and how many epochs the batch's policy is behind.
+        All of it lands on the training epoch's step; the same batch's
+        ``profile/rollout/*`` went out at the step it was sampled."""
+        started = time.perf_counter()
+        pending.rewards.wait(_reward_writer(pending.rollouts))
+        wait_s = time.perf_counter() - started
+
+        step = getattr(self, "_current_step", 0)
+        self.log_reduced_metrics(
+            pending.profile.local_payload(), reduce_reward_profiles, step
+        )
+        current_epoch: int = getattr(self, "_current_epoch", pending.epoch)
+        self.log_metrics(
+            {
+                "rollout/policy_lag": current_epoch - pending.policy_version,
+                "profile/reward/wait_at_train_s": wait_s,
+            },
+            step=step,
+        )
+        if self.profile_dump:
+            out_dir = self.run_dir / "reward_profiles"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"epoch{pending.epoch:05d}_rank{self.rank}.json").write_text(
+                json.dumps(
+                    {
+                        "epoch": pending.epoch,
+                        "policy_version": pending.policy_version,
+                        "step": step,
+                        "wait_at_train_s": wait_s,
+                        **pending.profile.timestamps(),
+                    }
+                )
+            )
+        return pending.rollouts
 
     # ----------------------------- Advantages -------------------------------- #
 

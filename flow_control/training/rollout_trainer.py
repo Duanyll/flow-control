@@ -13,12 +13,13 @@ rollout endpoints.
 
 import os
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import Any
+from typing import Any, Self
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, NonNegativeInt, PrivateAttr, model_validator
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -29,7 +30,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from flow_control.adapters import ModelAdapter
-from flow_control.rewards import Reward
+from flow_control.rewards import Reward, _has_pairwise_child
 from flow_control.samplers import Sampler
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
@@ -50,6 +51,7 @@ from .ema import (
 from .mixins import (
     CheckpointingMixin,
     MicrobatchTrainMixin,
+    PendingRollouts,
     Rollout,
     RolloutMixin,
     TrainingPredictionMixin,
@@ -87,6 +89,14 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     num_inner_epochs: int = 1
     """Passes over each epoch's rollouts. Whether a pass draws fresh train
     items or reorders the same ones is up to :meth:`_build_train_plan`."""
+    rollout_lookahead: NonNegativeInt = 0
+    """Batches sampled ahead of training (``N``). ``0`` is the synchronous loop:
+    sample, wait for rewards, train. With ``N > 0`` epoch ``k`` samples batch
+    ``k + N`` before waiting for batch ``k``'s rewards, so the reward backend
+    scores one batch while the accelerator produces the next; the price is that
+    every batch trains under a policy ``N`` epochs newer than the one that
+    sampled it (``rollout/policy_lag``). Which teacher an off-policy batch gets
+    is the subclass's business."""
 
     ema: EMAConfig | None = None
     """Validation EMA config (stepped per gradient step)."""
@@ -120,6 +130,18 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     _init_backup_optimizer: InitBackupOptimizer | None = None
     _current_step: int = 0
     _current_epoch: int = 0
+    _pending_rollouts: deque[PendingRollouts] = PrivateAttr(default_factory=deque)
+    """Batches sampled but not yet trained on, oldest first."""
+
+    @model_validator(mode="after")
+    def check_rollout_lookahead(self) -> Self:
+        if self.rollout_lookahead > 0 and _has_pairwise_child(self.reward):
+            raise ValueError(
+                "rollout_lookahead > 0 keeps a batch's rewards in flight while the "
+                "next batch samples, but a pairwise reward is scored blocking per "
+                "prompt group; set rollout_lookahead=0 or use a non-pairwise reward."
+            )
+        return self
 
     # ------------------------------- Properties --------------------------------- #
 
@@ -169,6 +191,10 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         """Weights the rollout sampler runs under; default: the current policy."""
         return nullcontext()
 
+    def _on_rollouts_started(self, pending: PendingRollouts) -> None:
+        """Runs right after a batch is sampled, still under :meth:`_rollout_scope`
+        (e.g. cache teacher outputs under the weights that sampled it)."""
+
     def _check_rollouts(self, rollouts: list[Rollout]) -> None:
         """Fail fast on rollouts the trainer cannot train on."""
 
@@ -176,6 +202,12 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         """Runs once per outer epoch after the update loop (e.g. EMA steps)."""
 
     # ------------------------------- Setup methods ------------------------------ #
+
+    def cleanup(self) -> None:
+        # Runs on every exit of run(), an exception included: batches sampled
+        # ahead keep issuing reward requests until their loop is stopped.
+        self.close_reward_loop()
+        super().cleanup()
 
     def make_optimizer_and_scheduler(self):
         params = [p for p in self.transformer.parameters() if p.requires_grad]
@@ -214,7 +246,13 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
             "optimizer": get_optimizer_state_dict(
                 self.transformer, self._optimizer, options=opts
             ),
-            "cursor": self._cursor.state_dict(),
+            # In-flight batches are dropped on resume and sampled again, so the
+            # cursor must rewind to before the oldest of them took its prompts.
+            "cursor": (
+                self._pending_rollouts[0].cursor_state_before
+                if self._pending_rollouts
+                else self._cursor.state_dict()
+            ),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
             "current_epoch": self._current_epoch,
@@ -322,14 +360,20 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         self,
         rollouts: list[Rollout],
         advantages: torch.Tensor,
+        train_plan: list[list[ItemT]] | None = None,
     ):
-        """Training phase: update model using collected rollouts and advantages."""
+        """Training phase: update model using collected rollouts and advantages.
+
+        A prebuilt *train_plan* (its caches filled when the batch was sampled)
+        is trained on as is; otherwise the plan is built and precomputed here.
+        """
         self.transformer.train()
 
-        train_plan = self._build_train_plan(rollouts)
+        if train_plan is None:
+            train_plan = self._build_train_plan(rollouts)
+            if self.precompute_aux_model_outputs:
+                self._precompute(rollouts, train_plan, advantages)
         total_items = sum(len(items) for items in train_plan)
-        if self.precompute_aux_model_outputs:
-            self._precompute(rollouts, train_plan, advantages)
 
         progress = Progress(
             *self.get_progress_columns(),
@@ -365,9 +409,47 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
                 metric_prefix="val/non_ema",
                 image_name="validation_non_ema",
                 profile_prefix="profile/validation_non_ema",
+                reward_loop=self.reward_loop,
             )
         with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self._current_step, reward=self.reward)
+            self.validate_and_log(
+                self.model,
+                self._current_step,
+                reward=self.reward,
+                reward_loop=self.reward_loop,
+            )
+
+    def _launch_rollouts(self, epoch: int) -> None:
+        """Sample batch *epoch* under the rollout policy and queue it behind the
+        batches already in flight."""
+        with self._rollout_scope():
+            pending = self._start_rollouts(epoch)
+            self._on_rollouts_started(pending)
+        self._pending_rollouts.append(pending)
+
+    def _prime_rollouts(self) -> None:
+        """Sample the first ``rollout_lookahead`` batches under the current
+        weights. A resume starts here too, re-sampling whatever was in flight."""
+        first, ahead = self._current_epoch, self.rollout_lookahead
+        for epoch in range(first, min(first + ahead, self.train_epochs)):
+            self._launch_rollouts(epoch)
+
+    def _run_epoch(self) -> None:
+        """One outer epoch: top up the lookahead, then wait for the oldest
+        batch's rewards and train on it."""
+        logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
+        if self._current_epoch + self.rollout_lookahead < self.train_epochs:
+            self._launch_rollouts(self._current_epoch + self.rollout_lookahead)
+        pending = self._pending_rollouts.popleft()
+        rollouts = self._finish_rollouts(pending)
+        self._check_rollouts(rollouts)
+        advantages = self._compute_advantages(rollouts, step=self._current_step)
+
+        logger.debug(f"Epoch {self._current_epoch}: starting training phase...")
+        self._train_on_rollouts(rollouts, advantages, train_plan=pending.train_plan)
+        self._after_train_epoch()
+
+        self._current_epoch += 1
 
     @distributed_main
     def run(self):
@@ -418,21 +500,11 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         )
 
         with self.status_bar(f"{name} Training"), progress:
+            self._prime_rollouts()
             while self._current_epoch < self.train_epochs:
-                logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
-                with self._rollout_scope():
-                    rollouts = self._collect_rollouts(self._current_epoch)
-                self._check_rollouts(rollouts)
-                advantages = self._compute_advantages(rollouts, step=self._current_step)
-
-                logger.debug(f"Epoch {self._current_epoch}: starting training phase...")
-                self._train_on_rollouts(rollouts, advantages)
-                self._after_train_epoch()
-
-                self._current_epoch += 1
+                # The epoch's rollouts and advantages are released on return.
+                self._run_epoch()
                 progress.update(task, completed=self._current_epoch)
-
-                del rollouts, advantages
                 devutil.empty_cache()
 
                 self.save_maybe(

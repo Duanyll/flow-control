@@ -24,7 +24,7 @@ from flow_control.data import (
     build_loader,
     is_padding,
 )
-from flow_control.rewards import Reward, execute_reward
+from flow_control.rewards import Reward, RewardLoopThread, execute_reward
 from flow_control.rewards.base import BaseReward, RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import console, get_logger
@@ -159,6 +159,7 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         metric_prefix: str = "val",
         image_name: str = "validation",
         profile_prefix: str = "profile/validation",
+        reward_loop: RewardLoopThread | None = None,
     ) -> None:
         """Run validation: sample images and optionally compute reward scores.
 
@@ -166,6 +167,8 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             model: The model adapter (with transformer) to sample from.
             step: Current training step, used for logging.
             reward: If provided, score each sample and log mean reward.
+            reward_loop: Caller-owned reward loop to score on (left open); by
+                default ``execute_reward`` opens and closes its own.
 
         Padding rows are sampled like every other row (the ranks' collectives
         stay balanced) but are neither logged nor scored.
@@ -238,6 +241,7 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                 metric_reward,
                 sample_submitter(),
                 lambda _tag, r: r,
+                loop=reward_loop,
             )
             self.log_metrics(
                 self._reward_metrics(reward_values, metric_prefix), step=step

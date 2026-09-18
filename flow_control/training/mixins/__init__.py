@@ -13,7 +13,7 @@ from .epochs import EpochLoopMixin
 from .logging import LoggingMixin
 from .microbatch import MicrobatchTrainMixin, MicroUpdate
 from .prediction import TrainingPredictionMixin
-from .rollout import Rollout, RolloutMixin
+from .rollout import PendingRollouts, Rollout, RolloutMixin
 from .validation import ValidationMixin
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "LoggingMixin",
     "MicrobatchTrainMixin",
     "MicroUpdate",
+    "PendingRollouts",
     "Rollout",
     "RolloutMixin",
     "ValidationMixin",

@@ -30,13 +30,13 @@ transition and goes through ``train_predictor.velocity`` directly.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_optimizer_state_dict,
@@ -51,7 +51,7 @@ from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.tensor import deep_move_to_device
 
 from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
-from .mixins import Rollout
+from .mixins import PendingRollouts, Rollout
 from .rollout_trainer import RolloutTrainerBase
 from .train_timesteps import TrainTimesteps
 
@@ -193,8 +193,33 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
     ema_old: EMAConfig
     """Old / lagged policy EMA (stepped once per outer epoch). Required, like
     ``objective`` and ``train_timesteps``: every preset chooses its own."""
+    lookahead_teacher: Literal["latest", "behavior"] = "latest"
+    """Which teacher a batch sampled ahead (``rollout_lookahead > 0``) trains
+    against. ``latest``: the old EMA as it stands at train time, one lookahead
+    step ahead of the policy that sampled the batch. ``behavior``: the old /
+    reference velocities are precomputed when the batch is sampled, so the
+    teacher equals the behaviour policy by construction; this is the
+    ``precompute_aux_model_outputs`` path run early, and both batches' caches
+    live on ``rollout_storage_device`` meanwhile. Only meaningful with
+    ``rollout_lookahead > 0``. A resume re-primes the batch that was in flight
+    and redraws its plan and noise from the checkpoint's RNG state, so a
+    ``behavior`` run resumed mid-lookahead is not bitwise identical to an
+    uninterrupted one (``latest`` draws them at train time and is)."""
 
     _old_ema: EMAOptimizer
+
+    @model_validator(mode="after")
+    def check_lookahead_teacher(self) -> Self:
+        if (
+            self.lookahead_teacher == "behavior"
+            and not self.precompute_aux_model_outputs
+        ):
+            raise ValueError(
+                "lookahead_teacher='behavior' caches the old / reference velocities "
+                "when a batch is sampled, which is the precompute path; set "
+                "precompute_aux_model_outputs=true or use lookahead_teacher='latest'."
+            )
+        return self
 
     # --------------------------------- Hooks ------------------------------------ #
 
@@ -231,6 +256,30 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
         if self.objective.rollout_policy() == "old":
             return apply_ema_maybe(self._old_ema)
         return nullcontext()
+
+    def _on_rollouts_started(self, pending: PendingRollouts) -> None:
+        """``lookahead_teacher="behavior"``: build the batch's train plan and
+        cache its teacher velocities now, under the weights that sampled it."""
+        if self.lookahead_teacher != "behavior" or self.rollout_lookahead == 0:
+            return
+
+        def behavior_scope(role: PolicyRole) -> AbstractContextManager[None]:
+            # _rollout_scope() has already applied the old EMA when the old
+            # policy samples; apply_ema_maybe is not re-entrant (apply_shadow
+            # would back up the shadow itself), so run "old" as the weights are.
+            if role == "old" and self.objective.rollout_policy() == "old":
+                return nullcontext()
+            return self._policy_scope(role)
+
+        train_plan = self._build_train_plan(pending.rollouts)
+        self._fill_caches(
+            pending.rollouts,
+            train_plan,
+            torch.zeros(len(pending.rollouts)),
+            scope=behavior_scope,
+            storage=self.rollout_storage,
+        )
+        pending.train_plan = train_plan
 
     def _after_train_epoch(self) -> None:
         self._old_ema.step()
@@ -390,6 +439,26 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
         train_plan: list[list[EndpointTrainItem]],
         advantages: torch.Tensor,
     ) -> None:
+        self._fill_caches(
+            rollouts,
+            train_plan,
+            advantages,
+            scope=self._policy_scope,
+            storage=self.device,
+        )
+
+    def _fill_caches(
+        self,
+        rollouts: list[Rollout],
+        train_plan: list[list[EndpointTrainItem]],
+        advantages: torch.Tensor,
+        scope: Callable[[PolicyRole], AbstractContextManager[None]],
+        storage: torch.device,
+    ) -> None:
+        """Draw every item's noise once and cache the required auxiliary
+        velocities at the resulting ``x_t``. *scope* gives the weights each role
+        runs under; the cached tensors are kept on *storage* (``_make_point`` /
+        ``_loss_batched`` move them back to the device)."""
         flat_items = [item for items in train_plan for item in items]
         if len(flat_items) == 0:
             return
@@ -403,14 +472,14 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
                     rollouts[item.rollout_idx].row["clean_latents"],
                     device=self.device,
                     dtype=torch.float32,
-                )
+                ).to(storage)
                 progress.advance(prepare_task)
             for role in self._required_roles():
                 task = progress.add_task(f"Precompute {role}", total=len(flat_items))
-                with self._policy_scope(role):
+                with scope(role):
                     for micro_items in self.iter_train_micro_batches(flat_items):
                         prepared = self._prepare(micro_items, rollouts, advantages)
                         velocities = self._predict(prepared)
                         for item, velocity in zip(micro_items, velocities, strict=True):
-                            item.cache[role] = velocity.detach()
+                            item.cache[role] = velocity.detach().to(storage)
                         progress.advance(task, advance=len(micro_items))

@@ -11,6 +11,7 @@ from test_microbatching import FakeSamplerModel, make_sampler_batch
 
 from flow_control.contrib.momentum_guidance import MomentumGuidance
 from flow_control.processors import parse_processor
+from flow_control.rewards import PendingRewards
 from flow_control.samplers import (
     CfgPlusPlusGuidance,
     ClassifierFreeGuidance,
@@ -359,12 +360,14 @@ class TrainerRolloutPlanTest(unittest.TestCase):
             store, trainer.make_planner(store, shuffle=True), trainer.seed
         )
 
-        def drain(reward, submitter, handler, profile):
+        def drain(reward, submitter, loop, profile):
             list(submitter)
+            return PendingRewards([])
 
+        self.addCleanup(trainer.close_reward_loop)
         with (
             patch(
-                "flow_control.training.mixins.rollout.execute_reward", side_effect=drain
+                "flow_control.training.mixins.rollout.submit_reward", side_effect=drain
             ),
             patch.object(_NftProbe, "log_progress_timing"),
             patch.object(_NftProbe, "log_reduced_metrics"),

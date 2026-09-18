@@ -150,6 +150,14 @@ class LoggingMixin(BaseModel):
 
         return _generate_run_id()
 
+    @property
+    def run_dir(self) -> Path:
+        """``runs_root/experiment_name/run_id`` on every rank once
+        :meth:`resolve_run_context` ran; :meth:`init_tracker` creates it on rank 0."""
+        if self.run_id is None:
+            raise RuntimeError("run_id was not resolved; call resolve_run_context().")
+        return Path(self.runs_root) / self.experiment_name / self.run_id
+
     def resolve_run_context(self) -> None:
         """Resolve run identity and any ``checkpoint_root='$auto'`` in-place.
 
@@ -197,7 +205,7 @@ class LoggingMixin(BaseModel):
             auto_log_gpu=True,
         )
 
-        self._run_dir = Path(self.runs_root) / self.experiment_name / self.run_id
+        self._run_dir = self.run_dir
         self._run_dir.mkdir(parents=True, exist_ok=True)
         self._link_log_dir()
         (self._run_dir / "meta.json").write_text(
