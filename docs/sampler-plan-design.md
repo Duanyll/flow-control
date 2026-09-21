@@ -293,8 +293,8 @@ cost-grouped plan, no repeats within a pass over the dataset; `independent`: a
 fresh random subset per epoch) and `expand_rollouts` splits the `M × K` rollouts
 across ranks with a stride, so the i-th rollout of every rank comes from
 cost-adjacent prompts while every prompt keeps exactly K rollouts. Short plan
-groups are padded at plan time (`__padding__`) and the cursor skips the padding;
-there are no buckets. Pairwise rewards group completions by `__key__` in the
+groups are padded at plan time (`padding`) and the cursor skips the padding;
+there are no buckets. Pairwise rewards group completions by `key` in the
 reward executor; `expand_rollouts(whole_prompts=True)` keeps all K rollouts of a
 prompt on one rank and incomplete groups raise instead of comparing different
 prompts. See the data section of [modules.md](modules.md).

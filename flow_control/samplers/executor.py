@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from flow_control.adapters.base import SamplerModel
+from flow_control.utils.model_cache import cache_enabled, clear_cache
 
 from .calls import Calls, ModelCall
 from .run import SampleRun
@@ -20,6 +22,12 @@ class _Active[T]:
     gen: Calls[T]
     calls: list[ModelCall]
     velocities: dict[int, torch.Tensor] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        for call in self.calls:
+            clear_cache(call.row)
+        self.calls = []
+        self.velocities.clear()
 
 
 class Executor:
@@ -38,12 +46,13 @@ class Executor:
         self.model = model
         self.variants = list(variants)
 
-    def stream(self, runs: Iterable[SampleRun]) -> Iterator[SampleRun]:
+    def stream(self, runs: Iterable[SampleRun]) -> Generator[SampleRun, None, None]:
         """Sample runs lazily, pulling a new one only while pending calls fit a
         microbatch; finished runs come out in completion order."""
         source = ((run, run.run()) for run in runs)
-        for run, _ in self._drive(source, self.model.micro_batch_size):
-            yield run
+        with closing(self._drive(source, self.model.micro_batch_size)) as driven:
+            for run, _ in driven:
+                yield run
 
     def evaluate[T](self, gens: Sequence[Calls[T]]) -> list[T]:
         """Run every generator at once (training microbatches); order preserved."""
@@ -52,35 +61,46 @@ class Executor:
 
     def _drive[K, T](
         self, source: Iterator[tuple[K, Calls[T]]], window: int | None
-    ) -> Iterator[tuple[K, T]]:
+    ) -> Generator[tuple[K, T], None, None]:
         active: list[tuple[K, _Active[T]]] = []
         exhausted = False
-        while True:
-            while not exhausted and (
-                window is None or sum(len(entry.calls) for _, entry in active) < window
-            ):
+        try:
+            while True:
+                while not exhausted and (
+                    window is None
+                    or sum(len(entry.calls) for _, entry in active) < window
+                ):
+                    try:
+                        key, gen = next(source)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    try:
+                        active.append((key, _Active(gen, self._checked(next(gen)))))
+                    except StopIteration as stop:
+                        yield key, stop.value
+                if not self._anyone_active(bool(active)):
+                    return
+                self._forward(active)
+                remaining: list[tuple[K, _Active[T]]] = []
+                for key, entry in active:
+                    velocities = [entry.velocities[i] for i in range(len(entry.calls))]
+                    try:
+                        calls = entry.gen.send(velocities)
+                    except StopIteration as stop:
+                        entry.clear()
+                        yield key, stop.value
+                    else:
+                        entry.clear()
+                        entry.calls = self._checked(calls)
+                        remaining.append((key, entry))
+                active = remaining
+        finally:
+            for _, entry in active:
                 try:
-                    key, gen = next(source)
-                except StopIteration:
-                    exhausted = True
-                    break
-                try:
-                    active.append((key, _Active(gen, self._checked(next(gen)))))
-                except StopIteration as stop:
-                    yield key, stop.value
-            if not self._anyone_active(bool(active)):
-                return
-            self._forward(active)
-            remaining: list[tuple[K, _Active[T]]] = []
-            for key, entry in active:
-                velocities = [entry.velocities[i] for i in range(len(entry.calls))]
-                try:
-                    calls = entry.gen.send(velocities)
-                except StopIteration as stop:
-                    yield key, stop.value
-                else:
-                    remaining.append((key, _Active(entry.gen, self._checked(calls))))
-            active = remaining
+                    entry.gen.close()
+                finally:
+                    entry.clear()
 
     def _checked(self, calls: list[ModelCall]) -> list[ModelCall]:
         unknown = {call.variant for call in calls} - set(self.variants)
@@ -108,12 +128,16 @@ class Executor:
                 for index, call in enumerate(entry.calls)
                 if call.variant == variant
             ]
-            with self.model.use_variant(variant):
-                velocities = self.model.predict_velocity_batched(
-                    [entry.calls[index].row for entry, index in slots],
-                    [entry.calls[index].timestep for entry, index in slots],
-                    dummy_outputs=dummies,
-                )
+            token = cache_enabled.set(True)
+            try:
+                with self.model.use_variant(variant):
+                    velocities = self.model.predict_velocity_batched(
+                        [entry.calls[index].row for entry, index in slots],
+                        [entry.calls[index].timestep for entry, index in slots],
+                        dummy_outputs=dummies,
+                    )
+            finally:
+                cache_enabled.reset(token)
             for (entry, index), velocity in zip(slots, velocities, strict=True):
                 entry.velocities[index] = velocity
         if dummies:

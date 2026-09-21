@@ -13,6 +13,8 @@ logger = get_logger(__name__)
 
 
 class Flux1Batch(Batch):
+    _txt_ids: NotRequired[torch.Tensor]
+    _img_ids: NotRequired[torch.Tensor]
     pooled_prompt_embeds: torch.Tensor
     """`[B, D]` Pooled text embeddings from the CLIP text encoder."""
     prompt_embeds: torch.Tensor
@@ -30,6 +32,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
     BaseModelAdapter[FluxTransformer2DModel, TBatch]
 ):
     supports_dense_batching = True
+    shared_cache_fields = ("_txt_ids", "_img_ids")
     dense_batch_fields = (
         "image_size",
         "noisy_latents",
@@ -78,19 +81,10 @@ class Flux1Adapter[TBatch: Flux1Batch](
         batch: TBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
+        self._prepare_ids(batch)
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
-
-        if "txt_ids" not in batch:
-            batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
-        if "img_ids" not in batch:
-            scale = self.patch_size * self.vae_scale_factor
-            latent_size = (
-                batch["image_size"][0] // scale,
-                batch["image_size"][1] // scale,
-            )
-            batch["img_ids"] = self._make_img_ids(latent_size)
 
         model_pred = self.transformer(
             hidden_states=batch["noisy_latents"],
@@ -98,12 +92,31 @@ class Flux1Adapter[TBatch: Flux1Batch](
             guidance=guidance,
             pooled_projections=batch["pooled_prompt_embeds"],
             encoder_hidden_states=batch["prompt_embeds"],
-            txt_ids=batch["txt_ids"],
-            img_ids=batch["img_ids"],
+            txt_ids=batch["_txt_ids"],
+            img_ids=batch["_img_ids"],
             return_dict=False,
         )[0]
 
         return model_pred
+
+    def _prepare_ids(self, batch: TBatch) -> None:
+        if "_txt_ids" not in batch:
+            batch["_txt_ids"] = (
+                batch["txt_ids"]
+                if "txt_ids" in batch
+                else self._make_txt_ids(batch["prompt_embeds"])
+            )
+        if "_img_ids" not in batch:
+            batch["_img_ids"] = (
+                batch["img_ids"]
+                if "img_ids" in batch
+                else self._make_batch_img_ids(batch)
+            )
+
+    def _make_batch_img_ids(self, batch: TBatch) -> torch.Tensor:
+        scale = self.patch_size * self.vae_scale_factor
+        h, w = batch["image_size"]
+        return self._make_img_ids((h // scale, w // scale))
 
     def _make_txt_ids(self, prompt_embeds: torch.Tensor):
         b, n, d = prompt_embeds.shape

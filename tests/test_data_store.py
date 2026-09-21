@@ -14,13 +14,16 @@ order equals tar member order, the tail shard is short and unpadded, and a
 ``shard_size`` that is not a multiple of ``group_size`` only warns (§15, 14.5).
 """
 
+import io
 import os
 import pickle
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from typing import Any
 
+import lmdb
 import torch
 
 from flow_control.data import (
@@ -174,13 +177,48 @@ class DataStoreTest(unittest.TestCase):
                             (offset, size), (member.offset_data, member.size)
                         )
 
+            # The runtime-cache field convention renamed the row identifier.
+            # Old on-disk directory/LMDB/tar rows must still load as plain `key`.
+            for name, store in stores.items():
+                if isinstance(store, LmdbStore | PackedStore):
+                    store.close()
+                entry = store.index.entries[0]
+                expected_row = expected[entry.key]
+                legacy = {**expected_row, "__key__": expected_row[KEY]}
+                del legacy[KEY]
+                payload = io.BytesIO()
+                torch.save(legacy, payload)
+                data = payload.getvalue()
+                if isinstance(store, DirectoryStore):
+                    torch.save(legacy, os.path.join(store.path, str(entry.loc)))
+                elif isinstance(store, LmdbStore):
+                    with lmdb.open(store.path) as env, env.begin(write=True) as txn:
+                        txn.put(str(entry.loc).encode(), data)
+                else:
+                    shard, offset, _ = packed_loc(entry)
+                    # Use a separate one-row byte region; no existing tar offsets move.
+                    with open(shard_path(paths[name], shard), "ab") as output:
+                        offset = output.tell()
+                        output.write(data)
+                    store.index.entries[0] = replace(
+                        entry, loc=(shard, offset, len(data))
+                    )
+                self.assert_row_equal(store.get(0), expected_row)
+
             self.assertEqual(len(self.open_cache(paths["packed"], limit=5)), 5)
 
             with self.assertRaisesRegex(ValueError, "reassign_keys"):
                 write_cache(rows[:3] + rows[:1], os.path.join(tmp, "dup"), "directory")
 
         online = open_store(
-            {"type": "inline", "data": [{"prompt": "p", "image_size": "[64, 64]"}]},
+            {
+                "type": "inline",
+                "data": [
+                    {"prompt": "p", "image_size": "[64, 64]"},
+                    {"prompt": "p", "key": "custom-id"},
+                    {"prompt": "p", "__key__": "custom-id"},
+                ],
+            },
             processor_class=T2IProcessor,
             mode="inference",
         )
@@ -189,6 +227,8 @@ class DataStoreTest(unittest.TestCase):
         self.assertEqual(
             (row[KEY], row["prompt"], tuple(row["image_size"])), ("0", "p", (64, 64))
         )
+        self.assertEqual([online.get(i)[KEY] for i in (1, 2)], ["custom-id"] * 2)
+        self.assertTrue(all("__key__" not in online.get(i) for i in (1, 2)))
 
     def test_pack_shard_layout(self):
         rows = make_rows(21, seed=1)

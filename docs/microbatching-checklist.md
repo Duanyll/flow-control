@@ -175,7 +175,7 @@ plan construction, SDEdit start noise, and stochastic solver draws — one per-r
 - [x] Add `train_micro_batch_size` to GRPO, NFT, AWM, and RAM.
 - [x] Use `PositiveInt` for every new configuration field.
 - [x] Keep serving at one request and report per-step progress via its collector.
-- [x] Group streamed pairwise rewards by original `__key__`, retaining K per prompt
+- [x] Group streamed pairwise rewards by original `key`, retaining K per prompt
       on the same rank and rejecting incomplete groups.
 - [x] Migrate inference, validation, rollout, serving, SFT, GRPO, NFT, AWM,
       and RAM.
@@ -239,7 +239,7 @@ gradient_accumulation_steps = local_update_batch // M
 - [x] All ranks agree on dense collation versus sequential fallback.
 - [x] All ranks execute equal conditional/unconditional CFG forward counts.
 - [x] All ranks execute equal backward counts per optimizer update.
-- [x] Plan-time padding (`__padding__` rows) produces equal final logical microbatch lengths.
+- [x] Plan-time padding (`padding` rows) produces equal final logical microbatch lengths.
 - [x] A rank with dense-compatible inputs safely follows another rank's fallback.
 - [x] Two-rank CPU collective tests cover fallback, cold empty ranks, CFG, and tails.
 - [x] Two-rank FSDP2/NCCL tests cover dense forward/backward, local fallback,

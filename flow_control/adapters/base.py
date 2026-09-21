@@ -15,6 +15,7 @@ from transformers import PreTrainedModel
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
+from flow_control.utils.model_cache import cache_enabled, cache_fields, clear_cache
 from flow_control.utils.registry import Registry
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -207,6 +208,13 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     mathematically equivalent, but dense forwards are not bitwise reproducible
     on GPU."""
 
+    use_cache: bool = True
+    """Reuse adapter intermediates within a no-grad Executor run."""
+
+    shared_cache_fields: ClassVar[tuple[str, ...]] = ()
+    """Layout-only caches shared by compatible dense samples, independent of B.
+    Sample-dependent caches require adapter-specific collation and splitting."""
+
     supports_dense_batching: ClassVar[bool] = False
     """Whether equal-shaped logical samples may use the default dense collator."""
     dense_batch_fields: ClassVar[tuple[str, ...]] = ()
@@ -315,6 +323,11 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 return None
             collated[key] = value
 
+        for key in self.shared_cache_fields:
+            for batch in batches:
+                if key in batch:
+                    collated[key] = batch[key]
+                    break
         return cast(TBatch, collated), torch.cat(timesteps, dim=0)
 
     def _collate_velocity_values(
@@ -374,7 +387,10 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     def _forward_dummy(self) -> torch.Tensor:
         assert self._dummy_sample is not None  # Seeded collectively before chunking.
-        return self._forward_one(*self._dummy_sample)
+        try:
+            return self._forward_one(*self._dummy_sample)
+        finally:
+            clear_cache(self._dummy_sample[0])
 
     def _share_dummy(self, source: int) -> None:
         """Seed empty ranks once, transferring detached CPU data rather than GPU objects."""
@@ -407,16 +423,54 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         if not sequential:
             if collated is None:  # Empty chunk: pad the peers' single dense forward.
                 return [], [self._forward_dummy()]
-            velocity = self._checked_velocity(
-                self._predict_velocity(*collated), len(batches)
-            )
-            return list(velocity.split(1, dim=0)), []
+            try:
+                velocity = self._checked_velocity(
+                    self._predict_velocity(*collated), len(batches)
+                )
+                shared = {
+                    key: collated[0][key]
+                    for key in self.shared_cache_fields
+                    if key in collated[0]
+                }
+                for batch in batches:
+                    cast(dict[str, Any], batch).update(shared)
+                return list(velocity.split(1, dim=0)), []
+            finally:
+                clear_cache(collated[0])
         velocities = [
             self._forward_one(batch, timestep)
             for batch, timestep in zip(batches, timesteps, strict=True)
         ]
         dummies = [self._forward_dummy() for _ in range(longest - len(batches))]
         return velocities, dummies
+
+    @contextmanager
+    def _prepared_batches(self, batches: list[TBatch]) -> Iterator[list[TBatch]]:
+        """Prepare model inputs; write runtime fields back only inside Executor."""
+        reuse_cache = (
+            self.use_cache and cache_enabled.get() and not torch.is_grad_enabled()
+        )
+        prepared_batches: list[TBatch] = []
+        for batch in batches:
+            data = {
+                key: value for key, value in batch.items() if not key.startswith("_")
+            }
+            prepared = deep_move_to_device(
+                deep_cast_float_dtype(data, self.dtype), self.device
+            )
+            if reuse_cache:
+                # Cached values already have the model's device/dtype. Keep
+                # their identity, including structured K/V, across preparation.
+                prepared.update(cache_fields(batch))
+            prepared_batches.append(cast(TBatch, prepared))
+        try:
+            yield prepared_batches
+            if reuse_cache:
+                for batch, prepared in zip(batches, prepared_batches, strict=True):
+                    cast(dict[str, Any], batch).update(cache_fields(prepared))
+        finally:
+            for prepared in prepared_batches:
+                clear_cache(prepared)
 
     def predict_velocity_batched(
         self,
@@ -449,58 +503,58 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                     f"{tuple(batch['noisy_latents'].shape)}."
                 )
 
-        prepared_batches = [
-            cast(
-                TBatch,
-                deep_move_to_device(
-                    deep_cast_float_dtype(batch, self.dtype), self.device
-                ),
-            )
-            for batch in batches
-        ]
-        prepared_timesteps = [
-            self._prepare_timestep(timestep) for timestep in timesteps
-        ]
-        if prepared_batches and dist.is_initialized() and dist.get_world_size() > 1:
-            self._dummy_sample = (
-                deep_detach(prepared_batches[0]),
-                prepared_timesteps[0].detach(),
-            )
-        size = self.micro_batch_size
-        chunks, needs_dummy, donor = self._sync_max(
-            [
-                math.ceil(len(prepared_batches) / size),
-                int(self._dummy_sample is None),
-                dist.get_rank() + 1
-                if dist.is_initialized() and self._dummy_sample is not None
-                else 0,
+        with self._prepared_batches(batches) as prepared_batches:
+            prepared_timesteps = [
+                self._prepare_timestep(timestep) for timestep in timesteps
             ]
-        )
-        if chunks and needs_dummy and donor:
-            self._share_dummy(donor - 1)
-        velocities: list[torch.Tensor] = []
-        dummies: list[torch.Tensor] = []
-        # Run the longest rank's chunk count; slicing past our own end is empty.
-        for start in range(0, chunks * size, size):
-            chunk_velocities, chunk_dummies = self._forward_chunk(
-                prepared_batches[start : start + size],
-                prepared_timesteps[start : start + size],
-            )
-            velocities.extend(chunk_velocities)
-            dummies.extend(chunk_dummies)
-        dummies = [output for output in dummies if output.requires_grad]
-        if dummy_outputs is not None:
-            dummy_outputs.extend(dummies)
-        elif dummies:
-            if not velocities:
-                raise RuntimeError(
-                    f"Rank {dist.get_rank()} ran dummy forwards under autograd "
-                    "with no real sample to carry their zero-weight graph "
-                    "dependency; a training call must give every rank at least "
-                    "one item."
+            if prepared_batches and dist.is_initialized() and dist.get_world_size() > 1:
+                self._dummy_sample = (
+                    deep_detach(
+                        {
+                            key: value
+                            for key, value in prepared_batches[0].items()
+                            if not key.startswith("_")
+                        }
+                    ),
+                    prepared_timesteps[0].detach(),
                 )
-            velocities[0] = velocities[0] + sum(output.sum() * 0 for output in dummies)
-        return velocities
+            size = self.micro_batch_size
+            chunks, needs_dummy, donor = self._sync_max(
+                [
+                    math.ceil(len(prepared_batches) / size),
+                    int(self._dummy_sample is None),
+                    dist.get_rank() + 1
+                    if dist.is_initialized() and self._dummy_sample is not None
+                    else 0,
+                ]
+            )
+            if chunks and needs_dummy and donor:
+                self._share_dummy(donor - 1)
+            velocities: list[torch.Tensor] = []
+            dummies: list[torch.Tensor] = []
+            # Run the longest rank's chunk count; slicing past our own end is empty.
+            for start in range(0, chunks * size, size):
+                chunk_velocities, chunk_dummies = self._forward_chunk(
+                    prepared_batches[start : start + size],
+                    prepared_timesteps[start : start + size],
+                )
+                velocities.extend(chunk_velocities)
+                dummies.extend(chunk_dummies)
+            dummies = [output for output in dummies if output.requires_grad]
+            if dummy_outputs is not None:
+                dummy_outputs.extend(dummies)
+            elif dummies:
+                if not velocities:
+                    raise RuntimeError(
+                        f"Rank {dist.get_rank()} ran dummy forwards under autograd "
+                        "with no real sample to carry their zero-weight graph "
+                        "dependency; a training call must give every rank at least "
+                        "one item."
+                    )
+                velocities[0] = velocities[0] + sum(
+                    output.sum() * 0 for output in dummies
+                )
+            return velocities
 
     def _pack_latents(self, latents):
         return rearrange(

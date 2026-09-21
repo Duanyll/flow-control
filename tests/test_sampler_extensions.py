@@ -49,6 +49,7 @@ from flow_control.training.grpo_sampling import (
     ReplayItem,
     replay_steps,
 )
+from flow_control.utils.model_cache import cache_fields
 from flow_control.utils.tiling import TileLayout, extract_tiles, stitch_tiles
 
 
@@ -263,8 +264,20 @@ class SamplerExtensionsTest(unittest.TestCase):
         model.proj.base_layer.weight.requires_grad_(True)
         flags = {name: param.requires_grad for name, param in model.named_parameters()}
 
+        seen_caches: dict[str | None, list[object]] = {}
+        cache_misses: Counter[str | None] = Counter()
+
         class Adapter(FakeDenseAdapter):
+            shared_cache_fields = ("_variant",)
+
             def _predict_velocity(self, batch, timestep):
+                if not torch.is_grad_enabled():
+                    cache_misses[self._active_variant] += int("_variant" not in batch)
+                    variant, value = batch.setdefault(
+                        "_variant", (self._active_variant, object())
+                    )
+                    assert variant == self._active_variant
+                    seen_caches.setdefault(variant, []).append(value)
                 return self.transformer(batch["noisy_latents"])
 
         adapter = Adapter.model_construct(
@@ -326,6 +339,23 @@ class SamplerExtensionsTest(unittest.TestCase):
             {name: param.requires_grad for name, param in model.named_parameters()},
             flags,
         )
+
+        # A single binding switches weights and later revisits the old
+        # variant; caches must remain separate and survive that round trip.
+        cache_sampler = Sampler(
+            steps=3,
+            guidance=ClassifierFreeGuidance(
+                positive_variant=["default", "other", "default"],
+            ),
+        )
+        with torch.no_grad():
+            completed = list(cache_sampler.sample(adapter, [SampleRequest(batch)]))
+        first, revisited = seen_caches["default"]
+        (other,) = seen_caches["other"]
+        self.assertEqual(cache_misses, {"default": 1, "other": 1})
+        self.assertIs(first, revisited)
+        self.assertIsNot(first, other)
+        self.assertTrue(all(not cache_fields(run.row) for run in completed))
 
         # Delayed activation-checkpoint recomputation must re-enter the exact
         # variant used during forward, including the base branch. A non-LoRA
@@ -678,7 +708,7 @@ class SamplerExtensionsTest(unittest.TestCase):
             torch.testing.assert_close(value, count * (2 * plain["noisy_latents"] + 7))
 
         # S2 streamed completions interleave prompt groups. The reward layer
-        # must group by __key__ BEFORE prepare_row_for_async drops metadata.
+        # must group by key BEFORE prepare_row_for_async drops metadata.
         class SamePromptReward(PairwiseReward):
             async def async_score_pair(self, row_a, row_b) -> float:
                 assert row_a["prompt"] == row_b["prompt"]
@@ -689,7 +719,7 @@ class SamplerExtensionsTest(unittest.TestCase):
             key = "A" if index < 2 else "B"
             batch: Any = make_sampler_batch(0.2)
             batch.update(
-                __key__=key,
+                key=key,
                 prompt=key,
                 clean_image=torch.full((1, 3, 1, 1), float(index % 2)),
             )
@@ -763,7 +793,7 @@ class SamplerExtensionsTest(unittest.TestCase):
                 return len(self.costs)
 
             def get(self, row_id):
-                return {"__key__": str(row_id)}
+                return {"key": str(row_id)}
 
         store: Any = Store()
         n, world_size, prompts = 4, 4, 8

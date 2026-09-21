@@ -221,7 +221,7 @@ class _TinyStore:
 
 def test_final_padded_microbatch(rank: int) -> None:
     # Five rows over the ranks in one plan group of two microbatches per rank:
-    # the tail is padded with repeated rows flagged ``__padding__`` so every rank
+    # the tail is padded with repeated rows flagged ``padding`` so every rank
     # runs the same number of full microbatches (equal collectives), and the
     # padding is counted, never dropped.
     world_size = dist.get_world_size()

@@ -14,7 +14,7 @@ import lmdb
 import torch
 
 from flow_control.data.index import Index, IndexEntry
-from flow_control.data.rows import Row
+from flow_control.data.rows import KEY, Row
 from flow_control.data.sources.base import RawSource
 
 SHARDS_DIR = "shards"
@@ -29,8 +29,14 @@ class RowStore(Protocol):
     def get(self, row_id: int) -> Row: ...
 
 
-def _load_row(data: bytes | memoryview) -> Row:
-    return torch.load(io.BytesIO(data), weights_only=True)
+def _load_row(data: str | bytes | memoryview) -> Row:
+    row = torch.load(
+        data if isinstance(data, str) else io.BytesIO(data), weights_only=True
+    )
+    # Existing preprocessed caches keep their on-disk format; normalize on read.
+    if "__key__" in row:
+        row.setdefault(KEY, row.pop("__key__"))
+    return row
 
 
 class DirectoryStore:
@@ -45,7 +51,7 @@ class DirectoryStore:
 
     def get(self, row_id: int) -> Row:
         loc = cast(str, self.index.entries[row_id].loc)
-        return torch.load(os.path.join(self.path, loc), weights_only=True)
+        return _load_row(os.path.join(self.path, loc))
 
 
 class LmdbStore:
@@ -159,7 +165,7 @@ class OnlineStore:
     """No cache: rows come straight from a (coerced) raw source, un-preprocessed.
 
     The index carries positional keys only (``cost=0``, ``sig=""``): reading the
-    real ``__key__`` of every row up front would load every image / tensor.
+    real ``key`` of every row up front would load every image / tensor.
     """
 
     def __init__(self, source: RawSource):

@@ -37,7 +37,7 @@ class ResampleTest(unittest.TestCase):
         mean, std = clean[0:1], clean[1:2]
 
         row: Any = {
-            "__key__": "a",
+            "key": "a",
             "image_size": (64, 64),
             "clean_latents": clean.clone(),
             "prompt_embeds": torch.zeros(1, 3, 8),

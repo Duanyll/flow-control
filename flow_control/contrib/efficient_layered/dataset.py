@@ -55,7 +55,7 @@ class PrismLayersProSource:
 
         h, w = row_data["whole_image"].shape[-2:]
         output = {
-            "__key__": record["id"],
+            "key": record["id"],
             "prompt": row_data["whole_caption"],
             "clean_image": row_data["whole_image"],
             "style_category": row_data["style_category"],

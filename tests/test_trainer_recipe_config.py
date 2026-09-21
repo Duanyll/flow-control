@@ -344,7 +344,7 @@ class TrainerRolloutPlanTest(unittest.TestCase):
         )
 
         class OneRowStore:
-            row = {**make_sampler_batch(0.3, 0.9), "__key__": "sample"}
+            row = {**make_sampler_batch(0.3, 0.9), "key": "sample"}
             index = Index([IndexEntry("sample", 1, "", None, "sample")], {})
 
             def __len__(self):

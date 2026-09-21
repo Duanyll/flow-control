@@ -62,7 +62,7 @@ def make_batch(
             ),
         }
     batch["prompt"] = f"ignored metadata {seed}"
-    batch["__key__"] = str(seed)
+    batch["key"] = str(seed)
     return cast(Batch, batch)
 
 

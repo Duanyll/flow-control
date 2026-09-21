@@ -63,6 +63,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     def _predict_velocity(
         self, batch: Flux1DConcatBatch, timestep: torch.Tensor
     ) -> torch.Tensor:
+        self._prepare_ids(batch)
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
@@ -71,24 +72,14 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
             (batch["noisy_latents"], batch["control_latents"]), dim=2
         )
 
-        if "txt_ids" not in batch:
-            batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
-        if "img_ids" not in batch:
-            scale = self.patch_size * self.vae_scale_factor
-            latent_size = (
-                batch["image_size"][0] // scale,
-                batch["image_size"][1] // scale,
-            )
-            batch["img_ids"] = self._make_img_ids(latent_size)
-
         model_pred = self.transformer(
             hidden_states=noisy_model_input,
             timestep=timestep,
             guidance=guidance,
             pooled_projections=batch["pooled_prompt_embeds"],
             encoder_hidden_states=batch["prompt_embeds"],
-            txt_ids=batch["txt_ids"],
-            img_ids=batch["img_ids"],
+            txt_ids=batch["_txt_ids"],
+            img_ids=batch["_img_ids"],
             return_dict=False,
         )[0]
 

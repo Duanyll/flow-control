@@ -31,8 +31,7 @@ class HuggingFaceSource:
 
     def __getitem__(self, index: int) -> Row:
         row = dict(self.dataset[index])
-        if KEY not in row:
-            row[KEY] = str(index)
+        row.setdefault(KEY, row.pop("__key__", str(index)))
         return row
 
 

@@ -21,6 +21,5 @@ class InlineSource:
 
     def __getitem__(self, index: int) -> Row:
         row = self.data[index].copy()
-        if KEY not in row:
-            row[KEY] = str(index)
+        row.setdefault(KEY, row.pop("__key__", str(index)))
         return row

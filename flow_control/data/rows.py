@@ -1,6 +1,6 @@
 """Row contract shared by every stage of the data stack.
 
-A row is a plain ``dict``; the keys below are reserved (design §1). ``__padding__``
+A row is a plain ``dict``; the keys below are reserved (design §1). ``padding``
 only ever exists in consumer memory (plan-time padding) and is never persisted.
 """
 
@@ -11,13 +11,13 @@ import torch
 
 Row = dict[str, Any]
 
-KEY = "__key__"
+KEY = "key"
 """Unique within a dataset, written by the raw source; ``KEY_PATTERN`` chars only."""
 COST = "cost"
 """Token total (latent + text + reference) computed by the processor; the sort key."""
 IMAGE_SIZE = "image_size"
 """``(h, w)`` written by the processor."""
-PADDING = "__padding__"
+PADDING = "padding"
 """``True`` on plan-time padding rows: forwarded as usual, loss / outputs dropped."""
 
 KEY_PATTERN = re.compile(r"[A-Za-z0-9._-]+")

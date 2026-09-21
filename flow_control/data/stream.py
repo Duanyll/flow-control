@@ -44,7 +44,7 @@ class RowStream(Dataset):
 
     Call ``set_epoch`` before creating the epoch's iterator: the rows are pickled
     into the DataLoader workers at that point, so it must run in the main process
-    first. Padding rows come back with ``__padding__ = True``.
+    first. Padding rows come back with ``padding = True``.
 
     ``multiple_of``: a trainer passes its rows per optimizer update so every
     epoch is a whole number of updates; the tail short of that is dropped from
@@ -213,7 +213,7 @@ if __name__ == "__main__":
             return len(self.index)
 
         def get(self, row_id: int) -> Row:
-            return {"__key__": str(row_id), "v": torch.full((2,), float(row_id))}
+            return {"key": str(row_id), "v": torch.full((2,), float(row_id))}
 
     store: Any = ListStore(10)
     planner = partial(groups_plain, 10, 4, 7, shuffle=True)
@@ -223,10 +223,10 @@ if __name__ == "__main__":
             s.set_epoch(epoch)
         loader = build_loader(streams[0], batch_size=2, num_workers=0)
         batches = list(loader)
-        print(epoch, [[r["__key__"] for r in b] for b in batches])
+        print(epoch, [[r["key"] for r in b] for b in batches])
         assert len(batches) == len(streams[0]) // 2 == 3
         keys = {
-            r["__key__"]
+            r["key"]
             for s in streams
             for i in range(len(s))
             for r in [s[i]]

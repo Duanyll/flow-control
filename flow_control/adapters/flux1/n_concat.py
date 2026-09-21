@@ -29,6 +29,7 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
         batch: Flux1NConcatBatch,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
+        self._prepare_ids(batch)
         b, n, d = batch["noisy_latents"].shape
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
@@ -38,28 +39,20 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
         concatenated_model_input = torch.cat(
             (noisy_model_input, control_model_input), dim=1
         )
-        if "txt_ids" not in batch:
-            batch["txt_ids"] = self._make_txt_ids(batch["prompt_embeds"])
-        if "img_ids" not in batch:
-            scale = self.patch_size * self.vae_scale_factor
-            latent_size = (
-                batch["image_size"][0] // scale,
-                batch["image_size"][1] // scale,
-            )
-            img_ids = self._make_img_ids(latent_size)
-            batch["img_ids"] = repeat(img_ids, "n d -> (r n) d", r=2)
-
         model_pred = self.transformer(
             hidden_states=concatenated_model_input,
             timestep=timestep,
             guidance=guidance,
             pooled_projections=batch["pooled_prompt_embeds"],
             encoder_hidden_states=batch["prompt_embeds"],
-            txt_ids=batch["txt_ids"],
-            img_ids=batch["img_ids"],
+            txt_ids=batch["_txt_ids"],
+            img_ids=batch["_img_ids"],
             return_dict=False,
         )[0]
 
         model_pred = model_pred[:, :n, :]
 
         return model_pred
+
+    def _make_batch_img_ids(self, batch: Flux1NConcatBatch) -> torch.Tensor:
+        return repeat(super()._make_batch_img_ids(batch), "n d -> (r n) d", r=2)

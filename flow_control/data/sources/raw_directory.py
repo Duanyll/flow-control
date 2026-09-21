@@ -75,6 +75,7 @@ class RawDirectorySource:
         if self.allowed_fields is not None:
             sample = {k: sample[k] for k in self.allowed_fields if k in sample}
 
+        sample.pop("__key__", None)
         sample[KEY] = sample_dir_name
         return sample
 

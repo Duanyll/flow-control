@@ -1,11 +1,11 @@
 """Consumer-side data contract: how the trainers treat plan-time padding rows.
 
-Locks the cross-module behaviour between ``flow_control.data`` (``__padding__``
+Locks the cross-module behaviour between ``flow_control.data`` (``padding``
 marker set by ``RowStream``) and ``SftTrainer.train_step``: a padding row must
 still be forwarded (its rank's FSDP collectives have to line up with the other
 ranks) but must weigh nothing, with the microbatch loss normalized by the real
 rows. Before the data rework, padding rows were detected by the
-``__key__ == "__padding__"`` sentinel and SFT averaged over every row, so a
+``key == "padding"`` sentinel and SFT averaged over every row, so a
 padded tail microbatch double-counted the duplicated samples.
 """
 
@@ -47,7 +47,7 @@ class _SftProbe(_ProbeOverrides, SftTrainer):
 
 def _row(value: float, *, padding: bool = False) -> dict[str, Any]:
     row: dict[str, Any] = {
-        "__key__": "row",
+        "key": "row",
         "image_size": (2, 2),
         "clean_latents": torch.full((1, 1, 1), value),
         "noisy_latents": torch.zeros(1, 1, 1),

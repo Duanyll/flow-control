@@ -271,7 +271,7 @@ def execute_pairwise_reward[TTag, TResult](
 ) -> list[TResult]:
     """Score rows using the pairwise execution path.
 
-    Groups by the original row's ``__key__`` so rollouts may arrive in
+    Groups by the original row's ``key`` so rollouts may arrive in
     completion order. All K rollouts for a prompt must stay on the same rank.
 
     For a CompositeReward with mixed children, non-pairwise children are scored
@@ -315,10 +315,10 @@ def execute_pairwise_reward[TTag, TResult](
                 results.append(handler(tag, score))
 
         for row, tag in submitter:
-            key = row.get("__key__")
+            key = row.get("key")
             if not isinstance(key, str):
                 raise ValueError(
-                    "Pairwise rewards require a string __key__ for each prompt."
+                    "Pairwise rewards require a string key for each prompt."
                 )
             async_row = reward.prepare_row_for_async(row)
             prompt_group = prompt_groups.setdefault(key, [])

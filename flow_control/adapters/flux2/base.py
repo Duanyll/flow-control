@@ -12,6 +12,8 @@ logger = get_logger(__name__)
 
 
 class Flux2Batch(Batch):
+    _txt_ids: NotRequired[torch.Tensor]
+    _img_ids: NotRequired[torch.Tensor]
     prompt_embeds: torch.Tensor
     """`[B, N, D]` Text embeddings from the Mistral3 / Qwen3 text encoder."""
     reference_latents: list[torch.Tensor]
@@ -29,6 +31,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
     BaseModelAdapter[Flux2Transformer2DModel, TBatch]
 ):
     supports_dense_batching = True
+    shared_cache_fields = ("_txt_ids", "_img_ids")
     dense_batch_fields = (
         "image_size",
         "noisy_latents",
@@ -119,31 +122,40 @@ class Flux2Adapter[TBatch: Flux2Batch](
         else:
             return None
 
-    def _predict_velocity(self, batch, timestep):
+    def _make_batch_img_ids(self, batch: TBatch) -> torch.Tensor:
+        ids = self.make_latent_ids(batch["image_size"])
+        if "reference_latents" in batch and "reference_sizes" in batch:
+            ids = torch.cat(
+                [ids, self.make_reference_ids(batch["reference_sizes"])], dim=1
+            )
+        return ids
+
+    def _predict_velocity(self, batch: TBatch, timestep: torch.Tensor) -> torch.Tensor:
         b, n, d = batch["noisy_latents"].shape
         guidance = self.make_guidance(b)
         if "reference_latents" in batch and "reference_sizes" in batch:
             latent_model_input = torch.cat(
                 [batch["noisy_latents"]] + batch["reference_latents"], dim=1
             )
-            if "img_ids" not in batch:
-                batch["img_ids"] = torch.cat(
-                    [self.make_latent_ids(batch["image_size"])]
-                    + [self.make_reference_ids(batch["reference_sizes"])],
-                    dim=1,
-                ).expand(b, -1, -1)
-            img_ids = batch["img_ids"]
         else:
             latent_model_input = batch["noisy_latents"]
-            if "img_ids" not in batch:
-                batch["img_ids"] = self.make_latent_ids(batch["image_size"]).expand(
-                    b, -1, -1
-                )
-            img_ids = batch["img_ids"]
 
-        if "txt_ids" not in batch:
-            batch["txt_ids"] = self.make_text_ids(batch["prompt_embeds"])
-        txt_ids = batch["txt_ids"]
+        # Store singleton IDs: the executor may regroup this sample into a
+        # different physical batch on the next step.
+        if "img_ids" not in batch and "_img_ids" not in batch:
+            batch["_img_ids"] = self._make_batch_img_ids(batch)
+        if "txt_ids" not in batch and "_txt_ids" not in batch:
+            batch["_txt_ids"] = self.make_text_ids(batch["prompt_embeds"][:1])
+        img_ids = (
+            batch["img_ids"]
+            if "img_ids" in batch
+            else batch["_img_ids"].expand(b, -1, -1)
+        )
+        txt_ids = (
+            batch["txt_ids"]
+            if "txt_ids" in batch
+            else batch["_txt_ids"].expand(b, -1, -1)
+        )
 
         model_pred = self.transformer(
             hidden_states=latent_model_input,

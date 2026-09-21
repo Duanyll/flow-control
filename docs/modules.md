@@ -27,7 +27,7 @@
 
 ## data — 数据栈
 
-raw source → `preprocess`（random cache）→ `pack`（packed cache）→ 分组 plan → resample → consumer → report。行是 `dict`，保留键 `__key__` / `cost` / `image_size` / `__padding__`（`rows.py`）。
+raw source → `preprocess`（random cache）→ `pack`（packed cache）→ 分组 plan → resample → consumer → report。行是 `dict`，保留键 `key` / `cost` / `image_size` / `padding`（`rows.py`）。
 
 | 接口 | 说明 |
 |------|------|
@@ -35,7 +35,7 @@ raw source → `preprocess`（random cache）→ `pack`（packed cache）→ 分
 | `open_store(config, processor_class=, mode=)` | `"type": "cache"` 按 `meta.json` 打开 `DirectoryStore` / `LmdbStore` / `PackedStore`；其它 type 走 `OnlineStore(open_source(...))`（无 cache，consumer 在线 preprocess） |
 | `RandomCacheWriter` / `finalize_cache()` | preprocess sink：写 `rows/<hh>/<key>.pt` 或 `data.mdb` 与 `index.jsonl`（`IndexEntry`：key / cost / sig / image_size / loc），主进程合并 index 并写 `meta.json` |
 | `pack(PackConfig)` | random cache → tar shard 的 packed cache（shard 内按 `(cost, sig)` 排序），`flow-control pack` |
-| `groups_shuffled` / `groups_sorted` / `groups_packed` / `groups_plain` / `rank_rows` | 纯函数分组 plan：n 个 cost 相近的行成一组，组内按 rank 跨步切片，尾组用同块行补齐并标 `__padding__` |
+| `groups_shuffled` / `groups_sorted` / `groups_packed` / `groups_plain` / `rank_rows` | 纯函数分组 plan：n 个 cost 相近的行成一组，组内按 rank 跨步切片，尾组用同块行补齐并标 `padding` |
 | `RowStream` + `build_loader()` | SFT / inference / validation 的 map-style Dataset（每 epoch `set_epoch`），恒等 collate，`StatefulDataLoader` 可恢复 |
 | `RowCursor` + `expand_rollouts()` | RL：每 epoch 取 `num_prompts_per_epoch` 条不重复 prompt（`chunked` / `independent`），K 份 rollout 按 rank 跨步展开 |
 | `ReportWriter` / `ReportConfig` | inference 输出：`metrics.jsonl`、`previews/`、可选 `records/`（本身是 `{"type": "cache"}` 数据集） |
@@ -76,7 +76,7 @@ raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directo
 | `BaseReward` | 奖励函数基类，定义 `score()`, `async_score()` 等方法，支持远程卸载 |
 | `parse_reward(conf)` | 工厂函数 |
 | `execute_reward()` | 执行奖励计算（支持异步批处理） |
-| `execute_pairwise_reward()` | 按原始 `__key__` 汇聚乱序完成的 K 个 rollout 后成对评分 |
+| `execute_pairwise_reward()` | 按原始 `key` 汇聚乱序完成的 K 个 rollout 后成对评分 |
 
 内置奖励类型：`clip_score`, `pickscore`, `geneval`, `unified_reward`, `composite`（加权组合）, `pairwise`（成对比较）
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, cast
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from flow_control.adapters.base import Batch
+from flow_control.utils.model_cache import cache_fields
 from flow_control.utils.registry import Registry, RegistryUnion
 
 from .calls import Calls, ModelCall
@@ -81,6 +82,8 @@ class ModelPrediction(BasePrediction):
     type: Literal["model"] = "model"
 
     def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
+        caches: dict[str | None, dict[str, Any]] = {}
+
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
             timestep = (
                 request.sigma.to(
@@ -89,13 +92,10 @@ class ModelPrediction(BasePrediction):
                 if isinstance(request.sigma, torch.Tensor)
                 else request.latents.new_full((1,), request.sigma, dtype=torch.float32)
             )
-            (velocity,) = yield [
-                ModelCall(
-                    {**row, "noisy_latents": request.latents},
-                    timestep,
-                    request.variant,
-                )
-            ]
+            cache = caches.setdefault(request.variant, {})
+            batch = cast(Batch, {**row, **cache, "noisy_latents": request.latents})
+            (velocity,) = yield [ModelCall(batch, timestep, request.variant)]
+            cache.update(cache_fields(batch))
             return velocity
 
         return predict

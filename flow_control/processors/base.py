@@ -43,7 +43,7 @@ class TrainInputRow(TypedDict):
 class ProcessedRow(TypedDict):
     image_size: tuple[int, int]
     """Height and width of the images in the row in pixels. Used for initializing latents."""
-    __key__: NotRequired[str]
+    key: NotRequired[str]
     """Sample identifier carried over from the source dataset, used to name outputs."""
     cost: NotRequired[int]
     """Token total (latent + text + reference) from ``get_cost``; the plan sort key."""

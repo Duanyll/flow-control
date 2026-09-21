@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -43,10 +43,6 @@ class SampleRun:
     ctx: StepContext
     predictor: BasePrediction
     collector: StepCollector | None = None
-    _prediction: Predictor = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._prediction = self._bind_prediction()
 
     def _bind_prediction(self) -> Predictor:
         inner = self.predictor.bind(self.row, self.negative_row)
@@ -63,7 +59,7 @@ class SampleRun:
     def run(self) -> Calls[None]:
         ctx = self.ctx
         ctx.num_items = len(self.plan)
-        predict = self._prediction
+        predict = self._bind_prediction()
         velocity: torch.Tensor | None = None
 
         def observed(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:

@@ -46,7 +46,7 @@ inputs. Sampling execution is described in [sampler-plan-design.md](sampler-plan
   either collates the declared `dense_batch_fields` into a physical `Batch` with
   leading dimension `B` (list-valued fields become lists of `[B, ...]` tensors)
   or forwards each dictionary sequentially. The dense path builds a new
-  dictionary holding only the declared fields and requires non-tensor values to
+  dictionary holding the declared data and shared cache fields and requires non-tensor values to
   agree across the chunk; the fallback decision is synchronized across ranks.
   Callers do not stack dictionary fields themselves.
 
@@ -54,14 +54,36 @@ Sources: [BaseProcessor](../flow_control/processors/base.py) (`encode_latents`,
 `_pack_latents`, `decode_output`), [VAE implementations](../flow_control/processors/components/vae.py),
 [BaseModelAdapter](../flow_control/adapters/base.py) (`predict_velocity_batched`).
 
+## Adapter runtime caches
+
+Top-level names beginning with `_` are disposable adapter caches, such as
+`_txt_ids`, `_img_ids`, and a future `_kv_cache`. Declare them as optional
+TypedDict fields and access them normally. `key` and `padding` are ordinary
+metadata. Cache stores normalize the previous identifier name on read, so
+existing directory, LMDB and packed caches remain readable without rewriting them.
+Tabular and inline raw sources also accept the previous name on input; returned
+rows and new outputs use `key`.
+
+The adapter prepares data fields separately, then carries cache values by
+reference. Only no-grad Executor forwards with `use_cache=True` write them
+back. Each leaf binding retains caches per weight variant; completed and
+abandoned calls lose their runtime fields before leaving Executor. Original
+sample rows and saved rollouts remain data-only. A run keeps its conditions,
+weights, device and dtype fixed.
+
+Dense adapters declare layout-only, batch-size-independent fields in
+`shared_cache_fields`. Per-sample K/V requires adapter-specific collation and
+splitting; it must not use that shared-field path. Dummy snapshots and forwards
+exclude runtime caches.
+
 ## Lifecycle and retention
 
 | Stage | Contract |
 | --- | --- |
 | Dataset input | Raw images, prompts and arbitrary columns. Task input coercion accepts supported paths/PIL/arrays/tensors and JSON forms for annotated structured fields; unknown columns pass through. Tensor-file attachments load their native tensor representation, so their shape/range must already be correct. |
-| Processor output / offline cache | `prepare_training_row` adds clean targets and conditions; `prepare_inference_row` adds conditions. The offline `ProcessorStage.process` adds `cost`. `save_extra` merges original fields with processed fields taking precedence; `__key__` is carried separately. Processors also rewrite inputs in place (resized `clean_image`, enhanced or generated `prompt`), so retained extras hold the rewritten values. |
-| Runtime preprocessing | `DataMixin.prepare_row` moves the row to the device, runs the processor only when the store is an `OnlineStore` (raw source; a cache row is used as is), carries `__key__` / `__padding__` over, adds `cost`, then calls `processor.resample`. Inference and validation keep the raw fields next to the processed ones; SFT training does not. Sampling callers initialize `noisy_latents` in the model dtype; training builds noisy inputs from its targets. |
-| Model call | `ModelPrediction` overlays the current request's latents as `noisy_latents` on a fresh shallow copy of the whole working row. Predictor branches and tiles select their own condition rows. The adapter receives a microbatch (`list[Row]`); the physical `Batch` with a leading `B` dimension exists only inside its collate step. Only dense collation narrows the call to declared fields; the sequential path sees every key. |
+| Processor output / offline cache | `prepare_training_row` adds clean targets and conditions; `prepare_inference_row` adds conditions. The offline `ProcessorStage.process` adds `cost`. `save_extra` merges original fields with processed fields taking precedence; `key` is carried separately. Processors also rewrite inputs in place (resized `clean_image`, enhanced or generated `prompt`), so retained extras hold the rewritten values. |
+| Runtime preprocessing | `DataMixin.prepare_row` moves the row to the device, runs the processor only when the store is an `OnlineStore` (raw source; a cache row is used as is), carries `key` / `padding` over, adds `cost`, then calls `processor.resample`. Inference and validation keep the raw fields next to the processed ones; SFT training does not. Sampling callers initialize `noisy_latents` in the model dtype; training builds noisy inputs from its targets. |
+| Model call | `ModelPrediction` overlays the current request's latents as `noisy_latents` on a fresh shallow copy of the whole working row. Predictor branches and tiles select their own condition rows. The adapter receives a microbatch (`list[Row]`); the physical `Batch` with a leading `B` dimension exists only inside its collate step. Dense collation keeps declared data and shared cache fields; the sequential path keeps all data fields and any enabled runtime caches. |
 | Decode | `decode_output(final_latents, row)` returns a new decoded row. Inference and rollout callers merge it into their working row, replacing names such as `clean_image`. |
 | Persist / score | Inference scores the merged row; its `save_extra` only decides whether the record holds the decoded fields or the whole merged row, and reward fields are added to it. Raw fields needed for scoring must survive any earlier offline cache as well. |
 
@@ -101,8 +123,8 @@ guesses by name. Plugins that cache another posterior field must declare it.
 
 | Key | Meaning / representation | Producer | Consumers |
 | --- | --- | --- | --- |
-| `__key__` | String source-sample identifier. K rollouts of one prompt share it. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity, `execute_pairwise_reward` grouping. |
-| `__padding__` | `True` on plan-time padding rows (a short tail group repeats rows of the same block). Consumer memory only, never persisted. | `RowStream.__getitem__`. | `is_padding(row)`: SFT / VAE weigh the row 0, inference and validation forward it but write and log nothing. |
+| `key` | String source-sample identifier. K rollouts of one prompt share it. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity, `execute_pairwise_reward` grouping. |
+| `padding` | `True` on plan-time padding rows (a short tail group repeats rows of the same block). Consumer memory only, never persisted. | `RowStream.__getitem__`. | `is_padding(row)`: SFT / VAE weigh the row 0, inference and validation forward it but write and log nothing. |
 | `image_size` | Optional requested size on raw input; actual target pixel `(H, W)` after task resizing. Required for model/sampler use. | Dataset/user, then processor. | Latent initialization, adapter geometry/position IDs, decode, tiling and resolution-dependent shift. |
 | `model_image_size` | Optional pixel `(H, W)` seen by one forward, e.g. a tile. Defaults to `image_size`. | `TiledT2IProcessor`. | `BaseShift._get_seq_len`; tiled prediction removes it from leaf conditions. |
 | `cost` | Integer token total from `processor.get_cost` (latent + text + reference); the plan sort key. It is not necessarily `noisy_latents.shape[1]`. | Offline `ProcessorStage.process`, runtime `DataMixin.prepare_row`, or an adapter's `cost_test` mock batch. | `RandomCacheWriter` records it in the cache index and grouping sorts on it; `ReportWriter` writes it to `metrics.jsonl`; `SftTrainer.run_cost_test` reads it off the mock batches. Resolution shift computes its own length and does not read this field. |
@@ -191,12 +213,14 @@ embedding layout, latent normalization, geometry and special tokens.
 | `input_ids` | HiDream int64 `[1, L]` chat-template token IDs, including editing placeholders and target/time markers. Resolution-dependent trailing vision tokens are appended by the adapter. | `HiDreamO1Encoder` / preset. | `HiDreamO1Adapter` jointly trained text/vision transformer; `HiDreamO1FullPreset.get_cost`. |
 | `pixel_values` | Optional HiDream editing thumbnail patches in the HF processor's native layout/normalization; not a BCHW `[0, 1]` batch image. | HiDream multimodal prompt encoding. | HiDream SigLIP condition path; paired with `image_grid_thw`. |
 | `image_grid_thw` | HiDream integer `[K, 3]` thumbnail grids `(T, H, W)`, corresponding to `pixel_values`. These are not target pixel sizes. | HiDream multimodal prompt encoding. | `HiDreamO1Adapter` forwards it with `pixel_values` to the SigLIP tower and uses it in `_build_sequence` positional indexing. |
-| `txt_ids` | Optional text positional-coordinate cache: typically `[L, 3]` for FLUX.1/LongCat, `[B, L, 4]` for FLUX.2. Not vocabulary IDs. | Adapter when absent. | The same adapter's positional embedding path. |
-| `img_ids` | Optional image positional-coordinate cache: typically `[Ntotal, 3]` for FLUX.1/LongCat, `[B, Ntotal, 4]` for FLUX.2; includes that variant's extra condition tokens. | Adapter when absent. | The same adapter's positional embedding path. |
+| `txt_ids` | Optional supplied text positional coordinates: typically `[L, 3]` for FLUX.1/LongCat, `[B, L, 4]` for FLUX.2. Not vocabulary IDs. | Adapter when absent. | The same adapter's positional embedding path. |
+| `img_ids` | Optional supplied image positional coordinates: typically `[Ntotal, 3]` for FLUX.1/LongCat, `[B, Ntotal, 4]` for FLUX.2; includes that variant's extra condition tokens. | Adapter when absent. | The same adapter's positional embedding path. |
 
-`txt_ids` and `img_ids` are normally constructed on the adapter's prepared copy,
-not persistent sample state. A supplied cache must match the call's actual text,
-image and reference geometry.
+FLUX.1/2 generate `_txt_ids` and `_img_ids` when no explicit coordinates are
+supplied, reusing them across no-grad Executor steps. FLUX.2 caches singleton
+`[1, N, 4]` coordinates and expands them to the current physical batch size.
+LongCat still constructs ordinary `txt_ids` / `img_ids` on its prepared copy.
+Supplied coordinates must match the call's text, image and reference geometry.
 
 Sources: [encoder implementations](../flow_control/processors/components/encoder.py),
 [presets](../flow_control/processors/presets.py), adapters

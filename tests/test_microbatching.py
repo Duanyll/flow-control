@@ -1,18 +1,22 @@
 import unittest
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
+from unittest.mock import patch
 
 import torch
 from diffusers import ModelMixin
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
+from flow_control.adapters.flux1.base import Flux1Adapter
+from flow_control.adapters.flux2.base import Flux2Adapter
 from flow_control.samplers import Executor, Sampler, SampleRequest
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.shift import LinearShift
 from flow_control.samplers.solver import FlowSolver
 from flow_control.training.mixins.microbatch import MicrobatchTrainMixin
+from flow_control.utils.model_cache import cache_enabled, cache_fields
 
 
 def make_batch(
@@ -58,6 +62,50 @@ class FakeDenseAdapter(BaseModelAdapter[ModelMixin, Batch]):
     ) -> torch.Tensor:
         self._forward_batch_sizes.append(batch["noisy_latents"].shape[0])
         return batch["noisy_latents"] * self._scale + timestep[:, None, None]
+
+
+class FakeCacheAdapter(FakeDenseAdapter):
+    # This cache depends on the condition, so it cannot use layout-only sharing.
+    supports_dense_batching = False
+    _seen_rows: list[list[Batch]] = PrivateAttr(default_factory=list)
+    _cache_misses: int = PrivateAttr(default=0)
+
+    def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
+        self._seen_rows.append(list(batches))
+        return super().predict_velocity_batched(
+            batches, timesteps, dummy_outputs=dummy_outputs
+        )
+
+    def _predict_velocity(self, batch: Batch, timestep: torch.Tensor) -> torch.Tensor:
+        data = cast(dict[str, Any], batch)
+        if "_condition" not in data:
+            data["_condition"] = batch["clean_latents"].clone()
+            self._cache_misses += 1
+        # A different CFG branch or logical sample must not reuse this value.
+        torch.testing.assert_close(data["_condition"], batch["clean_latents"])
+        return super()._predict_velocity(batch, timestep)
+
+
+class IdRecordingTransformer(ModelMixin):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(()))
+        self.config = {"guidance_embeds": False}
+        self.batch_sizes: list[int] = []
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        txt_ids: torch.Tensor,
+        img_ids: torch.Tensor,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor]:
+        b = hidden_states.shape[0]
+        self.batch_sizes.append(b)
+        if img_ids.ndim == 3:
+            assert img_ids.shape[0] == txt_ids.shape[0] == b
+        assert img_ids.shape[-2] == hidden_states.shape[1]
+        return (hidden_states + img_ids.float().mean() + txt_ids.float().mean(),)
 
 
 class FakeFallbackAdapter(FakeDenseAdapter):
@@ -141,6 +189,46 @@ class AdapterBatchingTest(unittest.TestCase):
         self.assertEqual(adapter._forward_batch_sizes, [2, 1, 1])
         self.assertEqual([output.shape[1] for output in outputs], [4, 4, 3, 5])
 
+        # The temporary-batch refactor lost Flux ID reuse across solver steps.
+        # Exercise the real adapters/collator while mocking only the transformer;
+        # unequal trajectory lengths also change physical B from two to one.
+        for adapter_type in (Flux1Adapter, Flux2Adapter):
+            with self.subTest(adapter=adapter_type.__name__):
+                flux = adapter_type(micro_batch_size=2)
+                transformer = IdRecordingTransformer()
+                flux.transformer = cast(Any, transformer)
+                rows: list[Any] = [
+                    {
+                        **make_batch(float(i)),
+                        "prompt_embeds": torch.zeros(1, 3, 2),
+                        "pooled_prompt_embeds": torch.zeros(1, 2),
+                    }
+                    for i in range(2)
+                ]
+                outputs_by_mode = []
+                for use_cache in (True, False):
+                    flux.use_cache = use_cache
+                    runs = [
+                        Sampler(steps=steps).make_run(SampleRequest(row))
+                        for steps, row in zip((1, 3), rows, strict=True)
+                    ]
+                    transformer.batch_sizes.clear()
+                    with (
+                        torch.no_grad(),
+                        patch.object(
+                            adapter_type,
+                            "_make_batch_img_ids",
+                            side_effect=flux._make_batch_img_ids,
+                        ) as make_ids,
+                    ):
+                        finished = list(Executor(flux).stream(runs))
+                    self.assertEqual(transformer.batch_sizes, [2, 1, 1])
+                    self.assertEqual(make_ids.call_count, 1 if use_cache else 3)
+                    self.assertTrue(all(not cache_fields(run.row) for run in finished))
+                    outputs_by_mode.append([run.ctx.latents for run in finished])
+                for cached, uncached in zip(*outputs_by_mode, strict=True):
+                    torch.testing.assert_close(cached, uncached, rtol=0, atol=0)
+
     def test_incompatible_inputs_fall_back_to_single_sample(self) -> None:
         adapter = self.make_adapter()
         outputs = adapter.predict_velocity_batched(
@@ -166,6 +254,26 @@ class AdapterBatchingTest(unittest.TestCase):
             [torch.tensor([0.0]), torch.tensor([0.0])],
         )
         self.assertEqual(adapter._forward_batch_sizes, [1, 1])
+
+        # Dummy snapshots may be broadcast before Executor has a chance to
+        # release the run: exclude runtime fields before detach/CPU transfer.
+        first["_kv"] = torch.ones(1)
+        first["key"] = "first"
+        with (
+            torch.no_grad(),
+            patch("flow_control.adapters.base.dist.is_initialized", return_value=True),
+            patch("flow_control.adapters.base.dist.get_world_size", return_value=2),
+            patch("flow_control.adapters.base.dist.get_rank", return_value=0),
+            patch("flow_control.adapters.base.dist.all_reduce"),
+            patch("flow_control.adapters.base.dist.broadcast_object_list") as broadcast,
+        ):
+            adapter.predict_velocity_batched(batches, [torch.zeros(1)] * 2)
+            adapter._share_dummy(0)
+        payload = broadcast.call_args.args[0][0][0]
+        self.assertFalse(any(key.startswith("_") for key in payload))
+        self.assertEqual(payload["noisy_latents"].device.type, "cpu")
+        self.assertIn("_kv", first)
+        self.assertEqual(payload["key"], "first")
 
     def test_dense_and_fallback_gradients_match(self) -> None:
         dense = self.make_adapter()
@@ -226,6 +334,69 @@ class SamplerBatchingTest(unittest.TestCase):
         self.assertEqual(model.forward_batch_sizes, [3])
         torch.testing.assert_close(velocities[0], torch.tensor([[[5.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[4.0]]]))
+
+        # Runtime cache must survive copied/dense rows, but stop at the
+        # executor boundary even when streaming pauses or fails mid-trajectory.
+        sampler = Sampler(steps=3, guidance=ClassifierFreeGuidance(scale=2.0))
+        request = SampleRequest(make_batch(3.0), make_batch(1.0))
+        request.row["clean_latents"].fill_(3.0)
+        assert request.negative_row is not None
+        request.negative_row["clean_latents"].fill_(1.0)
+        adapter = FakeCacheAdapter.model_construct(
+            arch="fake", type="fake", micro_batch_size=2
+        )
+        with torch.no_grad():
+            finished = list(sampler.sample(adapter, [request]))
+        self.assertEqual(adapter._cache_misses, 2)
+        self.assertEqual(adapter._forward_batch_sizes, [1] * 6)
+        self.assertTrue(
+            all(not cache_fields(row) for rows in adapter._seen_rows for row in rows)
+        )
+        self.assertFalse(cache_fields(finished[0].row))
+        self.assertFalse(cache_fields(finished[0].negative_row or {}))
+        self.assertFalse(cache_enabled.get())
+
+        # Neither a direct no-grad call nor an executor's training forward may
+        # read or persist runtime fields. A poisoned input would break the probe.
+        direct_row = cast(
+            Batch, {**make_batch(), "_condition": torch.full((1, 4, 2), 99.0)}
+        )
+        with torch.no_grad():
+            adapter.predict_velocity_batched([direct_row], [torch.zeros(1)])
+        torch.testing.assert_close(
+            cache_fields(direct_row)["_condition"], torch.full((1, 4, 2), 99.0)
+        )
+        run = sampler.make_run(request)
+        Executor(adapter).evaluate([run.guided_velocity(run.row["noisy_latents"], 0)])
+        self.assertTrue(all(not cache_fields(row) for row in adapter._seen_rows[-1]))
+
+        for exit_mode in ("close", "error"):
+            with self.subTest(exit_mode=exit_mode), torch.no_grad():
+                adapter = FakeCacheAdapter.model_construct(
+                    arch="fake", type="fake", micro_batch_size=2
+                )
+                runs = [
+                    Sampler(steps=n).make_run(SampleRequest(make_batch()))
+                    for n in (1, 3)
+                ]
+                with closing(Executor(adapter).stream(runs)) as stream:
+                    self.assertIs(next(stream), runs[0])
+                    first, pending = adapter._seen_rows[0]
+                    self.assertFalse(cache_fields(first))
+                    self.assertTrue(cache_fields(pending))
+                    self.assertFalse(cache_enabled.get())
+                    if exit_mode == "error":
+                        with (
+                            patch.object(
+                                FakeCacheAdapter,
+                                "_predict_velocity",
+                                side_effect=RuntimeError("forward failed"),
+                            ),
+                            self.assertRaisesRegex(RuntimeError, "forward failed"),
+                        ):
+                            next(stream)
+                self.assertFalse(cache_fields(pending))
+                self.assertFalse(cache_enabled.get())
 
     def test_cfg_renorm_is_applied_per_sample(self) -> None:
         sampler = Sampler(

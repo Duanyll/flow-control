@@ -128,7 +128,7 @@ class ReportWriter:
     def write(
         self, row: Row, preview: torch.Tensor | None, metrics: dict[str, Any]
     ) -> None:
-        """Append one sample. ``row`` must carry ``__key__`` (and ``cost`` when
+        """Append one sample. ``row`` must carry ``key`` (and ``cost`` when
         ``records`` is on: the records cache needs it like any other cache).
         Padding rows are dropped: they were forwarded only to keep ranks in step."""
         if is_padding(row):
@@ -137,13 +137,13 @@ class ReportWriter:
         if (self.previews or self._records is not None) and not (
             isinstance(key, str) and KEY_PATTERN.fullmatch(key)
         ):
-            # Raw sources take keys from file names / a __key__ column, which no
+            # Raw sources take keys from file names / a key column, which no
             # inference option can rewrite; the preview / record file is named
             # after the key, so refuse before anything is written for this row.
             raise ValueError(
                 f"Row key {key!r} cannot name a preview / record file "
                 f"({KEY_PATTERN.pattern}); rename the source rows (files for "
-                "plain_directory / raw_directory, the __key__ column otherwise) "
+                "plain_directory / raw_directory, the key column otherwise) "
                 "or preprocess the dataset into a cache with reassign_keys=true "
                 "and run inference on the cache."
             )
@@ -224,7 +224,7 @@ if __name__ == "__main__":
                     "reward_raw": {"a": torch.tensor([i])},
                 },
             )
-        writers[1].write({KEY: "pad", "__padding__": True}, None, {})
+        writers[1].write({KEY: "pad", "padding": True}, None, {})
         try:
             writers[0].write({KEY: "no spaces", COST: 1}, None, {})
         except ValueError as e:
