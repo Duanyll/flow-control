@@ -18,16 +18,24 @@ class BaseShift(BaseModel, ABC):
     off ``noisy_latents`` (scaled to ``model_image_size``), ``image_size`` assumes
     16x16 pixels per token."""
     shift_terminal: float | None = None
+    """Stretch the final positive evaluation sigma to this value, preserving
+    a terminal zero. None/0 disables stretching; a one-point grid is unchanged."""
 
     def apply(self, sigmas: torch.Tensor, row: Batch, num_steps: int) -> torch.Tensor:
         shift_factor = self._shift_factor(row, num_steps)
         if shift_factor != 1.0:
             sigmas = (shift_factor * sigmas) / (1 + (shift_factor - 1) * sigmas)
 
-        if self.shift_terminal is not None:
-            one_minus_z = 1 - sigmas
-            scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
-            sigmas = 1 - (one_minus_z / scale_factor)
+        if self.shift_terminal:
+            positive = sigmas > 0
+            evaluation_sigmas = sigmas[positive]
+            # Zero is the integration endpoint, not a model evaluation. A
+            # single evaluation (e.g. one-step [1, 0]) has nothing to stretch.
+            if evaluation_sigmas.numel() > 1:
+                one_minus_z = 1 - evaluation_sigmas
+                scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
+                sigmas = sigmas.clone()
+                sigmas[positive] = 1 - (one_minus_z / scale_factor)
 
         return sigmas
 

@@ -8,10 +8,12 @@ from copy import deepcopy
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
+import numpy as np
 import torch
+from diffusers import FlowMatchEulerDiscreteScheduler
 from einops import rearrange
 from peft import LoraConfig
 from test_lora_tools import TinyTransformer, make_lora_model
@@ -770,6 +772,59 @@ class SamplerExtensionsTest(unittest.TestCase):
                 self.assertNotEqual(
                     sampler.make_sigmas(whole), sampler.make_sigmas(reference)
                 )
+
+        # Qwen21's shift_terminal=0.02 exposed that our full grid stretched
+        # the final zero as well, stopping denoising at 0.02. Match the official
+        # explicit-sigma path without introducing another sampler schedule.
+        shift = LinearShift(
+            base_image_seq_len=256,
+            max_image_seq_len=8192,
+            base_shift=0.5,
+            max_shift=0.9,
+            shift_terminal=0.02,
+        )
+        for side in (1024, 2048):
+            tokens = side * side // 256
+            row: Any = {
+                "image_size": (side, side),
+                "noisy_latents": torch.zeros(1, tokens, 1),
+            }
+            for steps in (2, 40):
+                with self.subTest(side=side, steps=steps):
+                    official = FlowMatchEulerDiscreteScheduler(
+                        use_dynamic_shifting=True,
+                        shift_terminal=0.02,
+                        time_shift_type="exponential",
+                    )
+                    official.set_timesteps(
+                        sigmas=np.linspace(1.0, 1.0 / steps, steps).tolist(),
+                        mu=0.5 + (tokens - 256) * (0.9 - 0.5) / (8192 - 256),
+                    )
+                    expected = cast(torch.Tensor, official.sigmas)
+                    sampler = Sampler(steps=steps, shift=shift)
+                    actual = torch.tensor(sampler.make_sigmas(row))
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=2e-7)
+                    self.assertEqual(sampler.plan(row)[-1].sigma_next, 0.0)
+                    self.assertAlmostEqual(actual[-2].item(), 0.02)
+                    # Callers supplying evaluation points without the final
+                    # zero (diffusers_flow) still receive the same stretch.
+                    positive = shift.apply(
+                        torch.linspace(1.0, 1.0 / steps, steps), row, steps
+                    )
+                    torch.testing.assert_close(
+                        positive, expected[:-1], rtol=0, atol=2e-7
+                    )
+        self.assertEqual(
+            Sampler(steps=1, shift=shift).make_sigmas(reference), [1.0, 0.0]
+        )
+        self.assertEqual(
+            Sampler(
+                steps=6, shift=shift.model_copy(update={"shift_terminal": 0.0})
+            ).make_sigmas(reference),
+            Sampler(
+                steps=6, shift=shift.model_copy(update={"shift_terminal": None})
+            ).make_sigmas(reference),
+        )
 
     def test_cursor_rollouts_counts_and_resume(self):
         # R5 fixed resolution divergence between equal-position distributed

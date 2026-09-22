@@ -5,12 +5,14 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import torch
-from diffusers import ModelMixin
+from diffusers import Flux2Transformer2DModel, ModelMixin, QwenImage21Transformer2DModel
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.adapters.flux1.base import Flux1Adapter
 from flow_control.adapters.flux2.base import Flux2Adapter
+from flow_control.adapters.flux2.kv import Flux2KVAdapter
+from flow_control.adapters.qwen21 import QwenImage21Adapter
 from flow_control.samplers import Executor, Sampler, SampleRequest
 from flow_control.samplers.guidance import ClassifierFreeGuidance
 from flow_control.samplers.shift import LinearShift
@@ -238,6 +240,136 @@ class AdapterBatchingTest(unittest.TestCase):
 
         self.assertEqual(adapter._forward_batch_sizes, [1, 1])
         self.assertEqual([output.shape[1] for output in outputs], [3, 5])
+
+        # Real KV adapters must preserve per-sample/CFG caches through the
+        # sequential fallback, including mixed T2I and reference-image rows.
+        for adapter_type, transformer in (
+            (
+                QwenImage21Adapter,
+                QwenImage21Transformer2DModel(
+                    num_layers=1,
+                    num_attention_heads=2,
+                    attention_head_dim=16,
+                    context_in_dim=8,
+                    axes_dims_rope=(4, 6, 6),
+                ),
+            ),
+            (
+                Flux2KVAdapter,
+                Flux2Transformer2DModel(
+                    num_layers=1,
+                    num_single_layers=1,
+                    num_attention_heads=2,
+                    attention_head_dim=16,
+                    joint_attention_dim=8,
+                    axes_dims_rope=(4, 4, 4, 4),
+                    guidance_embeds=False,
+                ),
+            ),
+        ):
+            with self.subTest(adapter=adapter_type.__name__):
+                kv = adapter_type(micro_batch_size=2)
+                kv.hf_model.dtype = torch.float32
+                kv.transformer = transformer
+                kv._install_modules()
+                channels = kv.latent_channels * kv.patch_size**2
+                rows: list[Any] = []
+                for refs in (0, 1):
+                    rows.append(
+                        {
+                            "image_size": (32, 32),
+                            "noisy_latents": torch.randn(1, 4, channels),
+                            "prompt_embeds": torch.randn(1, 3, 8),
+                            "prompt_embeds_mask": torch.ones(1, 3, dtype=torch.long),
+                            "image_pad_mask": torch.tensor(
+                                [[False, bool(refs), False]]
+                            ),
+                            "reference_latents": [torch.randn(1, 4, channels)] * refs,
+                            "reference_sizes": [(32, 32)] * refs,
+                        }
+                    )
+                requests = [
+                    SampleRequest(
+                        row,
+                        cast(Batch, {**row, "prompt_embeds": -row["prompt_embeds"]}),
+                    )
+                    for row in rows
+                ]
+                sampler = Sampler(steps=3, guidance=ClassifierFreeGuidance(scale=2))
+                modes: list[str | None] = []
+                handle = transformer.register_forward_pre_hook(
+                    lambda module, args, kwargs, modes=modes: modes.append(
+                        kwargs.get("kv_cache_mode")
+                    ),
+                    with_kwargs=True,
+                )
+                results = []
+                for reuse in (True, False):
+                    kv.use_cache = reuse
+                    modes.clear()
+                    with torch.no_grad():
+                        completed = list(sampler.sample(kv, requests))
+                    results.append([run.ctx.latents for run in completed])
+                    self.assertEqual(
+                        modes.count("cached"),
+                        (8 if isinstance(kv, QwenImage21Adapter) else 4)
+                        if reuse
+                        else 0,
+                    )
+                    self.assertTrue(
+                        all(
+                            not cache_fields(run.row)
+                            and not cache_fields(run.negative_row or {})
+                            for run in completed
+                        )
+                    )
+                handle.remove()
+                for cached, uncached in zip(*results, strict=True):
+                    torch.testing.assert_close(cached, uncached, atol=2e-5, rtol=2e-5)
+                kv.use_cache = True
+                loss = torch.stack(
+                    [
+                        output.square().mean()
+                        for output in kv.predict_velocity_batched(
+                            rows, [torch.tensor([0.5])] * 2
+                        )
+                    ]
+                ).sum()
+                loss.backward()
+                self.assertTrue(
+                    any(
+                        p.grad is not None and p.grad.abs().sum() > 0
+                        for p in transformer.parameters()
+                    )
+                )
+                self.assertTrue(all(not cache_fields(row) for row in rows))
+
+                if isinstance(kv, QwenImage21Adapter):
+                    # The trainer materializes a meta model before loading DCP.
+                    # Upstream plain RoPE tables stay meta, and nonpersistent
+                    # timestep buffers otherwise become uninitialized here.
+                    restored = QwenImage21Adapter()
+                    restored.hf_model.dtype = torch.float32
+                    with torch.device("meta"):
+                        restored.transformer = (
+                            QwenImage21Transformer2DModel.from_config(
+                                transformer.config
+                            )
+                        )
+                    restored._install_modules()
+                    restored.transformer.to_empty(device="cpu")
+                    restored.transformer.load_state_dict(transformer.state_dict())
+                    with torch.no_grad():
+                        expected = kv.predict_velocity_batched(
+                            rows, [torch.tensor([0.5])] * 2
+                        )
+                        actual = restored.predict_velocity_batched(
+                            rows, [torch.tensor([0.5])] * 2
+                        )
+                    for reference, materialized in zip(expected, actual, strict=True):
+                        torch.testing.assert_close(
+                            reference, materialized, rtol=0, atol=0
+                        )
 
     def test_different_reference_topology_falls_back(self) -> None:
         adapter = self.make_adapter()

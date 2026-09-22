@@ -387,9 +387,11 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     def _forward_dummy(self) -> torch.Tensor:
         assert self._dummy_sample is not None  # Seeded collectively before chunking.
+        token = cache_enabled.set(False)
         try:
             return self._forward_one(*self._dummy_sample)
         finally:
+            cache_enabled.reset(token)
             clear_cache(self._dummy_sample[0])
 
     def _share_dummy(self, source: int) -> None:

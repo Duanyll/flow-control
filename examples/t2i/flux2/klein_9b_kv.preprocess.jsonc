@@ -1,0 +1,33 @@
+// Official model-card prompts; set image_size explicitly (H, W).
+{
+  "$schema": "../../../schema/preprocess.schema.json",
+  "num_loader_workers": 1,
+  "processor_devices": [
+    0
+  ],
+  "num_threads_per_worker": 8,
+  "queue_size": 2,
+  "num_sink_workers": 1,
+  "processing_mode": "inference",
+  "dataset": {
+    "type": "inline",
+    "data": [
+      {
+        "key": "0",
+        "prompt": "A cat holding a sign that says hello world",
+        "image_size": [
+          1024,
+          1024
+        ]
+      }
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "flux2_klein_9b_kv"
+  },
+  "output": {
+    "path": "./demo/preprocess_flux2_klein_9b_kv",
+    "backend": "directory"
+  }
+}

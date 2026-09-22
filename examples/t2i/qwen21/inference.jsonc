@@ -1,0 +1,38 @@
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_qwen21",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "qwen21",
+    "type": "base"
+  },
+  "dataset": {
+    "type": "cache",
+    "path": "./demo/preprocess_qwen21"
+  },
+  "sampler": {
+    "seed": 42,
+    "steps": 40,
+    "shift": {
+      "type": "linear",
+      "base_image_seq_len": 256,
+      "max_image_seq_len": 8192,
+      "base_shift": 0.5,
+      "max_shift": 0.9,
+      "shift_terminal": 0.02
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "qwen21"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/qwen21/preprocess.jsonc"
+  }
+}

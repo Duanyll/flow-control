@@ -27,8 +27,8 @@ dependencies = [
     "torch>=2.11.0", # 2.11 is the first release pinning nccl>=2.28.9 (pytorch#162057 fix); <=2.10 pin the buggy 2.27.5
     "torchdata>=0.11.0",
     "torchvision>=0.26.0", # paired with torch>=2.11.0
-    "trackio>=0.26.0",
-    "transformers>=4.57.3",
+    "trackio>=0.38.1",
+    "transformers>=5.17",
     "uvicorn>=0.40.0",
 ]
 
@@ -91,7 +91,7 @@ torchvision = [
 xformers = [
   { index = "pytorch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-diffusers = { git = "https://github.com/huggingface/diffusers.git" }
+diffusers = { git = "https://github.com/huggingface/diffusers.git", rev = "80c7ed262aeffbeb43ef13ae04baeb9b84515a69" }
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"

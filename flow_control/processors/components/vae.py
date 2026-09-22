@@ -199,6 +199,19 @@ class QwenImageVAE(BaseVAE[AutoencoderKLQwenImage]):
         return images
 
 
+@vae_registry.register("qwen21")
+class QwenImage21VAE(QwenImageVAE):
+    """Qwen21 keeps Qwen's latent normalization, with 64 channels and 16x compression."""
+
+    type: Literal["qwen21"] = "qwen21"
+    class_name: str = "AutoencoderKLQwenImage21"
+    pretrained_model_id: str = "Qwen/Qwen-Image-2.1"
+
+    @property
+    def in_channels(self) -> int:
+        return self.model.config["in_channels"]
+
+
 @vae_registry.register("flux2")
 class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
     type: Literal["flux2"] = "flux2"

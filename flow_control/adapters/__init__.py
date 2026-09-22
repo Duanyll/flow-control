@@ -11,6 +11,7 @@ from .flux1 import (
     Flux1NConcatAdapter,
 )
 from .flux2 import Flux2Adapter
+from .flux2.kv import Flux2KVAdapter
 from .hidream import HiDreamO1Adapter
 from .krea2 import Krea2Adapter
 from .longcat import LongCatAdapter, LongCatEditAdapter
@@ -19,6 +20,7 @@ from .qwen import (
     QwenImageEditAdapter,
     QwenImageLayeredAdapter,
 )
+from .qwen21 import QwenImage21Adapter
 from .sd3 import SD3Adapter
 from .zimage import ZImageAdapter
 
@@ -34,11 +36,13 @@ __all__ = [
     "Flux1KontextAdapter",
     "Flux1NConcatAdapter",
     "Flux2Adapter",
+    "Flux2KVAdapter",
     "HiDreamO1Adapter",
     "Krea2Adapter",
     "LongCatAdapter",
     "LongCatEditAdapter",
     "QwenImageAdapter",
+    "QwenImage21Adapter",
     "QwenImageEditAdapter",
     "QwenImageLayeredAdapter",
     "SD3Adapter",

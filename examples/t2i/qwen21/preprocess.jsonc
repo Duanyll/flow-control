@@ -1,0 +1,41 @@
+// Official model-card prompts; set image_size explicitly (H, W).
+{
+  "$schema": "../../../schema/preprocess.schema.json",
+  "num_loader_workers": 1,
+  "processor_devices": [
+    0
+  ],
+  "num_threads_per_worker": 8,
+  "queue_size": 2,
+  "num_sink_workers": 1,
+  "processing_mode": "inference",
+  "dataset": {
+    "type": "inline",
+    "data": [
+      {
+        "key": "0",
+        "prompt": "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement",
+        "image_size": [
+          1024,
+          1024
+        ]
+      },
+      {
+        "key": "1",
+        "prompt": "This is an RGBA image with transparency. A cute cartoon dragon sticker. The image has alpha channel and the background is transparent.",
+        "image_size": [
+          1024,
+          1024
+        ]
+      }
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "qwen21"
+  },
+  "output": {
+    "path": "./demo/preprocess_qwen21",
+    "backend": "directory"
+  }
+}
