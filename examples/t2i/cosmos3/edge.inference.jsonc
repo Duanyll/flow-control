@@ -1,0 +1,73 @@
+// Cosmos3-Edge (4B) text-to-image at its 480p tier, 20 steps, CFG 6.0. Edge only
+// supports 256p and 480p, and `use_native_flow_schedule` in its model_index gives
+// a different sigma grid from Nano/Super -- inlined below. Peaks at 9 GiB, so it
+// fits a 24 GB card. The preset only carries the tokenizer and VAE, so the
+// transformer checkpoint is named here too.
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_cosmos3_edge",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "cosmos3",
+    "type": "kv",
+    "hf_model": {
+      "library": "diffusers",
+      "class_name": "Cosmos3OmniTransformer",
+      "pretrained_model_id": "nvidia/Cosmos3-Edge",
+      "subfolder": "transformer",
+      "dtype": "bfloat16"
+    }
+  },
+  "dataset": {
+    "type": "cache",
+    "path": "./demo/preprocess_cosmos3_edge"
+  },
+  "sampler": {
+    "seed": 0,
+    "steps": 20,
+    "guidance": {
+      "type": "cfg",
+      "scale": 6.0
+    },
+    "solver": {
+      "type": "flow_unipc",
+      "order": 2
+    },
+    "custom_sigmas": [
+      0.995025,
+      0.993677,
+      0.991898,
+      0.989528,
+      0.986342,
+      0.982015,
+      0.976079,
+      0.967856,
+      0.956359,
+      0.940157,
+      0.917198,
+      0.884634,
+      0.838736,
+      0.775189,
+      0.690229,
+      0.58309,
+      0.459227,
+      0.33166,
+      0.217107,
+      0.12816,
+      0.0
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "cosmos3_edge"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/cosmos3/edge.preprocess.jsonc"
+  }
+}

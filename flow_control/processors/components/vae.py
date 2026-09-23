@@ -212,6 +212,27 @@ class QwenImage21VAE(QwenImageVAE):
         return self.model.config["in_channels"]
 
 
+@vae_registry.register("cosmos3")
+class Cosmos3VAE(QwenImageVAE):
+    """Cosmos3 ships the Wan2.2-TI2V VAE: 16x spatial, 4x temporal, 48 channels.
+
+    Its latent normalization is per-channel mean/std from the config, exactly
+    like Qwen-Image's, so only the loader coordinates differ. Images go through
+    as single-frame video, which is what ``num_frames=1`` means upstream.
+    """
+
+    type: Literal["cosmos3"] = "cosmos3"
+    class_name: str = "AutoencoderKLWan"
+    pretrained_model_id: str = "nvidia/Cosmos3-Nano"
+    subfolder: str | None = "vae"
+
+    @property
+    def in_channels(self) -> int:
+        # The Wan VAE pixel-shuffles 2x2 before its first conv, so `in_channels`
+        # in the config is 12; callers care about the 3 RGB channels they pass.
+        return 3
+
+
 @vae_registry.register("flux2")
 class Flux2VAE(BaseVAE[AutoencoderKLFlux2]):
     type: Literal["flux2"] = "flux2"

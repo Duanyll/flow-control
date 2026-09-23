@@ -1,0 +1,83 @@
+// Cosmos3-Nano (16B) text-to-image, matching the official recipe: UniPC order 2
+// with the UniC corrector, true CFG 6.0 (Super-Text2Image uses 4.0), and the
+// checkpoint's Karras sigma grid inlined -- the shift registry has no Karras
+// option, so `custom_sigmas` is the exact schedule rather than a fit.
+// `"type": "kv"` caches the understanding tower's per-layer K/V across steps;
+// it is bit-exact against `"type": "base"` and ~2.6x faster on this prompt.
+// For Edge and Super see the edge.* and super.* configs beside this one.
+{
+  "$schema": "../../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_cosmos3",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "model": {
+    "arch": "cosmos3",
+    "type": "kv"
+  },
+  "dataset": {
+    "type": "cache",
+    "path": "./demo/preprocess_cosmos3"
+  },
+  "sampler": {
+    "seed": 0,
+    "steps": 35,
+    "guidance": {
+      "type": "cfg",
+      "scale": 6.0
+    },
+    "solver": {
+      "type": "flow_unipc",
+      "order": 2
+    },
+    "custom_sigmas": [
+      0.995025,
+      0.994317,
+      0.993493,
+      0.992529,
+      0.991401,
+      0.990074,
+      0.988511,
+      0.986663,
+      0.984472,
+      0.981866,
+      0.978755,
+      0.975033,
+      0.970563,
+      0.965181,
+      0.958682,
+      0.950816,
+      0.941273,
+      0.929679,
+      0.915581,
+      0.898438,
+      0.877622,
+      0.852423,
+      0.822073,
+      0.785805,
+      0.742945,
+      0.693052,
+      0.636105,
+      0.572694,
+      0.504181,
+      0.432725,
+      0.361117,
+      0.292409,
+      0.229421,
+      0.174285,
+      0.12816,
+      0.0
+    ]
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "cosmos3_nano"
+  },
+  "launch": {
+    "type": "inference",
+    "devices": 1,
+    "preprocess_config": "examples/t2i/cosmos3/preprocess.jsonc"
+  }
+}

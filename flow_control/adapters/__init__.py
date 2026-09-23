@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from flow_control.utils.registry import RegistryUnion
 
 from .base import BaseModelAdapter, Batch, adapter_registry
+from .cosmos3 import Cosmos3Adapter, Cosmos3KVAdapter
 from .flux1 import (
     Flux1Adapter,
     Flux1DConcatAdapter,
@@ -25,6 +26,8 @@ from .sd3 import SD3Adapter
 from .zimage import ZImageAdapter
 
 __all__ = [
+    "Cosmos3Adapter",
+    "Cosmos3KVAdapter",
     "ModelAdapter",
     "Batch",
     "parse_model_adapter",

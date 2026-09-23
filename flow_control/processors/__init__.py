@@ -4,6 +4,9 @@ from flow_control.utils.registry import RegistryUnion
 
 from .base import BaseProcessor, task_registry
 from .presets import (
+    Cosmos3EdgePreset,
+    Cosmos3NanoPreset,
+    Cosmos3SuperText2ImagePreset,
     Flux1Preset,
     Flux2Klein4BPreset,
     Flux2Klein9BKVPreset,
@@ -114,6 +117,9 @@ def get_processor_input_typeddict(
 
 
 __all__ = [
+    "Cosmos3EdgePreset",
+    "Cosmos3NanoPreset",
+    "Cosmos3SuperText2ImagePreset",
     "BaseProcessor",
     "Flux1Preset",
     "Flux2Klein4BPreset",
