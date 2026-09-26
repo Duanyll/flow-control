@@ -1,6 +1,7 @@
 from .base import (
     BaseTrainer,
     LaunchConfig,
+    ProfileConfig,
     TorchCompileConfig,
     distributed_main,
     main_process_first,
@@ -23,6 +24,7 @@ __all__ = [
     "DataMixin",
     "EpochLoopMixin",
     "LaunchConfig",
+    "ProfileConfig",
     "TorchCompileConfig",
     "LoggingMixin",
     "MicrobatchTrainMixin",

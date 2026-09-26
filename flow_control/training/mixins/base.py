@@ -1,6 +1,8 @@
 import os
 import pickle
 import random
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import wraps
 
 import numpy as np
@@ -13,6 +15,8 @@ from torch.distributed.checkpoint.state_dict import (
     get_state_dict,
 )
 from torch.distributed.fsdp import fully_shard
+from torch.profiler import ProfilerActivity
+from torch.profiler import profile as torch_profiler
 
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.utils import device as devutil
@@ -42,6 +46,27 @@ class TorchCompileConfig(BaseModel):
         module.compile(**kwargs)
 
 
+class ProfileConfig(BaseModel):
+    """One ``torch.profiler`` (Kineto) trace per rank of one region of the run,
+    exported as a gzipped Chrome trace: CPU ops (FSDP's ``FSDP::*`` ranges
+    included), accelerator kernels with their grid/block dims, memcpys and the
+    collective kernels. Which region is captured is the trainer's business
+    (:meth:`BaseTrainer.profile_scope`): epoch-structured trainers capture outer
+    epoch ``epoch``, inference captures its whole sampling loop."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    output_dir: str
+    """Traces land here as ``<tag>_rank<rank>.json.gz``."""
+    epoch: int = 1
+    """Outer epoch (0-based) captured by epoch-structured trainers. Epoch 0 pays
+    the lazy initialization (autotuning, allocator growth), hence the default."""
+    record_shapes: bool = False
+    with_stack: bool = False
+    """Python stack per op: a much heavier trace, but it attributes launch-side
+    time to the code that issued it."""
+
+
 class BaseTrainer(BaseModel):
     # ---------------------------------- Configs --------------------------------- #
     launch: LaunchConfig
@@ -59,6 +84,8 @@ class BaseTrainer(BaseModel):
     gradient_checkpointing: bool = True
     torch_compile: TorchCompileConfig | None = None
     """Compile the transformer after FSDP wrapping and checkpoint restoration."""
+    profile: ProfileConfig | None = None
+    """Capture a ``torch.profiler`` trace of one region of the run per rank."""
 
     # ------------------------------ Lifecycle hooks ----------------------------- #
     # The launchable entry points (launch / seed / export) construct a trainer and
@@ -194,6 +221,35 @@ class BaseTrainer(BaseModel):
     def compile_transformer(self, model: BaseModelAdapter) -> None:
         if self.torch_compile is not None:
             self.torch_compile.apply(model.transformer)
+
+    @contextmanager
+    def profile_scope(self, tag: str, epoch: int | None = None) -> Iterator[None]:
+        """Trace the block under ``profile`` when it is configured (and, given
+        *epoch*, when that is the configured epoch); otherwise a no-op. The
+        device is synchronized before the trace is exported so the block's tail
+        kernels are in it."""
+        config = self.profile
+        if config is None or (epoch is not None and epoch != config.epoch):
+            yield
+            return
+        activities = [ProfilerActivity.CPU]
+        device_activity = getattr(
+            ProfilerActivity, devutil.current_device_type().upper(), None
+        )
+        if device_activity is not None:
+            activities.append(device_activity)
+        os.makedirs(config.output_dir, exist_ok=True)
+        path = os.path.join(config.output_dir, f"{tag}_rank{self.rank}.json.gz")
+        logger.info(f"Profiling {tag!r} with torch.profiler; trace -> {path}")
+        with torch_profiler(
+            activities=activities,
+            record_shapes=config.record_shapes,
+            with_stack=config.with_stack,
+        ) as prof:
+            yield
+            devutil.synchronize(self.device)
+        prof.export_chrome_trace(path)
+        logger.info(f"Profiler trace written to {path}")
 
     def load_transformer_from_seed(
         self,

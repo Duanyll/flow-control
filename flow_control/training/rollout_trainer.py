@@ -28,6 +28,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
+from torch.profiler import record_function
 
 from flow_control.adapters import ModelAdapter
 from flow_control.rewards import Reward, _has_pairwise_child
@@ -380,7 +381,8 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         if train_plan is None:
             train_plan = self._build_train_plan(rollouts)
             if self.precompute_aux_model_outputs:
-                self._precompute(rollouts, train_plan, advantages)
+                with record_function("phase/precompute"):
+                    self._precompute(rollouts, train_plan, advantages)
         total_items = sum(len(items) for items in train_plan)
 
         progress = Progress(
@@ -390,7 +392,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         )
         train_task = progress.add_task("Training", total=total_items)
 
-        with progress:
+        with progress, record_function("phase/train"):
             for train_items in train_plan:
                 for update in self.iter_micro_updates(train_items):
                     self.transformer.set_requires_gradient_sync(update.is_sync_step)
@@ -444,18 +446,23 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
     def _run_epoch(self) -> None:
         """One outer epoch: top up the lookahead, then wait for the oldest
-        batch's rewards and train on it."""
-        logger.debug(f"Epoch {self._current_epoch}: starting rollout phase...")
-        if self._current_epoch + self.rollout_lookahead < self.train_epochs:
-            self._launch_rollouts(self._current_epoch + self.rollout_lookahead)
-        pending = self._pending_rollouts.popleft()
-        rollouts = self._finish_rollouts(pending)
-        self._check_rollouts(rollouts)
-        advantages = self._compute_advantages(rollouts, step=self._current_step)
+        batch's rewards and train on it. The ``phase/*`` ranges mark the
+        phases in a profiler trace."""
+        epoch = self._current_epoch
+        with self.profile_scope(f"epoch{epoch}", epoch=epoch):
+            logger.debug(f"Epoch {epoch}: starting rollout phase...")
+            if epoch + self.rollout_lookahead < self.train_epochs:
+                with record_function("phase/rollout"):
+                    self._launch_rollouts(epoch + self.rollout_lookahead)
+            pending = self._pending_rollouts.popleft()
+            with record_function("phase/reward_wait"):
+                rollouts = self._finish_rollouts(pending)
+            self._check_rollouts(rollouts)
+            advantages = self._compute_advantages(rollouts, step=self._current_step)
 
-        logger.debug(f"Epoch {self._current_epoch}: starting training phase...")
-        self._train_on_rollouts(rollouts, advantages, train_plan=pending.train_plan)
-        self._after_train_epoch()
+            logger.debug(f"Epoch {epoch}: starting training phase...")
+            self._train_on_rollouts(rollouts, advantages, train_plan=pending.train_plan)
+            self._after_train_epoch()
 
         self._current_epoch += 1
 

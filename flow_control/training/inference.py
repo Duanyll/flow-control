@@ -347,7 +347,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         assert self._stream is not None
         task = progress.add_task("Inference", total=len(self._stream))
 
-        with progress:
+        with self.profile_scope("inference"), progress:
             submitter = self._sample_submitter(progress, task)
             if self.reward is not None:
 
