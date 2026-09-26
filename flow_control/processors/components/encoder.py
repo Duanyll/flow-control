@@ -1,8 +1,10 @@
+import math
 import re
 from typing import Annotated, Any, Literal, cast
 
 import torch
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import QwenImage21Pipeline
+from PIL import Image
 from transformers import (
     BatchEncoding,
     CLIPTextModel,
@@ -409,6 +411,8 @@ class Qwen25VLEncoder(
     image_scale: int = 2
 
     def _resize_image(self, image: torch.Tensor) -> torch.Tensor:
+        """Legacy bilinear, center-cropping resize, unlike the official preprocessing.
+        ``encode`` no longer calls it; kept for out-of-tree subclasses."""
         if self.resize_mode == "none":
             return image
         elif self.resize_mode == "scale":
@@ -452,13 +456,21 @@ class Qwen25VLEncoder(
             result.append((part, is_quoted))
         return result
 
-    def _get_image_pad_len(self, images: list[torch.Tensor]) -> int:
-        if not images:
-            return 0
-        processor: Any = self.vl_processor.model
-        image_inputs = processor.image_processor(images=images, return_tensors="pt")
-        merge_length = processor.image_processor.merge_size**2
-        return sum(i.prod() // merge_length for i in image_inputs["image_grid_thw"])
+    def _vl_image(self, image: torch.Tensor) -> Image.Image:
+        """The VL model's view of a [0, 1] BCHW reference, resized with PIL Lanczos
+        like the official pipelines. The processor rescales its input by 1/255, so
+        it must get 8-bit images, not [0, 1] floats."""
+        pil = tensor_to_pil(remove_alpha_channel(image))
+        if self.resize_mode == "none":
+            return pil
+        if self.resize_mode == "scale":
+            size = (pil.width // self.image_scale, pil.height // self.image_scale)
+        else:  # diffusers' calculate_dimensions, with image_multiple for its 32
+            ratio = pil.width / pil.height
+            width = math.sqrt(self.image_pixels * ratio)
+            m = self.image_multiple
+            size = (round(width / m) * m, round(width / ratio / m) * m)
+        return pil.resize(size, Image.Resampling.LANCZOS)
 
     def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
@@ -473,93 +485,82 @@ class Qwen25VLEncoder(
         prefix, suffix = self.chat_template.split("{user}")
         prefix = prefix.format(system=system_prompt or "")
 
-        pretokenized_inputs = [
-            self.image_template.format(index=i + 1) for i in range(len(images or []))
-        ]
+        words = []
         if self.split_quotation:
             for part, is_quoted in self._split_quotation(prompt):
                 if is_quoted:
                     # Each character in the quoted part is treated as a separate token
-                    pretokenized_inputs.extend(part)
+                    words.extend(part)
                 else:
-                    pretokenized_inputs.append(part)
+                    words.append(part)
         else:
-            pretokenized_inputs.append(prompt)
-
-        max_length = self.tokenizer_max_length
-        if images:
-            images = [
-                remove_alpha_channel(self._resize_image(image)) for image in images
-            ]
-
-            # FIXME: There is something wrong with LongCat-Image-Edit when caculating
-            # the required number of image padding tokens. The behavior is strange in
-            # the original codebase as well.
-
-            if self.keep_padding_tokens and self.tokenizer_max_length > 0:
-                max_length += self._get_image_pad_len(images) - len(images)
+            words.append(prompt)
 
         vl_processor = self.vl_processor.model
         model = self.model
-        prefix_inputs = vl_processor(
-            text=prefix, text_kwargs={"return_tensors": "pt"}
-        ).to(model.device)
+        max_length = self.tokenizer_max_length
+        text_kwargs = {"is_split_into_words": True, "return_tensors": "pt"}
+        prefix_inputs = vl_processor(text=prefix, text_kwargs={"return_tensors": "pt"})
+        vision = (
+            vl_processor(
+                images=[self._vl_image(image) for image in images],
+                text=[
+                    self.image_template.format(index=i + 1) for i in range(len(images))
+                ],
+                text_kwargs=text_kwargs,
+                images_kwargs={"return_tensors": "pt"},
+            )
+            if images
+            else None
+        )
+        # The token budget covers the prompt text alone, as in LongCat's pipelines.
         prompt_inputs = vl_processor(
-            images=images,
-            text=pretokenized_inputs,
-            text_kwargs={
+            text=words,
+            text_kwargs=text_kwargs
+            | {
                 "padding": "max_length"
                 if self.keep_padding_tokens and max_length > 0
                 else False,
-                "is_split_into_words": True,
+                "truncation": max_length > 0,
                 "max_length": max_length if max_length > 0 else None,
-                "return_tensors": "pt",
             },
-            images_kwargs={
-                "return_tensors": "pt",
-            },
-        ).to(model.device)
-        suffix_inputs = vl_processor(
-            text=suffix, text_kwargs={"return_tensors": "pt"}
-        ).to(model.device)
-
-        # When is_split_into_words=True is passed, returned inputs_ids and attention_mask
-        # will not have batch dimension. However, pixel_values and image_grid_thw will
-        # always have batch dimension.
-
-        prefix_len = prefix_inputs.input_ids.shape[1]
-        suffix_len = suffix_inputs.input_ids.shape[1]
-
-        input_ids = torch.cat(
-            [
-                prefix_inputs.input_ids,
-                prompt_inputs.input_ids.unsqueeze(0),
-                suffix_inputs.input_ids,
-            ],
-            dim=1,
         )
-        attention_mask = torch.cat(
-            [
-                prefix_inputs.attention_mask,
-                prompt_inputs.attention_mask.unsqueeze(0),
-                suffix_inputs.attention_mask,
-            ],
-            dim=1,
+        suffix_inputs = vl_processor(text=suffix, text_kwargs={"return_tensors": "pt"})
+        parts = [
+            prefix_inputs,
+            *([vision] if vision else []),
+            prompt_inputs,
+            suffix_inputs,
+        ]
+
+        def joined(key: str) -> torch.Tensor:
+            return torch.cat([part[key] for part in parts], dim=1).to(model.device)
+
+        input_ids = joined("input_ids")
+        attention_mask = joined("attention_mask")
+        image_grid_thw = vision.image_grid_thw.to(model.device) if vision else None
+        # The mRoPE positions of Transformers 4.x, which the checkpoints were used
+        # with. 5.x needs mm_token_type_ids for 3-D image positions, counts padding
+        # in text-only input, and puts padding at position 0 (4.x: 1).
+        position_ids, _ = model.model.get_rope_index(
+            cast(torch.LongTensor, input_ids),
+            cast(torch.IntTensor, joined("mm_token_type_ids")),
+            image_grid_thw,
+            attention_mask=attention_mask,
         )
-        pixel_values = prompt_inputs.pixel_values if images else None
-        image_grid_thw = prompt_inputs.image_grid_thw if images else None
-        encoder_hidden_states = model(
+        hidden_states = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            pixel_values=pixel_values,
+            position_ids=position_ids.masked_fill(attention_mask == 0, 1),
+            pixel_values=vision.pixel_values.to(model.device) if vision else None,
             image_grid_thw=image_grid_thw,
             output_hidden_states=True,
-        )
-        hidden_states = encoder_hidden_states.hidden_states[-1]
+        ).hidden_states[-1]
+        prefix_len = prefix_inputs["input_ids"].shape[-1]
         if self.drop_suffix_tokens:
+            suffix_len = suffix_inputs["input_ids"].shape[-1]
             return hidden_states[:, prefix_len:-suffix_len, :]
-        else:
-            return hidden_states[:, prefix_len:, :]
+        return hidden_states[:, prefix_len:, :]
 
     def generate(
         self, prompt, images=None, system_prompt: str = "You are a helpful assistant."
@@ -568,7 +569,7 @@ class Qwen25VLEncoder(
         model = self.model
 
         if images:
-            images = [remove_alpha_channel(image) for image in images]
+            images = [tensor_to_pil(remove_alpha_channel(image)) for image in images]
         text_input = self._format_prompt(prompt, images, system_prompt)
         model_inputs = vl_processor(
             text=text_input,
@@ -993,10 +994,16 @@ Encoder = Annotated[BaseEncoder, RegistryUnion(encoder_registry, "type")]
 
 
 if __name__ == "__main__":
-    from PIL import Image
+    from diffusers.pipelines.qwenimage.pipeline_qwenimage import QwenImagePipeline
+    from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
+        CONDITION_IMAGE_SIZE,
+        QwenImageEditPlusPipeline,
+        calculate_dimensions,
+    )
     from rich import print
     from transformers import AttentionInterface
 
+    from flow_control.processors.components.prompts import parse_prompt
     from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
@@ -1046,3 +1053,89 @@ if __name__ == "__main__":
     reference = t5.encode(prompt)
     assert torch.equal(ours, reference), "T5 no longer matches transformers <= 5.16"
     print("[green]T5: bitwise equal to the transformers <= 5.16 attention[/]")
+    t5.unload_model()
+
+    # Qwen25VLEncoder vs the official diffusers encode_prompt (T2I, and Edit-Plus with
+    # two example images), bitwise. Diffusers omits the mm_token_type_ids that
+    # Transformers 5.x needs for 3-D mRoPE, so a hook supplies them. It also counts
+    # padding on 5.x, so LongCat-style padding is checked against the 4.x rule.
+    device = devutil.default_device()
+    encoder = Qwen25VLEncoder()
+    encoder.load_model(device)
+    text_encoder = encoder.model
+    # Diffusers accepts absent components at runtime; annotations omit None.
+    t2i_pipe = QwenImagePipeline(
+        scheduler=None,
+        vae=None,  # ty: ignore[invalid-argument-type]
+        text_encoder=text_encoder,
+        tokenizer=encoder.tokenizer.model,
+        transformer=None,  # ty: ignore[invalid-argument-type]
+    )
+    edit_pipe = QwenImageEditPlusPipeline(
+        scheduler=None,
+        vae=None,  # ty: ignore[invalid-argument-type]
+        text_encoder=text_encoder,
+        tokenizer=encoder.tokenizer.model,
+        processor=encoder.vl_processor.model,
+        transformer=None,  # ty: ignore[invalid-argument-type]
+    )
+
+    def mark_image_tokens(module, args, kwargs):
+        image_token_id = module.config.image_token_id
+        kwargs["mm_token_type_ids"] = (kwargs["input_ids"] == image_token_id).int()
+        return args, kwargs
+
+    text_encoder.register_forward_pre_hook(mark_image_tokens, with_kwargs=True)
+    images = [
+        Image.open(f"examples/assets/{name}").convert("RGB")
+        for name in ("image9.png", "image10.png")
+    ]
+    conditions = []
+    for image in images:
+        width, height = calculate_dimensions(
+            CONDITION_IMAGE_SIZE, image.width / image.height
+        )
+        conditions.append(edit_pipe.image_processor.resize(image, height, width))
+    prompt = "Dress the man in Picture 1 in the blue polo shirt from Picture 2."
+    with torch.no_grad():
+        results = {
+            "t2i": (
+                encoder.encode(
+                    prompt, system_prompt=parse_prompt("@qwen_image_encoder")
+                ),
+                t2i_pipe.encode_prompt(prompt, device=device)[0],
+            ),
+            "edit": (
+                encoder.encode(
+                    prompt,
+                    [pil_to_tensor(image) for image in images],
+                    system_prompt=parse_prompt("@qwen_image_edit_encoder"),
+                ),
+                edit_pipe.encode_prompt(
+                    prompt,
+                    # The pipeline passes PIL images; the annotation says tensor.
+                    image=conditions,  # ty: ignore[invalid-argument-type]
+                    device=device,
+                )[0],
+            ),
+        }
+    for name, (ours, theirs) in results.items():
+        print(f"{name}: {tuple(ours.shape)} vs diffusers {tuple(theirs.shape)}")
+        assert torch.equal(ours, theirs), f"max |diff| {(ours - theirs).abs().max()}"
+
+    # Padding in the middle of the template (LongCat): real tokens keep consecutive
+    # positions across it, and padding sits at position 1.
+    padded = Qwen25VLEncoder(tokenizer_max_length=64, keep_padding_tokens=True)
+    padded.load_model(device)
+    seen = {}
+    text_encoder.register_forward_pre_hook(
+        lambda module, args, kwargs: seen.update(kwargs), with_kwargs=True
+    )
+    with torch.no_grad():
+        padded.encode(prompt)
+    real = seen["attention_mask"][0].bool()
+    positions = seen["position_ids"][:, 0]
+    assert (positions[:, ~real] == 1).all() and torch.equal(
+        positions[:, real], torch.arange(int(real.sum()), device=device).expand(3, -1)
+    )
+    print(f"Bitwise equal to diffusers; {int((~real).sum())} padding tokens skipped.")
