@@ -127,7 +127,8 @@ def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
         tensor = tensor.squeeze(0)
     tensor = tensor.clamp(0, 1)  # Ensure values are in [0, 1]
     tensor = rearrange(tensor, "c h w -> h w c")
-    array = (tensor.detach().float().cpu().numpy() * 255).astype(np.uint8)
+    # Round like diffusers' numpy_to_pil; truncating biases every value down.
+    array = (tensor.detach().float().cpu().numpy() * 255).round().astype(np.uint8)
     image = Image.fromarray(array)
     return image
 
@@ -240,3 +241,14 @@ def ensure_compiled_flex_attention():
 
         logger.info("Flex attention function has been compiled.")
         _flex_attention_compiled = True
+
+
+if __name__ == "__main__":
+    from rich import print
+
+    # Decoder outputs just below an 8-bit level must round to it; truncation
+    # (the old behaviour) dropped every such value one level.
+    levels = np.arange(256, dtype=np.uint8).reshape(1, 256, 1).repeat(3, axis=2)
+    below = pil_to_tensor(Image.fromarray(levels)) - 0.49 / 255
+    assert np.array_equal(np.array(tensor_to_pil(below)), levels)
+    print("[green]tensor/PIL conversion checks passed[/green]")
