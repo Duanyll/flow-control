@@ -41,6 +41,11 @@ class ClassifierFreeGuidance(WrappedPrediction):
     renorm: bool = False
     renorm_eps: float = 1e-8
     renorm_min: float = 0.0
+    renorm_max: float | None = 1.0
+    """Upper bound of the per-token renorm factor ``|cond| / |guided|``. The
+    default 1.0 only shrinks tokens, as LongCat-Image's ``cfg_renorm`` does.
+    ``None`` rescales every token to the conditional norm, as diffusers'
+    Qwen-Image pipelines do with ``true_cfg_scale``."""
     positive_variant: Variant = None
     negative_variant: Variant = None
     negative_condition: Literal["positive", "negative"] = "negative"
@@ -128,7 +133,7 @@ class ClassifierFreeGuidance(WrappedPrediction):
             cond_norm = torch.norm(cond, dim=2, keepdim=True)
             noise_norm = torch.norm(combined, dim=2, keepdim=True)
             combined = combined * (cond_norm / (noise_norm + self.renorm_eps)).clamp(
-                min=self.renorm_min, max=1.0
+                min=self.renorm_min, max=self.renorm_max
             )
         return combined
 
@@ -226,3 +231,17 @@ if __name__ == "__main__":
     scheduled = ClassifierFreeGuidance(positive_variant=["default", "base"])
     assert scheduled.variant_keys(3) == ["default", "base"]
     print("[green]composed guidance configuration smoke passed[/green]")
+
+    # Renorm. Scale-4 guidance lengthens token 0 to |4| and shortens token 1 to
+    # |-0.5| (its uncond overshoots cond). Both variants shrink token 0 back to
+    # |cond| = 1; only renorm_max=None also scales token 1 up to it.
+    cond = torch.tensor([[[1.0, 0.0], [1.0, 0.0]]])
+    uncond = torch.tensor([[[0.0, 0.0], [1.5, 0.0]]])
+    request = EvalRequest(cond, 0.5)
+    exact = ClassifierFreeGuidance(scale=4.0, renorm=True, renorm_max=None)
+    clamped = ClassifierFreeGuidance(scale=4.0, renorm=True)
+    guided = exact._guide(cond, uncond, request)
+    assert torch.allclose(guided, torch.tensor([[[1.0, 0.0], [-1.0, 0.0]]]))
+    guided = clamped._guide(cond, uncond, request)
+    assert torch.allclose(guided, torch.tensor([[[1.0, 0.0], [-0.5, 0.0]]]))
+    print("[green]renorm checks passed[/green]")
