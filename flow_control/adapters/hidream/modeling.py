@@ -14,6 +14,11 @@ transformers-style class:
   garbage: non-persistent buffers and plain attributes are absent from the DCP
   seed checkpoint. Re-registering them as persistent buffers makes the seed
   checkpoint (generated from a real CPU load) carry and restore them.
+- load safety for the same buffers: transformers 5.x ``from_pretrained``
+  builds the model on meta and only re-initializes missing buffers its generic
+  ``_init_weights`` recognizes. It restores the text rotary but not the vendored
+  vision rotary, whose now-persistent ``inv_freq`` (missing from the checkpoint)
+  was left as uninitialized memory -- and then copied into every DCP seed.
 """
 
 import torch
@@ -58,18 +63,12 @@ class HiDreamO1Transformer(Qwen3VLForConditionalGeneration):
         vision_rot = self.model.visual.rotary_pos_emb
         vision_rot.register_buffer("inv_freq", vision_rot.inv_freq, persistent=True)
 
-    def to_empty(self, *, device, recurse: bool = True):
-        """Re-materialize the rope tables after ``to_empty``.
+    def _restore_rope_tables(self) -> None:
+        """Recompute the rope buffers in exact float32, each on its own device.
 
-        After ``to_empty`` the buffers are uninitialized, and the meta-load
-        path's earlier ``Module.to(bf16)`` would additionally have quantized
-        them (skewing every attention phase by ~1e-2 relative); recomputing
-        from the config restores exact float32 values and dtype. Computed here
-        rather than in ``__init__``: under from_pretrained the constructor runs
-        inside a meta ``DeviceContext`` where even fresh tensors land on meta
-        (that path re-initializes the buffers itself and never calls to_empty).
+        Computed after loading rather than in ``__init__``: both load paths
+        construct the model under meta, where even fresh tensors land on meta.
         """
-        module = super().to_empty(device=device, recurse=recurse)
         with torch.device("cpu"):
             tables = self._compute_rope_tables()
         text_rot = self.model.language_model.rotary_emb
@@ -79,7 +78,25 @@ class HiDreamO1Transformer(Qwen3VLForConditionalGeneration):
             ((text_rot, "original_inv_freq"), "text.original_inv_freq"),
             ((vision_rot, "inv_freq"), "vision.inv_freq"),
         ]:
+            device = getattr(owner, name).device
             owner.register_buffer(name, tables[key].to(device), persistent=True)
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        model = super().from_pretrained(*args, **kwargs)
+        model._restore_rope_tables()
+        return model
+
+    def to_empty(self, *, device, recurse: bool = True):
+        """Re-materialize the rope tables after ``to_empty``.
+
+        After ``to_empty`` the buffers are uninitialized, and the trainer's
+        meta-init path (``HfModelLoader._load_model_on_meta``) would additionally
+        have quantized them to bf16 (skewing every attention phase by ~1e-2
+        relative); recomputing from the config restores exact float32 values.
+        """
+        module = super().to_empty(device=device, recurse=recurse)
+        self._restore_rope_tables()
         return module
 
     def enable_gradient_checkpointing(self) -> None:
@@ -87,3 +104,62 @@ class HiDreamO1Transformer(Qwen3VLForConditionalGeneration):
 
     def disable_gradient_checkpointing(self) -> None:
         self.gradient_checkpointing_disable()
+
+
+if __name__ == "__main__":
+    import tempfile
+    from pathlib import Path
+
+    from rich import print
+    from safetensors.torch import save_file
+    from transformers import AutoConfig
+
+    # A tiny random HiDream-O1 saved like the real checkpoint (no rope buffers),
+    # reloaded through both paths that construct the model on meta.
+    config = AutoConfig.from_pretrained("HiDream-ai/HiDream-O1-Image")
+    config.text_config.update(
+        {
+            "num_hidden_layers": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 32,
+        }
+    )
+    config.vision_config.update(
+        {
+            "depth": 1,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_heads": 2,
+            "out_hidden_size": 64,
+            "deepstack_visual_indexes": [],
+        }
+    )
+    model = HiDreamO1Transformer(config)
+    expected = model._compute_rope_tables()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        config.save_pretrained(tmp)
+        state = {k: v for k, v in model.state_dict().items() if "inv_freq" not in k}
+        save_file(state, Path(tmp) / "model.safetensors")
+        loaded = HiDreamO1Transformer.from_pretrained(tmp, dtype=torch.bfloat16)
+
+    with torch.device("meta"):
+        meta = HiDreamO1Transformer(config)
+    # As the meta-load path does. transformers wraps `to()` in functools.wraps,
+    # so ty reads the decorated signature as unbound.
+    meta.to(dtype=torch.bfloat16)  # ty: ignore[missing-argument]
+    meta.to_empty(device=torch.device("cpu"))
+
+    for path, m in (("from_pretrained", loaded), ("meta + to_empty", meta)):
+        text_rot = m.model.language_model.rotary_emb
+        got = {
+            "text.inv_freq": text_rot.inv_freq,
+            "text.original_inv_freq": text_rot.original_inv_freq,
+            "vision.inv_freq": m.model.visual.rotary_pos_emb.inv_freq,
+        }
+        for key, value in expected.items():
+            assert torch.equal(got[key], value), f"{path}: {key} = {got[key]}"
+        print(f"[green]{path}: rope tables exact float32[/]")
