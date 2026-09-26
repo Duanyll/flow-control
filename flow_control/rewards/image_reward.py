@@ -117,50 +117,30 @@ class ImageRewardReward(BaseReward):
 
 
 if __name__ == "__main__":
-    import urllib.request
-    from pathlib import Path
-
     from PIL import Image
     from rich import print as rprint
 
     from flow_control.utils.tensor import pil_to_tensor
 
-    data_dir = Path("data")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    image_path = data_dir / "000000039769.jpg"
-    if not image_path.exists():
-        rprint(f"[bold]Downloading test image to[/] {image_path} ...")
-        urllib.request.urlretrieve(image_url, image_path)
-        rprint("[bold green]Done.[/]")
-
-    image_pil = Image.open(image_path).convert("RGB")
-    image_tensor = pil_to_tensor(image_pil)  # [1, C, H, W] in [0, 1]
-    rprint(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
+    image = Image.open("examples/assets/image1.png").convert("RGB")
+    image_tensor = pil_to_tensor(image)  # [1, C, H, W] in [0, 1]
 
     reward = ImageRewardReward()
     device = devutil.default_device()
     reward.load_model(device)
 
-    cats_prompt = "Two cats lying on a couch with two tv remotes"
-    car_prompt = "A picture of a sports car on a race track"
+    def score(prompt: str) -> float:
+        row = {"clean_image": image_tensor.to(device), "prompt": prompt}
+        return reward.score(row).raw.item()
 
-    batch_cats = {
-        "clean_image": image_tensor.to(device),
-        "prompt": cats_prompt,
-    }
-    score_cats = reward.score(batch_cats)
-    rprint(f"[bold]ImageReward (cats prompt):[/] {score_cats.aggregate().item():.4f}")
+    dinner = "Roast dinner with potatoes, brussels sprouts and carrots, red wine"
+    car = "A picture of a sports car on a race track"
+    score_dinner, score_car = score(dinner), score(car)
+    rprint(f"[bold]ImageReward:[/] dinner {score_dinner:.4f}, car {score_car:.4f}")
+    assert score_dinner > score_car, (score_dinner, score_car)
 
-    batch_car = {
-        "clean_image": image_tensor.to(device),
-        "prompt": car_prompt,
-    }
-    score_car = reward.score(batch_car)
-    rprint(f"[bold]ImageReward (car prompt) :[/] {score_car.aggregate().item():.4f}")
-
-    assert score_cats.aggregate().item() > score_car.aggregate().item(), (
-        f"Expected cats prompt to score higher than car prompt; "
-        f"got cats={score_cats.aggregate().item():.4f}, car={score_car.aggregate().item():.4f}"
-    )
-    rprint("[bold green]Ordering assertion passed:[/] cats > car")
+    # Regression anchor: under transformers 4.57, before any 5.x shim was
+    # needed, this code scores the asset at -0.57376 ("a photo").
+    anchor = score("a photo")
+    assert abs(anchor + 0.57376) < 1e-3, anchor
+    rprint("[bold green]Ordering holds and the anchor matches transformers 4.57[/]")

@@ -11,8 +11,8 @@
 #     ``transformers.pytorch_utils`` in 5.x).
 #   * ``BertPreTrainedModel`` declares ``all_tied_weights_keys = {}`` and
 #     ``_tied_weights_keys = []`` so ``tie_weights`` in 5.x doesn't crash.
-#   * ``BertPreTrainedModel.get_head_mask`` reintroduced (the v4.x
-#     ``PreTrainedModel`` method was dropped in 5.x).
+#   * ``BertPreTrainedModel.get_head_mask`` and ``invert_attention_mask``
+#     reintroduced (the v4.x ``PreTrainedModel`` methods were dropped in 5.x).
 
 import math
 
@@ -671,6 +671,23 @@ class BertPreTrainedModel(PreTrainedModel):
         if is_attention_chunked is True:
             head_mask = head_mask.unsqueeze(-1)
         return head_mask
+
+    def invert_attention_mask(self, encoder_attention_mask):
+        """Compat shim: ``PreTrainedModel.invert_attention_mask`` (deprecated in
+        5.9, gone by 5.17) re-implemented as in v4.x; it builds the additive
+        cross-attention mask over the image embeddings.
+        """
+        if encoder_attention_mask.dim() == 3:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, :, :]
+        if encoder_attention_mask.dim() == 2:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, None, :]
+        encoder_extended_attention_mask = encoder_extended_attention_mask.to(
+            dtype=self.dtype
+        )  # fp16 compatibility
+        encoder_extended_attention_mask = (
+            1.0 - encoder_extended_attention_mask
+        ) * torch.finfo(self.dtype).min
+        return encoder_extended_attention_mask
 
 
 class BertModel(BertPreTrainedModel):
