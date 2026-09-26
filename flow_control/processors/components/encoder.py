@@ -215,7 +215,13 @@ class T5TextEncoder(BaseEncoder[T5EncoderModel]):
 
     def load_model(self, device, frozen: bool = True):
         self.tokenizer.load_model(device)
-        return super().load_model(device, frozen)
+        fresh = super().load_model(device, frozen)
+        # Transformers 5.17 made SDPA the default for T5. In bf16 it moves the
+        # FLUX/SD3 T5-XXL embeddings by up to 20% (relative L2) and lands further
+        # from an fp32 run than eager does; eager matches transformers <= 5.16
+        # bitwise, which every existing T5 embedding was computed with.
+        self.model.set_attn_implementation("eager")
+        return fresh
 
     @warn_no_image_support
     def encode(self, prompt, images=None, system_prompt: str | None = None):
@@ -981,3 +987,36 @@ class HiDreamO1Encoder(BaseEncoder[Qwen3VLProcessor]):
 
 
 Encoder = Annotated[BaseEncoder, RegistryUnion(encoder_registry, "type")]
+
+
+if __name__ == "__main__":
+    from rich import print
+    from transformers import AttentionInterface
+
+    from flow_control.utils import device as devutil
+
+    # T5 (FLUX.1, SD3): bitwise equal to the attention math of transformers
+    # <= 5.16 (bf16 scores + position bias, fp32 softmax).
+    def legacy_t5_attention(
+        module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: None,  # unregistered with the mask interface
+        position_bias: torch.Tensor,
+        **kwargs,
+    ):
+        scores = torch.matmul(query, key.transpose(3, 2))
+        scores += position_bias
+        weights = torch.softmax(scores.float(), dim=-1).type_as(scores)
+        return torch.matmul(weights, value).transpose(1, 2).contiguous(), weights
+
+    AttentionInterface.register("t5_legacy", legacy_t5_attention)
+    t5 = T5TextEncoder()
+    t5.load_model(devutil.default_device())
+    prompt = 'A neon sign that says "OPEN 24/7" above a rainy street'
+    ours = t5.encode(prompt)
+    t5.model.set_attn_implementation("t5_legacy")
+    reference = t5.encode(prompt)
+    assert torch.equal(ours, reference), "T5 no longer matches transformers <= 5.16"
+    print("[green]T5: bitwise equal to the transformers <= 5.16 attention[/]")
