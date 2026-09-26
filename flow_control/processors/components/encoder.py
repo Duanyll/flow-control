@@ -39,7 +39,7 @@ class BaseEncoder[T](HfModelLoader[T]):
     def _format_prompt(
         self, prompt: str, images: Any | None = None, system_prompt: str | None = None
     ) -> Any:
-        user_prompt = prompt
+        user_prompt = ""
         for i in range(len(images or [])):
             user_prompt += self.image_template.format(index=i + 1)
         user_prompt += prompt
