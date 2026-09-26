@@ -280,6 +280,9 @@ class LongcatImagePreset(BaseModel):
 class LongcatImageEditPreset(LongcatImagePreset):
     encoder_prompt: PromptStr = parse_prompt("@longcat_image_edit_encoder")
     max_reference_images: int = 1
+    negative_with_images: bool = True
+    """The official LongCat-Image-Edit pipeline encodes the negative prompt together
+    with the reference image."""
 
 
 # ---------------------------------- Z-Image --------------------------------- #
