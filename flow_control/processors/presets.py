@@ -110,6 +110,9 @@ class QwenImageEditPreset(QwenImagePreset):
     encoder: Encoder = Qwen25VLEncoder(tokenizer_max_length=0)
     encoder_prompt: PromptStr = parse_prompt("@qwen_image_edit_encoder")
     max_reference_images: int = 3
+    negative_with_images: bool = True
+    """The official Edit and Edit-Plus pipelines encode the negative prompt
+    together with the reference images."""
 
 
 @preset_registry.register("qwen_image_layered")
