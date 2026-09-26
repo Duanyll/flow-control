@@ -510,7 +510,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         sampler = Sampler(
             steps=3,
             solver=FlowSolver(eta=0.5),
-            guidance=ClassifierFreeGuidance(scale=2),
+            guidance=ClassifierFreeGuidance(scale=2, inner=TiledPrediction()),
         )
         leaf = _TileLeaf()
         with torch.no_grad():
@@ -539,7 +539,7 @@ class SamplerExtensionsTest(unittest.TestCase):
         self.assertEqual(leaf.calls, [8] * 3 + [16])
 
         # Moving CFG inside Tiled must change where nonlinear renorm happens;
-        # the default CFG(Tiled(Model)) keeps whole-image branch semantics.
+        # CFG(Tiled(Model)) keeps whole-image branch semantics.
         # Per-tile Momentum histories must remain separate over several calls.
         layout = TileLayout.model_validate(batch["tiling"])
         specs = layout.token_specs(batch["image_size"])
@@ -648,7 +648,7 @@ class SamplerExtensionsTest(unittest.TestCase):
             Sampler(
                 steps=3,
                 solver=FlowSolver(eta=0.5),
-                guidance=ClassifierFreeGuidance(scale=2),
+                guidance=ClassifierFreeGuidance(scale=2, inner=TiledPrediction()),
             ),
             Sampler(steps=4, solver=SASolver(eta=0.4)),
             Sampler(steps=10, solver=FlowSolver(eta=0.7), start=Start(strength=0.6)),

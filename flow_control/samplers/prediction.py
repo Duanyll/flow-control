@@ -82,6 +82,12 @@ class ModelPrediction(BasePrediction):
     type: Literal["model"] = "model"
 
     def bind(self, row: Batch, negative_row: Batch | None = None) -> Predictor:
+        if "tiling" in row:
+            raise ValueError(
+                "The row carries a tile layout (a tiled processor task) but no "
+                "`tiled` node wraps this model prediction. Tiling is opt-in: add "
+                '{"type": "tiled"} around the model in `guidance` / `train_predictor`.'
+            )
         caches: dict[str | None, dict[str, Any]] = {}
 
         def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:

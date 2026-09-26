@@ -81,7 +81,7 @@
     "path": "./data/pickscore_flux/train",
   },
 
-  "train_predictor": "tiled",
+  "train_predictor": "model",
 
   "rollout_sampler": {
     "steps": 14,

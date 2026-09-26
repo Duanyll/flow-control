@@ -18,6 +18,8 @@ from .prediction import Predictor, WrappedPrediction, prediction_registry
 class TiledPrediction(WrappedPrediction):
     """Bind a separate child per tile; absent layout passes through unchanged.
 
+    Tiling is opt-in: a row whose processor wrote a tile layout must be
+    evaluated under this node (the model leaf rejects such rows otherwise).
     Conditions/layout are fixed by the processor. Each evaluation cuts the
     current whole-image latent, evaluates children together, then stitches.
     """

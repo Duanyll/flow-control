@@ -87,7 +87,7 @@
     "path": "./data/pickscore_sd35/train",
   },
 
-  "train_predictor": "tiled",
+  "train_predictor": "model",
 
   "rollout_sampler": {
     "steps": 14,

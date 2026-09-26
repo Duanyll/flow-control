@@ -15,7 +15,6 @@ from flow_control.utils.logging import get_logger, warn_once
 from .calls import Calls, gather
 from .plan import EvalRequest, StepContext
 from .prediction import Prediction, Predictor, WrappedPrediction, prediction_registry
-from .tiling import TiledPrediction
 
 logger = get_logger(__name__)
 Variant = str | Annotated[list[str | None], Field(min_length=1)] | None
@@ -38,7 +37,6 @@ class ClassifierFreeGuidance(WrappedPrediction):
     """
 
     type: Literal["cfg"] = "cfg"
-    inner: Prediction = Field(default_factory=TiledPrediction)
     scale: float = 1.0
     renorm: bool = False
     renorm_eps: float = 1e-8

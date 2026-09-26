@@ -144,11 +144,12 @@ execution requirements; a bound predictor owns its runtime history. Actual
 evaluation latents always come from `request.latents`, including SA substeps
 and tile slices, rather than the step-start latent in `ctx`.
 
-For compatibility, CFG's default child is `Tiled(Model)`: numeric guidance still
-handles tiled rows, and its renorm runs after whole-image reconstruction.
-This is a default configuration choice; CFG's execution never reads tile data.
-Set `inner="model"` to call the model directly, or place CFG inside tiling to
-guide each tile before stitching:
+CFG's default child is `model`; tiling is opt-in. A row whose processor wrote a
+tile layout (`tiled_t2i`) must be evaluated under a `tiled` node, and the model
+leaf rejects it otherwise. Put `tiled` inside CFG
+(`{"type": "cfg", "scale": 4.5, "inner": "tiled"}`) to guide the stitched whole
+image, with renorm after reconstruction, or place CFG inside tiling to guide
+each tile before stitching:
 
 ```jsonc
 "guidance": {
@@ -246,12 +247,13 @@ all use this tree; rollout and validation keep their own sampler guidance.
 
 ```jsonc
 "rollout_sampler": {"steps": 20, "guidance": 4.5},
-"train_predictor": "tiled" // conditional Tiled(Model), without CFG
+"train_predictor": "model" // conditional model call, without CFG
 ```
 
-Use `"train_predictor": "model"` to call the model directly even when row
-metadata describes tiles. To keep training CFG, specify for example
-`{"type":"cfg","scale":4.5,"inner":"tiled"}`. Training resolves its own
+Tiled processors need `"train_predictor": "tiled"` (conditional
+`Tiled(Model)`); the model leaf rejects a tiled row without it. To keep
+training CFG, specify for example `{"type":"cfg","scale":4.5,"inner":"tiled"}`
+or `{"type":"cfg","scale":4.5}` for ordinary rows. Training resolves its own
 negative conditions regardless of whether rollout needed them; missing required
 negative data raises. SFT dropout retains the original negative condition.
 
@@ -283,10 +285,10 @@ existing GRPO surrogate (dimension-averaged log probabilities and the existing
 CPS/Flash conventions), rather than introducing a new importance-weight formula.
 All replay items/ranks share the configured training tree and grid length.
 
-Migration: add `train_predictor` explicitly. `"tiled"` preserves the previous
-SFT/AWM/RAM conditional path; copy the old rollout guidance into this field to
-preserve stateless NFT/GRPO behavior. Examples have been migrated. Include tiling
-in both trees when training and sampling should use the same tile evaluation.
+Migration: add `train_predictor` explicitly: `"model"` for ordinary rows (what
+the examples use), `"tiled"` for tiled processors; copy the old rollout guidance
+into this field to preserve stateless NFT/GRPO behavior. Include tiling in both
+trees when training and sampling should use the same tile evaluation.
 
 Rollout prompts come from `RowCursor` (`chunked`: consecutive rows of the
 cost-grouped plan, no repeats within a pass over the dataset; `independent`: a
