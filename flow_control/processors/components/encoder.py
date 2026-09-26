@@ -134,7 +134,11 @@ class Cosmos3Encoder(BaseEncoder[PreTrainedTokenizerBase]):
 
     type: Literal["cosmos3"] = "cosmos3"
     library: Literal["transformers"] = "transformers"
-    class_name: str = "AutoTokenizer"
+    # AutoTokenizer (transformers 5.x) first looks up a config.json, which this
+    # tokenizer-only subfolder lacks, and fails under HF_HUB_OFFLINE=1. The fast
+    # base class loads tokenizer.json as is, matching AutoTokenizer on Nano,
+    # Edge and Super; Qwen2Tokenizer would rebuild Edge's pre-tokenizer.
+    class_name: str = "PreTrainedTokenizerFast"
     pretrained_model_id: str = "nvidia/Cosmos3-Nano"
     subfolder: str | None = "text_tokenizer"
 
