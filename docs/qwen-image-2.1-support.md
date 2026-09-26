@@ -30,7 +30,7 @@ uv run tests/kv_inference_smoke.py flux2_kv --output demo/flux2_kv
 
 同为 1024²，透明小龙换海滩、猫戴红围巾则正常。霓虹图在仓库中改用更明确的提示词，或固定 `mu=0.69` 并取消 terminal stretch，仍失败。[Diffusers #14824](https://github.com/huggingface/diffusers/issues/14824) 报告了同版本的相同症状，尚无已确认根因；这不是所有 1024 编辑都会失败的尺寸限制，因此不自动降分辨率或修改默认 sampler。
 
-按用户建议，把同一霓虹样例的输出与参考处理尺寸都设为 **2048²** 后，仓库缓存版和无缓存版均正常换成海滩，视觉接近。48 GB RTX 4090、BF16、40 步、seed 42 下，缓存版去噪 `148.1 s` / 峰值分配显存 `26.51 GiB`，无缓存版 `254.5 s` / `18.50 GiB`，约 **1.72×** 加速；最终 latent 相对 L2 约 `0.00665`。计时不含模型加载、条件编码和 VAE 解码，编码器在去噪前卸载。2K 图片在 `demo/qwen21/2048/`，没有按这个单一样例改变全局默认尺寸。
+按用户建议，把同一霓虹样例的输出与参考处理尺寸都设为 **2048²** 后，仓库缓存版和无缓存版均正常换成海滩，视觉接近。48 GB RTX 4090、BF16、40 步、seed 42 下，缓存版去噪 `148.1 s` / 峰值分配显存 `26.51 GiB`，无缓存版 `254.5 s` / `18.50 GiB`，约 **1.72×** 加速；最终 latent 相对 L2 约 `0.00665`。计时不含模型加载、条件编码和 VAE 解码，编码器在去噪前卸载。2K 图片在 `demo/qwen21/2048/`。随后根据官方推荐的七组 2K 尺寸调整了 preset 默认值与尺寸列表。
 
 对齐检查中，prompt embeddings 与 image-slot mask 和官方完全一致。参考图改为官方 PIL RGBA 缩放后，方图、横图、竖图的归一化像素及内存布局都一致；此前 bilinear/连续布局与官方不同，1024 方图的 VAE latent 最大差异 `0.0957` 在相同布局下归零。小龙完整采样与官方视觉接近，最终 latent 相对 L2 为 `0.0114`；仅对齐 timestep 的 BF16 舍入顺序降为 `0.0075`，不是霓虹图失败原因。保留现有 adapter 的 timestep 约定。
 
@@ -43,7 +43,7 @@ uv run tests/kv_inference_smoke.py flux2_kv --output demo/flux2_kv
 - `Qwen/Qwen-Image-2.1-PE-T2I`，revision `f3ed7985c788ad75b3ab7223e0c4c51e2a43545b`。
 - `Qwen/Qwen-Image-2.1-PE-I2I`，revision `72927bc08afc99b7888ceb7d7d51a12db3700bbd`。
 
-本次仅做少量直接 `generate()` 的实验，复用[官方 Transformers runner](https://github.com/QwenLM/Qwen-Image-2.1/blob/main/prompt_rewrite/run_transformers.py)，不启动 vLLM，也未给通用 processor 增加新的服务或配置层。两个模型都通过 `AutoProcessor` / `AutoModelForImageTextToText` 加载，读取各自的 `system_prompt.txt`，开启 thinking；`temperature=1`、`top_p=0.95`、`top_k=20`，T2I presence penalty 为 `1.5`，编辑为 `0`。T2I 模型卡简例遗漏了 presence penalty，因此以官方 runner 的生产 profile 为准。
+实验复用[官方 Transformers runner](https://github.com/QwenLM/Qwen-Image-2.1/blob/main/prompt_rewrite/run_transformers.py)，不启动 vLLM。两个模型都通过 `AutoProcessor` / `AutoModelForImageTextToText` 加载，读取各自的 `system_prompt.txt`，开启 thinking；`temperature=1`、`top_p=0.95`、`top_k=20`，T2I presence penalty 为 `1.5`，编辑为 `0`。T2I 模型卡简例遗漏了 presence penalty，因此以官方 runner 的生产 profile 为准。现在这两份官方 system prompt 已收入 `processors/components/prompts.py`，`qwen21` preset 的 `t2i_enhance_prompt` 和 `tie_enhance_prompt` 分别引用它们；配置 `llm` 并开启 `enable_enhance` 后，processor 会提取返回 JSON 的 `rewritten_prompt`。模型服务与官方生成参数仍须单独配置。
 
 生成结果保存在 `demo/qwen21/enhancer/{t2i,edit}.jsonl`；必须检查 `parse_ok=true` 后才把 `positive_prompt` 送入 DiT，不能只看 runner 的退出码。`manifest.json` 记录 checkpoint revision、system prompt 与 runner 哈希及采样参数。对比中，T2I 两侧使用相同的推荐画幅；编辑按 1024²、2048² 分别固定参考图处理尺寸，PE 自身缩小后的 RGB 输入不替换 DiT 的原始 RGBA 参考。
 
@@ -85,7 +85,7 @@ Transformers 5.17 的 AutoTokenizer 会先查模型配置，但 Qwen processor �
 1. `flow_control/adapters/qwen21.py` 注册 `qwen21_base`，同一 adapter 处理 T2I 和 TIE。
 2. `QwenImage21Encoder.encode_condition()` 使用只装入 encoder/processor 的轻量官方 pipeline，直接复用 prompt 编码，返回 embeddings、padding mask、image-slot mask。
 3. `QwenImage21VAE` 复用 Qwen 的帧维度和 mean/std 归一化，读取新配置的 `in_channels`。
-4. `QwenImage21Preset` 注册为 `qwen21`，设置 `patch_size=1`、`vae_scale_factor=16`、`latent_channels=64`，尺寸保持 32 的倍数。参考图按 `total_pixels`（默认 1024²）和官方 `calculate_dimensions` / PIL RGBA 路径保留宽高比缩放，同一张 resized image 交给 VLM 和 VAE；参考面积独立于输出尺寸。
+4. `QwenImage21Preset` 注册为 `qwen21`，设置 `patch_size=1`、`vae_scale_factor=16`、`latent_channels=64`；默认输出 2048²，自动尺寸选择使用[官方推荐的七组 2K 尺寸](https://github.com/QwenLM/Qwen-Image-2.1#supported-aspect-ratios)。参考图按 `total_pixels`（默认 2048²）和官方 `calculate_dimensions` / PIL RGBA 路径保留宽高比缩放，同一张 resized image 交给 VLM 和 VAE；参考面积独立于输出尺寸。
 5. `flow_control/adapters/flux2/kv.py` 安装官方 KV attention processors。参考在目标之前；关闭复用时每步走 `extract` 并丢弃 KV，以保留固定参考 timestep 和因果注意力。preset 从 KV 模型仓库加载 encoder/VAE，参考图遵循官方 1024² 面积上限和 16 倍数裁剪。
 
 batch 新增 `prompt_embeds_mask` 和 `image_pad_mask`，保留现有 `reference_latents`、`reference_sizes`。

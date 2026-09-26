@@ -134,12 +134,24 @@ class QwenImage21Preset(BaseModel):
     patch_size: int = 1
     vae_scale_factor: int = 16
     latent_channels: int = 64
-    default_resolution: tuple[int, int] = (1024, 1024)
-    resize_mode: Literal["multiple_of"] = "multiple_of"
+    default_resolution: tuple[int, int] = (2048, 2048)
+    resize_mode: Literal["list"] = "list"
+    preferred_resolutions: ResolutionList = [
+        (2048, 2048),
+        (1792, 2400),
+        (2400, 1792),
+        (1696, 2528),
+        (2528, 1696),
+        (1536, 2752),
+        (2752, 1536),
+    ]
     multiple_of: int = 32
-    total_pixels: int = 1024 * 1024
+    total_pixels: int = 2048 * 2048
     max_reference_images: int = 10
     encoder_prompt: PromptStr = ""
+    t2i_enhance_prompt: PromptStr = parse_prompt("@qwen21_t2i_enhance")
+    tie_enhance_prompt: PromptStr = parse_prompt("@qwen21_tie_enhance")
+    enhance_json_field: str = "rewritten_prompt"
     default_negative_prompt: str = " "
     save_negative: bool = False
     negative_with_images: bool = True

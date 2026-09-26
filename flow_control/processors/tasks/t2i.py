@@ -1,3 +1,4 @@
+import json
 from typing import Literal, NotRequired
 
 import torch
@@ -35,6 +36,7 @@ class T2IProcessor(BaseProcessor[T2IInputRow, T2ITrainInputRow, T2IProcessedRow]
     encoder_prompt: PromptStr = ""
     caption_prompt: PromptStr = parse_prompt("@default_t2i_caption")
     t2i_enhance_prompt: PromptStr = parse_prompt("@default_t2i_enhance")
+    enhance_json_field: str | None = None
     default_negative_prompt: str = " "
     save_negative: bool = False
     enable_enhance: bool = False
@@ -46,6 +48,8 @@ class T2IProcessor(BaseProcessor[T2IInputRow, T2ITrainInputRow, T2IProcessedRow]
             prompt = await self.chat_completion(
                 prompt=prompt, system_prompt=self.t2i_enhance_prompt
             )
+            if self.enhance_json_field is not None:
+                prompt = json.loads(prompt)[self.enhance_json_field]
         if self.prepend_trigger_words is not None and not prompt.startswith(
             self.prepend_trigger_words
         ):

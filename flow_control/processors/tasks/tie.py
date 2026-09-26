@@ -1,3 +1,4 @@
+import json
 from typing import ClassVar, Literal, NotRequired, TypedDict
 
 import torch
@@ -48,6 +49,7 @@ class TIEProcessor(BaseProcessor[TIEInputRow, TIETrainInputRow, TIEProcessedRow]
     task: Literal["tie"] = "tie"
     encoder_prompt: PromptStr = ""
     tie_enhance_prompt: PromptStr = parse_prompt("@default_tie_enhance")
+    enhance_json_field: str | None = None
     default_negative_prompt: str = " "
     save_negative: bool = False
     negative_with_images: bool = False
@@ -116,11 +118,14 @@ class TIEProcessor(BaseProcessor[TIEInputRow, TIETrainInputRow, TIEProcessedRow]
     ) -> str:
         if not self.enable_enhance:
             return prompt
-        return await self.chat_completion(
+        result = await self.chat_completion(
             prompt=prompt,
             system_prompt=self.tie_enhance_prompt,
             images=reference_images,
         )
+        if self.enhance_json_field is not None:
+            return json.loads(result)[self.enhance_json_field]
+        return result
 
     async def prepare_inference_row(self, row: TIEInputRow) -> TIEProcessedRow:
         row["reference_images"] = self.trim_reference_images(row["reference_images"])
