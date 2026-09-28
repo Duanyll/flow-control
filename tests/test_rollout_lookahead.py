@@ -17,6 +17,7 @@ from test_trainer_recipe_config import _NftProbe, _ProbeOverrides
 from flow_control.data import KEY, Index, IndexEntry, RowCursor
 from flow_control.rewards import PendingRewards
 from flow_control.rewards.base import BaseReward
+from flow_control.rewards.pairwise import PairwiseReward
 from flow_control.training.ema import apply_ema_maybe
 from flow_control.training.endpoint import EndpointTrainItem
 from flow_control.training.mixins import PendingRollouts, Rollout
@@ -49,6 +50,23 @@ class _KeyReward(BaseReward):
 
     def supports_rollout_overlap(self) -> bool:
         return True
+
+
+class _KeyPairwise(PairwiseReward):
+    """Pairwise judge that calls every pair a tie (raw 0.5 for each rollout)
+    and records the event loop each pair request ran on."""
+
+    _loops: list[asyncio.AbstractEventLoop] = PrivateAttr(default_factory=list)
+
+    @property
+    def _row_fields(self) -> set[str]:
+        return {KEY}
+
+    async def async_score_pair(self, row_a, row_b) -> float:
+        assert row_a[KEY] == row_b[KEY]
+        self._loops.append(asyncio.get_running_loop())
+        await asyncio.sleep(0.005)
+        return 0.5
 
 
 class _GainTransformer(torch.nn.Module):
@@ -151,7 +169,7 @@ def _make_trainer(
     config: dict[str, Any],
     store: _RowStore,
     model: _GainModel,
-    reward: _KeyReward | None = None,
+    reward: BaseReward | None = None,
 ) -> Any:
     """``run()``'s setup for a CPU probe: seed, fakes, cursor, real optimizers."""
     trainer = cls.model_validate(
@@ -275,6 +293,42 @@ class RolloutLookaheadTest(unittest.TestCase):
                 self.assertTrue(all(loop is loops[0] for loop in loops))
                 self.assertTrue(loops[0].is_closed())
                 self.assertIsNone(trainer._reward_loop)
+
+        with self.subTest("pairwise reward sampled one batch ahead"):
+            # A prompt group's pair requests go out as soon as its K rollouts
+            # are in, on the run-long loop, so the batch sampled ahead scores
+            # while the next one samples and epoch k still trains on k's
+            # rewards; the profile counts requests: 2 prompts x K(K-1) pairs.
+            reward = _KeyPairwise()
+            trainer = _make_trainer(
+                _ScheduleProbe,
+                {
+                    **self.SCHEDULE_CONFIG,
+                    "rollout_lookahead": 1,
+                    "num_rollouts_per_prompt": 2,
+                },
+                _RowStore(8),
+                _GainModel(),
+                reward,
+            )
+            trainer._prime_rollouts()
+            self._run_to_end(trainer)
+            self.assertEqual(trainer._events, _expected_schedule(1, self.EPOCHS))
+            self.assertEqual(_policy_lags(trainer), [0, 1, 1, 1])
+            for epoch, seen in enumerate(trainer._trained):
+                self.assertEqual(
+                    seen, [(key, 0.5, ["pairwise"]) for key in trainer._sampled[epoch]]
+                )
+            counts = [
+                m["profile/reward/count"]
+                for _, m in trainer._emitted
+                if "profile/reward/count" in m
+            ]
+            self.assertEqual(counts, [4.0] * self.EPOCHS)
+            loops = reward._loops
+            self.assertEqual(len(loops), 4 * self.EPOCHS)
+            self.assertTrue(all(loop is loops[0] for loop in loops))
+            self.assertTrue(loops[0].is_closed())
 
         with self.subTest("resume with a batch in flight"):
             config = {**self.SCHEDULE_CONFIG, "rollout_lookahead": 1}

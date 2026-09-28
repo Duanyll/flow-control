@@ -36,8 +36,8 @@ from flow_control.rewards import (
     RewardLoopThread,
     RewardProfile,
     _has_pairwise_child,
-    execute_pairwise_reward,
     reduce_reward_profiles,
+    submit_pairwise_reward,
     submit_reward,
 )
 from flow_control.rewards.base import RewardResult
@@ -246,7 +246,8 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     def _start_rollouts(self, epoch: int) -> PendingRollouts:
         """Sample and decode batch *epoch*, submit its rewards and return without
         waiting for them; ``Rollout.reward`` holds a placeholder until
-        :meth:`_finish_rollouts`. Pairwise rewards are scored blocking here."""
+        :meth:`_finish_rollouts`. A pairwise reward is submitted per prompt group
+        as each group's rollouts complete."""
         rollouts: list[Rollout] = []
         model = self.model
         processor = self.processor
@@ -336,13 +337,14 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                     yield row, len(rollouts) - 1
 
         reward_profile = RewardProfile()
-        pending_rewards: PendingRewards[int] = PendingRewards([])
+        pending_rewards: PendingRewards[int]
         if _has_pairwise_child(self.reward):
-            execute_pairwise_reward(
+            pending_rewards = submit_pairwise_reward(
                 self.reward,
                 rollout_submitter(),
-                _reward_writer(rollouts),
+                loop=self.reward_loop,
                 num_rollouts_per_prompt=self.num_rollouts_per_prompt,
+                profile=reward_profile,
             )
         else:
             pending_rewards = submit_reward(

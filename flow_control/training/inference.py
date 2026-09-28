@@ -27,7 +27,7 @@ from flow_control.data import (
     build_loader,
     is_padding,
 )
-from flow_control.rewards import Reward, execute_reward
+from flow_control.rewards import Reward, _has_pairwise_child, execute_reward
 from flow_control.rewards.base import RewardResult
 from flow_control.samplers import Sampler, SampleRequest, derive_seed
 from flow_control.utils.logging import console, dump_if_failed, get_logger
@@ -95,6 +95,13 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
             raise ValueError(
                 f"checkpoint_weights={self.checkpoint_weights!r} requires "
                 "checkpoint_dir to be specified."
+            )
+        if self.reward is not None and _has_pairwise_child(self.reward):
+            raise ValueError(
+                "A pairwise reward compares the rollouts of one prompt and cannot "
+                "score inference rows one at a time; use a pointwise reward that "
+                "compares each sample against an anchor (for example "
+                "reference_compare in anchored mode)."
             )
         return self
 

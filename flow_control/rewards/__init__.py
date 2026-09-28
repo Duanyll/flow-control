@@ -102,7 +102,10 @@ class RewardProfile:
     result is published to the waiter.  Each index is written exactly once, so
     no lock is needed.
 
-    Only populated on the overlap path; left empty (``count == 0``) otherwise.
+    Only populated on the overlap path and the pairwise path, where every pair
+    request (each order) and every per-row request of a remote child is one
+    entry, so ``count`` and the throughput are judge requests, not rows; left
+    empty (``count == 0``) otherwise.
     """
 
     _submit_times: list[float] = field(default_factory=list)
@@ -236,9 +239,9 @@ class PendingRewards[TTag]:
         return [handler(tag, future.result()) for tag, future in self._futures]
 
 
-async def _record_done(
-    coro: Coroutine[Any, Any, RewardResult], profile: RewardProfile, idx: int
-) -> RewardResult:
+async def _record_done[T](
+    coro: Coroutine[Any, Any, T], profile: RewardProfile, idx: int
+) -> T:
     """Stamp completion on the loop thread before the result reaches the waiter.
 
     A ``Future`` done-callback would fire *after* ``set_result`` has woken
@@ -324,140 +327,221 @@ def _has_pairwise_child(reward: BaseReward) -> bool:
     return False
 
 
+def _stamped[T](
+    coro: Coroutine[Any, Any, T], profile: RewardProfile | None
+) -> Coroutine[Any, Any, T]:
+    """Give *coro* a profile entry now (main thread) if profiling is on."""
+    if profile is None:
+        return coro
+    return _record_done(coro, profile, profile.on_submit())
+
+
+async def _ready[T](value: T) -> T:
+    return value
+
+
+def _pairwise_group(
+    reward: PairwiseReward,
+    rows: list[dict[str, Any]],
+    profile: RewardProfile | None,
+) -> Coroutine[Any, Any, list[RewardResult]]:
+    """One prompt group's per-row results from every pair comparison.
+
+    The pair requests are created (and stamped) here on the caller's thread;
+    the returned coroutine runs them concurrently on the reward loop, fills
+    the ``[K, K]`` win matrix and aggregates it through the reward.
+    """
+    K = len(rows)
+    pairs = [(i, j) for i in range(K) for j in range(i)]
+    orders = pairs + ([(j, i) for i, j in pairs] if reward.swap_orders else [])
+    calls = [
+        _stamped(reward.async_score_pair(rows[a], rows[b]), profile) for a, b in orders
+    ]
+
+    async def run() -> list[RewardResult]:
+        scores = [float(s) for s in await asyncio.gather(*calls)]
+        win_matrix = torch.full((K, K), 0.5)
+        for n, (i, j) in enumerate(pairs):
+            score = scores[n]
+            if reward.swap_orders:
+                score = (score + 1.0 - scores[len(pairs) + n]) / 2.0
+            win_matrix[i, j] = score
+            win_matrix[j, i] = 1.0 - score
+        aggregated = reward.aggregate(win_matrix)
+        result = reward._make_result(aggregated.unsqueeze(-1))  # noqa: SLF001
+        return [result.row(i) for i in range(K)]
+
+    return run()
+
+
+def _row_requests(
+    reward: BaseReward,
+    rows: list[dict[str, Any]],
+    profile: RewardProfile | None,
+) -> Coroutine[Any, Any, list[RewardResult]]:
+    """One request per row for a remote (overlap-capable) child."""
+    calls = [_stamped(reward.async_score(row), profile) for row in rows]
+
+    async def run() -> list[RewardResult]:
+        return list(await asyncio.gather(*calls))
+
+    return run()
+
+
+class _PairwiseGroupPlan:
+    """How one prompt group of *reward* is scored.
+
+    The reward is a :class:`PairwiseReward` or a :class:`CompositeReward` whose
+    direct children may be pairwise (need the whole group), remote (one request
+    per row) or local (scored blocking on the trainer's device as each row is
+    yielded, like :func:`submit_reward` does for a local reward).
+    """
+
+    def __init__(self, reward: BaseReward) -> None:
+        self.reward = reward
+        self.children: list[BaseReward] = (
+            list(reward._reward_instances)  # noqa: SLF001
+            if isinstance(reward, CompositeReward)
+            else [reward]
+        )
+        for child in self.children:
+            if isinstance(child, CompositeReward) and _has_pairwise_child(child):
+                raise ValueError(
+                    "A pairwise reward must be the reward itself or a direct child "
+                    "of the top-level composite reward; a nested composite cannot "
+                    "carry one."
+                )
+        self.local = [
+            index
+            for index, child in enumerate(self.children)
+            if not isinstance(child, PairwiseReward)
+            and not child.supports_rollout_overlap()
+        ]
+
+    def score_local(self, row: dict[str, Any]) -> dict[int, RewardResult]:
+        """Local children score the row now, from the device tensors."""
+        return {
+            index: _score_blocking(self.children[index], row) for index in self.local
+        }
+
+    def group(
+        self,
+        rows: list[dict[str, Any]],
+        local_results: list[dict[int, RewardResult]],
+        profile: RewardProfile | None,
+    ) -> Coroutine[Any, Any, list[RewardResult]]:
+        parts: list[Coroutine[Any, Any, list[RewardResult]]] = []
+        for index, child in enumerate(self.children):
+            if isinstance(child, PairwiseReward):
+                parts.append(_pairwise_group(child, rows, profile))
+            elif index in self.local:
+                parts.append(_ready([result[index] for result in local_results]))
+            else:
+                parts.append(_row_requests(child, rows, profile))
+        return self._combine(parts)
+
+    async def _combine(
+        self, parts: list[Coroutine[Any, Any, list[RewardResult]]]
+    ) -> list[RewardResult]:
+        per_child = await asyncio.gather(*parts)
+        if not isinstance(self.reward, CompositeReward):
+            return per_child[0]
+        return [
+            self.reward._combine_results([child[k] for child in per_child])  # noqa: SLF001
+            for k in range(len(per_child[0]))
+        ]
+
+
+async def _resolve_group(
+    futures: list[concurrent.futures.Future[RewardResult]],
+    coro: Coroutine[Any, Any, list[RewardResult]],
+) -> None:
+    """Publish a group's results (or its failure) to its rows' futures, so a
+    waiter never blocks on a group that died."""
+    try:
+        results = await coro
+    except BaseException as exc:  # noqa: BLE001 - re-raised on the waiter's thread
+        for future in futures:
+            future.set_exception(exc)
+        return
+    for future, result in zip(futures, results, strict=True):
+        future.set_result(result)
+
+
+def submit_pairwise_reward[TTag](
+    reward: BaseReward,
+    submitter: Generator[tuple[dict[str, Any], TTag]],
+    loop: RewardLoopThread,
+    num_rollouts_per_prompt: int,
+    profile: RewardProfile | None = None,
+) -> PendingRewards[TTag]:
+    """Drive *submitter*, scoring each prompt group as soon as its K rows are in.
+
+    Rows are grouped by ``row["key"]`` and may arrive in any order (a streaming
+    sampler finishes prompts out of order), but all K rollouts of a prompt must
+    come through this submitter (i.e. stay on one rank).  The moment a group is
+    complete its pair requests (both orders when ``swap_orders``) and the
+    per-row requests of any remote child go to *loop* together; the generator
+    keeps producing rows meanwhile, so sampling and the judge overlap, and the
+    returned :class:`PendingRewards` can be waited on any time later (a batch
+    sampled ahead under ``rollout_lookahead``).  Local children are scored
+    blocking as their row is yielded, like :func:`submit_reward`.  *profile*
+    gets one entry per request, so its count and throughput are judge requests,
+    not rows.  Results reach the waiter's handler in submission order.
+    """
+    plan = _PairwiseGroupPlan(reward)
+    futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]] = []
+    groups: dict[
+        str,
+        list[tuple[dict[str, Any], dict[int, RewardResult], concurrent.futures.Future]],
+    ] = {}
+
+    for row, tag in submitter:
+        key = row.get("key")
+        if not isinstance(key, str):
+            raise ValueError("Pairwise rewards require a string key for each prompt.")
+        future: concurrent.futures.Future[RewardResult] = concurrent.futures.Future()
+        futures.append((tag, future))
+        group = groups.setdefault(key, [])
+        group.append((reward.prepare_row_for_async(row), plan.score_local(row), future))
+        if len(group) == num_rollouts_per_prompt:
+            del groups[key]
+            rows = [entry[0] for entry in group]
+            local_results = [entry[1] for entry in group]
+            row_futures = [entry[2] for entry in group]
+            loop.submit(
+                _resolve_group(row_futures, plan.group(rows, local_results, profile))
+            )
+
+    if groups:
+        sizes = {key: len(group) for key, group in groups.items()}
+        raise ValueError(
+            f"Incomplete pairwise prompt groups: {sizes}; expected "
+            f"{num_rollouts_per_prompt} rollouts per prompt on this rank."
+        )
+    return PendingRewards(futures)
+
+
 def execute_pairwise_reward[TTag, TResult](
     reward: BaseReward,
     submitter: Generator[tuple[dict[str, Any], TTag]],
     handler: Callable[[TTag, RewardResult], TResult],
     num_rollouts_per_prompt: int,
+    profile: RewardProfile | None = None,
+    loop: RewardLoopThread | None = None,
 ) -> list[TResult]:
-    """Score rows using the pairwise execution path.
-
-    Groups by the original row's ``key`` so rollouts may arrive in
-    completion order. All K rollouts for a prompt must stay on the same rank.
-
-    For a CompositeReward with mixed children, non-pairwise children are scored
-    independently while pairwise children go through the pairwise comparison
-    path.  Results are concatenated to produce the full ``[C]`` score vector.
-
-    Args:
-        reward: The reward (may be PairwiseReward, CompositeReward with
-            pairwise children, or a regular reward).
-        submitter: Yields ``(row, tag)`` pairs, K per prompt in any order.
-        handler: Called with ``(tag, reward_tensor)`` for each sample.
-        num_rollouts_per_prompt: K value for grouping.
-
-    Returns:
-        List of handler results.
-    """
-    reward_loop = RewardLoopThread()
-    results: list[TResult] = []
-
+    """:func:`submit_pairwise_reward` followed by :meth:`PendingRewards.wait`;
+    opens a :class:`RewardLoopThread` for the call when *loop* is None."""
+    owned_loop = None
+    if loop is None:
+        loop = owned_loop = RewardLoopThread()
     try:
-        prompt_groups: dict[str, list[tuple[dict[str, Any], TTag]]] = {}
-
-        def _flush_prompt_group(
-            prompt_group: list[tuple[dict[str, Any], TTag]],
-        ) -> None:
-            """Process a completed prompt group of K rollouts."""
-            rows = [b for b, _ in prompt_group]
-            tags = [t for _, t in prompt_group]
-
-            if isinstance(reward, PairwiseReward):
-                scores = _score_pairwise_group(reward, reward_loop, rows)
-            elif isinstance(reward, CompositeReward):
-                scores = _score_composite_pairwise_group(reward, reward_loop, rows)
-            else:
-                # No pairwise children, score independently
-                scores = []
-                for row in rows:
-                    scores.append(_score_blocking(reward, row))
-
-            for tag, score in zip(tags, scores, strict=True):
-                results.append(handler(tag, score))
-
-        for row, tag in submitter:
-            key = row.get("key")
-            if not isinstance(key, str):
-                raise ValueError(
-                    "Pairwise rewards require a string key for each prompt."
-                )
-            async_row = reward.prepare_row_for_async(row)
-            prompt_group = prompt_groups.setdefault(key, [])
-            prompt_group.append((async_row, tag))
-
-            if len(prompt_group) == num_rollouts_per_prompt:
-                _flush_prompt_group(prompt_groups.pop(key))
-
-        if prompt_groups:
-            sizes = {key: len(group) for key, group in prompt_groups.items()}
-            raise ValueError(
-                f"Incomplete pairwise prompt groups: {sizes}; expected "
-                f"{num_rollouts_per_prompt} rollouts per prompt on this rank."
-            )
+        return submit_pairwise_reward(
+            reward, submitter, loop, num_rollouts_per_prompt, profile
+        ).wait(handler)
     finally:
-        reward_loop.close()
-
-    return results
-
-
-def _score_pairwise_group(
-    reward: PairwiseReward,
-    loop: RewardLoopThread,
-    rows: list[dict[str, Any]],
-) -> list[RewardResult]:
-    """Build win matrix for a prompt group and aggregate."""
-    K = len(rows)
-    # Launch pairwise comparisons incrementally
-    futures: dict[tuple[int, int], concurrent.futures.Future[Any]] = {}
-    for i in range(K):
-        for j in range(i):
-            futures[(i, j)] = loop.submit(reward.async_score_pair(rows[i], rows[j]))
-
-    # Build win matrix
-    win_matrix = torch.full((K, K), 0.5)
-    for (i, j), fut in futures.items():
-        score = fut.result()
-        win_matrix[i, j] = score
-        win_matrix[j, i] = 1.0 - score
-
-    # Aggregate to per-sample raw scores [K] and normalize through the reward.
-    aggregated = reward.aggregate(win_matrix)
-    result = reward._make_result(aggregated.unsqueeze(-1))  # noqa: SLF001
-    return [result.row(i) for i in range(K)]
-
-
-def _score_composite_pairwise_group(
-    reward: CompositeReward,
-    loop: RewardLoopThread,
-    rows: list[dict[str, Any]],
-) -> list[RewardResult]:
-    """Score a composite reward with mixed pairwise and non-pairwise children."""
-    K = len(rows)
-    # Per-child scores: list of K results per child
-    child_scores: list[list[RewardResult]] = []
-
-    for child in reward._reward_instances:  # noqa: SLF001
-        if isinstance(child, PairwiseReward):
-            child_scores.append(_score_pairwise_group(child, loop, rows))
-        else:
-            # Score each row independently
-            per_row: list[RewardResult] = []
-            if child.supports_rollout_overlap():
-                futs = [loop.submit(child.async_score(b)) for b in rows]
-                for fut in futs:
-                    per_row.append(fut.result())
-            else:
-                for b in rows:
-                    per_row.append(_score_blocking(child, b))
-            child_scores.append(per_row)
-
-    # Concatenate per-child results for each sample.
-    result: list[RewardResult] = []
-    for k in range(K):
-        parts = [child_scores[c][k] for c in range(len(child_scores))]
-        result.append(reward._combine_results(parts))  # noqa: SLF001
-
-    return result
+        if owned_loop is not None:
+            owned_loop.close()
 
 
 __all__ = [
@@ -491,6 +575,7 @@ __all__ = [
     "parse_reward",
     "reduce_reward_profiles",
     "reward_registry",
+    "submit_pairwise_reward",
     "submit_reward",
 ]
 
@@ -633,6 +718,122 @@ if __name__ == "__main__":
         # A local reward on the persistent loop scores blocking during submit.
         pending_local = submit_reward(_FakeReward(overlap=False), rows(0, 3), loop)
         assert pending_local.wait(handler) == [0, 1, 2]
+    finally:
+        loop.close()
+
+    # (d) Pairwise path. Two prompts' rows arrive interleaved; each group is
+    # submitted the moment its K rows are in, every pair is asked in both
+    # orders under swap_orders, results come back in submission order, and the
+    # profile counts requests (not rows).
+    from pydantic import PrivateAttr
+
+    class _FakePairwise(PairwiseReward):
+        """Prefers the larger ``value``; ``bias`` favours whichever row is A."""
+
+        bias: float = 0.0
+        _calls: list[tuple[int, int]] = PrivateAttr(default_factory=list)
+
+        @property
+        def _row_fields(self) -> set[str]:
+            return {"value"}
+
+        async def async_score_pair(self, row_a, row_b) -> float:
+            a, b = int(row_a["value"]), int(row_b["value"])
+            self._calls.append((a, b))
+            await asyncio.sleep(0.001 * (a % 3))
+            return min(1.0, max(0.0, float(a > b) + self.bias))
+
+    def interleaved(k: int) -> Generator[tuple[dict[str, Any], int]]:
+        # Group "A" holds values 0..k-1, group "B" values 10..10+k-1.
+        for i in range(k):
+            yield {"key": "A", "value": i, "dropped": torch.zeros(1)}, i
+            yield {"key": "B", "value": 10 + i}, 10 + i
+
+    def win_rate(tag: int, result: RewardResult) -> tuple[int, float]:
+        return tag, round(result.raw.item(), 4)
+
+    # Full round robin, perfect judge: rank r of K -> (r + 0.5) / K.
+    values = (0, 1, 2, 3, 10, 11, 12, 13)
+    expected = {v: round((v % 10 + 0.5) / 4, 4) for v in values}
+    prof5 = RewardProfile()
+    pairwise = _FakePairwise()
+    got_pairs = execute_pairwise_reward(pairwise, interleaved(4), win_rate, 4, prof5)
+    assert [tag for tag, _ in got_pairs] == [0, 10, 1, 11, 2, 12, 3, 13], got_pairs
+    assert dict(got_pairs) == expected, got_pairs
+    assert len(pairwise._calls) == 2 * 4 * 3, len(pairwise._calls)  # both orders
+    assert prof5.count == len(pairwise._calls), prof5.count
+    assert prof5.local_payload()["count"] == prof5.count, prof5.timestamps()
+    # Swapping cancels a position bias; a single order does not.
+    biased = _FakePairwise(bias=0.2)
+    swapped = dict(execute_pairwise_reward(biased, interleaved(4), win_rate, 4))
+    assert swapped == {
+        v: round((0.9 * (v % 10) + 0.1 * (3 - v % 10) + 0.5) / 4, 4) for v in values
+    }, swapped
+    single = _FakePairwise(bias=0.2, swap_orders=False)
+    unswapped = dict(execute_pairwise_reward(single, interleaved(4), win_rate, 4))
+    assert len(single._calls) == 4 * 3, len(single._calls)
+    assert unswapped != swapped, unswapped
+
+    # Composite: pairwise child + remote child + local child. The local child is
+    # scored while its row is yielded; the others when the group completes.
+    composite = CompositeReward(
+        rewards=[
+            _FakePairwise(weight=0.5),
+            _FakeReward(weight=0.25),
+            _FakeReward(weight=0.25, overlap=False),
+        ]
+    )
+    prof6 = RewardProfile()
+
+    def components(tag: int, result: RewardResult) -> tuple[int, list[float]]:
+        return tag, [round(x, 4) for x in result.raw.squeeze(0).tolist()]
+
+    got_composite = dict(
+        execute_pairwise_reward(composite, interleaved(4), components, 4, prof6)
+    )
+    assert got_composite == {v: [expected[v], float(v), float(v)] for v in values}, (
+        got_composite
+    )
+    assert prof6.count == 2 * (12 + 4), prof6.count  # pair requests + remote rows
+    # Nested pairwise is refused up front; an incomplete group is an error.
+    try:
+        _PairwiseGroupPlan(CompositeReward(rewards=[composite]))
+    except ValueError as exc:
+        print(f"[green]nested pairwise rejected:[/] {exc}")
+    else:
+        raise AssertionError("a nested pairwise child must be rejected")
+    try:
+        execute_pairwise_reward(_FakePairwise(), interleaved(3), win_rate, 4)
+    except ValueError as exc:
+        assert "Incomplete" in str(exc), exc
+    else:
+        raise AssertionError("an incomplete prompt group must raise")
+
+    # A failing pair request surfaces at wait() instead of hanging it.
+    class _Broken(_FakePairwise):
+        async def async_score_pair(self, row_a, row_b) -> float:
+            raise RuntimeError("judge down")
+
+    try:
+        execute_pairwise_reward(_Broken(), interleaved(2), win_rate, 2)
+    except RuntimeError as exc:
+        assert str(exc) == "judge down", exc
+    else:
+        raise AssertionError("a failed group must raise at wait()")
+
+    # Batches in flight together on the run-long loop (rollout_lookahead): the
+    # second batch is submitted before the first is waited on.
+    loop = RewardLoopThread()
+    try:
+        pending_a = submit_pairwise_reward(_FakePairwise(), interleaved(4), loop, 4)
+        pending_b = submit_pairwise_reward(_FakePairwise(), interleaved(2), loop, 2)
+        assert dict(pending_a.wait(win_rate)) == expected
+        assert dict(pending_b.wait(win_rate)) == {
+            0: 0.25,
+            1: 0.75,
+            10: 0.25,
+            11: 0.75,
+        }
     finally:
         loop.close()
 

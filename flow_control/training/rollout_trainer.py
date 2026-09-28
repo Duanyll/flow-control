@@ -135,12 +135,22 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     """Batches sampled but not yet trained on, oldest first."""
 
     @model_validator(mode="after")
-    def check_rollout_lookahead(self) -> Self:
-        if self.rollout_lookahead > 0 and _has_pairwise_child(self.reward):
+    def check_validation_reward(self) -> Self:
+        """Validation scores one image per prompt, so it cannot use a pairwise
+        reward (also not the training reward it falls back to)."""
+        if self.validation_dataset is None or not self.validation_log_rewards:
+            return self
+        metric_reward = (
+            None
+            if self.validation_reward is False
+            else self.validation_reward or self.reward
+        )
+        if metric_reward is not None and _has_pairwise_child(metric_reward):
             raise ValueError(
-                "rollout_lookahead > 0 keeps a batch's rewards in flight while the "
-                "next batch samples, but a pairwise reward is scored blocking per "
-                "prompt group; set rollout_lookahead=0 or use a non-pairwise reward."
+                "A pairwise reward compares the rollouts of one prompt and cannot "
+                "score validation samples; set validation_reward to a pointwise "
+                "reward that compares each sample against an anchor (for example "
+                "reference_compare in anchored mode), or validation_reward=false."
             )
         return self
 

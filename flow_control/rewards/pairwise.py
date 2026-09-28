@@ -23,11 +23,21 @@ class PairwiseReward(BaseReward):
     (1 means *a* is preferred over *b*).
 
     The ``_score`` / ``score`` path is not used; pairwise scoring goes through
-    :func:`execute_pairwise_reward` which calls ``async_score_pair`` and
-    aggregates into per-sample scalars.
+    :func:`submit_pairwise_reward` (or :func:`execute_pairwise_reward`), which
+    calls ``async_score_pair`` for every pair of a prompt group as soon as the
+    group's rollouts are in and aggregates the win matrix into per-sample
+    scalars.  That makes it a training-time reward only: validation and
+    inference score rows one at a time and need a pointwise reward.
     """
 
     type: Literal["pairwise"] = "pairwise"
+    swap_orders: bool = True
+    """Ask each pair in both orders and average: ``s = (s_ab + 1 - s_ba) / 2``.
+    A judge that must answer A or B has a position bias (Qwen3.8 without
+    thinking picked the first candidate 67% of the time in the judge pilot);
+    asking both orders cancels it, and a pair whose answer flips with the order
+    lands on 0.5, the tie such a judge never says. ``False`` asks once per pair
+    and halves the requests, for a judge known to be order-invariant."""
     model_config = ConfigDict(extra="forbid")
 
     @property
