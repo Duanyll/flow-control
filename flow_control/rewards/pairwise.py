@@ -38,6 +38,17 @@ class PairwiseReward(BaseReward):
     asking both orders cancels it, and a pair whose answer flips with the order
     lands on 0.5, the tie such a judge never says. ``False`` asks once per pair
     and halves the requests, for a judge known to be order-invariant."""
+    gate_component: str | None = None
+    """Label of a component of a *local* sibling in the same composite reward
+    (for example ``"reject"`` of ``dino_semantic``); a row whose raw value of
+    that component is above 0.5 is rejected. A rejected row takes part in no
+    comparison (no judge requests) and scores 0, the loss to everyone, so the
+    group-normalised advantage unfits it; the other rows' win rates are taken
+    among themselves only, as if the rejected row had not been sampled (a
+    single surviving row scores 0.5, none surviving all score 0). Local
+    siblings are scored while the row is decoded, so the gate is known before
+    the group's pair requests are formed; a remote or pairwise sibling cannot
+    gate. Write ``"<type>/<label>"`` when two local siblings share the label."""
     model_config = ConfigDict(extra="forbid")
 
     @property
@@ -65,12 +76,21 @@ class PairwiseReward(BaseReward):
         """
         ...
 
-    def aggregate(self, win_matrix: torch.Tensor) -> torch.Tensor:
+    def aggregate(
+        self, win_matrix: torch.Tensor, active: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Aggregate a ``[K, K]`` pairwise win matrix into ``[K]`` per-sample scores.
 
-        Default: average win rate (mean across columns for each row).
+        Default: average win rate (mean across columns for each row, the
+        diagonal ``0.5`` included). With ``active`` (bool ``[K]``, rows not
+        rejected by :attr:`gate_component`) an active row averages over the
+        active columns only and a rejected row scores 0.
         """
-        return win_matrix.mean(dim=1)
+        if active is None:
+            return win_matrix.mean(dim=1)
+        counts = active.sum().clamp(min=1).to(win_matrix.dtype)
+        means = (win_matrix * active[None, :].to(win_matrix.dtype)).sum(dim=1) / counts
+        return torch.where(active, means, torch.zeros_like(means))
 
     def supports_rollout_overlap(self) -> bool:
         return True

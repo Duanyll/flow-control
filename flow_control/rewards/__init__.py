@@ -344,15 +344,19 @@ def _pairwise_group(
     reward: PairwiseReward,
     rows: list[dict[str, Any]],
     profile: RewardProfile | None,
+    gated: list[bool] | None = None,
 ) -> Coroutine[Any, Any, list[RewardResult]]:
     """One prompt group's per-row results from every pair comparison.
 
     The pair requests are created (and stamped) here on the caller's thread;
     the returned coroutine runs them concurrently on the reward loop, fills
-    the ``[K, K]`` win matrix and aggregates it through the reward.
+    the ``[K, K]`` win matrix and aggregates it through the reward. Rows
+    flagged in *gated* (see ``PairwiseReward.gate_component``) are asked no
+    comparison: they lose every pair and are left out of the others' means.
     """
     K = len(rows)
-    pairs = [(i, j) for i in range(K) for j in range(i)]
+    active = [not (gated and gated[i]) for i in range(K)]
+    pairs = [(i, j) for i in range(K) for j in range(i) if active[i] and active[j]]
     orders = pairs + ([(j, i) for i, j in pairs] if reward.swap_orders else [])
     calls = [
         _stamped(reward.async_score_pair(rows[a], rows[b]), profile) for a, b in orders
@@ -367,7 +371,15 @@ def _pairwise_group(
                 score = (score + 1.0 - scores[len(pairs) + n]) / 2.0
             win_matrix[i, j] = score
             win_matrix[j, i] = 1.0 - score
-        aggregated = reward.aggregate(win_matrix)
+        if gated is None:
+            aggregated = reward.aggregate(win_matrix)
+        else:
+            # A rejected row loses every pair (both sides recorded); its
+            # column is masked out of the active rows' means.
+            active_mask = torch.tensor(active)
+            win_matrix[:, ~active_mask] = 1.0
+            win_matrix[~active_mask, :] = 0.0
+            aggregated = reward.aggregate(win_matrix, active_mask)
         result = reward._make_result(aggregated.unsqueeze(-1))  # noqa: SLF001
         return [result.row(i) for i in range(K)]
 
@@ -417,6 +429,57 @@ class _PairwiseGroupPlan:
             if not isinstance(child, PairwiseReward)
             and not child.supports_rollout_overlap()
         ]
+        # Pairwise child index -> (local child index, component index) of its gate.
+        self.gates: dict[int, tuple[int, int]] = {}
+        for index, child in enumerate(self.children):
+            if isinstance(child, PairwiseReward) and child.gate_component is not None:
+                self.gates[index] = self._resolve_gate(child.gate_component)
+
+    def _resolve_gate(self, label: str) -> tuple[int, int]:
+        """Find the local sibling component that ``gate_component`` names."""
+        if not isinstance(self.reward, CompositeReward):
+            raise ValueError(
+                f"gate_component {label!r} needs a local sibling reward: put the "
+                "pairwise reward in a composite next to the reward that scores "
+                "the gate."
+            )
+        found: list[tuple[int, int]] = []
+        elsewhere: list[str] = []
+        for index, child in enumerate(self.children):
+            hits = [
+                c
+                for c, name in enumerate(child.component_labels)
+                if label in (name, f"{child.type}/{name}")
+            ]
+            if not hits:
+                continue
+            if index in self.local:
+                found.extend((index, c) for c in hits)
+            else:
+                elsewhere.append(child.type)
+        if len(found) == 1:
+            return found[0]
+        if found:
+            raise ValueError(
+                f"gate_component {label!r} matches {len(found)} components of the "
+                "local sibling rewards; write it as '<type>/<label>'."
+            )
+        if elsewhere:
+            raise ValueError(
+                f"gate_component {label!r} belongs to {', '.join(elsewhere)}, which "
+                "is scored remotely or pairwise, after the group's comparisons are "
+                "formed; only a local sibling (scored as the row is decoded) can "
+                "gate."
+            )
+        available = [
+            f"{self.children[index].type}/{name}"
+            for index in self.local
+            for name in self.children[index].component_labels
+        ]
+        raise ValueError(
+            f"gate_component {label!r} is not a component of any local sibling "
+            f"reward; available: {available or 'none'}."
+        )
 
     def score_local(self, row: dict[str, Any]) -> dict[int, RewardResult]:
         """Local children score the row now, from the device tensors."""
@@ -433,7 +496,14 @@ class _PairwiseGroupPlan:
         parts: list[Coroutine[Any, Any, list[RewardResult]]] = []
         for index, child in enumerate(self.children):
             if isinstance(child, PairwiseReward):
-                parts.append(_pairwise_group(child, rows, profile))
+                gated = None
+                if index in self.gates:
+                    local_index, component = self.gates[index]
+                    gated = [
+                        float(result[local_index].raw[0, component]) > 0.5
+                        for result in local_results
+                    ]
+                parts.append(_pairwise_group(child, rows, profile, gated))
             elif index in self.local:
                 parts.append(_ready([result[index] for result in local_results]))
             else:
@@ -485,9 +555,11 @@ def submit_pairwise_reward[TTag](
     keeps producing rows meanwhile, so sampling and the judge overlap, and the
     returned :class:`PendingRewards` can be waited on any time later (a batch
     sampled ahead under ``rollout_lookahead``).  Local children are scored
-    blocking as their row is yielded, like :func:`submit_reward`.  *profile*
-    gets one entry per request, so its count and throughput are judge requests,
-    not rows.  Results reach the waiter's handler in submission order.
+    blocking as their row is yielded, like :func:`submit_reward`; a pairwise
+    child's ``gate_component`` reads one of their components to drop rejected
+    rows from the comparisons before the requests are formed.  *profile* gets
+    one entry per request, so its count and throughput are judge requests, not
+    rows.  Results reach the waiter's handler in submission order.
     """
     plan = _PairwiseGroupPlan(reward)
     futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]] = []
@@ -795,6 +867,101 @@ if __name__ == "__main__":
         got_composite
     )
     assert prof6.count == 2 * (12 + 4), prof6.count  # pair requests + remote rows
+
+    # A local sibling's component gates the pairwise child: a rejected row is
+    # asked no comparison, scores 0, and drops out of the others' means.
+    class _FakeGate(_FakeReward):
+        """Local; components ``[value, reject]``, reject = 1 for ``reject_values``."""
+
+        overlap: bool = False
+        reject_values: list[int] = [2]
+
+        @property
+        def component_labels(self) -> list[str]:
+            return ["value", "reject"]
+
+        @property
+        def component_weights(self) -> list[float]:
+            return [1.0, 0.0]
+
+        def _score(self, row: dict[str, Any]) -> torch.Tensor:
+            value = int(row["value"])
+            return torch.tensor([float(value), float(value % 10 in self.reject_values)])
+
+    def gated_composite(reject_values: list[int]) -> CompositeReward:
+        return CompositeReward(
+            rewards=[
+                _FakePairwise(weight=0.5, gate_component="reject"),
+                _FakeGate(weight=0.5, reject_values=reject_values),
+            ]
+        )
+
+    # Value 2 (and 12) rejected: 3 survivors per group -> 3 pairs x 2 orders.
+    prof7 = RewardProfile()
+    one_out = gated_composite([2])
+    got_gated = dict(
+        execute_pairwise_reward(one_out, interleaved(4), components, 4, prof7)
+    )
+    survivors = {0: 0.1667, 1: 0.5, 3: 0.8333}
+    assert got_gated == {
+        v: [0.0 if v % 10 == 2 else survivors[v % 10], float(v), float(v % 10 == 2)]
+        for v in values
+    }, got_gated
+    assert prof7.count == 2 * (3 * 2), prof7.count
+    judge = one_out._reward_instances[0]
+    assert isinstance(judge, _FakePairwise)
+    assert all(2 not in (a % 10, b % 10) for a, b in judge._calls), judge._calls
+    # One survivor scores 0.5 without a request; none surviving all score 0.
+    prof8 = RewardProfile()
+    lone = dict(
+        execute_pairwise_reward(
+            gated_composite([0, 1, 2]), interleaved(4), components, 4, prof8
+        )
+    )
+    assert {v: comps[0] for v, comps in lone.items()} == {
+        v: (0.5 if v % 10 == 3 else 0.0) for v in values
+    }, lone
+    assert prof8.count == 0, prof8.count
+    none = dict(
+        execute_pairwise_reward(
+            gated_composite([0, 1, 2, 3]), interleaved(4), components, 4
+        )
+    )
+    assert all(comps[0] == 0.0 for comps in none.values()), none
+    # A gate must name a component of a local sibling.
+    for bad, reason in (
+        (_FakePairwise(gate_component="reject"), "needs a local sibling"),
+        (
+            CompositeReward(
+                rewards=[_FakePairwise(gate_component="nope"), _FakeGate()]
+            ),
+            "not a component",
+        ),
+        (
+            CompositeReward(
+                rewards=[_FakePairwise(gate_component="fake"), _FakeReward()]
+            ),
+            "scored remotely",
+        ),
+        (
+            CompositeReward(
+                rewards=[
+                    _FakePairwise(gate_component="reject"),
+                    _FakeGate(),
+                    _FakeGate(),
+                ]
+            ),
+            "'<type>/<label>'",
+        ),
+    ):
+        try:
+            _PairwiseGroupPlan(bad)
+        except ValueError as exc:
+            assert reason in str(exc), (reason, exc)
+        else:
+            raise AssertionError(f"gate {bad!r} must be rejected: {reason}")
+    print("[green]gate_component checks passed[/]")
+
     # Nested pairwise is refused up front; an incomplete group is an error.
     try:
         _PairwiseGroupPlan(CompositeReward(rewards=[composite]))
