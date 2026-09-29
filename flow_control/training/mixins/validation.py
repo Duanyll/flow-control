@@ -53,6 +53,10 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     ``annotate_output`` returns ``clean_image`` unchanged (plain T2I)."""
     validation_log_rewards: bool = True
     validation_reward: Reward | Literal[False] | None = None
+    validation_at_start: bool = True
+    """Validate before the first training step (the seed weights, or the resumed
+    checkpoint's). ``false`` skips that pass, e.g. when relaunching a run whose
+    step-0 numbers are already logged."""
     seed: int = 42
 
     validation_sampler: Sampler

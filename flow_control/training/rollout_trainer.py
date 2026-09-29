@@ -494,7 +494,8 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         os.makedirs(self.checkpoint_root, exist_ok=True)
         self.maybe_auto_resume(self.resume_from_dir)
 
-        self._validate_current_and_ema()
+        if self.validation_at_start:
+            self._validate_current_and_ema()
 
         name = self.training_type.upper()
         logger.info(

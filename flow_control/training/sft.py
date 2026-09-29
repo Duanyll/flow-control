@@ -308,8 +308,9 @@ class SftTrainer(
 
         self.maybe_auto_resume(self.resume_from_dir)
 
-        with apply_ema_maybe(self._ema_optimizer):
-            self.validate_and_log(self.model, self._current_step)
+        if self.validation_at_start:
+            with apply_ema_maybe(self._ema_optimizer):
+                self.validate_and_log(self.model, self._current_step)
 
         progress = Progress(
             *self.get_progress_columns(),
