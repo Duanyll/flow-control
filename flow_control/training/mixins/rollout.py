@@ -455,11 +455,21 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             gathered_rewards, prompt_ids, component_weights
         )
 
-        # Log aggregate reward plus per-component raw/normalized stats.
+        # Log aggregate reward plus per-component raw/normalized stats. The
+        # ``group_std`` entries are the mean over prompts of the within-group
+        # std: the spread group-relative advantages actually see, and where a
+        # collapse of rollout diversity shows first while the global std holds.
+        group_ids = prompt_ids.unique()
+
+        def group_std(values: torch.Tensor) -> float:
+            stds = [values[prompt_ids == g].std(correction=0) for g in group_ids]
+            return torch.stack(stds).mean().item()
+
         combined = (gathered_rewards * component_weights).sum(dim=-1)
         metrics: dict[str, float] = {
             "rollout/reward_mean": combined.mean().item(),
             "rollout/reward_std": combined.std(correction=0).item(),
+            "rollout/reward_group_std": group_std(combined),
             "rollout/adv_abs_mean": advantages.abs().mean().item(),
         }
         for i, label in enumerate(component_labels):
@@ -468,6 +478,9 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             )
             metrics[f"rollout/raw/{label}_std"] = (
                 gathered_raw_rewards[:, i].std(correction=0).item()
+            )
+            metrics[f"rollout/raw/{label}_group_std"] = group_std(
+                gathered_raw_rewards[:, i]
             )
             metrics[f"rollout/normalized/{label}_mean"] = (
                 gathered_rewards[:, i].mean().item()
