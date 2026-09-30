@@ -205,6 +205,15 @@ class BaseProcessor[
     """Scale applied to the initial sampling noise in :meth:`initialize_latents`.
     Some models deliberately start below the training noise level (HiDream-O1's
     official pipeline initializes at 7.5/8 = 0.9375 of its noise scale)."""
+    noise_device: Literal["device", "cpu"] = "device"
+    """Where :meth:`initialize_latents` draws the initial noise. ``cpu`` draws
+    it with a CPU generator seeded like the caller's and moves it to the target
+    device: the same noise on every GPU model and on CPU. ``device`` draws on
+    the target device, where CUDA maps elements to Philox streams by launch
+    grid, and the grid is capped by the SM count: tensors above ~200k elements
+    (a 1 MP FLUX.2 latent has 524k) differ between GPU models (A800 vs 4090;
+    the 24 GB and 48 GB 4090s agree). The caller's generator is left for the
+    sampler either way."""
     target_posterior: PosteriorMode = "distribution"
     condition_posterior: PosteriorMode = "mode"
     posterior_fields: ClassVar[tuple[str, ...]] = ("clean_latents",)
@@ -274,9 +283,16 @@ class BaseProcessor[
         c = self.latent_channels
         h = h // self.vae_scale_factor
         w = w // self.vae_scale_factor
+        draw_device = device
+        if self.noise_device == "cpu":
+            draw_device = "cpu"
+            if generator is not None and generator.device.type != "cpu":
+                generator = torch.Generator(device="cpu").manual_seed(
+                    generator.initial_seed()
+                )
         latents = torch.randn(
-            (1, c, h, w), generator=generator, device=device, dtype=dtype
-        )
+            (1, c, h, w), generator=generator, device=draw_device, dtype=dtype
+        ).to(device)
         if self.initial_noise_scale != 1.0:
             latents = (latents.float() * self.initial_noise_scale).to(dtype)
         noisy_latents = row["noisy_latents"] = self._pack_latents(latents)
