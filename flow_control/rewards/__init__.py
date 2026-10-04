@@ -102,10 +102,12 @@ class RewardProfile:
     result is published to the waiter.  Each index is written exactly once, so
     no lock is needed.
 
-    Only populated on the overlap path and the pairwise path, where every pair
-    request (each order) and every per-row request of a remote child is one
-    entry, so ``count`` and the throughput are judge requests, not rows; left
-    empty (``count == 0``) otherwise.
+    Populated whenever requests go to the reward loop (the remote and the
+    mixed-composite cases of :func:`submit_reward`, and
+    :func:`submit_pairwise_reward`), where every pair request (each order) and
+    every per-row request of a remote child is one entry, so ``count`` and the
+    throughput are judge requests, not rows; left empty (``count == 0``) for a
+    local reward.
     """
 
     _submit_times: list[float] = field(default_factory=list)
@@ -221,9 +223,9 @@ def reduce_reward_profiles(payloads: list[dict[str, Any]]) -> dict[str, float]:
 class PendingRewards[TTag]:
     """Reward requests launched by :func:`submit_reward`, waiting to be handled.
 
-    On the overlap path each entry is a ``Future`` still running on the reward
-    loop; on the blocking path scoring already happened during submission and
-    the future is complete.  Either way :meth:`wait` hands results to the
+    An entry whose reward (or part of it) runs on the reward loop is a
+    ``Future`` still in flight; a local reward's was scored during submission
+    and its future is complete.  Either way :meth:`wait` hands results to the
     handler in submission order.  The loop stays open: it belongs to the caller.
     """
 
@@ -254,6 +256,15 @@ async def _record_done[T](
         profile.on_done(idx)
 
 
+def _stamped[T](
+    coro: Coroutine[Any, Any, T], profile: RewardProfile | None
+) -> Coroutine[Any, Any, T]:
+    """Give *coro* a profile entry now (main thread) if profiling is on."""
+    if profile is None:
+        return coro
+    return _record_done(coro, profile, profile.on_submit())
+
+
 def submit_reward[TRow: dict, TTag](
     reward: BaseReward,
     submitter: Generator[tuple[TRow, TTag]],
@@ -262,22 +273,47 @@ def submit_reward[TRow: dict, TTag](
 ) -> PendingRewards[TTag]:
     """Drive *submitter* to completion, launching one reward request per row.
 
-    A reward that supports rollout overlap (i.e. remote rewards) has its
-    ``async_score`` submitted to *loop*, so the generator keeps producing rows
-    while earlier rewards are in flight, and *profile* records the
-    submit/complete timestamps.  A local reward is scored blocking as each row
-    is yielded and the profile stays empty.  The returned
-    :class:`PendingRewards` collects the results; the loop is left open.
+    How a row is scored depends on the reward, decided once per call:
+
+    - *remote* (``supports_rollout_overlap()``): ``async_score`` of the CPU
+      snapshot (``prepare_row_for_async``) goes to *loop*, so the generator
+      keeps producing rows while earlier rewards are in flight; *profile* gets
+      one entry per row.
+    - *local*: scored blocking on the caller's thread as the row is yielded,
+      from the device tensors; the loop is not touched and the profile stays
+      empty.
+    - *mixed composite* (a local child next to a remote one, so the composite
+      as a whole cannot overlap): the local children are scored blocking as
+      the row is yielded and the remote children's requests go to *loop*,
+      where the children are combined (:class:`_CompositePlan`); *profile*
+      gets one entry per remote request.
+
+    The returned :class:`PendingRewards` collects the results in submission
+    order; the loop is left open.
     """
     overlap = reward.supports_rollout_overlap()
+    plan = (
+        _CompositePlan(reward) if not overlap and _has_overlap_child(reward) else None
+    )
     futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]] = []
 
     for row, tag in submitter:
         if overlap:
-            coro = reward.async_score(reward.prepare_row_for_async(row))
-            if profile is not None:
-                coro = _record_done(coro, profile, profile.on_submit())
-            future = loop.submit(coro)
+            future = loop.submit(
+                _stamped(reward.async_score(reward.prepare_row_for_async(row)), profile)
+            )
+        elif plan is not None:
+            future = concurrent.futures.Future()
+            loop.submit(
+                _resolve_group(
+                    [future],
+                    plan.group(
+                        [reward.prepare_row_for_async(row)],
+                        [plan.score_local(row)],
+                        profile,
+                    ),
+                )
+            )
         else:
             future = concurrent.futures.Future()
             future.set_result(_score_blocking(reward, row))
@@ -296,13 +332,13 @@ def execute_reward[TRow: dict, TTag, TResult](
     """Score rows from *submitter* and pass each reward to *handler*.
 
     A local reward is scored and handled row by row, so a streaming consumer
-    (the inference report) never holds more than one row.  For a reward that
-    supports rollout overlap this is :func:`submit_reward` followed by
-    :meth:`PendingRewards.wait`; when *loop* is None a :class:`RewardLoopThread`
-    is opened for this call and closed afterwards, a caller-provided one is left
-    open.
+    (the inference report) never holds more than one row.  A reward with any
+    remote part (the remote and mixed-composite cases of :func:`submit_reward`)
+    is :func:`submit_reward` followed by :meth:`PendingRewards.wait`; when
+    *loop* is None a :class:`RewardLoopThread` is opened for this call and
+    closed afterwards, a caller-provided one is left open.
     """
-    if not reward.supports_rollout_overlap():
+    if not _has_overlap_child(reward):
         return [handler(tag, _score_blocking(reward, row)) for row, tag in submitter]
 
     owned_loop = None
@@ -327,13 +363,23 @@ def _has_pairwise_child(reward: BaseReward) -> bool:
     return False
 
 
-def _stamped[T](
-    coro: Coroutine[Any, Any, T], profile: RewardProfile | None
-) -> Coroutine[Any, Any, T]:
-    """Give *coro* a profile entry now (main thread) if profiling is on."""
-    if profile is None:
-        return coro
-    return _record_done(coro, profile, profile.on_submit())
+def _has_overlap_child(reward: BaseReward) -> bool:
+    """Whether *reward*, or any reward nested in it, supports rollout overlap.
+
+    ``supports_rollout_overlap()`` answers for the reward as one unit (a
+    composite only when every child does) and so selects the whole-reward
+    overlap path; this answers whether the reward loop is needed at all, so a
+    composite that mixes a local child with a remote one is split per child by
+    :class:`_CompositePlan` instead of blocking on the remote child.
+    """
+    if reward.supports_rollout_overlap():
+        return True
+    if isinstance(reward, CompositeReward):
+        return any(
+            _has_overlap_child(r)
+            for r in reward._reward_instances  # noqa: SLF001
+        )
+    return False
 
 
 async def _ready[T](value: T) -> T:
@@ -400,13 +446,32 @@ def _row_requests(
     return run()
 
 
-class _PairwiseGroupPlan:
-    """How one prompt group of *reward* is scored.
+class _CompositePlan:
+    """How *reward* is split between the caller's thread and the reward loop.
 
-    The reward is a :class:`PairwiseReward` or a :class:`CompositeReward` whose
-    direct children may be pairwise (need the whole group), remote (one request
-    per row) or local (scored blocking on the trainer's device as each row is
-    yielded, like :func:`submit_reward` does for a local reward).
+    *reward* is a single reward or a :class:`CompositeReward` whose direct
+    children are each one of:
+
+    - *local* (``supports_rollout_overlap()`` False): scored blocking on the
+      caller's thread from the device tensors as the row is yielded
+      (:meth:`score_local`), like :func:`submit_reward` does for a plain local
+      reward;
+    - *remote* (overlap-capable): one ``async_score`` request per row on the
+      reward loop, one profile entry each;
+    - *pairwise*: the pair requests of the whole prompt group on the loop
+      (:func:`submit_pairwise_reward` only); its ``gate_component`` reads a
+      local sibling's result, which is why local children are scored first.
+
+    :meth:`group` runs the remote parts concurrently on the loop and combines
+    all children there with ``CompositeReward._combine_results``, the same
+    result the blocking path (:func:`_score_blocking`) computes for the whole
+    composite.  Remote children receive the
+    composite's ``prepare_row_for_async`` snapshot (the row filtered to the
+    union of the children's ``_row_fields`` and moved to the CPU), exactly
+    what they see when the whole composite is scored on the loop; local
+    children must see the un-prepared row, whose tensors are still on the
+    trainer's device.  A nested composite is one child, local or remote as a
+    whole; one that mixes the two (or carries a pairwise reward) is refused.
     """
 
     def __init__(self, reward: BaseReward) -> None:
@@ -417,11 +482,24 @@ class _PairwiseGroupPlan:
             else [reward]
         )
         for child in self.children:
-            if isinstance(child, CompositeReward) and _has_pairwise_child(child):
+            if not isinstance(child, CompositeReward):
+                continue
+            if _has_pairwise_child(child):
                 raise ValueError(
                     "A pairwise reward must be the reward itself or a direct child "
                     "of the top-level composite reward; a nested composite cannot "
                     "carry one."
+                )
+            if not child.supports_rollout_overlap() and _has_overlap_child(child):
+                kinds = [
+                    f"{r.type} ({'remote' if r.supports_rollout_overlap() else 'local'})"
+                    for r in child._reward_instances  # noqa: SLF001
+                ]
+                raise ValueError(
+                    "A nested composite reward is scored as one local or one remote "
+                    f"reward, but this one mixes both: {', '.join(kinds)}. Put its "
+                    "rewards directly in the top-level composite, their weights "
+                    "scaled by the nested composite's weight."
                 )
         self.local = [
             index
@@ -549,19 +627,19 @@ def submit_pairwise_reward[TTag](
 
     Rows are grouped by ``row["key"]`` and may arrive in any order (a streaming
     sampler finishes prompts out of order), but all K rollouts of a prompt must
-    come through this submitter (i.e. stay on one rank).  The moment a group is
-    complete its pair requests (both orders when ``swap_orders``) and the
-    per-row requests of any remote child go to *loop* together; the generator
-    keeps producing rows meanwhile, so sampling and the judge overlap, and the
-    returned :class:`PendingRewards` can be waited on any time later (a batch
-    sampled ahead under ``rollout_lookahead``).  Local children are scored
-    blocking as their row is yielded, like :func:`submit_reward`; a pairwise
-    child's ``gate_component`` reads one of their components to drop rejected
-    rows from the comparisons before the requests are formed.  *profile* gets
-    one entry per request, so its count and throughput are judge requests, not
-    rows.  Results reach the waiter's handler in submission order.
+    come through this submitter (i.e. stay on one rank).  The reward's children
+    are split as :class:`_CompositePlan` describes: local children are scored
+    blocking as their row is yielded, and the moment a group is complete its
+    pair requests (both orders when ``swap_orders``, fewer when a
+    ``gate_component`` rejects rows) and the per-row requests of any remote
+    child go to *loop* together; the generator keeps producing rows meanwhile,
+    so sampling and the judge overlap, and the returned :class:`PendingRewards`
+    can be waited on any time later (a batch sampled ahead under
+    ``rollout_lookahead``).  *profile* gets one entry per request, so its count
+    and throughput are judge requests, not rows.  Results reach the waiter's
+    handler in submission order.
     """
-    plan = _PairwiseGroupPlan(reward)
+    plan = _CompositePlan(reward)
     futures: list[tuple[TTag, concurrent.futures.Future[RewardResult]]] = []
     groups: dict[
         str,
@@ -955,7 +1033,7 @@ if __name__ == "__main__":
         ),
     ):
         try:
-            _PairwiseGroupPlan(bad)
+            _CompositePlan(bad)
         except ValueError as exc:
             assert reason in str(exc), (reason, exc)
         else:
@@ -964,7 +1042,7 @@ if __name__ == "__main__":
 
     # Nested pairwise is refused up front; an incomplete group is an error.
     try:
-        _PairwiseGroupPlan(CompositeReward(rewards=[composite]))
+        _CompositePlan(CompositeReward(rewards=[composite]))
     except ValueError as exc:
         print(f"[green]nested pairwise rejected:[/] {exc}")
     else:
@@ -1003,5 +1081,129 @@ if __name__ == "__main__":
         }
     finally:
         loop.close()
+
+    # (e) Mixed composite on submit_reward: a local child (scored on the main
+    # thread as its row is yielded) next to a remote one (0.2 s per request on
+    # the loop). The generator must not wait for the judge, the results must
+    # equal the blocking path's bit for bit, and the profile counts the remote
+    # requests.
+    class _LocalFake(_FakeReward):
+        overlap: bool = False
+        _threads: list[str] = PrivateAttr(default_factory=list)
+
+        def _score(self, row: dict[str, Any]) -> torch.Tensor:
+            self._threads.append(threading.current_thread().name)
+            return super()._score(row)
+
+    class _RemoteFake(_FakeReward):
+        """``score`` is unavailable, like a judge's; a request takes 0.2 s."""
+
+        type: str = "judge"
+        _threads: list[str] = PrivateAttr(default_factory=list)
+
+        def _score(self, row: dict[str, Any]) -> torch.Tensor:
+            raise NotImplementedError("async only")
+
+        async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
+            self._threads.append(threading.current_thread().name)
+            await asyncio.sleep(0.2)
+            return torch.tensor([float(row["value"]) / 10])
+
+    def same(a: RewardResult, b: RewardResult) -> bool:
+        return (
+            torch.equal(a.raw, b.raw)
+            and torch.equal(a.normalized, b.normalized)
+            and torch.equal(a.weights, b.weights)
+            and a.labels == b.labels
+        )
+
+    def keep(_tag: int, result: RewardResult) -> RewardResult:
+        return result
+
+    local_fake, remote_fake = _LocalFake(weight=0.3), _RemoteFake(weight=0.7)
+    mixed = CompositeReward(rewards=[local_fake, remote_fake])
+    assert not mixed.supports_rollout_overlap() and _has_overlap_child(mixed)
+    loop = RewardLoopThread()
+    prof9 = RewardProfile()
+    try:
+        started = time.perf_counter()
+        pending = submit_reward(mixed, rows(0, 20), loop, prof9)
+        produce_s = time.perf_counter() - started  # blocking: >= 20 x 0.2 s
+        got_mixed = pending.wait(keep)
+        total_s = time.perf_counter() - started
+    finally:
+        loop.close()
+    assert produce_s < 1.0, produce_s
+    assert set(local_fake._threads) == {"MainThread"}, local_fake._threads
+    assert set(remote_fake._threads) == {"reward-loop"}, remote_fake._threads
+    assert prof9.count == 20, prof9.count
+    payload9 = prof9.local_payload()
+    assert payload9["count"] == 20 and payload9["max_in_flight"] > 1, payload9
+    assert "profile/reward/throughput_per_s" in reduce_reward_profiles([payload9])
+    assert got_mixed[3].labels == ["fake", "judge"], got_mixed[3].labels
+    assert torch.equal(got_mixed[3].raw, torch.tensor([[3.0, 0.3]])), got_mixed[3]
+    expected_mixed = [_score_blocking(mixed, row) for row, _ in rows(0, 20)]
+    equal = all(same(a, b) for a, b in zip(got_mixed, expected_mixed, strict=True))
+    print(
+        f"mixed composite: 20 rows produced in {produce_s:.2f}s, all scored in "
+        f"{total_s:.2f}s (blocking: >= 4.0s); {prof9.count} judge requests, "
+        f"max {payload9['max_in_flight']} in flight; equal to blocking: {equal}"
+    )
+    assert equal
+    # execute_reward (inference, validation) takes the same route.
+    assert [r.raw[0, 0].item() for r in execute_reward(mixed, rows(0, 3), keep)] == [
+        0.0,
+        1.0,
+        2.0,
+    ]
+    assert remote_fake._threads[-3:] == ["reward-loop"] * 3, remote_fake._threads
+
+    # A composite of local children only never touches the loop.
+    pure_local = CompositeReward(
+        rewards=[_LocalFake(weight=0.5), _LocalFake(weight=0.5)]
+    )
+    assert not _has_overlap_child(pure_local)
+    loop = RewardLoopThread()
+    got_local = submit_reward(pure_local, rows(0, 5), loop).wait(keep)
+    assert not loop._started
+    loop.close()
+    expected_local = [_score_blocking(pure_local, row) for row, _ in rows(0, 5)]
+    assert all(same(a, b) for a, b in zip(got_local, expected_local, strict=True))
+
+    # A nested composite is one child: all-local -> local (scored in place),
+    # all-remote -> remote (one request per row); a mixed one is refused.
+    nested_local = _LocalFake(weight=0.5)
+    nested = CompositeReward(
+        rewards=[
+            CompositeReward(rewards=[nested_local, _LocalFake(weight=0.5)], weight=0.5),
+            CompositeReward(
+                rewards=[_RemoteFake(weight=0.5), _RemoteFake(weight=0.5)], weight=0.5
+            ),
+        ]
+    )
+    assert _CompositePlan(nested).local == [0], _CompositePlan(nested).local
+    prof10 = RewardProfile()
+    got_nested = execute_reward(nested, rows(0, 6), keep, prof10)
+    assert prof10.count == 6, prof10.count
+    assert set(nested_local._threads) == {"MainThread"}, nested_local._threads
+    expected_nested = [_score_blocking(nested, row) for row, _ in rows(0, 6)]
+    assert all(same(a, b) for a, b in zip(got_nested, expected_nested, strict=True))
+    try:
+        _CompositePlan(
+            CompositeReward(
+                rewards=[
+                    CompositeReward(
+                        rewards=[_LocalFake(weight=0.3), _RemoteFake(weight=0.7)],
+                        weight=0.5,
+                    ),
+                    _RemoteFake(weight=0.5),
+                ]
+            )
+        )
+    except ValueError as exc:
+        assert "mixes both" in str(exc), exc
+        print(f"[green]nested mixed composite rejected:[/] {exc}")
+    else:
+        raise AssertionError("a nested mixed composite must be rejected")
 
     print("[green]reward self-test passed[/green]")
