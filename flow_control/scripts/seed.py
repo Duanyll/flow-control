@@ -19,4 +19,8 @@ def run(config: dict) -> None:
             "its module to the config's `imports`."
         )
     trainer = trainer_cls(**config)
+    # The seed checkpoint holds the freshly initialized trainable weights (e.g. LoRA A),
+    # drawn on the CPU here; seeding makes them a function of ``seed`` like the rest
+    # of the run (rank 0 outside the launcher, so ``seed`` itself).
+    trainer.set_seed()
     trainer.seed_checkpoint()
