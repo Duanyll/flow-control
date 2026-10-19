@@ -72,14 +72,12 @@ class Cfg(BasePrediction):
     negative: Prediction | None = None
     """The negative branch; defaults to `prediction`."""
     negative_condition: Literal["negative", "positive"] = "negative"
-    """``negative`` evaluates the row's negative conditioning, ``positive`` the
-    row itself (autoguidance between variants)."""
+    """``positive`` evaluates the row itself under `negative` (autoguidance between variants)."""
     renorm: bool = False
     renorm_eps: float = 1e-8
     renorm_min: float = 0.0
     renorm_max: float | None = 1.0
-    """Upper bound of the per-token renorm factor ``|cond| / |guided|``; the
-    default only shrinks tokens, ``None`` rescales every token to the conditional norm."""
+    """Cap of the per-token renorm factor ``|cond| / |guided|``; ``None`` rescales every token."""
 
     def guided(self) -> bool:
         return self.scale != 1.0

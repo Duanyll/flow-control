@@ -14,8 +14,10 @@ from pydantic import BaseModel, ConfigDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
+    get_optimizer_state_dict,
     get_state_dict,
     set_model_state_dict,
+    set_optimizer_state_dict,
 )
 from torch.distributed.fsdp import fully_shard
 from torch.profiler import ProfilerActivity
@@ -25,6 +27,12 @@ from flow_control.adapters.base import BaseModelAdapter
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.registry import Registry
+from flow_control.utils.types import (
+    OptimizerConfig,
+    SchedulerConfig,
+    parse_optimizer,
+    parse_scheduler,
+)
 
 from ..launch_config import LaunchConfig
 
@@ -370,6 +378,53 @@ def load_model_state_dict(model: BaseModelAdapter, state: dict[str, Any]) -> Non
     set_model_state_dict(
         model.transformer, state, options=StateDictOptions(strict=False)
     )
+
+
+_OPTIMIZER_OPTIONS = StateDictOptions(strict=False, ignore_frozen_params=True)
+
+
+def make_optimizer(
+    model: BaseModelAdapter, optimizer: OptimizerConfig, scheduler: SchedulerConfig
+) -> tuple[torch.optim.Optimizer, Any]:
+    """An optimizer over every trainable parameter, and its scheduler."""
+    params = model.trainable_parameters()
+    count = sum(p.numel() for p in params)
+    if count == 0:
+        raise RuntimeError("No trainable parameters found in the model.")
+    optim = parse_optimizer(optimizer, params)
+    logger.info(f"Created optimizer with {count / 1e6:.2f}M trainable parameters.")
+    return optim, parse_scheduler(scheduler, optim)
+
+
+def optimizer_state_dict(
+    model: BaseModelAdapter, optimizer: torch.optim.Optimizer
+) -> dict[str, Any]:
+    return get_optimizer_state_dict(
+        model.transformer, optimizer, options=_OPTIMIZER_OPTIONS
+    )
+
+
+def load_optimizer_state_dict(
+    model: BaseModelAdapter, optimizer: torch.optim.Optimizer, state: dict[str, Any]
+) -> None:
+    set_optimizer_state_dict(
+        model.transformer, optimizer, state, options=_OPTIMIZER_OPTIONS
+    )
+
+
+def optimizer_step(
+    model: BaseModelAdapter,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    clip_grad_norm: float,
+) -> None:
+    """Clip (optional), step, move the per-step EMAs, advance the schedule, zero grads."""
+    if clip_grad_norm > 0.0:
+        torch.nn.utils.clip_grad_norm_(model.transformer.parameters(), clip_grad_norm)
+    optimizer.step()
+    model.update_variants("step")
+    scheduler.step()
+    optimizer.zero_grad()
 
 
 # tag -> trainer class, mapping a config's ``launch.type`` to its trainer. Lives

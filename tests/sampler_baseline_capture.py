@@ -295,7 +295,7 @@ def step_fixture(transition: BaseTransition, indices: range) -> dict[str, Any]:
         if isinstance(
             transition, Flash
         ):  # moments of the re-noise form, even when gated off
-            mean, std_dev = transition.moments(row, step, latents, velocity)
+            mean, std_dev, _ = transition.moments(row, step, latents, velocity)
         else:
             mean, std_dev = actual.mean, actual.std_dev
         entries.append(

@@ -6,11 +6,6 @@ import torch
 from pydantic import ConfigDict
 from rich.panel import Panel
 from rich.progress import Progress
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-)
 
 from flow_control.adapters import ModelAdapter
 from flow_control.data import is_padding
@@ -28,8 +23,6 @@ from flow_control.utils.tensor import (
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
-    parse_optimizer,
-    parse_scheduler,
 )
 
 from .mixins import (
@@ -41,7 +34,14 @@ from .mixins import (
     distributed_main,
     trainer_registry,
 )
-from .mixins.base import load_model_state_dict, model_state_dict
+from .mixins.base import (
+    load_model_state_dict,
+    load_optimizer_state_dict,
+    make_optimizer,
+    model_state_dict,
+    optimizer_state_dict,
+    optimizer_step,
+)
 from .weighting import (
     LogitNormalTimestepWeighting,
     LossWeighting,
@@ -105,15 +105,9 @@ class SftTrainer(
     # ------------------------------- Setup methods ------------------------------ #
 
     def make_optimizer_and_scheduler(self):
-        params = self.model.trainable_parameters()
-        num_trainable_params = sum(p.numel() for p in params)
-        if num_trainable_params == 0:
-            raise RuntimeError("No trainable parameters found in the model.")
-        self._optimizer = parse_optimizer(self.optimizer_config, params)
-        logger.info(
-            f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
+        self._optimizer, self._scheduler = make_optimizer(
+            self.model, self.optimizer_config, self.scheduler_config
         )
-        self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
 
     def make_train_dataloader(self):
         # The plan hands every rank the same number of rows per epoch (padding
@@ -135,11 +129,7 @@ class SftTrainer(
     def state_dict(self):
         return {
             "transformer": model_state_dict(self.model),
-            "optimizer": get_optimizer_state_dict(
-                self.transformer,
-                self._optimizer,
-                options=StateDictOptions(strict=False, ignore_frozen_params=True),
-            ),
+            "optimizer": optimizer_state_dict(self.model, self._optimizer),
             "dataloader": self._dataloader.state_dict(),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
@@ -148,12 +138,7 @@ class SftTrainer(
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         load_model_state_dict(self.model, state_dict["transformer"])
-        set_optimizer_state_dict(
-            self.transformer,
-            self._optimizer,
-            state_dict["optimizer"],
-            options=StateDictOptions(strict=False, ignore_frozen_params=True),
-        )
+        load_optimizer_state_dict(self.model, self._optimizer, state_dict["optimizer"])
         self._dataloader.load_state_dict(state_dict["dataloader"])
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
@@ -198,16 +183,9 @@ class SftTrainer(
 
     def _after_sync_step(self, total_loss: float):
         """Handle optimizer step, logging, checkpointing after a gradient sync."""
-        if self.clip_grad_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self.transformer.parameters(), self.clip_grad_norm
-            )
-
-        self._optimizer.step()
-        self.model.update_variants("step")
-        self._scheduler.step()
-        self._optimizer.zero_grad()
-
+        optimizer_step(
+            self.model, self._optimizer, self._scheduler, self.clip_grad_norm
+        )
         self._current_step += 1
         self.log_metrics(
             {

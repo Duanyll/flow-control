@@ -8,7 +8,7 @@ from flow_control.samplers.calls import Calls
 from flow_control.samplers.node import Frame, Row
 from flow_control.samplers.prediction import (
     BasePrediction,
-    Cfg,
+    Model,
     Prediction,
     prediction_registry,
 )
@@ -16,14 +16,10 @@ from flow_control.samplers.prediction import (
 
 @prediction_registry.register("momentum")
 class Momentum(BasePrediction):
-    """EMA momentum of the child prediction; the history lives on the row.
-
-    Above CFG this tracks the guided velocity; below CFG each branch row keeps
-    its own history.
-    """
+    """EMA momentum of the child prediction; the history lives on the row, so per CFG branch."""
 
     type: Literal["momentum"] = "momentum"
-    prediction: Prediction = Cfg()
+    prediction: Prediction = Model()
     alpha: float
     beta: float
 

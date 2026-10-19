@@ -18,8 +18,7 @@ from .data import DataMixin
 class TrainingPredictionMixin(DataMixin):
     model: ModelAdapter
     train_predictor: Prediction
-    """Prediction tree for every loss and auxiliary velocity, independent of
-    the rollout and validation samplers (``model``, ``cfg``, ``tiled``, ...)."""
+    """Prediction tree for every loss and auxiliary velocity (``model``, ``cfg``, ``tiled``, ...)."""
 
     def noised_point(self, row: Row, sigma: float, noise: torch.Tensor) -> Row:
         """A training point of ``row``: its clean latents re-noised at ``sigma``, chain rooted here."""

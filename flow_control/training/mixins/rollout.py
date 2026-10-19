@@ -7,7 +7,6 @@ distinct prompts, identical on every rank, and ``expand_rollouts`` (§9.3)
 stripes their ``num_rollouts_per_prompt`` rollouts across the ranks.
 """
 
-import copy
 import json
 import time
 from collections.abc import Callable, Generator, Iterator
@@ -278,11 +277,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         rollout_task = progress.add_task("Rollout", total=len(mine))
 
         def runs() -> Iterator[tuple[Row, Calls[None]]]:
-            """Prepare lazily; the executor pulls a run when it has room.
-
-            A prompt is fetched and resampled once and its rollouts share that
-            row through shallow copies; every rollout gets its own latents.
-            """
+            """Prepare lazily; a prompt's rollouts share its row, each with its own latents."""
             for prompt_id, group in groupby(mine, key=itemgetter(0)):
                 row = deep_cast_float_dtype(
                     self.prepare_row(
@@ -295,7 +290,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                         derive_seed(self.seed, f"rollout:{epoch}:{prompt_id}:{k}")
                     )
                     rollout = self.start_row(
-                        copy.copy(row), generator, model.dtype, observers
+                        data(row), generator, model.dtype, observers
                     )
                     yield rollout, sampler(rollout)
 

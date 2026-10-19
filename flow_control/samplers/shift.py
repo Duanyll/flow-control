@@ -71,14 +71,11 @@ class BaseShift(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image_seq_len_from: Literal["actual", "image_size"] = "actual"
-    """Image sequence length for resolution-dependent shift: ``actual`` reads it
-    off ``noisy_latents`` (scaled to ``model_image_size``), ``image_size`` assumes
-    16x16 pixels per token."""
+    """``actual`` reads the token count off ``noisy_latents``; ``image_size`` assumes 16x16 px per token."""
     shift_terminal: float | None = None
     """Stretch the final positive sigma of the full grid to this value."""
     diffusers_grid: int | None = None
-    """Reproduce ``FlowMatchEulerDiscreteScheduler.set_timesteps`` with this many
-    training timesteps (its shifted training-grid endpoints)."""
+    """diffusers' ``set_timesteps`` grid with this many training timesteps."""
 
     def curve(self, row: Row, num_steps: int) -> Curve:
         factor = self.factor(self._seq_len(row), num_steps)

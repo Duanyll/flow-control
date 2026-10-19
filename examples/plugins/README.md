@@ -26,10 +26,10 @@ from flow_control.samplers.shift import BaseShift, shift_registry
 @shift_registry.register("toy_constant")
 class ToyConstantShift(BaseShift):
     type: Literal["toy_constant"] = "toy_constant"
-    factor: float = 1.0
+    value: float = 1.0
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
-        return self.factor
+    def factor(self, seq_len: int, num_steps: int) -> float:
+        return self.value
 ```
 
 ## Using it in a config
@@ -42,11 +42,12 @@ Declare the module under `imports`, then reference the registered tag wherever a
 imports = ["examples.plugins.toy"]
 
 [sampler]
+type = "grid"
 steps = 20
 
 [sampler.shift]
 type = "toy_constant"
-factor = 3.0
+value = 3.0
 ```
 
 The same works in the JSONC configs the example scripts ship with:
@@ -55,8 +56,9 @@ The same works in the JSONC configs the example scripts ship with:
 {
   "imports": ["examples.plugins.toy"],
   "sampler": {
+    "type": "grid",
     "steps": 20,
-    "shift": { "type": "toy_constant", "factor": 3.0 }
+    "shift": { "type": "toy_constant", "value": 3.0 }
   }
 }
 ```

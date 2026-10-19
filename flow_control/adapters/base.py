@@ -622,8 +622,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 self._share_dummy(donor - 1)
             velocities: list[torch.Tensor] = []
             dummies: list[torch.Tensor] = []
-            # An fp32 EMA copy of a full module computes in the model dtype;
-            # LoRA slots and clones cast themselves.
+            # An fp32 EMA copy of a full module computes in the model dtype.
             active = self._active.get()
             ema = (
                 isinstance(self.variants.get(active), EmaVariant)

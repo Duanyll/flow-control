@@ -1,10 +1,4 @@
-"""Training-timestep selection for endpoint-based rollout trainers.
-
-A :class:`TrainTimesteps` decides, per rollout, at which sigmas the clean
-endpoint is re-noised and trained on: a *grid* draw picks step starts of the
-executed rollout grid, a *continuous* draw samples free sigmas. ``1`` = pure
-noise; all draws use CPU tensors.
-"""
+"""Where each rollout endpoint is re-noised: step starts of its grid, or free sigmas."""
 
 from abc import ABC, abstractmethod
 from typing import Annotated, Literal
@@ -34,22 +28,8 @@ train_timesteps_registry: Registry[BaseTrainTimesteps] = Registry(
 
 @train_timesteps_registry.register("grid")
 class GridTimesteps(BaseTrainTimesteps):
-    """Draw training sigmas from the rollout's own grid.
-
-    The eligible window is the step-start index range ``[lo, hi)`` with
-    ``lo = 1`` if :attr:`exclude_first` else ``0`` and ``hi = max(lo + 1,
-    int(steps * window))``, i.e. the noisiest ``window`` fraction of the grid
-    (AWM's ``timestep_fraction``; ``discrete_wo_init`` is ``exclude_first``).
-    ``k`` indices are drawn from it: ``count`` if set (clamped to the window
-    size), else ``max(1, int(n * fraction))``. ``random`` draws a uniform
-    distinct subset; ``stratified`` splits the window into ``k`` equal bins and
-    draws one index uniformly per bin (Flow-Factory's discrete stratified
-    sampling).
-
-    Distributed invariant: the number of items per rollout depends only on the
-    step count, so all ranks build the same item count for equal step counts
-    and the per-microbatch model collectives line up.
-    """
+    """Step starts of the noisiest ``window`` fraction of the rollout grid; the
+    item count depends only on the step count, so the ranks' collectives line up."""
 
     type: Literal["grid"] = "grid"
     count: PositiveInt | None = None

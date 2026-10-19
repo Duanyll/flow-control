@@ -1,16 +1,5 @@
-"""Endpoint training: the objective contract and the trainer loop over it.
-
-:class:`EndpointTrainer` is the endpoint family (NFT / RAM / AWM / weighted
-flow matching): the clean rollout endpoint is re-noised at a training
-timestep and an :class:`Objective` turns the velocities of the current and
-auxiliary variants there into a loss. The concrete trainers are presets over
-``objective`` and ``train_timesteps``.
-
-Conventions (flow_control): ``sigma`` in ``[0, 1]`` with ``1`` = pure noise,
-``x_t = (1 - sigma) * x0 + sigma * noise`` and the flow-matching target is
-``noise - x0``. A training point is a row with ``clean_latents``,
-``noisy_latents``, ``noise``, ``sigma`` (float) and ``advantage`` (``[1]``).
-"""
+"""Endpoint trainers (NFT / RAM / AWM / weighted FM): re-noise the rollout endpoint, score
+the current and auxiliary variants' velocities there with an ``Objective``."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

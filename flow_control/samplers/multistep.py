@@ -17,13 +17,21 @@ def _lambda(sigma: torch.Tensor) -> torch.Tensor:
     return torch.log(1 - sigma) - torch.log(sigma)
 
 
+class MultistepGrid(BaseGrid):
+    """A grid that keeps its own history and predicts once per step."""
+
+    prediction: Prediction = Model()
+
+    def estimate_calls(self, row: Row) -> int:
+        return self.steps * self.prediction.estimate_calls(row)
+
+
 @trajectory_registry.register("dpm")
-class DpmGrid(BaseGrid):
+class DpmGrid(MultistepGrid):
     """Multistep DPM-Solver++ in x0-prediction form; DDIM on the first and last step."""
 
     type: Literal["dpm"] = "dpm"
     order: Literal[1, 2]
-    prediction: Prediction = Model()
 
     def run(self, row: Row, grid: GridFrame, /) -> Calls[None]:
         grid.sigmas = self.sigmas(row)
@@ -54,9 +62,6 @@ class DpmGrid(BaseGrid):
                 )
             row["sigma"] = sigma_next
             previous = (x0, sigma)
-
-    def estimate_calls(self, row: Row) -> int:
-        return self.steps * self.prediction.estimate_calls(row)
 
 
 def _dpm_first_order(
@@ -92,13 +97,8 @@ def _dpm_second_order(
 
 
 @trajectory_registry.register("sa")
-class SaGrid(BaseGrid):
-    """Second-order SA-Solver (data prediction, PEC) of the public AWM SD3.5 recipe.
-
-    The grid head is capped at ``initial_time`` and the penultimate time halved
-    like the reference; ``eta`` applies to target times inside the
-    stochasticity band. The random PEC step has no step-wise density.
-    """
+class SaGrid(MultistepGrid):
+    """Second-order SA-Solver (data prediction, PEC) of the AWM SD3.5 recipe; no step-wise density."""
 
     type: Literal["sa"] = "sa"
     eta: float = 0.4
@@ -106,7 +106,6 @@ class SaGrid(BaseGrid):
     stochasticity_end: float = 0.9
     initial_time: float = 1.0 - 1e-3
     adjust_penultimate_time: bool = True
-    prediction: Prediction = Model()
 
     def tau(self, t: float) -> float:
         return (
@@ -154,9 +153,6 @@ class SaGrid(BaseGrid):
             models, history = [*models, new_model][-2:], [*history, t_next][-2:]
         grid.index = self.steps - 1
         row["noisy_latents"], row["sigma"] = models[-1], times[-1]  # the final x0
-
-    def estimate_calls(self, row: Row) -> int:
-        return self.steps * self.prediction.estimate_calls(row)
 
 
 def sa_update(
@@ -213,19 +209,14 @@ def sa_update(
 
 
 @trajectory_registry.register("flow_unipc")
-class UniPcGrid(BaseGrid):
-    """Deterministic UniPC (predict-x0, B(h)) for flow matching, HiDream-O1's port.
-
-    The UniC corrector runs before the history shift with the previous
-    predictor order, so the effective accuracy is ``order + 1``.
-    """
+class UniPcGrid(MultistepGrid):
+    """Deterministic UniPC (predict-x0, B(h)) for flow matching; the UniC corrector gives order + 1."""
 
     type: Literal["flow_unipc"] = "flow_unipc"
     order: Literal[1, 2] = 2
     solver_type: Literal["bh1", "bh2"] = "bh2"
     use_corrector: bool = True
     lower_order_final: bool = True
-    prediction: Prediction = Model()
 
     def run(self, row: Row, grid: GridFrame, /) -> Calls[None]:
         grid.sigmas = self.sigmas(row)
@@ -266,9 +257,6 @@ class UniPcGrid(BaseGrid):
             row["sigma"] = sigma_next
             x0s, sigmas = x0s[-self.order :], sigmas[-self.order :]
             last_sample, prev_order = sample, this_order
-
-    def estimate_calls(self, row: Row) -> int:
-        return self.steps * self.prediction.estimate_calls(row)
 
     def _b_h(self, hh: torch.Tensor) -> torch.Tensor:
         return torch.expm1(hh) if self.solver_type == "bh2" else hh

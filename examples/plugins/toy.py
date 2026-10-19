@@ -9,9 +9,12 @@ To activate it, list this module in a config's ``imports`` key, e.g. (TOML)::
 
     imports = ["examples.plugins.toy"]
 
+    [sampler]
+    type = "grid"
+
     [sampler.shift]
     type = "toy_constant"
-    factor = 3.0
+    value = 3.0
 
 ``flow-control`` calls ``load_plugins(config["imports"])`` before validating the
 config, so the ``"toy_constant"`` tag is registered into the open ``Shift`` union
@@ -36,7 +39,7 @@ class ToyConstantShift(BaseShift):
     """
 
     type: Literal["toy_constant"] = "toy_constant"
-    factor: float = 1.0
+    value: float = 1.0
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
-        return self.factor
+    def factor(self, seq_len: int, num_steps: int) -> float:
+        return self.value

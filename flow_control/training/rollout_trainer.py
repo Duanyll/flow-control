@@ -18,11 +18,6 @@ from typing import Any, Self
 import torch
 from pydantic import ConfigDict, NonNegativeInt, PrivateAttr, model_validator
 from rich.progress import Progress
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_optimizer_state_dict,
-    set_optimizer_state_dict,
-)
 from torch.profiler import record_function
 
 from flow_control.adapters import ModelAdapter
@@ -33,8 +28,6 @@ from flow_control.utils.logging import console, get_logger
 from flow_control.utils.types import (
     OptimizerConfig,
     SchedulerConfig,
-    parse_optimizer,
-    parse_scheduler,
 )
 
 from .mixins import (
@@ -47,7 +40,14 @@ from .mixins import (
     ValidationMixin,
     distributed_main,
 )
-from .mixins.base import load_model_state_dict, model_state_dict
+from .mixins.base import (
+    load_model_state_dict,
+    load_optimizer_state_dict,
+    make_optimizer,
+    model_state_dict,
+    optimizer_state_dict,
+    optimizer_step,
+)
 from .mixins.microbatch import RolloutIndexedItem
 
 logger = get_logger(__name__)
@@ -170,26 +170,16 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         super().cleanup()
 
     def make_optimizer_and_scheduler(self):
-        params = self.model.trainable_parameters()
-        num_trainable_params = sum(p.numel() for p in params)
-        if num_trainable_params == 0:
-            raise RuntimeError("No trainable parameters found in the model.")
-        self._optimizer = parse_optimizer(self.optimizer_config, params)
-        logger.info(
-            f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable "
-            "parameters."
+        self._optimizer, self._scheduler = make_optimizer(
+            self.model, self.optimizer_config, self.scheduler_config
         )
-        self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
 
     # ------------------------------- Checkpointing ------------------------------ #
 
     def state_dict(self):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
         return {
             "transformer": model_state_dict(self.model),
-            "optimizer": get_optimizer_state_dict(
-                self.transformer, self._optimizer, options=opts
-            ),
+            "optimizer": optimizer_state_dict(self.model, self._optimizer),
             # In-flight batches are dropped on resume and sampled again, so the
             # cursor must rewind to before the oldest of them took its prompts.
             "cursor": (
@@ -205,12 +195,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         load_model_state_dict(self.model, state_dict["transformer"])
-        set_optimizer_state_dict(
-            self.transformer,
-            self._optimizer,
-            state_dict["optimizer"],
-            options=StateDictOptions(strict=False, ignore_frozen_params=True),
-        )
+        load_optimizer_state_dict(self.model, self._optimizer, state_dict["optimizer"])
         if "cursor" in state_dict:
             self._cursor.load_state_dict(state_dict["cursor"])
         else:
@@ -226,15 +211,9 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     # ----------------------------- Training phase ------------------------------- #
 
     def _optimizer_step(self):
-        """Clip gradients (optional), step, move the per-step EMAs, zero grads."""
-        if self.clip_grad_norm > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self.transformer.parameters(), self.clip_grad_norm
-            )
-        self._optimizer.step()
-        self.model.update_variants("step")
-        self._scheduler.step()
-        self._optimizer.zero_grad()
+        optimizer_step(
+            self.model, self._optimizer, self._scheduler, self.clip_grad_norm
+        )
 
     def _train_on_rollouts(self, rollouts: list[Rollout], advantages: torch.Tensor):
         """Training phase: update model using collected rollouts and advantages."""

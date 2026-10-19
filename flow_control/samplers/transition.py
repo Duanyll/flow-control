@@ -41,13 +41,6 @@ def normal_log_prob(
     return log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
 
 
-def euler_step(
-    x: torch.Tensor, velocity: torch.Tensor, sigma: float, sigma_next: float
-) -> torch.Tensor:
-    dt = x.new_tensor(sigma_next) - x.new_tensor(sigma)
-    return x + velocity * dt
-
-
 def euler_moments(
     x: torch.Tensor, velocity: torch.Tensor, sigma: float, sigma_next: float, eta: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -139,8 +132,8 @@ class GaussianTransition(BaseTransition):
         step.velocity = yield from self.prediction(row)
         x = row["noisy_latents"]
         if self.is_stochastic(step):
-            mean, std = self.moments(row, step, x, step.velocity)
-            row["noisy_latents"] = mean + std * self.noise(row)
+            mean, scale, _ = self.moments(row, step, x, step.velocity)
+            row["noisy_latents"] = mean + scale * self.noise(row)
         else:
             row["noisy_latents"] = self.deterministic(x, step.velocity, step)
         row["sigma"] = step.sigma_next
@@ -153,19 +146,21 @@ class GaussianTransition(BaseTransition):
             return StepLogProb(
                 torch.zeros(x.shape[0], device=x.device), mean, x.new_tensor(0.0)
             )
-        mean, std = self.moments(point, step, x, velocity)
-        return StepLogProb(self.density(point["next_latents"], mean, std), mean, std)
+        mean, scale, std_dev = self.moments(point, step, x, velocity)
+        return StepLogProb(
+            self.density(point["next_latents"], mean, scale), mean, std_dev
+        )
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(mean, std)`` of the stochastic step."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(mean, noise scale, std_dev)``; Euler's std_dev is the diffusion coefficient GRPO's KL uses."""
         raise NotImplementedError
 
     def deterministic(
         self, x: torch.Tensor, velocity: torch.Tensor, step: StepFrame
     ) -> torch.Tensor:
-        return euler_step(x, velocity, step.sigma, step.sigma_next)
+        return x + velocity * (x.new_tensor(step.sigma_next) - x.new_tensor(step.sigma))
 
     def noise(self, row: Row) -> torch.Tensor:
         return randn(row)
@@ -182,27 +177,11 @@ class Euler(GaussianTransition):
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        mean, _, scale = euler_moments(
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, std_dev, scale = euler_moments(
             x, velocity, step.sigma, step.sigma_next, self.eta
         )
-        return mean, scale
-
-    def log_prob(self, point: Row, velocity: torch.Tensor) -> StepLogProb:
-        # std_dev is the diffusion coefficient, which the GRPO KL term uses.
-        step = cast(StepFrame, point["_frame"])
-        if not self.is_stochastic(step):
-            return super().log_prob(point, velocity)
-        mean, std_dev, scale = euler_moments(
-            point["noisy_latents"].float(),
-            velocity.float(),
-            step.sigma,
-            step.sigma_next,
-            self.eta,
-        )
-        return StepLogProb(
-            normal_log_prob(point["next_latents"], mean, scale), mean, std_dev
-        )
+        return mean, scale, std_dev
 
 
 @transition_registry.register("ddim")
@@ -211,8 +190,9 @@ class Ddim(GaussianTransition):
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return ddim_moments(x, velocity, step.sigma, step.sigma_next, self.eta)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, std = ddim_moments(x, velocity, step.sigma, step.sigma_next, self.eta)
+        return mean, std, std
 
     def deterministic(
         self, x: torch.Tensor, velocity: torch.Tensor, step: StepFrame
@@ -228,7 +208,7 @@ class Cps(GaussianTransition):
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         sigma_t = x.new_tensor(step.sigma)
         sigma_next_t = x.new_tensor(step.sigma_next)
         std_dev_t = sigma_next_t * math.sin(self.eta * math.pi / 2)
@@ -237,7 +217,7 @@ class Cps(GaussianTransition):
         mean = pred_original_sample * (1 - sigma_next_t) + noise_estimate * torch.sqrt(
             sigma_next_t**2 - std_dev_t**2
         )
-        return mean, std_dev_t
+        return mean, std_dev_t, std_dev_t
 
     def density(
         self, sample: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
@@ -252,7 +232,7 @@ class Dance(GaussianTransition):
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         sigma_t = x.new_tensor(step.sigma)
         sigma_next_t = x.new_tensor(step.sigma_next)
         dsigma = sigma_next_t - sigma_t
@@ -262,16 +242,12 @@ class Dance(GaussianTransition):
         std_dev_t = self.eta * torch.sqrt(delta_t)
         score_estimate = -(x - pred_original_sample * (1 - sigma_t)) / sigma_t**2
         mean = mean - 0.5 * self.eta**2 * score_estimate * dsigma
-        return mean, std_dev_t
+        return mean, std_dev_t, std_dev_t
 
 
 @transition_registry.register("flash")
 class Flash(GaussianTransition):
-    """HiDream-O1 Dev's full re-noise step: x0, then fresh clipped noise at sigma_next.
-
-    ``s_noise`` ramps linearly over the enclosing grid; the Gaussian likelihood
-    is an approximation while ``noise_clip_std`` is on.
-    """
+    """HiDream-O1 Dev's full re-noise step: x0, then fresh clipped noise whose scale ramps over the grid."""
 
     type: Literal["flash"] = "flash"
     eta: float = 1.0
@@ -281,7 +257,7 @@ class Flash(GaussianTransition):
 
     def moments(
         self, row: Row, step: StepFrame, x: torch.Tensor, velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from .trajectory import BaseGrid, GridFrame
 
         grid = cast(
@@ -296,7 +272,7 @@ class Flash(GaussianTransition):
         )
         sigma_next_t = x.new_tensor(step.sigma_next)
         mean = (1.0 - sigma_next_t) * (x - x.new_tensor(step.sigma) * velocity)
-        return mean, sigma_next_t * scale
+        return mean, sigma_next_t * scale, sigma_next_t * scale
 
     def noise(self, row: Row) -> torch.Tensor:
         noise = randn(row)
