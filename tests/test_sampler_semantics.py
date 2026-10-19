@@ -1,62 +1,41 @@
-"""Plan/transform/executor semantics for the plan-as-data sampler.
-
-Two kinds of test live here:
+"""Node-tree sampler semantics: fixture parity, executor rounds, GRPO record/replay.
 
 * **Parity** (``BaselineParityTest``) replays the numeric fixtures under
   ``tests/fixtures/sampler_baselines/`` — first captured from the pre
   plan-as-data implementation — so accidental numeric drift in any solver
   surfaces as a bitwise mismatch. Regenerate with
   ``tests/sampler_baseline_capture.py`` only when behaviour changes on purpose.
-* **Invariants** assert properties of the plan data or compare two executions
-  of the current code; they need no fixtures.
+* **Invariants** compare two executions of the current code; no fixtures.
 """
 
+import copy
 import importlib
 import sys
 import unittest
-from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from flow_control.samplers import Calls, Executor, SdeWindow
-from flow_control.samplers.guidance import ClassifierFreeGuidance
-from flow_control.samplers.plan import (
-    EvalRequest,
-    StepContext,
-    Transition,
-    TransitionResult,
-)
-from flow_control.samplers.sampler import (
-    Sampler,
-    SampleRequest,
-)
-from flow_control.samplers.solver import (
-    CPSSolver,
-    DanceSolver,
-    DDIMSolver,
-    DPMSolver,
-    FlashSolver,
-    FlowSolver,
-    FlowUniPCSolver,
-    SASolver,
-    solver_registry,
-)
-from flow_control.samplers.solver.sa import SaRuntimeState
-from flow_control.samplers.transforms import (
+from flow_control.samplers import (
+    BaseGrid,
+    BaseTransition,
+    Cfg,
+    Cps,
+    Dance,
+    Ddim,
+    Euler,
+    Executor,
+    Flash,
+    Grid,
+    InitLatent,
+    Renoise,
+    SaGrid,
+    SdeWindowGrid,
+    Sequential,
+    Tiled,
     select_sde_window,
-    with_sde_window,
 )
-from flow_control.training.grpo_sampling import (
-    GrpoCollector,
-    RecordedStep,
-    ReplayItem,
-    replay_steps,
-    step_log_prob,
-)
-from flow_control.utils.tensor import deep_apply_tensor_fn, deep_move_to_device
+from flow_control.utils.tensor import deep_apply_tensor_fn
 
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
@@ -64,160 +43,13 @@ if str(TESTS_DIR) not in sys.path:
 capture = importlib.import_module("sampler_baseline_capture")
 microbatching = importlib.import_module("test_microbatching")
 
-BASELINE_DIR = capture.BASELINE_DIR
-RecordingModel = capture.RecordingModel
-make_request_batch = capture.make_request_batch
-drive_single_eval_transition = capture.drive_single_eval_transition
-
-MIGRATED_STEP_FIXTURES = {
-    # Each solver exposes its step moments as ``step_parts(latents, velocity,
-    # sigma, sigma_next, eta) -> (mean, std_dev, ...)``.
-    "step_flow_eta07.pt": FlowSolver,
-    "step_ddim_eta07.pt": DDIMSolver,
-    "step_cps_eta07.pt": CPSSolver,
-    "step_dance_eta07.pt": DanceSolver,
-}
-
 
 def load_fixture(name: str) -> dict:
-    return torch.load(BASELINE_DIR / name, weights_only=True)
+    return torch.load(capture.BASELINE_DIR / name, weights_only=True)
 
 
 def assert_bitwise(a: torch.Tensor, b: torch.Tensor) -> None:
     torch.testing.assert_close(a, b, rtol=0, atol=0)
-
-
-def run_recorded(model, sampler, batch, generator, transforms=None):
-    """Sample one recording run and return it with its GRPO records."""
-    if transforms is not None:
-        sampler = sampler.model_copy(update={"transforms": transforms})
-    collector = GrpoCollector(sampler)
-    run = next(
-        iter(
-            sampler.sample(
-                model,
-                [SampleRequest(row=batch, generator=generator)],
-                collector=collector,
-            )
-        )
-    )
-    return run, collector.take(run)
-
-
-def replay_run(sampler: Sampler, batch, plan=None):
-    """A training-side run for replaying records against ``sampler``."""
-    return sampler.make_run(
-        SampleRequest(row=batch), plan=sampler.plan(batch) if plan is None else plan
-    )
-
-
-class ConstVelocityModel:
-    """Duck-typed model returning a fixed velocity for every sample."""
-
-    device = torch.device("cpu")
-    dtype = torch.float32
-    micro_batch_size = 1
-
-    def __init__(self, velocity: torch.Tensor) -> None:
-        self.velocity = velocity
-
-    def use_variant(self, variant: str | None):
-        if variant is not None:
-            raise ValueError(f"Test model has no variant {variant!r}.")
-        return nullcontext()
-
-    def predict_velocity_batched(
-        self,
-        batches: list,
-        timesteps: list[torch.Tensor],
-        *,
-        dummy_outputs: list[torch.Tensor] | None = None,
-    ) -> list[torch.Tensor]:
-        return [self.velocity for _ in batches]
-
-
-def stack_trajectory(output: capture.TraceOutput) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rebuild the stacked ``(latents, log_probs)`` fixture views."""
-    trajectory = output.trajectory
-    assert trajectory
-    latents = torch.stack(
-        [trajectory[0].latent_t] + [step.latent_next for step in trajectory],
-        dim=1,
-    )
-    log_probs = torch.stack([step.log_prob for step in trajectory], dim=1)
-    return latents, log_probs
-
-
-def sampler_from_fixture(fixture: dict) -> Sampler:
-    """Rebuild the Sampler from a frozen config dump.
-
-    Fixtures captured before the guidance/recipe rename store the retired
-    spellings; they are migrated here exactly as a user would have to edit an
-    old config. Regenerating a fixture writes the current spelling and makes
-    the corresponding branch a no-op.
-    """
-    config = dict(fixture["sampler_config"])
-    if "cfg_scale" in config:
-        config["guidance"] = {
-            "type": "cfg",
-            "scale": config.pop("cfg_scale"),
-            "renorm": config.pop("enable_cfg_renorm"),
-            "renorm_eps": config.pop("cfg_renorm_eps"),
-            "renorm_min": config.pop("cfg_renorm_min"),
-        }
-    for key in ("trajectory_window_size", "trajectory_window_range"):
-        if key in config:
-            assert config.pop(key) is None, f"unexpected frozen window in {key}"
-    shift = config.get("shift")
-    if isinstance(shift, dict) and shift.get("type") == "none":
-        # The `none` shift was deleted as an exact duplicate of ConstantShift's
-        # default factor of 1.0, so the baseline numbers are unaffected.
-        config["shift"] = {**shift, "type": "constant"}
-    return Sampler.model_validate(config)
-
-
-def run_e2e_fixture(fixture: dict) -> tuple[capture.TraceOutput, Any]:
-    """Re-run a captured end-to-end config through the public sampler and test observer.
-
-    The second element is the ``RecordingModel`` that answered the evals; it is
-    untyped because the capture module is imported dynamically (see above).
-    """
-    model = RecordingModel()
-    output = capture.trace_sample(
-        model,
-        sampler_from_fixture(fixture),
-        SampleRequest(
-            row=make_request_batch(fixture["initial_latents"]),
-            generator=torch.Generator().manual_seed(777),
-        ),
-    )
-    return output, model
-
-
-def e2e_fixtures() -> list[Path]:
-    return sorted(BASELINE_DIR.glob("e2e_*.pt"))
-
-
-def drive_transition(
-    tr: Transition,
-    ctx: StepContext,
-    velocity_fn,
-) -> tuple[TransitionResult, list[EvalRequest]]:
-    """Drive a run_transition generator, answering evals via ``velocity_fn``."""
-    requests: list[EvalRequest] = []
-
-    def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
-        requests.append(request)
-        if False:
-            yield []
-        return velocity_fn(request)
-
-    try:
-        next(tr.run(ctx, predict))
-    except StopIteration as stop:
-        assert isinstance(stop.value, TransitionResult)
-        return stop.value, requests
-    raise AssertionError("The local velocity oracle must not yield model calls.")
 
 
 class BaselineParityTest(unittest.TestCase):
@@ -228,609 +60,169 @@ class BaselineParityTest(unittest.TestCase):
     commit them with the change; if not, it is the regression these exist for.
     """
 
-    def test_e2e_trajectories_match_baselines(self) -> None:
-        for fixture_path in e2e_fixtures():
-            with self.subTest(fixture=fixture_path.stem):
-                fixture = load_fixture(fixture_path.name)
-                output, _ = run_e2e_fixture(fixture)
-
-                assert_bitwise(output.final_latents, fixture["final_latents"])
-                traj_latents, log_probs = stack_trajectory(output)
-                if fixture["log_probs"] is None:
-                    # Captured by the legacy SA loop, which stored every
-                    # intermediate latent, produced no log-probs, and reported
-                    # the raw config grid rather than SA's adjusted one (its
-                    # head/penultimate rewrites are pinned by the sa_internals
-                    # tests). Regenerating this fixture retires the branch.
-                    assert_bitwise(output.timesteps[1:-1], fixture["timesteps"][1:-1])
-                    window = traj_latents.shape[1]
-                    assert_bitwise(traj_latents, fixture["traj_latents"][:, :window])
-                    assert_bitwise(output.final_latents, fixture["traj_latents"][:, -1])
-                    self.assertTrue((log_probs == 0).all())
-                else:
-                    assert_bitwise(output.timesteps, fixture["timesteps"])
-                    assert_bitwise(traj_latents, fixture["traj_latents"])
-                    assert_bitwise(log_probs, fixture["log_probs"])
-
-    def test_e2e_eval_topology_matches_baselines(self) -> None:
-        # Separate from the numerics: *where* and in what order the model is
-        # queried is a property of the plan, and can change (extra warmup eval,
-        # reordered rendezvous) while the final latents still land correctly.
-        for fixture_path in e2e_fixtures():
-            with self.subTest(fixture=fixture_path.stem):
-                fixture = load_fixture(fixture_path.name)
-                _, model = run_e2e_fixture(fixture)
-
+    def test_e2e_trajectories_and_eval_topology_match_baselines(self) -> None:
+        for name, sampler in capture.e2e_configs().items():
+            with self.subTest(fixture=name):
+                fixture = load_fixture(f"e2e_{name}.pt")
+                actual, model = capture.e2e_fixture(sampler)
+                assert_bitwise(actual["final_latents"], fixture["final_latents"])
+                # Where and in what order the model is queried is a property of
+                # the tree (warmup evals, PEC target points), checked on its own.
                 self.assertEqual(model.eval_sigmas, fixture["eval_sigmas"])
-                for actual, expected in zip(
+                for a, e in zip(
                     model.eval_latents, fixture["eval_latents"], strict=True
                 ):
-                    assert_bitwise(actual, expected)
+                    assert_bitwise(a, e)
+                if actual["traj_latents"] is None:
+                    # Multistep grids run no transitions; their path is pinned
+                    # by the evals. SA's legacy capture reported the raw grid
+                    # head rather than its initial_time cap.
+                    self.assertIsInstance(sampler, BaseGrid)
+                    self.assertNotIsInstance(sampler, Grid)
+                    assert_bitwise(actual["timesteps"][1:], fixture["timesteps"][1:])
+                else:
+                    assert_bitwise(actual["timesteps"], fixture["timesteps"])
+                    assert_bitwise(actual["traj_latents"], fixture["traj_latents"])
+                    assert_bitwise(actual["log_probs"], fixture["log_probs"])
 
-    def test_migrated_transitions_match_stochastic_step_baselines(self) -> None:
-        for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = load_fixture(fixture_name)
-            solver = solver_cls.model_validate(fixture["solver_config"])
-            latents = fixture["latents"]
-            velocity = fixture["velocity"]
-            for entry in fixture["entries"]:
-                with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
-                    tr = Transition(
-                        solver=solver,
-                        sigma=entry["sigma"],
-                        sigma_next=entry["sigma_next"],
-                        eta=solver.eta,
-                    )
-                    ctx = StepContext(
-                        latents=latents,
-                        generator=torch.Generator().manual_seed(
-                            5000 + entry["step_index"]
-                        ),
-                        solver_state=None,
-                    )
-                    result = drive_single_eval_transition(tr, ctx, velocity)
-                    assert_bitwise(result.next_latents, entry["next_latents"])
-                    recorded = capture.recorded_step(
-                        tr,
-                        latents,
-                        result.next_latents,
-                        velocity,
-                        entry["step_index"],
-                        8,
-                    )
-                    assert_bitwise(recorded.log_prob, entry["log_prob"])
-
-                    parts = solver_cls.step_parts(
-                        latents, velocity, tr.sigma, tr.sigma_next, tr.eta
-                    )
-                    assert_bitwise(parts[0], entry["mean"])
-                    assert_bitwise(parts[1], entry["std_dev"])
-
-    def test_replay_steps_match_replay_baselines(self) -> None:
-        for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = load_fixture(fixture_name)
-            solver = solver_cls.model_validate(fixture["solver_config"])
-            for entry in fixture["entries"]:
-                with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
-                    recorded = RecordedStep(
-                        latent_t=fixture["latents"],
-                        latent_next=fixture["prev_sample"],
-                        log_prob=torch.zeros(1),
-                        item_index=entry["step_index"],
-                        num_items=8,
-                        transition=Transition(
-                            solver, entry["sigma"], entry["sigma_next"], solver.eta
-                        ),
-                    )
-                    output = step_log_prob(recorded, fixture["velocity"])
-                    assert_bitwise(output.log_prob, entry["replay_log_prob"])
-                    assert_bitwise(output.mean, entry["replay_mean"])
-                    assert_bitwise(output.std_dev, entry["replay_std_dev"])
-
-    def test_replay_recorded_steps_matches_replay_baselines(self) -> None:
-        for fixture_name, solver_cls in MIGRATED_STEP_FIXTURES.items():
-            fixture = load_fixture(fixture_name)
-            solver_type = solver_registry.get(fixture["solver_config"]["type"])
-            self.assertIs(solver_type, solver_cls)
-            solver = solver_cls.model_validate(fixture["solver_config"])
-            # The sweep grid is the 8-step sampler grid, so its plan carries
-            # exactly the swept transitions at their step indices.
-            run = replay_run(
-                Sampler(steps=8, solver=solver), make_request_batch(fixture["latents"])
-            )
-            model = ConstVelocityModel(fixture["velocity"])
-            items = [
-                ReplayItem(
-                    run,
-                    RecordedStep(
-                        latent_t=fixture["latents"],
-                        latent_next=fixture["prev_sample"],
-                        log_prob=torch.zeros(1),
-                        transition=Transition(
-                            solver, entry["sigma"], entry["sigma_next"], solver.eta
-                        ),
-                        item_index=entry["step_index"],
-                        num_items=8,
-                    ),
+    def test_transition_steps_match_stochastic_step_baselines(self) -> None:
+        # Next latents, likelihood, moments and the replay density of every
+        # stochastic transition, including Flash's grid-position noise ramp.
+        configs = {**capture.step_configs(), "flash_eta1": capture.flash_transition()}
+        for name, transition in configs.items():
+            with self.subTest(fixture=name):
+                fixture = load_fixture(f"step_{name}.pt")
+                fixture.pop("solver_config")
+                actual = capture.step_fixture(
+                    transition, range(len(fixture["entries"]))
                 )
-                for entry in fixture["entries"]
-            ]
-            outputs = replay_steps(model, items)
-            for entry, output in zip(fixture["entries"], outputs, strict=True):
-                with self.subTest(fixture=fixture_name, sigma=entry["sigma"]):
-                    assert_bitwise(output.log_prob, entry["replay_log_prob"])
-                    assert_bitwise(output.mean, entry["replay_mean"])
-                    assert_bitwise(output.std_dev, entry["replay_std_dev"])
+                self.assertEqual(capture.mismatches(actual, fixture, name), [])
 
-    def test_flash_transitions_match_step_baselines(self) -> None:
-        fixture = load_fixture("step_flash_eta1.pt")
-        solver = FlashSolver.model_validate(fixture["solver_config"])
-        latents = fixture["latents"]
-        velocity = fixture["velocity"]
-        # The fixture sweep was captured on the full 8-step grid; the compiled
-        # per-step noise scale must match the legacy step-index lerp bitwise.
-        plan = [
-            item
-            for item in solver.plan(torch.linspace(1.0, 0.0, 9).tolist())
-            if isinstance(item, Transition)
-        ]
-        self.assertEqual(len(plan), len(fixture["entries"]))
-        self.assertEqual(plan[-1].eta, 0.0)
-
-        for tr, entry in zip(plan, fixture["entries"], strict=True):
-            with self.subTest(sigma=entry["sigma"]):
-                index = entry["step_index"]
-                self.assertEqual(tr.sigma, entry["sigma"])
-                self.assertEqual(tr.sigma_next, entry["sigma_next"])
-                noise_scale = solver.noise_scale_at(index, len(plan))
-                deterministic = tr.eta == 0.0 or tr.sigma_next <= 0.0
-                if not deterministic:
-                    # std_dev pins the compiled noise scale against the sweep.
-                    assert_bitwise(
-                        latents.new_tensor(tr.sigma_next) * noise_scale,
-                        entry["std_dev"],
-                    )
-                    assert_bitwise(
-                        FlashSolver.renoise_parts(
-                            latents, velocity, tr.sigma, tr.sigma_next, noise_scale
-                        )[0],
-                        entry["mean"],
-                    )
-                # The fixture captured every entry with eta=1; the terminal
-                # entry is deterministic via sigma_next == 0 in both paths.
-                ctx = StepContext(
-                    latents=latents,
-                    generator=torch.Generator().manual_seed(5000 + index),
-                    solver_state=None,
-                )
-                ctx.item_index, ctx.num_items = index, len(plan)
-                result = drive_single_eval_transition(tr, ctx, velocity)
-                assert_bitwise(result.next_latents, entry["next_latents"])
-                recorded = capture.recorded_step(
-                    tr, latents, result.next_latents, velocity, index, len(plan)
-                )
-                assert_bitwise(recorded.log_prob, entry["log_prob"])
-                output = step_log_prob(
-                    replace(recorded, latent_next=fixture["prev_sample"]), velocity
-                )
-                assert_bitwise(output.log_prob, entry["replay_log_prob"])
-                assert_bitwise(output.mean, entry["replay_mean"])
-                assert_bitwise(output.std_dev, entry["replay_std_dev"])
-
-    def test_flash_public_replay_matches_step_baselines(self) -> None:
-        # The recorded Flash step carries the executed ramp position;
-        # no runtime state is needed at replay time.
-        fixture = load_fixture("step_flash_eta1.pt")
-        solver = FlashSolver.model_validate(fixture["solver_config"])
-        run = replay_run(
-            Sampler(steps=8, solver=solver), make_request_batch(fixture["latents"])
-        )
-        model = ConstVelocityModel(fixture["velocity"])
-        items = [
-            ReplayItem(
-                run,
-                RecordedStep(
-                    latent_t=fixture["latents"],
-                    latent_next=fixture["prev_sample"],
-                    log_prob=torch.zeros(1),
-                    transition=Transition(
-                        solver, entry["sigma"], entry["sigma_next"], solver.eta
-                    ),
-                    item_index=entry["step_index"],
-                    num_items=8,
-                ),
-            )
-            for entry in fixture["entries"]
-        ]
-        outputs = replay_steps(model, items)
-        for entry, output in zip(fixture["entries"], outputs, strict=True):
-            with self.subTest(sigma=entry["sigma"]):
-                assert_bitwise(output.log_prob, entry["replay_log_prob"])
-                assert_bitwise(output.mean, entry["replay_mean"])
-                assert_bitwise(output.std_dev, entry["replay_std_dev"])
-
-    def test_sa_plan_compiles_adjusted_grid_and_taus(self) -> None:
-        # The self-contained companion in PlanInvariantsTest derives the same
-        # grid from SA's documented rules; this one pins it against the numbers
-        # the pre-refactor planner actually produced.
+    def test_sa_grid_and_internal_updates_match_baselines(self) -> None:
         fixture = load_fixture("sa_internals.pt")
-        solver = SASolver.model_validate(fixture["solver_config"])
-        plan = [
-            item
-            for item in solver.plan(fixture["sigmas"].tolist())
-            if isinstance(item, Transition)
-        ]
-        times = fixture["times"]
-        self.assertEqual(len(plan), times.numel() - 1)
-        # Transitions run on the adjusted grid (initial_time head, penultimate
-        # halving); compare after float32 rounding, as executed.
-        assert_bitwise(
-            torch.tensor([item.sigma for item in plan], dtype=torch.float32),
-            times[:-1],
-        )
-        assert_bitwise(
-            torch.tensor([item.sigma_next for item in plan], dtype=torch.float32),
-            times[1:],
-        )
-        # Per-step eta is the actual tau at the target time; terminal is zero.
-        assert_bitwise(
-            torch.tensor([item.eta for item in plan], dtype=torch.float32)[:-1],
-            fixture["tau_values"][1:-1],
-        )
-        self.assertEqual(plan[-1].eta, 0.0)
-
-    def test_sa_internal_updates_still_match_baselines(self) -> None:
-        # The shared AB/AM math is unchanged; pin it against the old fixtures.
-        fixture = load_fixture("sa_internals.pt")
-        solver = SASolver.model_validate(fixture["solver_config"])
-        times = fixture["times"]
-        x = fixture["x"]
-        tau_values = torch.stack([x.new_tensor(solver._tau(float(t))) for t in times])
-        assert_bitwise(tau_values, fixture["tau_values"])
-
-        ab1 = solver._adams_bashforth_update(
-            x,
-            x.new_tensor(solver._tau(float(times[1]))),
-            [fixture["m0"]],
-            [times[0]],
-            fixture["noise"],
-            times[1],
-            order=1,
-        )
-        assert_bitwise(ab1, fixture["ab1"])
-
-        for entry in fixture["entries"]:
-            with self.subTest(t_index=entry["t_index"]):
-                t = times[entry["t_index"]]
-                tau = x.new_tensor(solver._tau(float(t)))
-                assert_bitwise(tau, entry["tau"])
-                time_history = [
-                    times[entry["t_index"] - 2],
-                    times[entry["t_index"] - 1],
-                ]
-                ab2 = solver._adams_bashforth_update(
-                    x,
-                    tau,
-                    [fixture["m0"], fixture["m1"]],
-                    time_history,
-                    fixture["noise"],
-                    t,
-                    order=2,
-                )
-                assert_bitwise(ab2, entry["ab2"])
-                am2 = solver._adams_moulton_update(
-                    x,
-                    tau,
-                    [fixture["m0"], fixture["m1"], fixture["m2"]],
-                    time_history,
-                    fixture["noise"],
-                    t,
-                    order=2,
-                )
-                assert_bitwise(am2, entry["am2"])
-
-    def test_sa_run_transition_drives_pec_through_internal_updates(self) -> None:
-        # Drive run_transition generators with the fixture histories and check
-        # the PEC control flow reproduces the pinned AB/AM outputs.
-        fixture = load_fixture("sa_internals.pt")
-        solver = SASolver.model_validate(fixture["solver_config"])
-        times = fixture["times"]
-        x = fixture["x"]
-        m0, m1 = fixture["m0"], fixture["m1"]
-
-        # First executed transition with a seeded one-entry history: order-1
-        # AB predictor, eval at the predicted point, no corrector.
-        tr = Transition(
-            solver=solver,
-            sigma=float(times[0]),
-            sigma_next=float(times[1]),
-            eta=solver._tau(float(times[1])),
-        )
-        sent_velocity = torch.full_like(x, 0.25)
-        ctx = StepContext(
-            latents=x,
-            generator=torch.Generator().manual_seed(32),
-            solver_state=SaRuntimeState(
-                model_history=(m0,), time_history=(float(times[0]),)
-            ),
-            num_items=len(times) - 1,
-        )
-        result, requests = drive_transition(tr, ctx, lambda request: sent_velocity)
-        self.assertEqual(len(requests), 1)
-        assert_bitwise(requests[0].latents, fixture["ab1"])
-        self.assertEqual(requests[0].sigma, tr.sigma_next)
-        assert_bitwise(result.next_latents, fixture["ab1"])
-        state = result.next_solver_state
-        assert isinstance(state, SaRuntimeState)
-        assert_bitwise(state.model_history[0], m0)
-        assert_bitwise(
-            state.model_history[1],
-            fixture["ab1"] - x.new_tensor(tr.sigma_next) * sent_velocity,
-        )
-        self.assertEqual(state.time_history, (float(times[0]), float(times[1])))
-
-        # Order-2 PEC at an in-window time (tau = eta) and outside it (tau = 0).
-        for entry in fixture["entries"]:
-            with self.subTest(t_index=entry["t_index"]):
-                t_index = entry["t_index"]
-                tr = Transition(
-                    solver=solver,
-                    sigma=float(times[t_index - 1]),
-                    sigma_next=float(times[t_index]),
-                    eta=solver._tau(float(times[t_index])),
-                )
-                generator = torch.Generator().manual_seed(32)
-                ctx = StepContext(
-                    latents=x,
-                    generator=generator,
-                    solver_state=SaRuntimeState(
-                        model_history=(m0, m1),
-                        time_history=(
-                            float(times[t_index - 2]),
-                            float(times[t_index - 1]),
-                        ),
-                    ),
-                    item_index=t_index - 1,
-                    num_items=len(times) - 1,
-                )
-                result, requests = drive_transition(
-                    tr, ctx, lambda request: sent_velocity
-                )
-                self.assertEqual(len(requests), 1)
-                assert_bitwise(requests[0].latents, entry["ab2"])
-                if tr.eta == 0.0:
-                    # Deterministic PEC consumes no generator draws.
-                    self.assertTrue(
-                        torch.equal(
-                            generator.get_state(),
-                            torch.Generator().manual_seed(32).get_state(),
-                        )
-                    )
-                # The corrector reuses the predictor's noise and the fresh x0
-                # evaluated at the predicted point.
-                new_model = entry["ab2"] - x.new_tensor(tr.sigma_next) * sent_velocity
-                noise = (
-                    torch.randn(
-                        x.shape,
-                        dtype=x.dtype,
-                        generator=torch.Generator().manual_seed(32),
-                    )
-                    if tr.eta > 0.0
-                    else torch.zeros_like(x)
-                )
-                expected = solver._adams_moulton_update(
-                    x,
-                    x.new_tensor(tr.eta),
-                    [m0, m1, new_model],
-                    [times[t_index - 2], times[t_index - 1]],
-                    noise,
-                    times[t_index],
-                    order=2,
-                )
-                assert_bitwise(result.next_latents, expected)
-
-
-class PlanInvariantsTest(unittest.TestCase):
-    def test_with_sde_window_gates_eta(self) -> None:
-        plan = FlowSolver(eta=0.7).plan([1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
-        windowed = with_sde_window(plan, 1, 3)
-        self.assertEqual([item.eta for item in windowed], [0.0, 0.7, 0.7, 0.0, 0.0])
-
-    def test_sa_plan_compiles_the_adjusted_grid_and_frozen_tau(self) -> None:
+        fixture.pop("solver_config")
+        self.assertEqual(capture.mismatches(capture.sa_fixture(), fixture, "sa"), [])
         # SA does not run on the grid it is handed: the head is capped at
-        # initial_time (the reference never evaluates at pure noise) and the
-        # penultimate time is halved. Both rewrites are invisible on a uniform
-        # grid, hence the uneven sigmas here. ``eta`` is tau(sigma_next) frozen
-        # at plan time -- zero below the stochasticity band, and zero on the
-        # terminal step, which collapses to the previous x0 prediction.
-        solver = SASolver()  # eta 0.4 inside [0.3, 0.9]
-        transitions = [
-            item
-            for item in solver.plan([1.0, 0.9, 0.5, 0.2, 0.0])
-            if isinstance(item, Transition)
-        ]
-
-        self.assertEqual(
-            [item.sigma for item in transitions],
-            [solver.initial_time, 0.9, 0.5, 0.25],
-        )
-        self.assertEqual(
-            [item.sigma_next for item in transitions], [0.9, 0.5, 0.25, 0.0]
-        )
-        self.assertEqual([item.eta for item in transitions], [0.4, 0.4, 0.0, 0.0])
+        # initial_time and the penultimate time halved (both invisible on a
+        # uniform grid, hence the uneven custom grid); tau follows the target
+        # time and is zero below the stochasticity band.
+        solver = SaGrid(steps=4, custom_sigmas=[1.0, 0.9, 0.5, 0.2, 0.0])
+        row = capture.make_row(torch.zeros(1, 4, 2))
+        self.assertEqual(solver.sigmas(row), [solver.initial_time, 0.9, 0.5, 0.25, 0.0])
+        self.assertEqual([solver.tau(t) for t in (0.9, 0.5, 0.25)], [0.4, 0.4, 0.0])
 
 
 class ExecutorSemanticsTest(unittest.TestCase):
-    def test_ddim_eta0_consumes_no_generator_draws(self) -> None:
-        sampler = Sampler(steps=3, solver=DDIMSolver())
-        generator = torch.Generator().manual_seed(5)
-        state_before = generator.get_state().clone()
-        list(
-            sampler.sample(
-                microbatching.FakeSamplerModel(),
-                [
-                    SampleRequest(
-                        row=microbatching.make_sampler_batch(0.5),
-                        generator=generator,
-                    )
-                ],
+    def test_deterministic_grids_consume_no_generator_draws(self) -> None:
+        # A deterministic DDIM used to draw (and discard) noise; SA with eta=0
+        # must not touch the RNG either, so seeds stay comparable across runs.
+        for sampler in (Grid(steps=3, transition=Ddim()), SaGrid(steps=4, eta=0.0)):
+            with self.subTest(sampler=sampler.type):
+                generator = torch.Generator().manual_seed(5)
+                state = generator.get_state().clone()
+                row = microbatching.sampling_row(
+                    microbatching.make_sampler_batch(0.5), generator
+                )
+                microbatching.sample(microbatching.FakeSamplerModel(), sampler, [row])
+                self.assertTrue(torch.equal(generator.get_state(), state))
+
+    def test_observers_record_the_window_without_changing_the_path(self) -> None:
+        # Recording must not change the sampled path (same RNG consumption).
+        # The window is drawn from the row generator before any sampling
+        # randomness; its steps run the eta copy of the transition, records
+        # chain latent_next -> latent_t, and snapshots carry no tensors.
+        sampler = SdeWindowGrid(steps=6, size=2, window_range=(1, 5), eta=0.7)
+
+        def run(observers):
+            row = microbatching.sampling_row(
+                microbatching.make_sampler_batch(0.4),
+                torch.Generator().manual_seed(11),
+                observers,
             )
+            return microbatching.sample(
+                microbatching.FakeSamplerModel(), sampler, [row]
+            )[0]
+
+        recorded, plain = run([(BaseTransition, capture.record)]), run([])
+        assert_bitwise(recorded["noisy_latents"], plain["noisy_latents"])
+        self.assertNotIn("trajectory", plain)
+        start, end = select_sde_window(6, 2, (1, 5), torch.Generator().manual_seed(11))
+        trajectory = recorded["trajectory"]
+        points = capture.stochastic_points(recorded)
+        self.assertEqual(len(trajectory), 6)
+        self.assertEqual(
+            [p["_frame"].parent.index for p in points], list(range(start, end))
         )
-        self.assertTrue(torch.equal(generator.get_state(), state_before))
-
-    def test_recording_changes_neither_the_path_nor_the_reported_grid(self) -> None:
-        # sde_window gates eta whether or not it records: recording must not
-        # change the sampled path (same RNG consumption), and the executed
-        # sigma grid is plan metadata (full sigmas[:-1], never window-sliced).
-        def run(record: bool):
-            sampler = Sampler(
-                steps=6,
-                solver=FlowSolver(eta=0.7),
-                transforms=[SdeWindow(size=2, range=(1, 5))],
-            )
-            model = microbatching.FakeSamplerModel()
-            batch = microbatching.make_sampler_batch(0.4)
-            generator = torch.Generator().manual_seed(11)
-            if record:
-                return run_recorded(model, sampler, batch, generator)
-            run = next(
-                iter(
-                    sampler.sample(
-                        model, [SampleRequest(row=batch, generator=generator)]
-                    )
-                )
-            )
-            return run, None
-
-        recorded, trajectory = run(True)
-        plain, _ = run(False)
-        assert_bitwise(recorded.ctx.latents, plain.ctx.latents)
-        self.assertEqual(len(recorded.plan), 6)
-        self.assertEqual(recorded.plan, plain.plan)
-        self.assertIsNone(plain.collector)
-        # Recorded steps chain: each latent_next is the next step's latent_t.
-        assert trajectory is not None
-        self.assertEqual(len(trajectory), 2)
-        assert_bitwise(trajectory[0].latent_next, trajectory[1].latent_t)
-        assert isinstance(recorded.collector, GrpoCollector)
-        self.assertEqual(recorded.collector._records, {})
-
-        # Low-precision initial storage and adapter forwards must never leak
-        # into CFG, tile stitching, or any solver's transition arithmetic.
-        class Bf16Adapter(microbatching.FakeDenseAdapter):
-            @property
-            def dtype(self):
-                return torch.bfloat16
-
-            def _predict_velocity(self, batch, timestep):
-                self_dtype = torch.bfloat16
-                assert batch["noisy_latents"].dtype == self_dtype
-                assert timestep.dtype == self_dtype
-                return super()._predict_velocity(batch, timestep)
-
-        def check_step(run, step):
-            for tensor in (step.latents, step.next_latents, step.velocity):
-                if tensor is not None:
-                    self.assertEqual(tensor.dtype, torch.float32)
-
-        for solver in (
-            FlowSolver(),
-            DDIMSolver(),
-            CPSSolver(),
-            DanceSolver(),
-            FlashSolver(),
-            DPMSolver(order=2),
-            FlowUniPCSolver(),
-            SASolver(),
-        ):
-            with self.subTest(precision_solver=solver.type):
-                adapter = Bf16Adapter.model_construct(
-                    arch="fake", type="fake", micro_batch_size=2
-                )
-                batch: Any = microbatching.make_batch(0.734)
-                batch["noisy_latents"] = batch["noisy_latents"].bfloat16()
-                batch["tiling"] = {"tile_size": 16, "overlap": 0, "stride": 16}
-                sampler = Sampler(
-                    steps=8, solver=solver, guidance=ClassifierFreeGuidance(scale=2)
-                )
-                with torch.no_grad():
-                    (result,) = sampler.sample(
-                        adapter,
-                        [
-                            SampleRequest(
-                                batch, batch, torch.Generator().manual_seed(11)
-                            )
-                        ],
-                        collector=check_step,
-                    )
-                self.assertEqual(result.ctx.latents.dtype, torch.bfloat16)
-                self.assertTrue(torch.isfinite(result.ctx.latents).all())
+        self.assertTrue(all((p["log_prob"] != 0).all() for p in points))
+        self.assertTrue(
+            all((p["log_prob"] == 0).all() for p in trajectory if p not in points)
+        )
+        assert_bitwise(trajectory[0]["next_latents"], trajectory[1]["noisy_latents"])
+        snapshot = points[0]["_frame"]
+        self.assertIs(snapshot.node, sampler._sde)
+        self.assertEqual(
+            (snapshot.node.eta, snapshot.latents, snapshot.velocity), (0.7, None, None)
+        )
+        self.assertIs(snapshot.root, recorded["_frame"])
+        self.assertEqual(len(snapshot.parent.sigmas), 7)
 
     def test_rollout_and_replay_are_self_consistent(self) -> None:
-        # GRPO-shaped parity: replay every RecordedStep through the public
-        # entry point; the deterministic fake model reproduces the rollout
-        # velocity, so the replayed log-prob must match bitwise.
-        solvers = [
-            FlowSolver(eta=0.5),
-            DDIMSolver(eta=0.5),
-            CPSSolver(eta=0.5),
-            DanceSolver(eta=0.5),
-            FlashSolver(noise_scale_start=0.9, noise_scale_end=0.7),
-        ]
+        # GRPO-shaped parity: replay every recorded stochastic step through the
+        # training path (node.prediction + node.log_prob on a fresh point). The
+        # deterministic fake model reproduces the rollout velocity, so the
+        # replayed log-prob must match bitwise; the executed node (and its eta)
+        # comes from the recorded chain, never from a live sampler config.
         velocity = torch.full((1, 4, 2), 0.3)
-        for solver in solvers:
-            with self.subTest(solver=solver.type):
-                sampler = Sampler(steps=4, solver=solver)
-                batch = microbatching.make_batch(0.9)
-                model = ConstVelocityModel(velocity)
-                run, trajectory = run_recorded(
-                    model, sampler, batch, torch.Generator().manual_seed(3)
+        transitions = [
+            Euler(eta=0.5),
+            Ddim(eta=0.5),
+            Cps(eta=0.5),
+            Dance(eta=0.5),
+            Flash(noise_scale_start=0.9, noise_scale_end=0.7),
+        ]
+        for transition in transitions:
+            with self.subTest(transition=transition.type):
+                model = capture.ConstVelocityModel(velocity)
+                row = microbatching.sampling_row(
+                    microbatching.make_batch(0.9),
+                    torch.Generator().manual_seed(3),
+                    [(BaseTransition, capture.record)],
                 )
-                self.assertEqual(len(trajectory), sampler.steps - 1)
-                self.assertTrue(all((step.log_prob != 0).all() for step in trajectory))
-
-                items = [ReplayItem(run, step) for step in trajectory]
-                replayed = replay_steps(model, items)
-                for step, replay in zip(trajectory, replayed, strict=True):
-                    assert_bitwise(replay.log_prob, step.log_prob)
-
-                # Replay reads the recorded transition's ACTUAL eta, never the
-                # sampler's live solver config: a retuned sampler replaying the
-                # executed plan reproduces the same likelihoods.
-                retuned = replay_run(
-                    Sampler(steps=4, solver=type(solver)(eta=0.123)), batch, run.plan
+                (rollout,) = microbatching.sample(
+                    model, Grid(steps=4, transition=transition), [row]
                 )
-                for output_now, output_then in zip(
-                    replay_steps(model, [ReplayItem(retuned, s) for s in trajectory]),
-                    replayed,
-                    strict=True,
-                ):
-                    assert_bitwise(output_now.log_prob, output_then.log_prob)
+                points = capture.stochastic_points(rollout)
+                self.assertEqual(len(points), 3)
+                self.assertTrue(all((p["log_prob"] != 0).all() for p in points))
+                replayed = Executor(model).evaluate(
+                    [capture.replay(rollout, p) for p in points]
+                )
+                for point, output in zip(points, replayed, strict=True):
+                    assert_bitwise(output.log_prob, point["log_prob"])
 
                 # S2 precision review: bf16 storage made replay coefficients
                 # bf16 even with an fp32 velocity (mean drifted by 1.17e-4).
                 # Compare the SAME stored values, promoted before arithmetic.
                 stored = [
-                    replace(
-                        step,
-                        latent_t=step.latent_t.bfloat16(),
-                        latent_next=step.latent_next.bfloat16(),
-                    )
-                    for step in trajectory
+                    {
+                        **p,
+                        "noisy_latents": p["noisy_latents"].bfloat16(),
+                        "next_latents": p["next_latents"].bfloat16(),
+                    }
+                    for p in points
                 ]
                 promoted = [
-                    replace(
-                        step,
-                        latent_t=step.latent_t.float(),
-                        latent_next=step.latent_next.float(),
-                    )
-                    for step in stored
+                    {
+                        **p,
+                        "noisy_latents": p["noisy_latents"].float(),
+                        "next_latents": p["next_latents"].float(),
+                    }
+                    for p in stored
                 ]
                 predictions = [velocity.clone().requires_grad_() for _ in range(2)]
                 low, reference = [
-                    replay_steps(
-                        ConstVelocityModel(prediction),
-                        [ReplayItem(run, step) for step in records],
+                    Executor(capture.ConstVelocityModel(prediction)).evaluate(
+                        [capture.replay(rollout, p) for p in records]
                     )
                     for prediction, records in zip(
                         predictions, (stored, promoted), strict=True
@@ -848,33 +240,95 @@ class ExecutorSemanticsTest(unittest.TestCase):
                     predictions[0].grad, predictions[1].grad, rtol=0, atol=0
                 )
 
-    def test_recorded_steps_round_trip_deep_move_to_device(self) -> None:
+    def test_flash_replay_reads_the_grid_position(self) -> None:
+        # Flash's noise scale ramps with the step index: a windowed rollout
+        # starts recording at index > 0 and the snapshot chain must carry the
+        # executed position (a shifted index changes the likelihood).
         velocity = torch.full((1, 4, 2), 0.3)
-        sampler = Sampler(steps=4, solver=FlowSolver(eta=0.5))
-        batch = microbatching.make_batch(0.9)
-        model = ConstVelocityModel(velocity)
-        run, trajectory = run_recorded(
-            model, sampler, batch, torch.Generator().manual_seed(3)
+        model = capture.ConstVelocityModel(velocity)
+        sampler = SdeWindowGrid(
+            steps=8,
+            size=3,
+            window_range=(2, 7),
+            eta=1.0,
+            transition=Flash(eta=0.0, noise_scale_start=0.9, noise_scale_end=0.7),
         )
-
-        # CPU rollout storage round-trips the record list, rebuilding fresh
-        # RecordedStep/Transition instances along the way.
-        moved: list[RecordedStep] = deep_move_to_device(
-            trajectory, torch.device("cpu"), preserve_aliases=True
+        row = microbatching.sampling_row(
+            microbatching.make_batch(0.9),
+            torch.Generator().manual_seed(3),
+            [(BaseTransition, capture.record)],
         )
-        self.assertIsNot(moved, trajectory)
-        for original, restored in zip(trajectory, moved, strict=True):
-            self.assertIsNot(restored, original)
-            self.assertEqual(restored.transition, original.transition)
-            assert_bitwise(restored.latent_t, original.latent_t)
-            assert_bitwise(restored.latent_next, original.latent_next)
-        for previous, following in zip(moved[:-1], moved[1:], strict=True):
-            self.assertIs(previous.latent_next, following.latent_t)
+        (rollout,) = microbatching.sample(model, sampler, [row])
+        start, end = select_sde_window(8, 3, (2, 7), torch.Generator().manual_seed(3))
+        points = capture.stochastic_points(rollout)
+        self.assertGreater(start, 0)
+        self.assertEqual(
+            [p["_frame"].parent.index for p in points], list(range(start, end))
+        )
+        replayed = Executor(model).evaluate(
+            [capture.replay(rollout, p) for p in points]
+        )
+        for point, output in zip(points, replayed, strict=True):
+            assert_bitwise(output.log_prob, point["log_prob"])
+        shifted = copy.copy(points[0]["_frame"])
+        shifted.parent = copy.copy(shifted.parent)
+        shifted.parent.index = 0
+        (wrong,) = Executor(model).evaluate(
+            [capture.replay(rollout, {**points[0], "_frame": shifted})]
+        )
+        self.assertFalse(torch.equal(wrong.log_prob, points[0]["log_prob"]))
 
-        items = [ReplayItem(run, step) for step in moved]
-        replayed = replay_steps(model, items)
-        for step, replay in zip(trajectory, replayed, strict=True):
-            assert_bitwise(replay.log_prob, step.log_prob)
+    def test_sa_batches_across_requests(self) -> None:
+        # The legacy loop sampled SA requests sequentially with a warn_once;
+        # the executor batches every rendezvous across requests.
+        model = microbatching.FakeSamplerModel()
+        rows = [
+            microbatching.sampling_row(microbatching.make_sampler_batch(v))
+            for v in (1.0, 2.0)
+        ]
+        microbatching.sample(model, SaGrid(steps=4, eta=0.0), rows)
+        # 4 eval rounds (seed + 3 PEC target evals; terminal evaluates nothing),
+        # each a single batched forward over both requests.
+        self.assertEqual(model.forward_batch_sizes, [2, 2, 2, 2])
+
+    def test_progress_counts_every_model_call(self) -> None:
+        # Serving reports progress once per ModelCall through RootFrame.on_call,
+        # so CFG and tile branches count and estimate_calls must agree with it
+        # (init_latent / renoise make no calls).
+        class Leaf(microbatching.FakeSamplerModel):
+            def predict_velocity_batched(
+                self, batches, timesteps, *, dummy_outputs=None
+            ):
+                self.forward_batch_sizes.append(len(batches))
+                return [2 * batch["noisy_latents"] for batch in batches]
+
+        cfg = Cfg(scale=2.0, prediction=Tiled())
+        sampler = Sequential(
+            steps=[
+                InitLatent(source="clean", sigma_end=0.5),
+                Grid(steps=3, sigma_end=0.2, transition=Euler(prediction=cfg)),
+                Renoise(sigma_end=0.3),
+                Grid(steps=2, transition=Euler(prediction=Tiled())),
+            ]
+        )
+        plain = {**microbatching.make_batch(tokens=4), "negative": {}}
+        tiled = {
+            **plain,
+            "image_size": (6, 6),
+            "clean_latents": torch.zeros(1, 36, 1),
+            "noisy_latents": torch.arange(36, dtype=torch.float32).reshape(1, 36, 1),
+            "tiling": {"tile_size": 4, "overlap": 2, "stride": 1},
+        }
+        for batch, expected in ((plain, 3 * 2 + 2), (tiled, 3 * 2 * 4 + 2 * 4)):
+            with self.subTest(tiles="tiling" in batch):
+                calls = []
+                row = microbatching.sampling_row(
+                    batch, torch.Generator().manual_seed(0), on_call=calls.append
+                )
+                self.assertEqual(sampler.estimate_calls(row), expected)
+                microbatching.sample(Leaf(), sampler, [row])
+                self.assertEqual(len(calls), expected)
+                self.assertEqual(row["sigma"], 0.0)
 
     def test_deep_tensor_map_alias_table_is_per_call(self) -> None:
         tensor = torch.ones(1)
@@ -892,135 +346,6 @@ class ExecutorSemanticsTest(unittest.TestCase):
         self.assertIs(first[0], first[1])
         self.assertIs(second[0], second[1])
         self.assertIsNot(first[0], second[0])
-
-    def test_flash_windowed_recording_stores_offset_noise_scales(self) -> None:
-        # With an sde_window the recorded steps start at train_start > 0; each
-        # record must retain the executed noise scale of its
-        # plan-level step index (which varies per step here, so an offset bug
-        # would change the numbers).
-        velocity = torch.full((1, 4, 2), 0.3)
-        solver = FlashSolver(noise_scale_start=0.9, noise_scale_end=0.7)
-        sampler = Sampler(steps=8, solver=solver)
-        batch = microbatching.make_batch(0.9)
-        model = ConstVelocityModel(velocity)
-        run, trajectory = run_recorded(
-            model,
-            sampler,
-            batch,
-            torch.Generator().manual_seed(3),
-            transforms=[SdeWindow(size=3, range=(2, 7))],
-        )
-
-        # The window is drawn from the request generator before any sampling
-        # randomness, so a fresh generator with the same seed reproduces it.
-        train_start, train_end = select_sde_window(
-            sampler.steps, 3, (2, 7), torch.Generator().manual_seed(3)
-        )
-        self.assertGreater(train_start, 0)
-        self.assertEqual(len(trajectory), train_end - train_start)
-        for index, step in enumerate(trajectory):
-            self.assertEqual(step.item_index, train_start + index)
-            self.assertEqual(step.num_items, sampler.steps)
-
-        items = [ReplayItem(run, step) for step in trajectory]
-        replayed = replay_steps(model, items)
-        for step, replay_output in zip(trajectory, replayed, strict=True):
-            assert_bitwise(replay_output.log_prob, step.log_prob)
-
-        # A wrong noise scale must change the replayed log-prob.
-        first = trajectory[0]
-        corrupted = ReplayItem(
-            run, replace(first, noise_scale=solver.noise_scale_at(0, sampler.steps))
-        )
-        wrong = replay_steps(model, [corrupted])[0]
-        self.assertFalse(torch.equal(wrong.log_prob, first.log_prob))
-
-    def test_sliced_plans_warm_up_from_empty_history(self) -> None:
-        # New capability: the tail half of a multistep plan runs standalone,
-        # warming up from an empty history instead of a compiled step index.
-        # The sliced tail must behave exactly like a fresh plan built on the
-        # tail sigma grid (same per-step order metadata, same warmup).
-        initial = torch.randn(1, 4, 2, generator=torch.Generator().manual_seed(4))
-        sigmas = torch.linspace(1.0, 0.0, 9).tolist()
-        for solver in (DPMSolver(order=2), FlowUniPCSolver()):
-            with self.subTest(solver=solver.type):
-                sampler = Sampler(steps=8, solver=solver)
-                full = solver.plan(sigmas)
-                tail_sliced = full[len(full) // 2 :]
-                tail_fresh = solver.plan(sigmas[len(full) // 2 :])
-                self.assertEqual(tail_sliced, tail_fresh)
-
-                results: list[torch.Tensor] = []
-                for plan in (tail_sliced, tail_fresh):
-                    steps = []
-                    run = sampler.make_run(
-                        SampleRequest(row=make_request_batch(initial)),
-                        plan=plan,
-                        collector=lambda run, step, steps=steps: steps.append(step),
-                    )
-                    self.assertEqual(
-                        list(Executor(RecordingModel()).stream([run])), [run]
-                    )
-                    self.assertEqual(len(steps), len(plan))
-                    self.assertTrue(torch.isfinite(run.ctx.latents).all())
-                    results.append(run.ctx.latents)
-                assert_bitwise(results[0], results[1])
-
-    def test_sa_window_gating_composes_deterministic_pec(self) -> None:
-        solver = SASolver()  # eta = 0.4 inside [0.3, 0.9]
-        sampler = Sampler(steps=6, solver=solver)
-        initial = torch.randn(1, 4, 2, generator=torch.Generator().manual_seed(1))
-
-        # eta gated to zero everywhere: deterministic PEC, no generator draws.
-        plan = with_sde_window(solver.plan(torch.linspace(1.0, 0.0, 7).tolist()), 0, 0)
-
-        def run_gated(seed: int) -> tuple[torch.Tensor, bool]:
-            generator = torch.Generator().manual_seed(seed)
-            state_before = generator.get_state().clone()
-            steps = []
-            run = sampler.make_run(
-                SampleRequest(row=make_request_batch(initial), generator=generator),
-                plan=plan,
-                collector=lambda run, step, steps=steps: steps.append(step),
-            )
-            list(Executor(RecordingModel()).stream([run]))
-            self.assertEqual(len(steps), len(plan))
-            return run.ctx.latents, torch.equal(generator.get_state(), state_before)
-
-        first, first_untouched = run_gated(3)
-        second, second_untouched = run_gated(19)
-        assert_bitwise(first, second)
-        self.assertTrue(first_untouched and second_untouched)
-
-        # Sanity: the ungated plan keeps its stored per-transition tau and is
-        # actually stochastic (different seeds diverge).
-        def sample_full(seed: int) -> torch.Tensor:
-            request = SampleRequest(
-                row=make_request_batch(initial),
-                generator=torch.Generator().manual_seed(seed),
-            )
-            model = RecordingModel()
-            return next(iter(sampler.sample(model, [request]))).ctx.latents
-
-        self.assertFalse(torch.equal(sample_full(3), sample_full(19)))
-
-    def test_sa_batches_across_requests(self) -> None:
-        # The legacy loop sampled SA requests sequentially with a warn_once;
-        # the executor now batches every rendezvous across requests.
-        sampler = Sampler(steps=4, solver=SASolver(eta=0.0))
-        model = microbatching.FakeSamplerModel()
-        list(
-            sampler.sample(
-                model,
-                [
-                    SampleRequest(row=microbatching.make_sampler_batch(1.0)),
-                    SampleRequest(row=microbatching.make_sampler_batch(2.0)),
-                ],
-            )
-        )
-        # 4 eval rounds (seed + 3 PEC target evals; terminal evaluates nothing),
-        # each a single batched forward over both requests.
-        self.assertEqual(model.forward_batch_sizes, [2, 2, 2, 2])
 
 
 if __name__ == "__main__":

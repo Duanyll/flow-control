@@ -4,30 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from contextlib import closing
-from dataclasses import dataclass, field
-from typing import Any
 
 import torch
 import torch.distributed as dist
 
 from flow_control.adapters.base import SamplerModel
-from flow_control.utils.model_cache import cache_enabled, clear_cache
 
 from .calls import Calls, ModelCall
-from .run import SampleRun
+from .node import Row
 
 
-@dataclass(slots=True)
-class _Active[T]:
-    gen: Calls[T]
-    calls: list[ModelCall]
-    velocities: dict[int, torch.Tensor] = field(default_factory=dict)
-
-    def clear(self) -> None:
-        for call in self.calls:
-            clear_cache(call.row)
-        self.calls = []
-        self.velocities.clear()
+def timestep(row: Row) -> torch.Tensor:
+    return row["noisy_latents"].new_full((1,), row["sigma"], dtype=torch.float32)
 
 
 class Executor:
@@ -36,23 +24,19 @@ class Executor:
     Every round is collective: one all-reduce decides whether any rank still
     has work, then ``predict_velocity_batched`` runs once per variant in the
     fixed ``variants`` order, with an empty list where this rank has nothing,
-    so all ranks issue the same forward sequence. Unequal sample counts are the
-    adapter's business (it pads with dummy forwards). Grad mode is the caller's.
+    so all ranks issue the same forward sequence. Grad mode is the caller's.
     """
 
     def __init__(
         self, model: SamplerModel, variants: Sequence[str | None] = (None,)
     ) -> None:
-        self.model = model
-        self.variants = list(variants)
+        self.model, self.variants = model, list(variants)
 
-    def stream(self, runs: Iterable[SampleRun]) -> Generator[SampleRun, None, None]:
-        """Sample runs lazily, pulling a new one only while pending calls fit a
-        microbatch; finished runs come out in completion order."""
-        source = ((run, run.run()) for run in runs)
-        with closing(self._drive(source, self.model.micro_batch_size)) as driven:
-            for run, _ in driven:
-                yield run
+    def stream(self, runs: Iterable[tuple[Row, Calls[None]]]) -> Iterator[Row]:
+        """Pull runs lazily while pending calls fit a microbatch; rows come out in completion order."""
+        with closing(self._drive(iter(runs), self.model.micro_batch_size)) as driven:
+            for row, _ in driven:
+                yield row
 
     def evaluate[T](self, gens: Sequence[Calls[T]]) -> list[T]:
         """Run every generator at once (training microbatches); order preserved."""
@@ -62,13 +46,12 @@ class Executor:
     def _drive[K, T](
         self, source: Iterator[tuple[K, Calls[T]]], window: int | None
     ) -> Generator[tuple[K, T], None, None]:
-        active: list[tuple[K, _Active[T]]] = []
+        active: list[tuple[K, Calls[T], list[ModelCall]]] = []
         exhausted = False
         try:
             while True:
                 while not exhausted and (
-                    window is None
-                    or sum(len(entry.calls) for _, entry in active) < window
+                    window is None or sum(len(calls) for *_, calls in active) < window
                 ):
                     try:
                         key, gen = next(source)
@@ -76,41 +59,28 @@ class Executor:
                         exhausted = True
                         break
                     try:
-                        active.append((key, _Active(gen, self._checked(next(gen)))))
+                        active.append((key, gen, next(gen)))
                     except StopIteration as stop:
                         yield key, stop.value
                 if not self._anyone_active(bool(active)):
                     return
-                self._forward(active)
-                remaining: list[tuple[K, _Active[T]]] = []
-                for key, entry in active:
-                    velocities = [entry.velocities[i] for i in range(len(entry.calls))]
+                velocities = self._forward(
+                    [call for *_, calls in active for call in calls]
+                )
+                remaining: list[tuple[K, Calls[T], list[ModelCall]]] = []
+                for key, gen, calls in active:
+                    values, velocities = (
+                        velocities[: len(calls)],
+                        velocities[len(calls) :],
+                    )
                     try:
-                        calls = entry.gen.send(velocities)
+                        remaining.append((key, gen, gen.send(values)))
                     except StopIteration as stop:
-                        entry.clear()
                         yield key, stop.value
-                    else:
-                        entry.clear()
-                        entry.calls = self._checked(calls)
-                        remaining.append((key, entry))
                 active = remaining
         finally:
-            for _, entry in active:
-                try:
-                    entry.gen.close()
-                finally:
-                    entry.clear()
-
-    def _checked(self, calls: list[ModelCall]) -> list[ModelCall]:
-        unknown = {call.variant for call in calls} - set(self.variants)
-        if unknown:
-            raise ValueError(
-                f"Model calls ask for weight variants {sorted(unknown, key=str)} "
-                f"but this Executor only runs {self.variants}; build it with "
-                "Sampler.variant_keys()."
-            )
-        return calls
+            for _, gen, _ in active:
+                gen.close()
 
     def _anyone_active(self, local: bool) -> bool:
         if not dist.is_initialized():
@@ -119,35 +89,40 @@ class Executor:
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
         return bool(flag.item())
 
-    def _forward(self, active: list[tuple[Any, _Active[Any]]]) -> None:
+    def _forward(self, calls: list[ModelCall]) -> list[torch.Tensor]:
+        if len({id(call.row) for call in calls}) < len(calls):
+            raise RuntimeError(
+                "A row object appears in two model calls of one round; derive one "
+                "row per concurrent branch (derived/follow)."
+            )
+        unknown = {call.variant for call in calls} - set(self.variants)
+        if unknown:
+            raise ValueError(
+                f"Model calls ask for variants {sorted(unknown, key=str)} but this "
+                f"Executor runs {self.variants}; build it with variants(tree)."
+            )
+        velocities: dict[int, torch.Tensor] = {}
         dummies: list[torch.Tensor] = []
         for variant in self.variants:
             slots = [
-                (entry, index)
-                for _, entry in active
-                for index, call in enumerate(entry.calls)
-                if call.variant == variant
+                index for index, call in enumerate(calls) if call.variant == variant
             ]
-            token = cache_enabled.set(True)
-            try:
-                with self.model.use_variant(variant):
-                    velocities = self.model.predict_velocity_batched(
-                        [entry.calls[index].row for entry, index in slots],
-                        [entry.calls[index].timestep for entry, index in slots],
-                        dummy_outputs=dummies,
-                    )
-            finally:
-                cache_enabled.reset(token)
-            for (entry, index), velocity in zip(slots, velocities, strict=True):
-                entry.velocities[index] = velocity
-        if dummies:
-            if not active:
-                raise RuntimeError(
-                    "Distributed training needs at least one local evaluation "
-                    "to carry dummy forward gradients; only no-grad streams may "
-                    "have an entirely empty rank."
+            with self.model.use_variant(variant):
+                outputs = self.model.predict_velocity_batched(
+                    [calls[index].row for index in slots],
+                    [timestep(calls[index].row) for index in slots],
+                    dummy_outputs=dummies,
                 )
-            entry = active[0][1]
-            entry.velocities[0] = entry.velocities[0] + sum(
-                output.sum() * 0 for output in dummies
-            )
+            velocities.update(zip(slots, outputs, strict=True))
+        if dummies:
+            if not calls:
+                raise RuntimeError(
+                    "Distributed training needs at least one local evaluation to "
+                    "carry dummy forward gradients; only no-grad streams may have "
+                    "an entirely empty rank."
+                )
+            velocities[0] = velocities[0] + sum(output.sum() * 0 for output in dummies)
+        for call in calls:
+            if (on_call := call.row["_frame"].root.on_call) is not None:
+                on_call(call.row)
+        return [velocities[index] for index in range(len(calls))]

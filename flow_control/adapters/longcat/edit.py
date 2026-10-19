@@ -70,7 +70,7 @@ class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
         model_input_list = [batch["noisy_latents"]] + batch["reference_latents"]
         latent_model_input = torch.cat(model_input_list, dim=1)
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=latent_model_input,
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],

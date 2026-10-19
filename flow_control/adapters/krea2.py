@@ -3,7 +3,6 @@ from typing import Literal
 import torch
 from diffusers import Krea2Transformer2DModel
 from einops import rearrange
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
@@ -56,17 +55,15 @@ class Krea2Adapter[TBatch: Krea2Batch](
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
-    peft_lora_config: LoraConfig = LoraConfig(
-        # Attention projections of the main DiT blocks (Krea2Attention). NOTE: these
-        # suffixes also match the Krea2TextFusion attention; refine when we build the RL
-        # training config (this pass is inference-only, so LoRA is not exercised yet).
-        target_modules=[
-            "attn.to_q",
-            "attn.to_k",
-            "attn.to_v",
-            "attn.to_gate",
-            "attn.to_out.0",
-        ],
+    # Attention projections of the main DiT blocks (Krea2Attention). NOTE: these
+    # suffixes also match the Krea2TextFusion attention; refine when we build the RL
+    # training config (this pass is inference-only, so LoRA is not exercised yet).
+    lora_target_modules = (
+        "attn.to_q",
+        "attn.to_k",
+        "attn.to_v",
+        "attn.to_gate",
+        "attn.to_out.0",
     )
 
     def model_post_init(self, context: object, /) -> None:
@@ -102,7 +99,7 @@ class Krea2Adapter[TBatch: Krea2Batch](
         text_seq_len = batch["prompt_embeds"].shape[1]
         position_ids = self._prepare_position_ids(text_seq_len, grid_h, grid_w)
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=batch["noisy_latents"],
             encoder_hidden_states=batch["prompt_embeds"],
             timestep=timestep,

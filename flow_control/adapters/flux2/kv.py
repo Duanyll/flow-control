@@ -12,7 +12,6 @@ from diffusers.models.transformers.transformer_flux2 import (
 
 from flow_control.adapters.base import adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.model_cache import cache_enabled
 
 from .base import Flux2Adapter, Flux2Batch
 
@@ -55,7 +54,7 @@ class Flux2KVAdapter(Flux2Adapter[Flux2KVBatch]):
             batch["_img_ids"] = self.make_latent_ids(batch["image_size"])
         latents = batch["noisy_latents"]
         img_ids = batch.get("img_ids", batch["_img_ids"])
-        reuse = self.use_cache and cache_enabled.get() and not torch.is_grad_enabled()
+        reuse = self.use_cache and not torch.is_grad_enabled()
         kv_cache = batch.get("_kv_cache") if reuse else None
         mode = "cached" if kv_cache is not None else None
         num_ref_tokens = 0
@@ -69,7 +68,7 @@ class Flux2KVAdapter(Flux2Adapter[Flux2KVBatch]):
             # Extract also supplies fixed reference modulation and causal attention.
             # With caching disabled, recompute it each step and discard the KV.
             mode = "extract"
-        result = self.transformer(
+        result = self.module()(
             hidden_states=latents,
             timestep=timestep,
             guidance=None,

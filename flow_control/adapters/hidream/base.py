@@ -1,7 +1,6 @@
 from typing import Any, Literal, NotRequired, cast
 
 import torch
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.third_party.hidream_o1 import get_rope_index_fix_point
@@ -84,11 +83,9 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
         pretrained_model_id=HIDREAM_O1_FULL,
         dtype=torch.bfloat16,
     )
-    peft_lora_config: LoraConfig = LoraConfig(
-        # Language-model attention projections. The vision tower uses different
-        # module names (qkv/proj), so these do not touch the SigLIP path.
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    )
+    # Language-model attention projections. The vision tower uses different
+    # module names (qkv/proj), so these do not touch the SigLIP path.
+    lora_target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
@@ -205,7 +202,7 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
             )
 
         sigma = timestep.float().reshape(-1)
-        outputs = self.transformer(
+        outputs = self.module()(
             input_ids=batch["input_ids"],
             position_ids=position_ids,
             vinputs=vinputs.to(self.dtype),

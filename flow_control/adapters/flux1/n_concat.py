@@ -39,7 +39,7 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
         concatenated_model_input = torch.cat(
             (noisy_model_input, control_model_input), dim=1
         )
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=concatenated_model_input,
             timestep=timestep,
             guidance=guidance,

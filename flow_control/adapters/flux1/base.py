@@ -3,7 +3,6 @@ from typing import Literal, NotRequired
 import torch
 from diffusers import FluxTransformer2DModel
 from einops import rearrange
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
@@ -59,21 +58,19 @@ class Flux1Adapter[TBatch: Flux1Batch](
     """
     patch_size: int = 2
     vae_scale_factor: int = 8
-    peft_lora_config: LoraConfig = LoraConfig(
-        target_modules=[
-            "attn.to_k",
-            "attn.to_q",
-            "attn.to_v",
-            "attn.to_out.0",
-            "attn.add_k_proj",
-            "attn.add_q_proj",
-            "attn.add_v_proj",
-            "attn.to_add_out",
-            "ff.net.0.proj",
-            "ff.net.2",
-            "ff_context.net.0.proj",
-            "ff_context.net.2",
-        ]
+    lora_target_modules = (
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "ff.net.0.proj",
+        "ff.net.2",
+        "ff_context.net.0.proj",
+        "ff_context.net.2",
     )
 
     def _predict_velocity(
@@ -86,7 +83,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
         device = batch["noisy_latents"].device
         guidance = torch.full((b,), self.guidance, device=device)
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=batch["noisy_latents"],
             timestep=timestep,
             guidance=guidance,

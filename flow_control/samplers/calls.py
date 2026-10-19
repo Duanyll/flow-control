@@ -6,13 +6,12 @@ from typing import cast
 
 import torch
 
-from flow_control.adapters.base import Batch
+from .node import Row
 
 
 @dataclass(slots=True)
 class ModelCall:
-    row: Batch
-    timestep: torch.Tensor
+    row: Row
     variant: str | None = None
 
 

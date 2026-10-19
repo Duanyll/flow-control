@@ -57,7 +57,7 @@ class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
             ]
         ] * b
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=input_latents,
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],

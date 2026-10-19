@@ -1,4 +1,4 @@
-"""Regenerate the sampler numeric baselines under ``tests/fixtures/``.
+"""Regenerate (or ``--check``) the sampler numeric baselines under ``tests/fixtures/``.
 
 The checked-in fixtures were first captured from the pre plan-as-data sampler
 (before 164e5a9). ``tests/test_sampler_semantics.py`` replays them against the
@@ -10,39 +10,45 @@ this script, review what moved, and commit the new fixtures together with the
 change that caused them. A fixture diff with no intended algorithm change is a
 bug report, not a rebase chore.
 
-Usage: ``uv run python tests/sampler_baseline_capture.py``
+Usage: ``uv run python tests/sampler_baseline_capture.py [--check]``
 """
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from flow_control.adapters.base import Batch
-from flow_control.samplers import Calls, ClassifierFreeGuidance, SampleRequest
-from flow_control.samplers.plan import (
-    EvalRequest,
-    StepContext,
-    Transition,
-    TransitionResult,
+from flow_control.samplers import (
+    BaseGrid,
+    BaseTrajectory,
+    BaseTransition,
+    Calls,
+    Cps,
+    Dance,
+    Ddim,
+    DpmGrid,
+    Euler,
+    Executor,
+    Flash,
+    Grid,
+    GridFrame,
+    Observer,
+    RootFrame,
+    Row,
+    SaGrid,
+    StepFrame,
+    StepLogProb,
+    UniPcGrid,
+    data,
+    variants,
 )
-from flow_control.samplers.sampler import Sampler
+from flow_control.samplers.multistep import sa_update
 from flow_control.samplers.shift import ConstantShift, LinearShift
-from flow_control.samplers.solver import (
-    CPSSolver,
-    DanceSolver,
-    DDIMSolver,
-    DPMSolver,
-    FlashSolver,
-    FlowSolver,
-    FlowUniPCSolver,
-    SASolver,
-)
-from flow_control.training.grpo_sampling import RecordedStep, step_log_prob
 from flow_control.utils.logging import console
 
 BASELINE_DIR = Path(__file__).resolve().parent / "fixtures/sampler_baselines"
@@ -77,7 +83,7 @@ class RecordingModel:
 
     def predict_velocity_batched(
         self,
-        batches: list[Batch],
+        batches: list[Row],
         timesteps: list[torch.Tensor],
         *,
         dummy_outputs: list[torch.Tensor] | None = None,
@@ -91,12 +97,84 @@ class RecordingModel:
         return outputs
 
 
-def make_request_batch(latents: torch.Tensor) -> Batch:
+class ConstVelocityModel(RecordingModel):
+    """Duck-typed model returning a fixed velocity for every sample."""
+
+    def __init__(self, velocity: torch.Tensor) -> None:
+        super().__init__()
+        self.velocity = velocity
+
+    def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
+        super().predict_velocity_batched(
+            batches, timesteps, dummy_outputs=dummy_outputs
+        )
+        return [self.velocity for _ in batches]
+
+
+def make_row(
+    latents: torch.Tensor,
+    generator: torch.Generator | None = None,
+    observers: Sequence[tuple[type, Observer]] = (),
+    **fields: Any,
+) -> Row:
+    """A sampling row at σ = 1 (what an engine puts on the row before streaming)."""
     return {
         "image_size": (64, 64),
         "clean_latents": torch.zeros_like(latents),
         "noisy_latents": latents.clone(),
+        "sigma": 1.0,
+        "_generator": generator,
+        "_frame": RootFrame(None, observers),
+        **fields,
     }
+
+
+def sample(model: Any, sampler: BaseTrajectory, rows: Iterable[Row]) -> list[Row]:
+    """Stream rows through ``sampler``; rows come back in completion order."""
+    executor = Executor(model, variants(sampler))
+    return list(executor.stream((row, sampler(row)) for row in rows))
+
+
+def record(row: Row, step: StepFrame) -> None:
+    """GRPO-style observer: keep every step's point and likelihood on the row."""
+    node = step.node
+    if not isinstance(node, BaseTransition) or step.velocity is None:
+        return  # a wrapper step (differential_diffusion) predicts nothing itself
+    point = {
+        "noisy_latents": step.latents,
+        "sigma": step.sigma,
+        "next_latents": step.next_latents,
+        "_frame": step.snapshot(),
+    }
+    point["log_prob"] = node.log_prob({**data(row), **point}, step.velocity).log_prob
+    row.setdefault("trajectory", []).append(point)
+
+
+def replay(rollout: Row, recorded: Row) -> Calls[StepLogProb]:
+    """Re-evaluate one recorded step against the model: GRPO's training path."""
+    point = {**data(rollout), **recorded}
+    node = point["_frame"].node
+    velocity = yield from node.prediction(point)
+    return node.log_prob(point, velocity)
+
+
+def stochastic_points(rollout: Row) -> list[Row]:
+    """The recorded steps a GRPO trainer keeps: those with a likelihood."""
+    return [
+        point
+        for point in rollout["trajectory"]
+        if point["_frame"].node.is_stochastic(point["_frame"])
+    ]
+
+
+def keep_sigmas(row: Row, grid: GridFrame) -> None:
+    row["sigmas"] = grid.sigmas
+
+
+TRACE_OBSERVERS: list[tuple[type, Observer]] = [
+    (BaseTransition, record),
+    (BaseGrid, keep_sigmas),
+]
 
 
 def make_initial_latents() -> torch.Tensor:
@@ -113,320 +191,166 @@ def make_step_tensors() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return seeded(21), seeded(22), seeded(23)
 
 
-def drive_single_eval_transition(
-    tr: Transition,
-    ctx: StepContext,
-    velocity: torch.Tensor,
-) -> TransitionResult:
-    """Manually run a single-eval run_transition generator with a fixed velocity."""
-    requests = []
-
-    def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
-        requests.append(request)
-        if False:
-            yield []
-        return velocity
-
-    try:
-        next(tr.run(ctx, predict))
-    except StopIteration as stop:
-        assert isinstance(stop.value, TransitionResult)
-        assert len(requests) == 1 and requests[0].sigma == tr.sigma
-        return stop.value
-    raise AssertionError("expected an immediate single-eval transition")
-
-
-def e2e_configs() -> dict[str, Sampler]:
-    common: dict[str, Any] = {
-        "guidance": ClassifierFreeGuidance(scale=1.0),
-        "steps": 8,
-    }
-    common18: dict[str, Any] = {**common, "steps": 18}
+def e2e_configs() -> dict[str, BaseTrajectory]:
+    custom = [1.0, 0.85, 0.7, 0.55, 0.4, 0.3, 0.2, 0.1, 0.0]
     return {
-        "flow_eta0": Sampler(**common, solver=FlowSolver()),
-        "ddim_eta0": Sampler(**common, solver=DDIMSolver()),
-        "cps_eta0": Sampler(**common, solver=CPSSolver()),
-        "dance_eta0": Sampler(**common, solver=DanceSolver()),
-        "dpm_order1": Sampler(**common, solver=DPMSolver(order=1)),
-        "dpm_order2": Sampler(**common, solver=DPMSolver(order=2)),
-        "dpm_order2_steps18": Sampler(**common18, solver=DPMSolver(order=2)),
-        "unipc_corrector_on": Sampler(**common, solver=FlowUniPCSolver()),
-        "unipc_corrector_off": Sampler(
-            **common, solver=FlowUniPCSolver(use_corrector=False)
+        "flow_eta0": Grid(steps=8),
+        "ddim_eta0": Grid(steps=8, transition=Ddim()),
+        "cps_eta0": Grid(steps=8, transition=Cps()),
+        "dance_eta0": Grid(steps=8, transition=Dance()),
+        "dpm_order1": DpmGrid(steps=8, order=1),
+        "dpm_order2": DpmGrid(steps=8, order=2),
+        "dpm_order2_steps18": DpmGrid(steps=18, order=2),
+        "unipc_corrector_on": UniPcGrid(steps=8),
+        "unipc_corrector_off": UniPcGrid(steps=8, use_corrector=False),
+        "unipc_steps18": UniPcGrid(steps=18),
+        "sa_eta0": SaGrid(steps=8, eta=0.0),
+        "flash_eta0": Grid(steps=8, transition=Flash(eta=0.0)),
+        "flow_eta0_linear_shift": Grid(steps=8, shift=LinearShift()),
+        "flow_eta0_diffusers_flow": Grid(
+            steps=8, shift=ConstantShift(shift_value=3.0, diffusers_grid=1000)
         ),
-        "unipc_steps18": Sampler(**common18, solver=FlowUniPCSolver()),
-        "sa_eta0": Sampler(**common, solver=SASolver(eta=0.0)),
-        "flash_eta0": Sampler(**common, solver=FlashSolver(eta=0.0)),
-        "flow_eta0_linear_shift": Sampler(
-            **common, solver=FlowSolver(), shift=LinearShift()
-        ),
-        "flow_eta0_diffusers_flow": Sampler(
-            **common,
-            solver=FlowSolver(),
-            sigma_schedule="diffusers_flow",
-            shift=ConstantShift(shift_value=3.0),
-        ),
-        "flow_eta0_custom_sigmas": Sampler(
-            **common,
-            solver=FlowSolver(),
-            custom_sigmas=[1.0, 0.85, 0.7, 0.55, 0.4, 0.3, 0.2, 0.1, 0.0],
-        ),
+        "flow_eta0_custom_sigmas": Grid(steps=8, custom_sigmas=custom),
     }
 
 
-def step_configs() -> dict[str, FlowSolver | DDIMSolver | CPSSolver | DanceSolver]:
-    """Stochastic single-eval solvers, swept step by step over ``STEP_GRID``.
+def step_configs() -> dict[str, Euler | Ddim | Cps | Dance]:
+    """Stochastic single-eval transitions, swept step by step over ``STEP_GRID``."""
+    return {
+        "flow_eta07": Euler(eta=0.7),
+        "ddim_eta07": Ddim(eta=0.7),
+        "cps_eta07": Cps(eta=0.7),
+        "dance_eta07": Dance(eta=0.7),
+    }
 
-    The union is what makes ``step_parts`` visible: it is declared per solver,
-    not on ``BaseSolver``, because multi-eval solvers have no such moments.
+
+def e2e_fixture(sampler: BaseTrajectory) -> tuple[dict[str, Any], RecordingModel]:
+    """Sample the fixed initial latents through ``sampler`` with a recording model.
+
+    ``traj_latents``/``log_probs`` cover the legacy nonterminal step window of
+    transition-based grids; multistep grids pin their path through
+    ``eval_latents`` instead.
     """
+    model = RecordingModel()
+    row = make_row(
+        make_initial_latents(), torch.Generator().manual_seed(777), TRACE_OBSERVERS
+    )
+    (row,) = sample(model, sampler, [row])
+    trajectory = row.get("trajectory", [])[:-1]
     return {
-        "flow_eta07": FlowSolver(eta=0.7),
-        "ddim_eta07": DDIMSolver(eta=0.7),
-        "cps_eta07": CPSSolver(eta=0.7),
-        "dance_eta07": DanceSolver(eta=0.7),
-    }
+        "sampler_config": sampler.model_dump(),
+        "initial_latents": make_initial_latents(),
+        "final_latents": row["noisy_latents"],
+        "traj_latents": torch.stack(
+            [trajectory[0]["noisy_latents"]] + [p["next_latents"] for p in trajectory],
+            dim=1,
+        )
+        if trajectory
+        else None,
+        "log_probs": torch.stack([p["log_prob"] for p in trajectory], dim=1)
+        if trajectory
+        else None,
+        "timesteps": torch.tensor(row["sigmas"][:-1], dtype=torch.float32),
+        "eval_sigmas": model.eval_sigmas,
+        "eval_latents": model.eval_latents,
+    }, model
 
 
-@dataclass
-class TraceOutput:
-    final_latents: torch.Tensor
-    timesteps: torch.Tensor
-    """Executed plan-item start sigmas."""
-    trajectory: list[RecordedStep]
-
-
-def recorded_step(
-    transition: Transition,
+def drive_step(
+    transition: BaseTransition,
     latents: torch.Tensor,
-    next_latents: torch.Tensor,
-    velocity: torch.Tensor | None,
-    item_index: int,
-    num_items: int,
-) -> RecordedStep:
-    """A GRPO record of one executed step; eta-0 steps get a zero log-prob."""
-    step = RecordedStep(
-        latent_t=latents,
-        latent_next=next_latents,
-        log_prob=torch.zeros(latents.shape[0]),
-        transition=transition,
-        item_index=item_index,
-        num_items=num_items,
+    velocity: torch.Tensor,
+    index: int,
+    seed: int,
+) -> tuple[Row, StepFrame]:
+    """Run one transition at position ``index`` of ``STEP_GRID`` with a fixed velocity."""
+    frames: list[StepFrame] = []
+    row = make_row(
+        latents,
+        torch.Generator().manual_seed(seed),
+        [(BaseTransition, lambda row, step: frames.append(step))],
     )
-    if velocity is not None:
-        step.log_prob = step_log_prob(step, velocity).log_prob
-    return step
-
-
-def trace_sample(model: Any, sampler: Sampler, request: SampleRequest) -> TraceOutput:
-    """Sample one request, keeping the legacy nonterminal step window."""
-    steps = []
-    run = next(
-        iter(
-            sampler.sample(
-                model, [request], collector=lambda run, step: steps.append(step)
-            )
-        )
+    grid = GridFrame(Grid(steps=len(STEP_GRID) - 1), row["_frame"])
+    grid.sigmas, grid.index = STEP_GRID, index
+    row["_frame"], row["sigma"] = grid, STEP_GRID[index]
+    Executor(ConstVelocityModel(velocity)).evaluate(
+        [transition(row, STEP_GRID[index + 1])]
     )
-    return TraceOutput(
-        run.ctx.latents,
-        torch.tensor([item.sigma for item in run.plan], dtype=torch.float32),
-        [
-            recorded_step(
-                step.transition,
-                step.latents,
-                step.next_latents,
-                step.velocity,
-                step.index,
-                len(run.plan),
-            )
-            for step in steps[:-1]
-        ],
-    )
+    return row, frames[0]
 
 
-def capture_e2e() -> None:
-    initial_latents = make_initial_latents()
-    for name, sampler in e2e_configs().items():
-        model = RecordingModel()
-        output = trace_sample(
-            model,
-            sampler,
-            SampleRequest(
-                row=make_request_batch(initial_latents),
-                generator=torch.Generator().manual_seed(777),
-            ),
-        )
-        trajectory = output.trajectory
-        fixture = {
-            "sampler_config": sampler.model_dump(),
-            "initial_latents": initial_latents,
-            "final_latents": output.final_latents,
-            "traj_latents": torch.stack(
-                [trajectory[0].latent_t] + [step.latent_next for step in trajectory],
-                dim=1,
-            ),
-            "log_probs": torch.stack([step.log_prob for step in trajectory], dim=1),
-            "timesteps": output.timesteps,
-            "eval_sigmas": model.eval_sigmas,
-            "eval_latents": model.eval_latents,
-        }
-        torch.save(fixture, BASELINE_DIR / f"e2e_{name}.pt")
-        console.print(f"captured e2e_{name}: {len(model.eval_sigmas)} evals")
-
-
-def capture_steps() -> None:
-    """Per-step moments and replay densities of the stochastic solvers.
-
-    Originally captured through the ``step``/``replay_step`` API deleted in the
-    plan-as-data refactor; this reproduces the same fixture layout by driving
-    the current ``Transition``/GRPO plugin path, which is exactly what the
-    harness asserts against.
-    """
+def step_fixture(transition: BaseTransition, indices: range) -> dict[str, Any]:
+    """Per-step moments and replay densities of one transition over ``STEP_GRID``."""
     latents, velocity, prev_sample = make_step_tensors()
-    for name, solver in step_configs().items():
-        entries: list[dict[str, Any]] = []
-        # The terminal step lands on sigma_next == 0, where every solver is
-        # deterministic regardless of eta; the sweep stops before it.
-        for index, (sigma, sigma_next) in enumerate(
-            zip(STEP_GRID[:-2], STEP_GRID[1:-1], strict=True)
-        ):
-            tr = Transition(
-                solver=solver,
-                sigma=sigma,
-                sigma_next=sigma_next,
-                eta=solver.eta,
-            )
-            ctx = StepContext(
-                latents=latents,
-                generator=torch.Generator().manual_seed(5000 + index),
-                solver_state=None,
-            )
-            result = drive_single_eval_transition(tr, ctx, velocity)
-            recorded = recorded_step(
-                tr, latents, result.next_latents, velocity, index, len(STEP_GRID) - 1
-            )
-            mean, std_dev = type(solver).step_parts(
-                latents, velocity, sigma, sigma_next, solver.eta
-            )[:2]
-            replay = step_log_prob(replace(recorded, latent_next=prev_sample), velocity)
-            entries.append(
-                {
-                    "step_index": index,
-                    "sigma": sigma,
-                    "sigma_next": sigma_next,
-                    "next_latents": result.next_latents,
-                    "log_prob": recorded.log_prob,
-                    "mean": mean,
-                    "std_dev": std_dev,
-                    "replay_log_prob": replay.log_prob,
-                    "replay_mean": replay.mean,
-                    "replay_std_dev": replay.std_dev,
-                }
-            )
-        fixture = {
-            "solver_config": solver.model_dump(),
-            "latents": latents,
-            "velocity": velocity,
-            "prev_sample": prev_sample,
-            "entries": entries,
-        }
-        torch.save(fixture, BASELINE_DIR / f"step_{name}.pt")
-        console.print(f"captured step_{name}: {len(entries)} steps")
-
-
-def capture_flash_steps() -> None:
-    """Flash sweeps the full grid: its terminal step is deterministic anyway.
-
-    Flash has no ``step_parts``; its moments come from ``renoise_parts`` and the
-    plan-compiled per-step ``noise_scale``, so it needs its own sweep.
-    """
-    latents, velocity, prev_sample = make_step_tensors()
-    # Non-default scales, and start != end, so the per-step lerp is visible.
-    solver = FlashSolver(eta=1.0, noise_scale_start=0.9, noise_scale_end=0.8)
-    plan = solver.plan(STEP_GRID)
     entries: list[dict[str, Any]] = []
-    for index, tr in enumerate(plan):
-        ctx = StepContext(
-            latents=latents,
-            generator=torch.Generator().manual_seed(5000 + index),
-            solver_state=None,
-        )
-        ctx.item_index, ctx.num_items = index, len(plan)
-        result = drive_single_eval_transition(tr, ctx, velocity)
-        recorded = recorded_step(
-            tr, latents, result.next_latents, velocity, index, len(plan)
-        )
-        noise_scale = solver.noise_scale_at(index, len(plan))
-        mean = FlashSolver.renoise_parts(
-            latents, velocity, tr.sigma, tr.sigma_next, noise_scale
-        )[0]
-        replay = step_log_prob(replace(recorded, latent_next=prev_sample), velocity)
+    for index in indices:
+        row, step = drive_step(transition, latents, velocity, index, 5000 + index)
+        point = {
+            "noisy_latents": latents,
+            "next_latents": step.next_latents,
+            "_frame": step,
+        }
+        actual = transition.log_prob(point, velocity)
+        replay = transition.log_prob({**point, "next_latents": prev_sample}, velocity)
+        if isinstance(
+            transition, Flash
+        ):  # moments of the re-noise form, even when gated off
+            mean, std_dev = transition.moments(row, step, latents, velocity)
+        else:
+            mean, std_dev = actual.mean, actual.std_dev
         entries.append(
             {
                 "step_index": index,
-                "sigma": tr.sigma,
-                "sigma_next": tr.sigma_next,
-                "next_latents": result.next_latents,
-                "log_prob": recorded.log_prob,
+                "sigma": step.sigma,
+                "sigma_next": step.sigma_next,
+                "next_latents": step.next_latents,
+                "log_prob": actual.log_prob,
                 "mean": mean,
-                "std_dev": latents.new_tensor(tr.sigma_next) * noise_scale,
+                "std_dev": std_dev,
                 "replay_log_prob": replay.log_prob,
                 "replay_mean": replay.mean,
                 "replay_std_dev": replay.std_dev,
             }
         )
-    fixture = {
-        "solver_config": solver.model_dump(),
+    return {
+        "solver_config": transition.model_dump(),
         "latents": latents,
         "velocity": velocity,
         "prev_sample": prev_sample,
         "entries": entries,
     }
-    torch.save(fixture, BASELINE_DIR / "step_flash_eta1.pt")
-    console.print(f"captured step_flash_eta1: {len(entries)} steps")
 
 
-def capture_sa_internals() -> None:
-    solver = SASolver()  # default eta=0.4 > 0
+def flash_transition() -> Flash:
+    # Non-default scales, and start != end, so the per-step lerp is visible.
+    return Flash(eta=1.0, noise_scale_start=0.9, noise_scale_end=0.8)
+
+
+def sa_fixture() -> dict[str, Any]:
+    """The SA-Solver's adjusted grid, tau band and AB/AM updates on fixed inputs."""
+    solver = SaGrid(steps=8)  # default eta=0.4 > 0
     sigmas = torch.linspace(1.0, 0.0, 9)
     times = sigmas.clone()
     times[0] = solver.initial_time
     times[-2] = times[-3] / 2.0
     x = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(31))
     noise = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(32))
-    m0 = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(33))
-    m1 = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(34))
-    m2 = torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(35))
-
-    tau_values = torch.stack([torch.tensor(solver._tau(float(t))) for t in times])
-
-    # Order-1 predictor as used for the first transition of a run.
-    ab1 = solver._adams_bashforth_update(
-        x,
-        torch.tensor(solver._tau(float(times[1]))),
-        [m0],
-        [times[0]],
-        noise,
-        times[1],
-        order=1,
+    m0, m1, m2 = (
+        torch.randn(LATENT_SHAPE, generator=torch.Generator().manual_seed(seed))
+        for seed in (33, 34, 35)
     )
-
+    tau_values = torch.stack([torch.tensor(solver.tau(float(t))) for t in times])
+    # Order-1 predictor as used for the first transition of a run.
+    ab1 = sa_update(x, tau_values[1], [m0], [times[0]], noise, times[1], 1, False)
     entries = []
     # Order-2 PEC at an in-window time (tau = eta) and outside it (tau = 0).
     for t_index in (3, 6):
-        t = times[t_index]
-        tau = torch.tensor(solver._tau(float(t)))
-        time_history = [times[t_index - 2], times[t_index - 1]]
-        ab2 = solver._adams_bashforth_update(
-            x, tau, [m0, m1], time_history, noise, t, order=2
-        )
-        am2 = solver._adams_moulton_update(
-            x, tau, [m0, m1, m2], time_history, noise, t, order=2
-        )
+        t, tau = times[t_index], tau_values[t_index]
+        history = [times[t_index - 2], times[t_index - 1]]
+        ab2 = sa_update(x, tau, [m0, m1], history, noise, t, 2, False)
+        am2 = sa_update(x, tau, [m0, m1, m2], history, noise, t, 2, True)
         entries.append({"t_index": t_index, "t": t, "tau": tau, "ab2": ab2, "am2": am2})
-
-    fixture = {
+    return {
         "solver_config": solver.model_dump(),
         "sigmas": sigmas,
         "times": times,
@@ -439,17 +363,82 @@ def capture_sa_internals() -> None:
         "ab1": ab1,
         "entries": entries,
     }
-    torch.save(fixture, BASELINE_DIR / "sa_internals.pt")
-    console.print("captured sa_internals")
+
+
+def fixtures() -> dict[str, dict[str, Any]]:
+    """Every fixture by file stem, freshly computed."""
+    computed = {f"e2e_{name}": e2e_fixture(s)[0] for name, s in e2e_configs().items()}
+    for name, transition in step_configs().items():
+        computed[f"step_{name}"] = step_fixture(transition, range(len(STEP_GRID) - 2))
+    computed["step_flash_eta1"] = step_fixture(
+        flash_transition(), range(len(STEP_GRID) - 1)
+    )
+    computed["sa_internals"] = sa_fixture()
+    return computed
+
+
+def mismatches(actual: Any, expected: Any, path: str = "") -> list[str]:
+    """Paths where two fixture trees differ (tensors bitwise)."""
+    if isinstance(expected, dict):
+        return [
+            m
+            for key in expected
+            for m in mismatches(actual.get(key), expected[key], f"{path}.{key}")
+        ]
+    if (
+        isinstance(expected, list)
+        and expected
+        and isinstance(expected[0], dict | torch.Tensor)
+    ):
+        if len(actual) != len(expected):
+            return [f"{path}: {len(actual)} != {len(expected)} entries"]
+        return [
+            m
+            for i, (a, e) in enumerate(zip(actual, expected, strict=True))
+            for m in mismatches(a, e, f"{path}[{i}]")
+        ]
+    if isinstance(expected, torch.Tensor):
+        same = isinstance(actual, torch.Tensor) and torch.equal(actual, expected)
+        return [] if same else [f"{path}: tensor mismatch"]
+    return [] if actual == expected else [f"{path}: {actual!r} != {expected!r}"]
+
+
+SKIPPED_KEYS = {"sampler_config", "solver_config"}  # config dumps are informational
+
+
+def check() -> bool:
+    ok = True
+    for name, computed in fixtures().items():
+        stored = torch.load(BASELINE_DIR / f"{name}.pt", weights_only=True)
+        stored = {k: v for k, v in stored.items() if k not in SKIPPED_KEYS}
+        if (
+            name == "e2e_sa_eta0"
+        ):  # legacy SA capture: raw grid head, whole-path latents
+            stored = {
+                k: v
+                for k, v in stored.items()
+                if k not in ("traj_latents", "log_probs")
+            }
+            stored["timesteps"] = stored["timesteps"][1:]
+            computed = {**computed, "timesteps": computed["timesteps"][1:]}
+        if name.startswith("e2e_") and computed["traj_latents"] is None:
+            stored.pop("traj_latents", None)
+            stored.pop("log_probs", None)
+        diff = mismatches(computed, stored, name)
+        ok &= not diff
+        console.print(
+            f"{name}: " + ("[green]ok[/green]" if not diff else f"[red]{diff}[/red]")
+        )
+    return ok
 
 
 def main() -> None:
+    if "--check" in sys.argv:
+        sys.exit(0 if check() else 1)
     BASELINE_DIR.mkdir(parents=True, exist_ok=True)
-    torch.manual_seed(0)
-    capture_e2e()
-    capture_steps()
-    capture_flash_steps()
-    capture_sa_internals()
+    for name, fixture in fixtures().items():
+        torch.save(fixture, BASELINE_DIR / f"{name}.pt")
+        console.print(f"captured {name}")
     console.print(f"baselines written to {BASELINE_DIR}")
 
 

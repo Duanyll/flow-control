@@ -56,7 +56,7 @@ class ZImageAdapter[TBatch: ZImageBatch](
         # Z-Image use 0 for noise, 1 for clean
         timestep = 1 - timestep
         prompt_embeds = list(batch["prompt_embeds"].unbind(dim=0))
-        model_preds = self.transformer(
+        model_preds = self.module()(
             x=latent_inputs,
             t=timestep,
             cap_feats=prompt_embeds,

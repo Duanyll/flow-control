@@ -181,6 +181,7 @@ class RegistryUnion:
                 )
         self._list_as = list_as
         self._number_as = number_as
+        self._advertising = False
 
     def _accepts_shorthand(self) -> bool:
         return isinstance(self._discriminator, str) and self._parser is None
@@ -235,16 +236,23 @@ class RegistryUnion:
             alternatives: list[CoreSchema] = [
                 core_schema.literal_schema(list(self._registry.members()))
             ]
-            for kind, shorthand in (
-                ("list_as", self._list_as),
-                ("number_as", self._number_as),
-            ):
-                if shorthand is not None:
-                    alternatives.append(
-                        handler.generate_schema(
-                            self._shorthand_field_annotation(kind, shorthand)
-                        )
-                    )
+            # A shorthand field may hold this union again (``sequential.steps``):
+            # the nested occurrence advertises only the tags.
+            if not self._advertising:
+                self._advertising = True
+                try:
+                    for kind, shorthand in (
+                        ("list_as", self._list_as),
+                        ("number_as", self._number_as),
+                    ):
+                        if shorthand is not None:
+                            alternatives.append(
+                                handler.generate_schema(
+                                    self._shorthand_field_annotation(kind, shorthand)
+                                )
+                            )
+                finally:
+                    self._advertising = False
             schema = core_schema.union_schema([union_schema, *alternatives])
         # ...but runtime validation dispatches through the registry lazily.
         return core_schema.with_info_wrap_validator_function(self._validate, schema)

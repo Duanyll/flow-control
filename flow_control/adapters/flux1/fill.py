@@ -59,7 +59,7 @@ class Flux1FillAdapter(Flux1Adapter[Flux1FillBatch]):
             "b n *",
         )
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=inputs,
             timestep=timestep,
             guidance=guidance,

@@ -19,7 +19,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from flow_control.data.grouping import Group, PlannedRow, rank_rows
 from flow_control.data.rows import PADDING, Row
 from flow_control.data.store import PackedStore, RowStore
-from flow_control.samplers.sampler import derive_seed
+from flow_control.samplers import derive_seed
 
 Planner = Callable[[int], list[Group]]
 """``epoch -> groups``; see ``groups_*`` in ``grouping.py``."""

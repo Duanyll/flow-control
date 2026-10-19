@@ -61,7 +61,7 @@ class LongCatAdapter[TBatch: LongCatBatch](
                 w_offset=prompt_len,
             )
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=batch["noisy_latents"],
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],

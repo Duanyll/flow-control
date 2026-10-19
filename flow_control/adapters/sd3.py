@@ -2,7 +2,6 @@ from typing import Literal
 
 import torch
 from diffusers import SD3Transformer2DModel
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
@@ -52,17 +51,15 @@ class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatc
     patch_size: int = 2
     latent_channels: int = 16
     vae_scale_factor: int = 8
-    peft_lora_config: LoraConfig = LoraConfig(
-        target_modules=[
-            "attn.to_q",
-            "attn.to_k",
-            "attn.to_v",
-            "attn.to_out.0",
-            "attn.add_q_proj",
-            "attn.add_k_proj",
-            "attn.add_v_proj",
-            "attn.to_add_out",
-        ]
+    lora_target_modules = (
+        "attn.to_q",
+        "attn.to_k",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_q_proj",
+        "attn.add_k_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
     )
 
     def _predict_velocity(
@@ -80,7 +77,7 @@ class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatc
         # The sampler passes ``timestep`` as sigma in [0, 1]. FLUX's transformer rescales
         # to [0, 1000] internally; SD3's does not, so we scale it here to match the range
         # SD3 was trained with.
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=latents,
             timestep=timestep * 1000,
             encoder_hidden_states=batch["prompt_embeds"],

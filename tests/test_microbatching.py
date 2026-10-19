@@ -1,5 +1,6 @@
 import unittest
-from contextlib import closing, nullcontext
+from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 from unittest.mock import patch
@@ -13,12 +14,19 @@ from flow_control.adapters.flux1.base import Flux1Adapter
 from flow_control.adapters.flux2.base import Flux2Adapter
 from flow_control.adapters.flux2.kv import Flux2KVAdapter
 from flow_control.adapters.qwen21 import QwenImage21Adapter
-from flow_control.samplers import Executor, Sampler, SampleRequest
-from flow_control.samplers.guidance import ClassifierFreeGuidance
+from flow_control.samplers import (
+    BaseGrid,
+    BaseTrajectory,
+    Cfg,
+    Euler,
+    Executor,
+    Grid,
+    Observer,
+    RootFrame,
+    variants,
+)
 from flow_control.samplers.shift import LinearShift
-from flow_control.samplers.solver import FlowSolver
-from flow_control.training.mixins.microbatch import MicrobatchTrainMixin
-from flow_control.utils.model_cache import cache_enabled, cache_fields
+from flow_control.utils.model_cache import cache_fields
 
 
 def make_batch(
@@ -149,6 +157,27 @@ def make_sampler_batch(velocity: float, initial: float = 0.0) -> Batch:
     return batch
 
 
+def sampling_row(
+    batch: Any,
+    generator: torch.Generator | None = None,
+    observers: Sequence[tuple[type, Observer]] = (),
+    on_call: Callable[[Any], None] | None = None,
+) -> Any:
+    """A sampling row at σ = 1 carrying the engine's runtime keys."""
+    return {
+        **batch,
+        "sigma": 1.0,
+        "_generator": generator,
+        "_frame": RootFrame(None, observers, on_call),
+    }
+
+
+def sample(model: Any, sampler: BaseTrajectory, rows: list[Any]) -> list[Any]:
+    """Stream rows through ``sampler``; rows come back in completion order."""
+    executor = Executor(model, variants(sampler))
+    return list(executor.stream((row, sampler(row)) for row in rows))
+
+
 class AdapterBatchingTest(unittest.TestCase):
     def make_adapter(self, micro_batch_size: int = 2) -> FakeDenseAdapter:
         return FakeDenseAdapter.model_construct(
@@ -211,8 +240,10 @@ class AdapterBatchingTest(unittest.TestCase):
                 for use_cache in (True, False):
                     flux.use_cache = use_cache
                     runs = [
-                        Sampler(steps=steps).make_run(SampleRequest(row))
-                        for steps, row in zip((1, 3), rows, strict=True)
+                        (run, Grid(steps=steps)(run))
+                        for steps, run in zip(
+                            (1, 3), [sampling_row(row) for row in rows], strict=True
+                        )
                     ]
                     transformer.batch_sizes.clear()
                     with (
@@ -226,8 +257,7 @@ class AdapterBatchingTest(unittest.TestCase):
                         finished = list(Executor(flux).stream(runs))
                     self.assertEqual(transformer.batch_sizes, [2, 1, 1])
                     self.assertEqual(make_ids.call_count, 1 if use_cache else 3)
-                    self.assertTrue(all(not cache_fields(run.row) for run in finished))
-                    outputs_by_mode.append([run.ctx.latents for run in finished])
+                    outputs_by_mode.append([run["noisy_latents"] for run in finished])
                 for cached, uncached in zip(*outputs_by_mode, strict=True):
                     torch.testing.assert_close(cached, uncached, rtol=0, atol=0)
 
@@ -288,14 +318,11 @@ class AdapterBatchingTest(unittest.TestCase):
                             "reference_sizes": [(32, 32)] * refs,
                         }
                     )
-                requests = [
-                    SampleRequest(
-                        row,
-                        cast(Batch, {**row, "prompt_embeds": -row["prompt_embeds"]}),
-                    )
+                guided = [
+                    {**row, "negative": {"prompt_embeds": -row["prompt_embeds"]}}
                     for row in rows
                 ]
-                sampler = Sampler(steps=3, guidance=ClassifierFreeGuidance(scale=2))
+                sampler = Grid(steps=3, transition=Euler(prediction=Cfg(scale=2)))
                 modes: list[str | None] = []
                 handle = transformer.register_forward_pre_hook(
                     lambda module, args, kwargs, modes=modes: modes.append(
@@ -308,20 +335,15 @@ class AdapterBatchingTest(unittest.TestCase):
                     kv.use_cache = reuse
                     modes.clear()
                     with torch.no_grad():
-                        completed = list(sampler.sample(kv, requests))
-                    results.append([run.ctx.latents for run in completed])
+                        completed = sample(
+                            kv, sampler, [sampling_row(row) for row in guided]
+                        )
+                    results.append([run["noisy_latents"] for run in completed])
                     self.assertEqual(
                         modes.count("cached"),
                         (8 if isinstance(kv, QwenImage21Adapter) else 4)
                         if reuse
                         else 0,
-                    )
-                    self.assertTrue(
-                        all(
-                            not cache_fields(run.row)
-                            and not cache_fields(run.negative_row or {})
-                            for run in completed
-                        )
                     )
                 handle.remove()
                 for cached, uncached in zip(*results, strict=True):
@@ -363,6 +385,9 @@ class AdapterBatchingTest(unittest.TestCase):
                         expected = kv.predict_velocity_batched(
                             rows, [torch.tensor([0.5])] * 2
                         )
+                        # Rows keep their KV cache; the fresh model must not reuse it.
+                        for row in rows:
+                            row.pop("_cache", None)
                         actual = restored.predict_velocity_batched(
                             rows, [torch.tensor([0.5])] * 2
                         )
@@ -434,120 +459,63 @@ class AdapterBatchingTest(unittest.TestCase):
         torch.testing.assert_close(dense._scale.grad, fallback._scale.grad)
 
 
-def guided_velocities(
-    sampler: Sampler, model: FakeSamplerModel, requests: list[SampleRequest]
-) -> list[torch.Tensor]:
-    """Training-style evaluation of plan item 0 for every request, batched."""
-    runs = [
-        sampler.make_run(request, plan=sampler.plan(request.row))
-        for request in requests
-    ]
-    return Executor(model, sampler.variant_keys()).evaluate(
-        [run.guided_velocity(run.row["noisy_latents"], 0) for run in runs]
-    )
+def with_negative(batch: Any, negative_velocity: float) -> Any:
+    return {
+        **batch,
+        "negative": {"clean_latents": torch.tensor([[[negative_velocity]]])},
+    }
 
 
 class SamplerBatchingTest(unittest.TestCase):
-    def test_mixed_cfg_batches_only_the_branches_present(self) -> None:
-        # A request without a negative row skips the optional branch instead
-        # of getting a dummy forward; the present branches share one forward
-        # and the missing one falls back to the conditional velocity.
-        sampler = Sampler(steps=1, guidance=ClassifierFreeGuidance(scale=2.0))
+    def test_cfg_batches_both_branches_and_needs_the_negative(self) -> None:
+        # Rows under different guidance share one forward (two branches plus
+        # one conditional); a guided row without negative conditioning fails
+        # loudly instead of silently degrading to the conditional velocity.
         model = FakeSamplerModel()
-        velocities = guided_velocities(
-            sampler,
-            model,
-            [
-                SampleRequest(make_sampler_batch(3.0), make_sampler_batch(1.0)),
-                SampleRequest(make_sampler_batch(4.0)),
-            ],
-        )
-
+        guided = sampling_row(with_negative(make_sampler_batch(3.0), 1.0))
+        plain = sampling_row(make_sampler_batch(4.0))
+        velocities = Executor(model).evaluate([Cfg(scale=2.0)(guided), Cfg()(plain)])
         self.assertEqual(model.forward_batch_sizes, [3])
         torch.testing.assert_close(velocities[0], torch.tensor([[[5.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[4.0]]]))
+        with self.assertRaisesRegex(ValueError, "save_negative"):
+            Executor(model).evaluate([Cfg(scale=2.0)(plain)])
 
-        # Runtime cache must survive copied/dense rows, but stop at the
-        # executor boundary even when streaming pauses or fails mid-trajectory.
-        sampler = Sampler(steps=3, guidance=ClassifierFreeGuidance(scale=2.0))
-        request = SampleRequest(make_batch(3.0), make_batch(1.0))
-        request.row["clean_latents"].fill_(3.0)
-        assert request.negative_row is not None
-        request.negative_row["clean_latents"].fill_(1.0)
+        # The negative branch is one derived row that persists across steps, so
+        # the adapter builds each branch's condition cache once per trajectory.
+        batch: Any = make_batch(3.0)
+        batch["clean_latents"].fill_(3.0)
+        row = sampling_row(
+            {**batch, "negative": {"clean_latents": torch.full((1, 4, 2), 1.0)}}
+        )
         adapter = FakeCacheAdapter.model_construct(
             arch="fake", type="fake", micro_batch_size=2
         )
         with torch.no_grad():
-            finished = list(sampler.sample(adapter, [request]))
+            sample(
+                adapter,
+                Grid(steps=3, transition=Euler(prediction=Cfg(scale=2.0))),
+                [row],
+            )
         self.assertEqual(adapter._cache_misses, 2)
         self.assertEqual(adapter._forward_batch_sizes, [1] * 6)
-        self.assertTrue(
-            all(not cache_fields(row) for rows in adapter._seen_rows for row in rows)
-        )
-        self.assertFalse(cache_fields(finished[0].row))
-        self.assertFalse(cache_fields(finished[0].negative_row or {}))
-        self.assertFalse(cache_enabled.get())
-
-        # Neither a direct no-grad call nor an executor's training forward may
-        # read or persist runtime fields. A poisoned input would break the probe.
-        direct_row = cast(
-            Batch, {**make_batch(), "_condition": torch.full((1, 4, 2), 99.0)}
-        )
-        with torch.no_grad():
-            adapter.predict_velocity_batched([direct_row], [torch.zeros(1)])
+        self.assertIsNot(row["_uncond"], row)
         torch.testing.assert_close(
-            cache_fields(direct_row)["_condition"], torch.full((1, 4, 2), 99.0)
+            row["_uncond"]["clean_latents"], torch.full((1, 4, 2), 1.0)
         )
-        run = sampler.make_run(request)
-        Executor(adapter).evaluate([run.guided_velocity(run.row["noisy_latents"], 0)])
-        self.assertTrue(all(not cache_fields(row) for row in adapter._seen_rows[-1]))
-
-        for exit_mode in ("close", "error"):
-            with self.subTest(exit_mode=exit_mode), torch.no_grad():
-                adapter = FakeCacheAdapter.model_construct(
-                    arch="fake", type="fake", micro_batch_size=2
-                )
-                runs = [
-                    Sampler(steps=n).make_run(SampleRequest(make_batch()))
-                    for n in (1, 3)
-                ]
-                with closing(Executor(adapter).stream(runs)) as stream:
-                    self.assertIs(next(stream), runs[0])
-                    first, pending = adapter._seen_rows[0]
-                    self.assertFalse(cache_fields(first))
-                    self.assertTrue(cache_fields(pending))
-                    self.assertFalse(cache_enabled.get())
-                    if exit_mode == "error":
-                        with (
-                            patch.object(
-                                FakeCacheAdapter,
-                                "_predict_velocity",
-                                side_effect=RuntimeError("forward failed"),
-                            ),
-                            self.assertRaisesRegex(RuntimeError, "forward failed"),
-                        ):
-                            next(stream)
-                self.assertFalse(cache_fields(pending))
-                self.assertFalse(cache_enabled.get())
 
     def test_cfg_renorm_is_applied_per_sample(self) -> None:
-        sampler = Sampler(
-            steps=1,
-            guidance=ClassifierFreeGuidance(scale=3.0, renorm=True, renorm_min=0.0),
-        )
-        velocities = guided_velocities(
-            sampler,
-            FakeSamplerModel(),
-            [
-                SampleRequest(make_sampler_batch(2.0), make_sampler_batch(-2.0)),
-                SampleRequest(make_sampler_batch(8.0), make_sampler_batch(4.0)),
-            ],
-        )
+        rows = [
+            sampling_row(with_negative(make_sampler_batch(2.0), -2.0)),
+            sampling_row(with_negative(make_sampler_batch(8.0), 4.0)),
+        ]
+        cfg = Cfg(scale=3.0, renorm=True, renorm_min=0.0)
+        velocities = Executor(FakeSamplerModel()).evaluate([cfg(row) for row in rows])
         torch.testing.assert_close(velocities[0], torch.tensor([[[2.0]]]))
         torch.testing.assert_close(velocities[1], torch.tensor([[[8.0]]]))
 
     def test_each_request_keeps_its_own_shifted_schedule(self) -> None:
-        sampler = Sampler(
+        sampler = Grid(
             steps=3,
             shift=LinearShift(
                 base_image_seq_len=1,
@@ -558,56 +526,47 @@ class SamplerBatchingTest(unittest.TestCase):
         )
         long_batch = make_batch(tokens=8)
         long_batch["clean_latents"] = torch.tensor(0.0)
-        short, long = sampler.sample(
+        keep = (BaseGrid, lambda row, grid: row.__setitem__("sigmas", grid.sigmas))
+        short, long = sample(
             FakeSamplerModel(),
+            sampler,
             [
-                SampleRequest(row=make_sampler_batch(0.0)),
-                SampleRequest(row=long_batch),
+                sampling_row(make_sampler_batch(0.0), observers=[keep]),
+                sampling_row(long_batch, observers=[keep]),
             ],
         )
-        self.assertNotEqual(
-            [item.sigma for item in short.plan], [item.sigma for item in long.plan]
-        )
+        self.assertNotEqual(short["sigmas"], long["sigmas"])
 
     def test_stochastic_generators_are_isolated_per_sample(self) -> None:
-        sampler = Sampler(steps=3, solver=FlowSolver(eta=0.4))
+        sampler = Grid(steps=3, transition=Euler(eta=0.4))
         model = FakeSamplerModel()
-        batched = list(
-            sampler.sample(
-                model,
-                [
-                    SampleRequest(
-                        row=make_sampler_batch(0.0),
-                        generator=torch.Generator().manual_seed(7),
-                    ),
-                    SampleRequest(
-                        row=make_sampler_batch(0.0),
-                        generator=torch.Generator().manual_seed(19),
-                    ),
-                ],
-            )
+        batched = sample(
+            model,
+            sampler,
+            [
+                sampling_row(
+                    make_sampler_batch(0.0), torch.Generator().manual_seed(seed)
+                )
+                for seed in (7, 19)
+            ],
         )
         self.assertEqual(model.forward_batch_sizes, [2, 2, 2])
 
         individual = [
-            next(
-                iter(
-                    sampler.sample(
-                        FakeSamplerModel(),
-                        [
-                            SampleRequest(
-                                row=make_sampler_batch(0.0),
-                                generator=torch.Generator().manual_seed(seed),
-                            )
-                        ],
+            sample(
+                FakeSamplerModel(),
+                sampler,
+                [
+                    sampling_row(
+                        make_sampler_batch(0.0), torch.Generator().manual_seed(seed)
                     )
-                )
-            )
+                ],
+            )[0]
             for seed in (7, 19)
         ]
-        for batched_run, individual_run in zip(batched, individual, strict=True):
+        for batched_row, individual_row in zip(batched, individual, strict=True):
             torch.testing.assert_close(
-                batched_run.ctx.latents, individual_run.ctx.latents
+                batched_row["noisy_latents"], individual_row["noisy_latents"]
             )
 
 
@@ -617,9 +576,11 @@ class _IndexedItem:
 
 
 class MicrobatchArithmeticTest(unittest.TestCase):
-    def make_mixin(
-        self, train_batch_size: int, micro_batch_size: int
-    ) -> MicrobatchTrainMixin:
+    def make_mixin(self, train_batch_size: int, micro_batch_size: int) -> Any:
+        # Imported here: the sampler fixtures above must load while the
+        # training package is mid-migration.
+        from flow_control.training.mixins.microbatch import MicrobatchTrainMixin
+
         return MicrobatchTrainMixin.model_construct(
             train_batch_size=train_batch_size,
             train_micro_batch_size=micro_batch_size,

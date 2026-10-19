@@ -175,7 +175,7 @@ class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
 
         is_rgb = torch.tensor([0] * b).to(device=self.device, dtype=torch.long)
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=input_latents,
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],

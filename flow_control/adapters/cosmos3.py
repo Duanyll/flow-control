@@ -27,12 +27,10 @@ from diffusers.models.transformers.transformer_cosmos3 import (
     _rotate_half,
 )
 from einops import rearrange, repeat
-from peft import LoraConfig
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.model_cache import cache_enabled
 
 
 class Cosmos3Batch(Batch):
@@ -260,17 +258,15 @@ class Cosmos3Adapter[TBatch: Cosmos3Batch](
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
-    peft_lora_config: LoraConfig = LoraConfig(
-        # The generation expert only: the und tower is the text encoder.
-        target_modules=[
-            "self_attn.add_q_proj",
-            "self_attn.add_k_proj",
-            "self_attn.add_v_proj",
-            "self_attn.to_add_out",
-            "mlp_moe_gen.gate_proj",
-            "mlp_moe_gen.up_proj",
-            "mlp_moe_gen.down_proj",
-        ],
+    # The generation expert only: the und tower is the text encoder.
+    lora_target_modules = (
+        "self_attn.add_q_proj",
+        "self_attn.add_k_proj",
+        "self_attn.add_v_proj",
+        "self_attn.to_add_out",
+        "mlp_moe_gen.gate_proj",
+        "mlp_moe_gen.up_proj",
+        "mlp_moe_gen.down_proj",
     )
 
     def _install_modules(self) -> None:
@@ -364,7 +360,7 @@ class Cosmos3Adapter[TBatch: Cosmos3Batch](
 
         cached = self._begin_forward(batch)
         try:
-            preds_vision, _, _ = self.transformer(
+            preds_vision, _, _ = self.module()(
                 vision_tokens=[vision_tokens],
                 vision_token_shapes=[pack.token_shape],
                 vision_timesteps=vision_timesteps,
@@ -426,7 +422,7 @@ class Cosmos3KVAdapter[TBatch: Cosmos3KVBatch](Cosmos3Adapter[TBatch]):
 
     def _begin_forward(self, batch: TBatch) -> bool:
         self._bind_processors()
-        reuse = self.use_cache and cache_enabled.get() and not torch.is_grad_enabled()
+        reuse = self.use_cache and not torch.is_grad_enabled()
         if not reuse:
             self._kv_state.mode = None
             self._kv_state.cache = None

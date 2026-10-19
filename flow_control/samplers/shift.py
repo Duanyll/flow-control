@@ -1,15 +1,72 @@
+"""Sigma-grid shifts as invertible curves σ = F(u) on [0, 1]."""
+
 import math
-from abc import ABC, abstractmethod
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Literal, Protocol
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from flow_control.adapters.base import Batch
 from flow_control.utils.registry import Registry, RegistryUnion
 
+from .node import Row
 
-class BaseShift(BaseModel, ABC):
+
+class Curve(Protocol):
+    """σ = F(u), invertible on [0, 1]."""
+
+    def __call__(self, u: torch.Tensor) -> torch.Tensor: ...
+    def inverse(self, sigma: float) -> float: ...
+
+
+class ShiftCurve:
+    """F = stretch ∘ f with f(u) = s·u / (1 + (s − 1)·u); the terminal stretch comes from the full grid."""
+
+    def __init__(self, factor: float, num_steps: int, terminal: float | None) -> None:
+        self.factor = factor
+        self.scale = (
+            None
+            if terminal is None
+            else float((1 - self.f(torch.tensor(1 / num_steps))) / (1 - terminal))
+        )
+
+    def f(self, u: torch.Tensor) -> torch.Tensor:
+        s = self.factor
+        return (s * u) / (1 + (s - 1) * u)
+
+    def __call__(self, u: torch.Tensor) -> torch.Tensor:
+        sigma = self.f(u)
+        if self.scale is None:
+            return sigma
+        return torch.where(sigma > 0, 1 - (1 - sigma) / self.scale, sigma)
+
+    def inverse(self, sigma: float) -> float:
+        if self.scale is not None and sigma > 0:
+            sigma = 1 - (1 - sigma) * self.scale
+        return sigma / (sigma + self.factor * (1 - sigma))
+
+
+class DiffusersCurve(ShiftCurve):
+    """diffusers' FlowMatchEulerDiscreteScheduler grid: f over linspace(f(1), f(1/N), n), then 0."""
+
+    def __init__(self, factor: float, num_steps: int, train_steps: int) -> None:
+        super().__init__(factor, num_steps, None)
+        self.n = num_steps
+        self.a = float(self.f(torch.tensor(1 / train_steps)))
+
+    def __call__(self, u: torch.Tensor) -> torch.Tensor:
+        n, a = self.n, self.a
+        inner = a + (1 - a) * (u * n - 1) / (n - 1)
+        return torch.where(u * n >= 1, self.f(inner), torch.zeros_like(u))
+
+    def inverse(self, sigma: float) -> float:
+        if sigma == 0:
+            return 0.0
+        return (
+            1 + (super().inverse(sigma) - self.a) * (self.n - 1) / (1 - self.a)
+        ) / self.n
+
+
+class BaseShift(BaseModel):
     type: Literal["base"] = "base"
     model_config = ConfigDict(extra="forbid")
 
@@ -18,43 +75,27 @@ class BaseShift(BaseModel, ABC):
     off ``noisy_latents`` (scaled to ``model_image_size``), ``image_size`` assumes
     16x16 pixels per token."""
     shift_terminal: float | None = None
-    """Stretch the final positive evaluation sigma to this value, preserving
-    a terminal zero. None/0 disables stretching; a one-point grid is unchanged."""
+    """Stretch the final positive sigma of the full grid to this value."""
+    diffusers_grid: int | None = None
+    """Reproduce ``FlowMatchEulerDiscreteScheduler.set_timesteps`` with this many
+    training timesteps (its shifted training-grid endpoints)."""
 
-    def apply(self, sigmas: torch.Tensor, row: Batch, num_steps: int) -> torch.Tensor:
-        shift_factor = self._shift_factor(row, num_steps)
-        if shift_factor != 1.0:
-            sigmas = (shift_factor * sigmas) / (1 + (shift_factor - 1) * sigmas)
+    def curve(self, row: Row, num_steps: int) -> Curve:
+        factor = self.factor(self._seq_len(row), num_steps)
+        if self.diffusers_grid:
+            return DiffusersCurve(factor, num_steps, self.diffusers_grid)
+        return ShiftCurve(factor, num_steps, self.shift_terminal or None)
 
-        if self.shift_terminal:
-            positive = sigmas > 0
-            evaluation_sigmas = sigmas[positive]
-            # Zero is the integration endpoint, not a model evaluation. A
-            # single evaluation (e.g. one-step [1, 0]) has nothing to stretch.
-            if evaluation_sigmas.numel() > 1:
-                one_minus_z = 1 - evaluation_sigmas
-                scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
-                sigmas = sigmas.clone()
-                sigmas[positive] = 1 - (one_minus_z / scale_factor)
-
-        return sigmas
-
-    def _shift_factor(self, row: Batch, num_steps: int) -> float:
-        return self._calculate_shift_factor(self._get_seq_len(row), num_steps)
-
-    def _get_seq_len(self, row: Batch) -> int:
+    def _seq_len(self, row: Row) -> int:
         # The model may see less than the whole image per forward (tiles).
         height, width = row["image_size"]
-        model_h, model_w = cast(dict[str, Any], row).get(
-            "model_image_size", (height, width)
-        )
+        model_h, model_w = row.get("model_image_size", (height, width))
         if self.image_seq_len_from == "actual":
             return row["noisy_latents"].shape[1] * model_h * model_w // (height * width)
-        return model_h * model_w // 256  # assuming patch size 16x16
+        return model_h * model_w // 256
 
-    @abstractmethod
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
-        raise NotImplementedError()
+    def factor(self, seq_len: int, num_steps: int) -> float:
+        raise NotImplementedError
 
 
 shift_registry: Registry[BaseShift] = Registry("shift", base=BaseShift)
@@ -67,7 +108,7 @@ class ConstantShift(BaseShift):
     type: Literal["constant"] = "constant"
     shift_value: float = 1.0
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+    def factor(self, seq_len: int, num_steps: int) -> float:
         return self.shift_value
 
 
@@ -79,13 +120,12 @@ class LinearShift(BaseShift):
     base_shift: float = 0.5
     max_shift: float = 1.15
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+    def factor(self, seq_len: int, num_steps: int) -> float:
         m = (self.max_shift - self.base_shift) / (
             self.max_image_seq_len - self.base_image_seq_len
         )
         b = self.base_shift - m * self.base_image_seq_len
-        mu = seq_len * m + b
-        return math.exp(mu)
+        return math.exp(seq_len * m + b)
 
 
 @shift_registry.register("squared")
@@ -93,15 +133,13 @@ class SquaredShift(BaseShift):
     type: Literal["squared"] = "squared"
     base_image_seq_len: int = 256
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
+    def factor(self, seq_len: int, num_steps: int) -> float:
         return (seq_len / self.base_image_seq_len) ** 0.5
 
 
 @shift_registry.register("flux2")
 class Flux2Shift(BaseShift):
-    """FLUX.2's empirical ``mu`` (diffusers ``compute_empirical_mu``), applied
-    through the scheduler's ``exponential`` time shift
-    ``e^mu / (e^mu + 1/σ - 1)``, i.e. a shift factor of ``e^mu``."""
+    """FLUX.2's empirical ``mu`` (diffusers ``compute_empirical_mu``) as the factor ``e^mu``."""
 
     type: Literal["flux2"] = "flux2"
     a1: float = 8.73809524e-05
@@ -112,18 +150,13 @@ class Flux2Shift(BaseShift):
     c: float = 190.0
     d: float = 200.0
 
-    def _calculate_shift_factor(self, seq_len: int, num_steps: int) -> float:
-        return math.exp(self._empirical_mu(seq_len, num_steps))
-
-    def _empirical_mu(self, seq_len: int, num_steps: int) -> float:
-        if seq_len > self.image_seq_len_threshold:
-            return self.a2 * seq_len + self.b2
-
+    def factor(self, seq_len: int, num_steps: int) -> float:
         m_200 = self.a2 * seq_len + self.b2
+        if seq_len > self.image_seq_len_threshold:
+            return math.exp(m_200)
         m_10 = self.a1 * seq_len + self.b1
         a = (m_200 - m_10) / self.c
-        b = m_200 - self.d * a
-        return a * num_steps + b
+        return math.exp(a * num_steps + m_200 - self.d * a)
 
 
 Shift = Annotated[
@@ -134,6 +167,7 @@ Shift = Annotated[
 
 
 if __name__ == "__main__":
+    from pydantic import TypeAdapter
     from rich import print
 
     # Golden grids from diffusers' FlowMatchEulerDiscreteScheduler with
@@ -146,26 +180,18 @@ if __name__ == "__main__":
     }
     shift = Flux2Shift()
     for (seq_len, steps), (factor, head, last) in golden.items():
-        assert abs(shift._calculate_shift_factor(seq_len, steps) - factor) < 1e-5
-        sigmas = torch.linspace(1.0, 1.0 / steps, steps, dtype=torch.float64)
-        row = cast(
-            Batch,
-            {
-                "image_size": (16 * int(seq_len**0.5), 16 * int(seq_len**0.5)),
-                "noisy_latents": torch.zeros(1, seq_len, 1),
-            },
-        )
-        shifted = shift.apply(sigmas, row, steps)
+        assert abs(shift.factor(seq_len, steps) - factor) < 1e-5
+        side = 16 * int(seq_len**0.5)
+        row = {"image_size": (side, side), "noisy_latents": torch.zeros(1, seq_len, 1)}
+        curve = shift.curve(row, steps)
+        shifted = curve(torch.linspace(1.0, 1.0 / steps, steps, dtype=torch.float64))
         assert torch.allclose(
             shifted[:4], torch.tensor(head, dtype=torch.float64), atol=2e-6
         ), (seq_len, steps, shifted[:4])
         assert abs(shifted[-1].item() - last) < 2e-6, (seq_len, steps, shifted[-1])
+        assert abs(curve.inverse(float(shifted[2])) - 1 + 2 / steps) < 1e-6
         print(f"flux2 shift seq_len={seq_len} steps={steps}: factor={factor:.4f} ok")
 
-    # Bare-number shorthand parses to a constant shift.
-    from pydantic import TypeAdapter
-
     constant = TypeAdapter(Shift).validate_python(3.0)
-    assert isinstance(constant, ConstantShift)
-    assert constant._calculate_shift_factor(1024, 20) == 3.0
+    assert isinstance(constant, ConstantShift) and constant.shift_value == 3.0
     print("[green]shift checks passed[/green]")

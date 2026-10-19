@@ -8,11 +8,9 @@ from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21Rope,
     QwenImage21TemporalTimesteps,
 )
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
-from flow_control.utils.model_cache import cache_enabled
 
 
 class TemporalTimesteps(QwenImage21TemporalTimesteps):
@@ -67,9 +65,7 @@ class QwenImage21Adapter(
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
-    peft_lora_config: LoraConfig = LoraConfig(
-        target_modules=["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"],
-    )
+    lora_target_modules = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0")
 
     def _install_modules(self) -> None:
         # RoPE's ordinary tensor list survives to_empty, but must be created
@@ -104,7 +100,6 @@ class QwenImage21Adapter(
         kv_cache, mode = None, None
         if (
             self.use_cache
-            and cache_enabled.get()
             and not torch.is_grad_enabled()
             and self.transformer.config["causal_condition"]
         ):
@@ -114,7 +109,7 @@ class QwenImage21Adapter(
                 kv_cache = QwenImage21KVCache(len(self.transformer.transformer_blocks))
                 batch["_kv_cache"] = kv_cache
 
-        return self.transformer(
+        return self.module()(
             hidden_states=hidden_states,
             encoder_hidden_states=batch["prompt_embeds"],
             encoder_hidden_states_mask=batch["prompt_embeds_mask"],

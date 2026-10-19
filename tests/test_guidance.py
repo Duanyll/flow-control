@@ -1,161 +1,103 @@
-"""Guidance-axis tests for config, execution, and replay semantics."""
+"""Differential diffusion and momentum under the node tree."""
 
 import importlib
 import sys
 import unittest
 from itertools import product
 from pathlib import Path
-from typing import Any, ClassVar, Literal, cast
+from typing import Any
 
 import torch
-from pydantic import PrivateAttr
 
-from flow_control.adapters.base import Batch
-from flow_control.contrib.momentum_guidance import MomentumGuidance
+from flow_control.contrib.momentum_guidance import Momentum
 from flow_control.processors.tasks.inpaint import InpaintProcessor
-from flow_control.samplers import Calls, Executor, SampleRun, WrappedPrediction
-from flow_control.samplers.guidance import (
-    CfgPlusPlusGuidance,
-    ClassifierFreeGuidance,
-)
-from flow_control.samplers.plan import (
-    EvalRequest,
-    StepContext,
-    euler_step,
-)
-from flow_control.samplers.prediction import ModelPrediction, Predictor
-from flow_control.samplers.projectors import DifferentialDiffusion
-from flow_control.samplers.sampler import Sampler, SampleRequest
-from flow_control.samplers.solver import (
-    DPMSolver,
-    FlowSolver,
-    SASolver,
-)
-from flow_control.training.grpo_sampling import (
-    GrpoCollector,
-    ReplayItem,
-    replay_steps,
+from flow_control.samplers import (
+    BaseTransition,
+    Cfg,
+    CfgPlusPlus,
+    DifferentialDiffusion,
+    Euler,
+    Executor,
+    Grid,
+    GridFrame,
+    Model,
+    StepFrame,
 )
 
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+capture = importlib.import_module("sampler_baseline_capture")
 microbatching = importlib.import_module("test_microbatching")
 
 
-class _CountingGuidance(WrappedPrediction):
-    """Probe that observes a binding's private evaluation counter and step index."""
+class RecordingModel(microbatching.FakeSamplerModel):
+    """Zero velocity; keeps the latents every forward saw."""
 
-    type: Literal["counting"] = "counting"
-    stateful: ClassVar[bool] = True
-    _seen: list[int] = PrivateAttr(default_factory=list)
-    _indices: list[int] = PrivateAttr(default_factory=list)
+    def __init__(self) -> None:
+        super().__init__()
+        self.latents: list[list[torch.Tensor]] = []
 
-    def bind(self, row, negative_row=None) -> Predictor:
-        inner = self.inner.bind(row, negative_row)
-        count = 0
-
-        def predict(request: EvalRequest, ctx: StepContext) -> Calls[torch.Tensor]:
-            nonlocal count
-            velocity = yield from inner(request, ctx)
-            self._seen.append(count)
-            self._indices.append(ctx.item_index)
-            count += 1
-            return velocity
-
-        return predict
+    def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
+        self.latents.append([batch["noisy_latents"].clone() for batch in batches])
+        return [torch.zeros_like(batch["noisy_latents"]) for batch in batches]
 
 
-class GuidedVelocityCompatibilityTest(unittest.TestCase):
-    def test_guided_velocity_matches_sampling_path(self) -> None:
-        # Training re-evaluates a plan item through SampleRun.guided_velocity;
-        # it must be the very velocity the sampling loop stepped with.
-        sampler = Sampler(
-            steps=1,
-            guidance=ClassifierFreeGuidance(scale=2.0),
-            solver=FlowSolver(),
-        )
-        cond = microbatching.make_sampler_batch(3.0)
-        negative = microbatching.make_sampler_batch(1.0)
-        request = SampleRequest(row=cond, negative_row=negative)
+def _inpaint_batch(mask: torch.Tensor, latents: float = 10.0) -> Any:
+    batch: Any = microbatching.make_batch(latents, tokens=mask.shape[1])
+    batch["inpaint_latents"] = torch.full((1, mask.shape[1], 2), 2.0)
+    batch["inpaint_mask_latents"] = mask
+    return batch
 
-        run = sampler.make_run(request, plan=sampler.plan(cond))
-        velocity = Executor(
-            microbatching.FakeSamplerModel(), sampler.variant_keys()
-        ).evaluate([run.guided_velocity(cond["noisy_latents"], 0)])[0]
-        torch.testing.assert_close(velocity, torch.tensor([[[5.0]]]))
 
-        sampled = next(
-            iter(sampler.sample(microbatching.FakeSamplerModel(), [request]))
-        )
-        # The single Euler step must use the same guided velocity.
-        torch.testing.assert_close(
-            sampled.ctx.latents,
-            euler_step(cond["noisy_latents"], velocity, 1.0, 0.0),
-        )
+def _project(
+    row: Any, sigmas: list[float], index: int, model: RecordingModel
+) -> torch.Tensor:
+    """Run one differential-diffusion step at grid position ``index``; return what the model saw."""
+    grid = GridFrame(Grid(steps=len(sigmas) - 1), row["_frame"])
+    grid.sigmas, grid.index = sigmas, index
+    row["_frame"], row["sigma"] = grid, sigmas[index]
+    Executor(model).evaluate([DifferentialDiffusion()(row, sigmas[index + 1])])
+    return model.latents[-1][0]
 
 
 class DifferentialDiffusionTest(unittest.TestCase):
-    @staticmethod
-    def _make_run() -> SampleRun:
-        batch: Any = microbatching.make_batch(
-            10.0,
-            tokens=4,
-            image_size=(32, 32),
-        )
-        batch["inpaint_latents"] = torch.full((1, 4, 2), 2.0)
-        batch["inpaint_mask_latents"] = torch.tensor(
-            [[[0.0], [0.25], [0.75], [1.0]]],
-        )
-        return SampleRun(
-            sampler=Sampler(),
-            predictor=ClassifierFreeGuidance(),
-            row=batch,
-            negative_row=None,
-            plan=FlowSolver().plan([1.0, 0.5, 0.0]),
-            ctx=StepContext(
-                latents=batch["noisy_latents"].float(),
-                generator=None,
-                solver_state=None,
-                num_items=2,
-            ),
-        )
-
-    def test_config_wraps_inner_guidance(self) -> None:
-        sampler = Sampler.model_validate(
-            {
-                "guidance": {"type": "cfg", "scale": 2.0, "renorm": True},
-                "projectors": [{"type": "differential"}],
-            }
-        )
-        restored = Sampler.model_validate_json(sampler.model_dump_json())
-        self.assertEqual(restored, sampler)
-        self.assertIsInstance(restored.projectors[0], DifferentialDiffusion)
-        self.assertTrue(restored.guidance.requires_negative(restored.steps))
-
     def test_inpaint_mask_controls_reference_release_time(self) -> None:
-        guidance = DifferentialDiffusion()
-        run = self._make_run()
-
-        first = guidance.pre_transition(run.ctx.latents, run.row, run.ctx, run.plan[0])
-        # At sigma=1 the noised reference is exactly the fixed initial noise.
-        torch.testing.assert_close(first, torch.full((1, 4, 2), 10.0))
-
-        run.ctx.latents = torch.full((1, 4, 2), 20.0)
-        run.ctx.item_index = 1
-        second = guidance.pre_transition(run.ctx.latents, run.row, run.ctx, run.plan[1])
-        # At progress=1/2, edit strengths 0 and .25 still follow the
-        # reference (which is 6 at sigma=.5); .75 and 1 have been released.
+        # The projection happens before the wrapped step, on the latents the
+        # model then sees. At sigma=1 the noised reference is exactly the
+        # initial noise; at progress 1/2 of a two-step grid, edit strengths 0
+        # and .25 still follow the reference (6 at sigma=.5), .75 and 1 have
+        # been released. A grid that starts mid-way measures progress on its
+        # own steps, against the noise kept from the first projection.
+        mask = torch.tensor([[[0.0], [0.25], [0.75], [1.0]]])
+        row = microbatching.sampling_row(_inpaint_batch(mask))
+        model = RecordingModel()
         torch.testing.assert_close(
-            second,
+            _project(row, [1.0, 0.5, 0.0], 0, model), torch.full((1, 4, 2), 10.0)
+        )
+        row["noisy_latents"] = torch.full((1, 4, 2), 20.0)
+        torch.testing.assert_close(
+            _project(row, [1.0, 0.5, 0.0], 1, model),
             torch.tensor([[[6.0, 6.0], [6.0, 6.0], [20.0, 20.0], [20.0, 20.0]]]),
         )
+        row["noisy_latents"] = torch.full((1, 4, 2), 20.0)
+        torch.testing.assert_close(
+            _project(row, [0.75, 0.5], 0, model),
+            torch.tensor([[[8.0, 8.0], [8.0, 8.0], [8.0, 8.0], [20.0, 20.0]]]),
+        )
+        # The tree round-trips through its JSON spelling (the `from` alias).
+        sampler = Grid(
+            steps=2,
+            transition=DifferentialDiffusion(
+                source="inpaint",
+                transition=Euler(prediction=Cfg(scale=2.0, renorm=True)),
+            ),
+        )
+        self.assertEqual(Grid.model_validate_json(sampler.model_dump_json()), sampler)
+        self.assertIn('"from":"inpaint"', sampler.model_dump_json())
 
     def test_packed_mask_preserves_intra_token_spatial_detail(self) -> None:
-        processor = InpaintProcessor.model_construct(
-            vae_scale_factor=1,
-            patch_size=2,
-        )
+        processor = InpaintProcessor.model_construct(vae_scale_factor=1, patch_size=2)
         raw_mask = torch.tensor(
             [
                 [
@@ -168,9 +110,7 @@ class DifferentialDiffusionTest(unittest.TestCase):
                 ]
             ]
         )
-
         luminance, packed = processor._prepare_inpaint_mask(raw_mask, (4, 4))
-
         self.assertEqual(tuple(luminance.shape), (1, 4, 4))
         self.assertEqual(tuple(packed.shape), (1, 4, 4))
         torch.testing.assert_close(packed[0, 0], torch.tensor([0.0, 0.25, 0.5, 0.75]))
@@ -183,170 +123,56 @@ class DifferentialDiffusionTest(unittest.TestCase):
             )
             torch.testing.assert_close(normalized, luminance)
             torch.testing.assert_close(packed_multichannel, packed)
-
-        run = self._make_run()
-        run.ctx.latents = torch.zeros(1, 1, 8)
-        row: Any = run.row
-        row["inpaint_mask_latents"] = packed[:, :1]
-        expanded = DifferentialDiffusion._edit_strength(run.row, run.ctx.latents)
+        # The packed mask expands over the latent features of each token, so at
+        # progress 1/2 only the features with strength < .5 keep the reference.
+        batch: Any = microbatching.make_batch(20.0, tokens=1)
+        batch["noisy_latents"] = torch.full((1, 1, 8), 20.0)
+        batch["inpaint_latents"] = torch.full((1, 1, 8), 2.0)
+        batch["inpaint_mask_latents"] = packed[:, :1]
+        row = microbatching.sampling_row(batch)
+        row["_noise"] = torch.full((1, 1, 8), 10.0)
         torch.testing.assert_close(
-            expanded,
-            torch.tensor([[[0.0, 0.25, 0.5, 0.75] * 2]]),
+            _project(row, [1.0, 0.5, 0.0], 1, RecordingModel()),
+            torch.tensor([[[6.0, 6.0, 20.0, 20.0, 6.0, 6.0, 20.0, 20.0]]]),
         )
-
-    def test_partial_denoise_uses_local_step_progress(self) -> None:
-        run = self._make_run()
-        run.plan = FlowSolver().plan([0.75, 0.5])
-        run.ctx.latents = torch.full((1, 4, 2), 20.0)
-        row: Any = run.row
-        row["inpaint_mask_latents"] = torch.tensor([[[0.0], [0.25], [0.75], [1.0]]])
-
-        run.ctx.num_items = len(run.plan)
-        projected = DifferentialDiffusion().pre_transition(
-            run.ctx.latents, run.row, run.ctx, run.plan[0]
-        )
-
-        # A sliced plan defines its own editing interval. At its first step,
-        # every non-white region remains on the reference trajectory.
-        torch.testing.assert_close(
-            projected,
-            torch.tensor([[[8.0, 8.0], [8.0, 8.0], [8.0, 8.0], [20.0, 20.0]]]),
-        )
-
-    def test_executor_feeds_projected_latents_to_the_model(self) -> None:
-        class RecordingModel(microbatching.FakeSamplerModel):
-            def __init__(self) -> None:
-                super().__init__()
-                self.latents: list[list[torch.Tensor]] = []
-
-            def predict_velocity_batched(
-                self, batches, timesteps, *, dummy_outputs=None
-            ):
-                self.latents.append(
-                    [batch["noisy_latents"].clone() for batch in batches]
-                )
-                return super().predict_velocity_batched(
-                    batches, timesteps, dummy_outputs=dummy_outputs
-                )
-
-        guidance = DifferentialDiffusion()
-        sampler = Sampler(steps=2, projectors=[guidance], solver=FlowSolver())
-        runs = []
-        for strength in (0.0, 1.0):
-            batch: Any = microbatching.make_sampler_batch(0.0, initial=10.0)
-            batch["inpaint_latents"] = torch.full((1, 1, 1), 2.0)
-            batch["inpaint_mask_latents"] = torch.tensor([[[strength]]])
-            runs.append(SampleRequest(row=batch))
-
-        model = RecordingModel()
-        list(sampler.sample(model, runs))
-
-        self.assertEqual(model.forward_batch_sizes, [2, 2])
-        torch.testing.assert_close(model.latents[0][0], torch.tensor([[[10.0]]]))
-        torch.testing.assert_close(model.latents[0][1], torch.tensor([[[10.0]]]))
-        torch.testing.assert_close(model.latents[1][0], torch.tensor([[[6.0]]]))
-        torch.testing.assert_close(model.latents[1][1], torch.tensor([[[10.0]]]))
-
-    def test_all_white_mask_preserves_multistep_solver(self) -> None:
-        batch: Any = microbatching.make_batch(0.9, tokens=1)
-        batch["inpaint_latents"] = torch.full((1, 1, 2), 0.2)
-        batch["inpaint_mask_latents"] = torch.ones(1, 1, 1)
-        model = microbatching.FakeDenseAdapter.model_construct(
-            arch="fake",
-            type="fake",
-        )
-
-        plain = next(
-            iter(
-                Sampler(
-                    steps=4,
-                    guidance=ClassifierFreeGuidance(),
-                    solver=DPMSolver(order=2),
-                ).sample(model, [SampleRequest(row=batch)])
-            )
-        )
-        differential = next(
-            iter(
-                Sampler(
-                    steps=4,
-                    projectors=[DifferentialDiffusion()],
-                    solver=DPMSolver(order=2),
-                ).sample(model, [SampleRequest(row=batch)])
-            )
-        )
-
-        torch.testing.assert_close(differential.ctx.latents, plain.ctx.latents)
 
     def test_recorded_projection_gap_remains_independently_replayable(self) -> None:
-        guidance = DifferentialDiffusion()
-        sampler = Sampler(
-            steps=3,
-            projectors=[guidance],
-            solver=FlowSolver(eta=0.5),
+        # The projection between steps breaks the latent chain (latent_next of
+        # one record is not latent_t of the next), yet each record replays on
+        # its own from the row data.
+        sampler = Grid(
+            steps=3, transition=DifferentialDiffusion(transition=Euler(eta=0.5))
         )
         batch: Any = microbatching.make_sampler_batch(0.0, initial=0.9)
         batch["inpaint_latents"] = torch.full((1, 1, 1), 0.2)
         batch["inpaint_mask_latents"] = torch.zeros(1, 1, 1)
-        collector = GrpoCollector(sampler)
-        run = next(
-            iter(
-                sampler.sample(
-                    microbatching.FakeSamplerModel(),
-                    [
-                        SampleRequest(
-                            row=batch, generator=torch.Generator().manual_seed(5)
-                        )
-                    ],
-                    collector=collector,
-                )
-            )
+        row = microbatching.sampling_row(
+            batch, torch.Generator().manual_seed(5), [(BaseTransition, capture.record)]
         )
-        trajectory = collector.take(run)
-        self.assertEqual(len(trajectory), 2)
-        self.assertFalse(torch.equal(trajectory[0].latent_next, trajectory[1].latent_t))
-
-        replayed = replay_steps(
-            microbatching.FakeSamplerModel(),
-            [ReplayItem(run, step) for step in trajectory],
+        (rollout,) = microbatching.sample(
+            microbatching.FakeSamplerModel(), sampler, [row]
         )
-        for recorded, replay in zip(trajectory, replayed, strict=True):
-            torch.testing.assert_close(replay.log_prob, recorded.log_prob)
-
-
-class GuidanceStateTimingTest(unittest.TestCase):
-    def test_state_advances_per_eval_including_mid_transition(self) -> None:
-        # SA's first PEC transition evaluates twice (seeding eval + predicted
-        # point); the counter must advance at the mid-transition eval too.
-        guidance = _CountingGuidance()
-        sampler = Sampler(steps=4, solver=SASolver(eta=0.0), guidance=guidance)
-        batch = microbatching.make_sampler_batch(1.0)
-        run = next(
-            iter(
-                sampler.sample(microbatching.FakeSamplerModel(), [SampleRequest(batch)])
-            )
+        points = capture.stochastic_points(rollout)
+        self.assertEqual(len(points), 2)
+        self.assertEqual(
+            [type(p["_frame"].node).__name__ for p in points], ["Euler", "Euler"]
         )
-        self.assertEqual(len(run.plan), 4)
-        # 4 transitions -> 2 + 1 + 1 + 0 evals; [0, 1] within the first
-        # transition proves per-eval (not per-transition) advancement.
-        self.assertEqual(guidance._seen, [0, 1, 2, 3])
+        self.assertFalse(
+            torch.equal(points[0]["next_latents"], points[1]["noisy_latents"])
+        )
+        replayed = Executor(microbatching.FakeSamplerModel()).evaluate(
+            [capture.replay(rollout, p) for p in points]
+        )
+        for point, replay in zip(points, replayed, strict=True):
+            torch.testing.assert_close(replay.log_prob, point["log_prob"])
 
-        # S2 review reproduced [2, 2, 2] here: priming multiple evaluations
-        # of one run must not overwrite earlier contexts or reuse its state.
-        guidance._seen.clear()
-        guidance._indices.clear()
-        saved_index, saved_latents = run.ctx.item_index, run.ctx.latents
-        for _ in range(2):
-            Executor(microbatching.FakeSamplerModel()).evaluate(
-                [run.guided_velocity(batch["noisy_latents"], i) for i in range(3)]
-            )
-        self.assertEqual(guidance._indices, [0, 1, 2] * 2)
-        self.assertEqual(guidance._seen, [0] * 6)
-        self.assertEqual(run.ctx.item_index, saved_index)
-        self.assertIs(run.ctx.latents, saved_latents)
 
-        # Composable Momentum must own history per sample AND condition branch.
+class MomentumTest(unittest.TestCase):
+    def test_momentum_history_is_per_row_and_branch(self) -> None:
+        # Momentum must own its history per sample AND per condition branch.
         # Renorm is nonlinear, so placing Momentum inside/outside CFG exercises
-        # different algebra; plain linear CFG would hide a misplaced EMA.
+        # different algebra; plain linear CFG would hide a misplaced EMA. CFG++
+        # reads the enclosing step's sigma_next and eta.
         class TimeDependentModel(microbatching.FakeSamplerModel):
             def predict_velocity_batched(
                 self, batches, timesteps, *, dummy_outputs=None
@@ -363,7 +189,6 @@ class GuidanceStateTimingTest(unittest.TestCase):
             guided = guided * (
                 c.norm(dim=2, keepdim=True) / (guided.norm(dim=2, keepdim=True) + 1e-8)
             ).clamp(max=1)
-
             # Flow's CFG++ mean conversion uses the actual transition eta.
             kappa = sigma * (1 - 0.15) / ((1 + 0.3**2 / 2) * (sigma - 0.15))
             return u + kappa * (guided - u) if cfg_pp else guided
@@ -372,48 +197,43 @@ class GuidanceStateTimingTest(unittest.TestCase):
             v0, v1, v2 = values
             return [v0, 1.5 * v1 - 0.5 * v0, 1.5 * v2 - 0.5 * (0.75 * v1 + 0.25 * v0)]
 
+        batch = microbatching.make_sampler_batch(1.0)
+        sigmas = (0.9, 0.6, 0.3)
         all_outputs = []
-        for cfg_cls, outside in product(
-            (ClassifierFreeGuidance, CfgPlusPlusGuidance), (True, False)
-        ):
+        for cfg_cls, outside in product((Cfg, CfgPlusPlus), (True, False)):
             config = (
-                MomentumGuidance(
-                    alpha=0.5,
-                    beta=0.25,
-                    inner=cfg_cls(scale=3, renorm=True, inner=ModelPrediction()),
-                )
+                Momentum(alpha=0.5, beta=0.25, prediction=cfg_cls(scale=3, renorm=True))
                 if outside
                 else cfg_cls(
                     scale=3,
                     renorm=True,
-                    inner=MomentumGuidance(
-                        alpha=0.5, beta=0.25, inner=ModelPrediction()
-                    ),
+                    prediction=Momentum(alpha=0.5, beta=0.25, prediction=Model()),
                 )
             )
-            cfg_pp = cfg_cls is CfgPlusPlusGuidance
-            sampler = Sampler(steps=3, guidance=config)
+            cfg_pp = cfg_cls is CfgPlusPlus
             self.assertEqual(
-                Sampler.model_validate_json(sampler.model_dump_json()), sampler
+                Grid.model_validate_json(
+                    Grid(transition=Euler(prediction=config)).model_dump_json()
+                ),
+                Grid(transition=Euler(prediction=config)),
             )
-            bindings, expected = [], []
-            sigmas = (0.9, 0.6, 0.3)
+            rows, expected = [], []
             for index in range(2):
                 positive, negative = [
-                    {
-                        **batch,
-                        "clean_latents": torch.tensor([[vector]], dtype=torch.float32),
-                    }
+                    torch.tensor([[vector]], dtype=torch.float32)
                     for vector in ([2 + index, -1], [-1, 2 - index])
                 ]
-                bindings.append(
-                    config.bind(cast(Batch, positive), cast(Batch, negative))
+                rows.append(
+                    microbatching.sampling_row(
+                        {
+                            **batch,
+                            "clean_latents": positive,
+                            "negative": {"clean_latents": negative},
+                        }
+                    )
                 )
                 condition_values = [
-                    [
-                        b["clean_latents"] * s + torch.tensor([[[s * s, 1 - s]]])
-                        for s in sigmas
-                    ]
+                    [b * s + torch.tensor([[[s * s, 1 - s]]]) for s in sigmas]
                     for b in (positive, negative)
                 ]
                 expected.append(
@@ -432,20 +252,15 @@ class GuidanceStateTimingTest(unittest.TestCase):
                     ]
                 )
             model = TimeDependentModel()
-            executor = Executor(model, sampler.variant_keys())
             outputs = []
             for index, sigma in enumerate(sigmas):
-                values = executor.evaluate(
-                    [
-                        binding(
-                            EvalRequest(
-                                batch["noisy_latents"], sigma, 0.15, 0.3, FlowSolver()
-                            ),
-                            run.ctx,
-                        )
-                        for binding in bindings
-                    ]
-                )
+                for row in rows:
+                    step = StepFrame(Euler(eta=0.3), row["_frame"])
+                    step.sigma, step.sigma_next = sigma, 0.15
+                    row["_frame"], row["sigma"] = step, sigma
+                values = Executor(model).evaluate([config(row) for row in rows])
+                for row in rows:
+                    row["_frame"] = row["_frame"].parent
                 for sample, value in enumerate(values):
                     self.assertEqual(value.dtype, torch.float32)
                     torch.testing.assert_close(value, expected[sample][index])
@@ -455,18 +270,6 @@ class GuidanceStateTimingTest(unittest.TestCase):
         self.assertFalse(torch.allclose(all_outputs[0][-1], all_outputs[1][-1]))
         self.assertFalse(torch.allclose(all_outputs[2][-1], all_outputs[3][-1]))
 
-        # An algorithm must bind two branches, not concurrently reuse one EMA.
-        from flow_control.samplers.calls import gather
 
-        momentum = MomentumGuidance(alpha=0.5, beta=0.25, inner=ModelPrediction())
-        binding = momentum.bind(batch)
-        request = EvalRequest(batch["noisy_latents"], 0.5)
-        with self.assertRaisesRegex(ValueError, "concurrently"):
-            Executor(microbatching.FakeSamplerModel()).evaluate(
-                [gather([binding(request, run.ctx), binding(request, run.ctx)])]
-            )
-        # Closing the aborted gather releases the guard without changing EMA.
-        (value,) = Executor(microbatching.FakeSamplerModel()).evaluate(
-            [binding(request, run.ctx)]
-        )
-        torch.testing.assert_close(value, batch["clean_latents"])
+if __name__ == "__main__":
+    unittest.main()

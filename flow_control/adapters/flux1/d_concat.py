@@ -1,7 +1,6 @@
 from typing import Literal
 
 import torch
-from peft import LoraConfig
 
 from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
@@ -25,17 +24,15 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     dense_batch_fields = (*Flux1Adapter.dense_batch_fields, "control_latents")
     input_dimension: int = 128
 
-    peft_lora_rank: int = 128
-    peft_lora_config: LoraConfig = LoraConfig(
-        target_modules="all-linear", lora_bias=True
-    )
-    extra_trainable_modules: list[str] = [
+    lora_target_modules = "all-linear"
+    # The widened x_embedder must train whole: its new channels start at zero.
+    lora_extra_trainable = (
         "x_embedder",
         "norm_q",
         "norm_k",
         "norm_added_q",
         "norm_added_k",
-    ]
+    )
 
     def _install_modules(self):
         transformer = self.transformer
@@ -72,7 +69,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
             (batch["noisy_latents"], batch["control_latents"]), dim=2
         )
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=noisy_model_input,
             timestep=timestep,
             guidance=guidance,

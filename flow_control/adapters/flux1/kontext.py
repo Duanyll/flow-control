@@ -45,7 +45,7 @@ class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
 
         model_input_list = [batch["noisy_latents"]] + batch["reference_latents"]
         concatenated_model_input = torch.cat(model_input_list, dim=1)
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=concatenated_model_input,
             timestep=timestep,
             guidance=guidance,

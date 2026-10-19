@@ -1,21 +1,37 @@
+import copy
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from typing import Any, ClassVar, Protocol, TypedDict, cast
+from contextvars import ContextVar
+from typing import Any, ClassVar, Literal, Protocol, TypedDict, cast
 
 import torch
 import torch.distributed as dist
 from diffusers import ModelMixin
 from einops import rearrange
-from peft import LoraConfig
-from peft.tuners.tuners_utils import BaseTunerLayer
 from pydantic import BaseModel, ConfigDict, PositiveInt, PrivateAttr
+from torch import nn
 from transformers import PreTrainedModel
 
+from flow_control.adapters.variants import (
+    AliasVariant,
+    EmaVariant,
+    FullVariant,
+    LoraLinear,
+    LoraVariant,
+    Variant,
+    VariantModule,
+    copy_slots,
+    install_clones,
+    install_slots,
+    load_lora,
+    pinned_checkpoint,
+    slots,
+)
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
-from flow_control.utils.model_cache import cache_enabled, cache_fields, clear_cache
+from flow_control.utils.model_cache import cache_fields, clear_cache
 from flow_control.utils.registry import Registry
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -76,97 +92,197 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     type: str
 
     model_config = ConfigDict(extra="forbid")
-    _base_variant_depth: int = PrivateAttr(default=0)
-    _active_variant: str | None = PrivateAttr(default=None)
+    _active: ContextVar[str] = PrivateAttr()
+    """The resolved variant running this adapter's forwards."""
+    _full: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Variants with a full module of their own (`transformer.variants`)."""
+    _ema_tensors: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]] = (
+        PrivateAttr(default_factory=dict)
+    )
     _dummy_sample: tuple[TBatch, torch.Tensor] | None = PrivateAttr(default=None)
     """Last real prepared sample, forwarded in place of samples another rank
     has and this rank lacks. Pins that sample's tensors on the device until
     the next call; only set in multi-rank runs, where a dummy can be needed."""
 
-    @contextmanager
-    def use_variant(self, variant: str | None) -> Iterator[None]:
-        """Select loaded LoRA weights, restoring selection and trainability.
+    def model_post_init(self, context: object, /) -> None:
+        super().model_post_init(context)
+        default = self.resolve("default")
+        self._active = ContextVar("variant", default=default)
 
-        A surrounding base/reference context dominates branch-level choices.
-        PEFT's public toggles change requires_grad, so restore those flags
-        before forward too: FSDP's parameter membership must remain fixed.
-        """
-        if (
-            variant is None
-            or self._base_variant_depth
-            or variant == self._active_variant
-        ):
+    def resolve(self, name: str) -> str:
+        """Follow aliases; an undeclared "default" is the base weights."""
+        variant = self.variants.get(name)
+        if isinstance(variant, AliasVariant):
+            return self.resolve(variant.of)
+        if variant is not None or name == "base":
+            return name
+        if name == "default":
+            return "base"
+        raise ValueError(
+            f"Unknown model variant {name!r}; declared: {['base', *self.variants]}."
+        )
+
+    @contextmanager
+    def use_variant(self, name: str | None) -> Iterator[None]:
+        """Run forwards with variant `name`; None keeps the current one."""
+        if name is None:
             yield
             return
-        transformer = self.transformer
-        if variant != "base" and variant not in getattr(transformer, "peft_config", {}):
-            raise ValueError(f"Model variant {variant!r} is not a loaded LoRA adapter.")
-        layers = [
-            module
-            for module in transformer.modules()
-            if isinstance(module, BaseTunerLayer)
-        ]
-        selections = [
-            (layer, list(layer.active_adapters), layer.disable_adapters)
-            for layer in layers
-        ]
-        trainability = [
-            (parameter, parameter.requires_grad)
-            for parameter in transformer.parameters()
-        ]
-        previous_variant = self._active_variant
-        self._active_variant = variant
-        if variant == "base":
-            self._base_variant_depth += 1
+        token = self._active.set(self.resolve(name))
         try:
-            for layer in layers:
-                if variant != "base":
-                    layer.set_adapter(variant)
-                layer.enable_adapters(variant != "base")
-            for parameter, requires_grad in trainability:
-                parameter.requires_grad_(requires_grad)
-            with self._checkpoint_variant(variant):
-                yield
-        finally:
-            for layer, names, disabled in selections:
-                layer.set_adapter(names)
-                layer.enable_adapters(not disabled)
-            for parameter, requires_grad in trainability:
-                parameter.requires_grad_(requires_grad)
-            if variant == "base":
-                self._base_variant_depth -= 1
-            self._active_variant = previous_variant
-
-    @contextmanager
-    def _checkpoint_variant(self, variant: str) -> Iterator[None]:
-        checkpoints = [
-            (module, checkpoint)
-            for module in self.transformer.modules()
-            if callable(
-                checkpoint := getattr(module, "_gradient_checkpointing_func", None)
-            )
-        ]
-
-        def capture(checkpoint: Callable[..., Any]) -> Callable[..., Any]:
-            def checkpoint_with_variant(
-                function: Callable[..., Any], *args: Any, **kwargs: Any
-            ) -> Any:
-                def call_with_variant(*inputs: Any, **call_kwargs: Any) -> Any:
-                    # Checkpoint recomputation runs after the selecting context exits.
-                    with self.use_variant(variant):
-                        return function(*inputs, **call_kwargs)
-
-                return checkpoint(call_with_variant, *args, **kwargs)
-
-            return checkpoint_with_variant
-
-        try:
-            for module, checkpoint in checkpoints:
-                cast(Any, module)._gradient_checkpointing_func = capture(checkpoint)
             yield
         finally:
-            for module, checkpoint in checkpoints:
-                cast(Any, module)._gradient_checkpointing_func = checkpoint
+            self._active.reset(token)
+
+    def module(self) -> TModel:
+        """The full module running the active variant."""
+        return self._full.get(self._active.get(), self.transformer)
+
+    def trainable_parameters(self) -> list[nn.Parameter]:
+        return [p for p in self.transformer.parameters() if p.requires_grad]
+
+    def variant_modules(self) -> set[nn.Module]:
+        """Modules holding variant weights and EMA counters (checkpointing frozen variants)."""
+        transformer = cast(Any, self.transformer)
+        owners: set[nn.Module] = {
+            transformer.variant_counts,
+            *transformer.variants.values(),
+        }
+        for name in self.variants:
+            owners.update(slots(self.transformer, name))
+        return owners
+
+    @torch.no_grad()
+    def update_variants(self, every: Literal["step", "epoch"]) -> None:
+        """Move every EMA variant scheduled `every` toward its source."""
+        counts = cast(Any, self.transformer).variant_counts
+        for name, variant in self.variants.items():
+            if not isinstance(variant, EmaVariant) or variant.every != every:
+                continue
+            count = counts.get_buffer(name)
+            decay = variant.warmup.get_decay(int(count), variant.decay)
+            if decay < 1:
+                if name not in self._ema_tensors:
+                    # Collected lazily: FSDP replaces the parameters after load.
+                    self._ema_tensors[name] = (
+                        self._weights(name),
+                        self._weights(self.resolve(variant.of)),
+                    )
+                ema, source = self._ema_tensors[name]
+                torch._foreach_lerp_(ema, [t.float() for t in source], 1 - decay)
+            count += 1
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable checkpointing with recompute pinned to the forward's variant."""
+        cast(Any, self.transformer).enable_gradient_checkpointing()
+        for module in self.transformer.modules():
+            original = getattr(module, "_gradient_checkpointing_func", None)
+            if callable(original):
+                cast(Any, module)._gradient_checkpointing_func = pinned_checkpoint(
+                    original, self._active
+                )
+
+    def _kind(self, name: str) -> str:
+        """How a variant is realized: "base", "full" (own module) or "lora" (slots)."""
+        name = self.resolve(name)
+        variant = self.variants.get(name)
+        if isinstance(variant, LoraVariant):
+            return "lora"
+        if isinstance(variant, EmaVariant):
+            return "lora" if self._kind(variant.of) == "lora" else "full"
+        return "base" if name == "base" else "full"
+
+    def _ordered(self) -> list[str]:
+        """Non-alias variant names, each after the variant it builds on."""
+        order: list[str] = []
+
+        def visit(name: str) -> None:
+            name = self.resolve(name)
+            variant = self.variants.get(name)
+            if variant is not None and name not in order:
+                visit(variant.of)
+                order.append(name)
+
+        for name in self.variants:
+            visit(name)
+        return order
+
+    def _realize(self, device: torch.device) -> None:
+        """Install the variants' weights: full copies, then clones, then LoRA slots."""
+        transformer = cast(Any, self.transformer)
+        order = self._ordered()
+        copies, counts = nn.ModuleDict(), nn.Module()
+        for name in order:  # copies first: they must not carry LoRA slots
+            if self._kind(name) == "full":
+                copies[name] = self._copy(name, copies)
+        for name in order:  # clones before slots: a clone must not contain slots
+            variant = self.variants[name]
+            if isinstance(variant, LoraVariant):
+                self._install_clones(name, variant)
+        for name in order:
+            variant = self.variants[name]
+            if isinstance(variant, LoraVariant):
+                self._install_slots(name, variant, device)
+            elif isinstance(variant, EmaVariant):
+                if self._kind(name) == "lora":
+                    copy_slots(transformer, name, self.resolve(variant.of))
+                counts.register_buffer(
+                    name, torch.zeros((), dtype=torch.long, device=device)
+                )
+        transformer.variants, transformer.variant_counts = copies, counts
+
+    def _copy(self, name: str, copies: nn.ModuleDict) -> nn.Module:
+        """A full-kind variant's own module: a copy of its source (fp32 for an EMA)."""
+        variant = self.variants[name]
+        if isinstance(variant, FullVariant) and variant.hf_model is not None:
+            raise NotImplementedError("FullVariant.hf_model is not implemented.")
+        source = self.resolve(variant.of)
+        if self._kind(source) == "lora":
+            raise NotImplementedError(
+                "A full copy of a LoRA variant is not implemented."
+            )
+        origin: nn.Module = self.transformer if source == "base" else copies[source]
+        module = copy.deepcopy(origin)
+        if isinstance(variant, EmaVariant):
+            return module.float().requires_grad_(False)
+        return module.requires_grad_(cast(FullVariant, variant).trainable)
+
+    def _install_clones(self, name: str, variant: LoraVariant) -> None:
+        if self.resolve(variant.of) != "base":
+            raise NotImplementedError("LoRA on a full variant is not implemented.")
+        names = variant.extra_trainable
+        if names is None:
+            names = self.lora_extra_trainable
+        install_clones(self.transformer, name, variant, names, self._active)
+
+    def _install_slots(
+        self, name: str, variant: LoraVariant, device: torch.device
+    ) -> None:
+        install_slots(
+            self.transformer,
+            name,
+            variant,
+            self.lora_target_modules
+            if variant.target_modules is None
+            else variant.target_modules,
+            self.lora_exclude_modules,
+            self._active,
+        )
+        if variant.path is not None and device.type != "meta":  # the seed carries it
+            load_lora(self.transformer, name, variant, variant.path)
+
+    def _weights(self, name: str) -> list[torch.Tensor]:
+        """The tensors realizing a resolved variant."""
+        if name in self._full:
+            return list(self._full[name].parameters())
+        if name != "base":
+            return [
+                p for slot in slots(self.transformer, name) for p in slot.parameters()
+            ]
+        owned = {
+            id(p) for module in self.variant_modules() for p in module.parameters()
+        }
+        return [p for p in self.transformer.parameters() if id(p) not in owned]
 
     @property
     def transformer(self) -> TModel:
@@ -189,15 +305,17 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     """The dtype to cast trainable parameters to."""
     # TODO: Add standard PyTorch AMP (torch.autocast) support (bf16 activation + fp32 trainable params)
 
-    all_trainable: bool = False
-    peft_lora_config: LoraConfig = LoraConfig()
-    peft_lora_rank: int = 0
-    """If > 0, will apply PEFT LoRA adapters with the given rank. Overrides `r` in `peft_lora_config`."""
-    extra_trainable_modules: list[str] = []
-    """
-    List of module name substrings to make trainable, in addition to any PEFT adapters. 
-    Matches if the substring is contained in the parameter's FQN.
-    """
+    trainable: bool = False
+    """Train the base weights themselves (full fine-tuning)."""
+    variants: dict[str, Variant] = {}
+    """Named weight sets (docs/model-variants.md); "base" is built in."""
+    lora_target_modules: ClassVar[tuple[str, ...] | Literal["all-linear"]] = (
+        "all-linear"
+    )
+    """Default LoRA targets: linears whose FQN ends with one of these names."""
+    lora_exclude_modules: ClassVar[tuple[str, ...]] = ()
+    lora_extra_trainable: ClassVar[tuple[str, ...]] = ()
+    """Default modules a LoRA variant clones and trains whole."""
 
     patch_size: int = 2
     vae_scale_factor: int = 8
@@ -230,54 +348,31 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         )
 
     def load_transformer(self, device: torch.device) -> None:
-        freshly_loaded = self.hf_model.load_model(
-            device=device, frozen=not self.all_trainable
-        )
-        if not freshly_loaded:
-            return  # reused from cache, post-load already done
-
-        self._install_modules()
-
-        if self.peft_lora_rank > 0:
-            self.peft_lora_config.r = self.peft_lora_rank
-            if self.peft_lora_config.target_modules == "all-linear":
-                self.peft_lora_config.target_modules = list(
-                    {
-                        k
-                        for k, v in self.transformer.named_modules()
-                        if isinstance(v, torch.nn.Linear)
-                    }
+        if self.hf_model.load_model(device=device, frozen=not self.trainable):
+            self._install_modules()
+            self._realize(device)
+            cast_trainable_parameters(self.transformer, self.trainable_dtype)
+            if (
+                self.hf_model.dtype != "auto"
+                and self.storage_dtype is not None
+                and self.storage_dtype != self.hf_model.dtype
+            ):
+                apply_layerwise_upcasting(
+                    self.transformer,
+                    storage_dtype=self.storage_dtype,
+                    compute_dtype=self.hf_model.dtype,
                 )
-            # Configuring LoRA at all requires a PeftAdapterMixin transformer,
-            # which neither bound guarantees.
-            self.transformer.add_adapter(  # ty: ignore[invalid-argument-type]
-                self.peft_lora_config
-            )
-
-        for name, param in self.transformer.named_parameters():
-            if any(k in name for k in self.extra_trainable_modules):
-                param.requires_grad = True
-
-        cast_trainable_parameters(self.transformer, self.trainable_dtype)
-        if (
-            self.hf_model.dtype != "auto"
-            and self.storage_dtype is not None
-            and self.storage_dtype != self.hf_model.dtype
-        ):
-            apply_layerwise_upcasting(
-                self.transformer,
-                storage_dtype=self.storage_dtype,
-                compute_dtype=self.hf_model.dtype,
-            )
-            logger.info(
-                f"Applied layerwise casting with storage dtype {self.storage_dtype} and compute dtype {self.hf_model.dtype}"
-            )
+                logger.info(
+                    f"Applied layerwise casting with storage dtype {self.storage_dtype} and compute dtype {self.hf_model.dtype}"
+                )
+        else:  # realized by another adapter sharing the cached transformer
+            for module in self.transformer.modules():
+                if isinstance(module, LoraLinear | VariantModule):
+                    module.active = self._active
+        self._full = dict(cast(Any, self.transformer).variants.items())
 
     def _install_modules(self):
-        """
-        Create and initialize additional modules on the base model. Called after base model is
-        created, before installing PEFT adapters and upcasting.
-        """
+        """Create extra modules on the freshly loaded base model, before the variants."""
         pass
 
     @abstractmethod
@@ -387,11 +482,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     def _forward_dummy(self) -> torch.Tensor:
         assert self._dummy_sample is not None  # Seeded collectively before chunking.
-        token = cache_enabled.set(False)
         try:
             return self._forward_one(*self._dummy_sample)
         finally:
-            cache_enabled.reset(token)
             clear_cache(self._dummy_sample[0])
 
     def _share_dummy(self, source: int) -> None:
@@ -448,10 +541,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     @contextmanager
     def _prepared_batches(self, batches: list[TBatch]) -> Iterator[list[TBatch]]:
-        """Prepare model inputs; write runtime fields back only inside Executor."""
-        reuse_cache = (
-            self.use_cache and cache_enabled.get() and not torch.is_grad_enabled()
-        )
+        """Model inputs on the device; no-grad caches persist in `row["_cache"][variant]`."""
+        reuse_cache = self.use_cache and not torch.is_grad_enabled()
+        variant = self._active.get()
         prepared_batches: list[TBatch] = []
         for batch in batches:
             data = {
@@ -461,18 +553,14 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 deep_cast_float_dtype(data, self.dtype), self.device
             )
             if reuse_cache:
-                # Cached values already have the model's device/dtype. Keep
-                # their identity, including structured K/V, across preparation.
-                prepared.update(cache_fields(batch))
+                caches = cast(dict[str, Any], batch).setdefault("_cache", {})
+                prepared.update(caches.get(variant, {}))
             prepared_batches.append(cast(TBatch, prepared))
-        try:
-            yield prepared_batches
-            if reuse_cache:
-                for batch, prepared in zip(batches, prepared_batches, strict=True):
-                    cast(dict[str, Any], batch).update(cache_fields(prepared))
-        finally:
-            for prepared in prepared_batches:
-                clear_cache(prepared)
+        yield prepared_batches
+        if reuse_cache:
+            for batch, prepared in zip(batches, prepared_batches, strict=True):
+                caches = cast(dict[str, Any], batch)["_cache"]
+                caches.setdefault(variant, {}).update(cache_fields(prepared))
 
     def predict_velocity_batched(
         self,
@@ -534,14 +622,17 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 self._share_dummy(donor - 1)
             velocities: list[torch.Tensor] = []
             dummies: list[torch.Tensor] = []
+            # fp32 EMA weights (copy, slots, clones) compute in the model dtype.
+            ema = isinstance(self.variants.get(self._active.get()), EmaVariant)
             # Run the longest rank's chunk count; slicing past our own end is empty.
-            for start in range(0, chunks * size, size):
-                chunk_velocities, chunk_dummies = self._forward_chunk(
-                    prepared_batches[start : start + size],
-                    prepared_timesteps[start : start + size],
-                )
-                velocities.extend(chunk_velocities)
-                dummies.extend(chunk_dummies)
+            with torch.autocast(self.device.type, self.dtype, enabled=ema):
+                for start in range(0, chunks * size, size):
+                    chunk_velocities, chunk_dummies = self._forward_chunk(
+                        prepared_batches[start : start + size],
+                        prepared_timesteps[start : start + size],
+                    )
+                    velocities.extend(chunk_velocities)
+                    dummies.extend(chunk_dummies)
             dummies = [output for output in dummies if output.requires_grad]
             if dummy_outputs is not None:
                 dummy_outputs.extend(dummies)

@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
-from peft import LoraConfig
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
@@ -135,34 +134,24 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
         subfolder="transformer",
         dtype=torch.bfloat16,
     )
-    peft_lora_config: LoraConfig = LoraConfig(
-        # Qwen-Image attention/MLP projections are all separate nn.Linear modules,
-        # so target them as modules (the proven config). Do NOT use
-        # `target_parameters` here: with `target_modules=None` PEFT's
-        # `_prepare_adapter_config` does a `model_config["model_type"]` lookup that
-        # KeyErrors on diffusers configs (which carry no `model_type`).
-        target_modules=[
-            "attn.to_k",
-            "attn.to_q",
-            "attn.to_v",
-            "attn.to_out.0",
-            "attn.add_k_proj",
-            "attn.add_q_proj",
-            "attn.add_v_proj",
-            "attn.to_add_out",
-            "img_mlp.net.2",
-            "img_mod.1",
-            "txt_mlp.net.2",
-            "txt_mod.1",
-        ],
-        exclude_modules=[
-            "59.txt_mlp.net.2",
-            "59.attn.to_add_out",
-        ],
+    lora_target_modules = (
+        "attn.to_k",
+        "attn.to_q",
+        "attn.to_v",
+        "attn.to_out.0",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "img_mlp.net.2",
+        "img_mod.1",
+        "txt_mlp.net.2",
+        "txt_mod.1",
     )
+    # The last block's text stream is discarded, so its projections get no gradient.
+    lora_exclude_modules = ("59.txt_mlp.net.2", "59.attn.to_add_out")
 
-    def load_transformer(self, device: torch.device) -> None:
-        super().load_transformer(device=device)
+    def _install_modules(self) -> None:
         # Replace self.transformer.pos_embed with the above impl
         orig_module = self.transformer.pos_embed
         # Swapping in a drop-in replacement module, hence the type mismatch.
@@ -182,7 +171,7 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
 
         img_shapes = [[(1, h // 16, w // 16)]] * b
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=batch["noisy_latents"],
             timestep=timestep,
             encoder_hidden_states=batch["prompt_embeds"],

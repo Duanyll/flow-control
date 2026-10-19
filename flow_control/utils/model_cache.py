@@ -1,10 +1,7 @@
 """Underscore-prefixed row fields are disposable adapter intermediates."""
 
 from collections.abc import Mapping
-from contextvars import ContextVar
 from typing import Any, cast
-
-cache_enabled: ContextVar[bool] = ContextVar("adapter_cache_enabled", default=False)
 
 
 def cache_fields(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -28,7 +25,6 @@ if __name__ == "__main__":
     assert cache["_img_ids"] is row["_img_ids"]
     clear_cache(row)
     assert row == {"key": "example"}
-    assert not cache_enabled.get()
     print(
         "[green]Runtime fields keep tensor identity and leave data fields intact[/green]"
     )

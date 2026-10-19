@@ -4,7 +4,7 @@ from typing import Annotated, Any, ClassVar, Literal, NotRequired
 
 from flow_control.data.coercion import JsonBeforeValidator
 
-from ..base import ProcessedRow, task_registry
+from ..base import task_registry
 from ..tiles import TileConfig
 from .t2i import T2IInputRow, T2IProcessedRow, T2IProcessor, T2ITrainInputRow
 
@@ -29,19 +29,12 @@ class TiledT2IProcessor(T2IProcessor, TileConfig):
         layout = self.layout(self.patch_size * self.vae_scale_factor)
         specs = layout.token_specs(result["image_size"])
         size = specs[0].height * layout.stride, specs[0].width * layout.stride
-        negative: Any = result.get("negative")
-        tiles: list[ProcessedRow] = []
-        negative_tiles: list[ProcessedRow] = []
+        tiles: list[Any] = []
         if inputs is None:
-            shared: Any = {
-                key: value
-                for key, value in result.items()
-                if key not in ("clean_latents", "negative")
-            }
+            # Each tile carries the shared conditioning, including its negative.
+            shared: Any = {k: v for k, v in result.items() if k != "clean_latents"}
             shared["image_size"] = size
             tiles = [shared.copy() for _ in specs]
-            if negative is not None:
-                negative_tiles = [{**shared, **negative} for _ in specs]
         else:
             if len(inputs) != len(specs):
                 raise ValueError(
@@ -55,19 +48,19 @@ class TiledT2IProcessor(T2IProcessor, TileConfig):
                     raise ValueError(
                         f"Tile {index} image_size must match the layout size {size}."
                     )
-                tile_input = source.copy()
-                tile_input["image_size"] = size
-                tile: Any = await super().prepare_inference_row(tile_input)
-                tile_negative = tile.pop("negative", None)
-                tiles.append(tile)
-                if tile_negative is not None:
-                    negative_tiles.append({**tile, **tile_negative})
+                tiles.append(
+                    await super().prepare_inference_row({**source, "image_size": size})
+                )
         result["tiling"] = layout.model_dump()
         result["model_image_size"] = size
         result["tiles"] = tiles
+        negative: Any = result.get("negative")
         if negative is not None:
-            # ``get_negative_row`` overlays this dict, replacing ``tiles`` too.
-            result["negative"] = {**negative, "tiles": negative_tiles}
+            # The whole-image negative overlay also swaps in the negative tiles.
+            result["negative"] = {
+                **negative,
+                "tiles": [{**tile, **tile["negative"]} for tile in tiles],
+            }
         return result
 
     async def prepare_inference_row(

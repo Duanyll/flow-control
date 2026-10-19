@@ -157,7 +157,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
             else batch["_txt_ids"].expand(b, -1, -1)
         )
 
-        model_pred = self.transformer(
+        model_pred = self.module()(
             hidden_states=latent_model_input,
             timestep=timestep,
             guidance=guidance,
