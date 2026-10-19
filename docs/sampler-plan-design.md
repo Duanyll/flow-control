@@ -1,361 +1,676 @@
 # Sampler execution and extensions
 
-Updated 2026-09-12 for composable predictors with binding-local state.
+## Config Specs Examples
 
-`Sampler` owns the sigma grid, solver, start, transforms, guidance and projectors.
-The processor stores the tile layout in each processed row.
-`sample(model, requests, collector=...)` accepts a lazy iterable and yields completed
-`SampleRun` objects. Each request has its own row, negative row and RNG.
-The result exposes final latents through `run.ctx.latents` and the **executed**
-plan through `run.plan`; completion order may differ from submission order.
-
-The [row dictionary contract](row-contract.md) lists data fields, coordinate
-spaces and their producers/consumers. Execution state remains outside the row.
-
-## Execution
-
-1. Build the shifted/custom grid and solver plan. Resolution-dependent shift
-   reads `row["model_image_size"]` (the size one forward sees, e.g. a tile)
-   and falls back to `image_size`.
-2. Slice for SDEdit, then apply transforms using the request generator.
-3. Initialize latents at the resulting plan's first sigma.
-4. Bind the configured prediction tree once for this run. For each transition,
-   apply whole-image `pre_transition` projectors once.
-5. The solver calls its predictor with `yield from predict(request, ctx)`.
-   Each component evaluates its children and finishes its own calculation in
-   the same generator. Independent children join with `yield from gather(...)`;
-   the model leaf yields `ModelCall(row, timestep, variant)` objects.
-   `Executor` batches calls
-   across runs, using the same variant order on every rank. The adapter chunks
-   these calls by `model.micro_batch_size`, collates compatible inputs, and
-   falls back to sequential forwards when shapes differ.
-6. Child results return through the prediction tree: tiling stitches, CFG guides,
-   Momentum updates its EMA, in the order configured. Once the root returns a
-   whole-image velocity, apply `post_combine` projectors.
-7. Resume each solver with the velocity, pass the completed `StepRecord` to
-   the optional caller collector `(run, step)`, and advance private state.
-   Sampling itself keeps no step history. GRPO retains only stochastic
-   latents/log probabilities; serving uses the callback for step progress.
-
-`Transition` contains `(solver, sigma, sigma_next, eta)`. Execution position is
-`StepContext.item_index / num_items`; solver history lives in that context.
-Prediction history belongs to closures created by `bind(row, negative_row)`.
-Shared configuration objects hold no per-sample numerical state.
-SA retains its multi-evaluation generator and cross-request batching.
-
-The common execution protocol is `Calls[T]`: yield a list of model calls,
-receive a list of fp32 velocities in the same order, return `T`. Local `gather`
-joins any number of these generators, including nested joins and children that
-finish without a model call. It has no model, microbatch, or collective logic.
-Only `Executor` drives physical execution. `SampleRun` knows neither CFG branches
-nor tile geometry, and solvers need no special handling for either.
-
-The sampling stream admits new runs while its pending calls are below one
-adapter microbatch (one tiled run can exceed that window). Training `evaluate()`
-drives all supplied logical items together, with physical forwards still chunked.
-Each round's all-reduce checks whether **any** rank has work; drained ranks keep
-participating with empty lists. Unequal request, plan and tile counts are legal.
-All ranks must use the same configured variant list and adapter microbatch limit.
-The adapter aligns chunk/forward counts and dense/fallback decisions. A rank
-with no cached dummy receives a detached sample through a cold-start collective;
-subsequent rounds reuse its local cache. Under autograd, the executor combines
-zero-valued dummy dependencies across variants into a local real output. A
-training rank must have a local evaluation to carry that graph into backward.
-
-Precision is an interface contract: adapter computation may use bf16 or lower,
-but returns fp32 velocities. Start, guidance, projectors, tile accumulation,
-solver state and loss arithmetic use fp32. Low-precision stored latents, teacher
-predictions and GRPO records are promoted before arithmetic. Final sampler
-latents are cast to the input latent storage dtype. Each `guided_velocity()`
-evaluation gets fresh state even when several evaluations share one run.
-
-## Configuration examples
-
-SDEdit starts from a condition image's latents, selecting the first grid point
-at or below `strength`. Noise interpolation uses that selected sigma.
-`start.source` is a [condition-image selector](row-contract.md#condition-image-roles)
-defaulting to `noisy_latents`, or to `clean` once `strength` is set:
+### Simple Flux1 (20 Steps No CFG)
 
 ```jsonc
-"sampler": {
-  "start": {"strength": 0.6},
-  "steps": 30,
-  "guidance": 4.5
-}
-```
-
-An SDE window preserves each selected transition's eta and sets the others to
-zero. Window indices refer to the sliced execution plan; the terminal step is
-excluded. GRPO records stochastic steps automatically:
-
-```jsonc
-"rollout_sampler": {
-  "solver": {"type": "flow", "eta": 0.7},
-  "transforms": [{"type": "sde_window", "size": 3, "range": [2, 12]}]
-}
-```
-
-First-order CFG++ supports Flow and DDIM, using each solver's own coefficient
-and the transition's actual eta. It requires a negative branch even at scale
-one or below; unsupported solvers raise:
-
-```jsonc
-"guidance": {"type": "cfg_pp", "scale": 0.5}
-```
-
-Named branches separate condition selection from model weights. Existing LoRA
-adapters can be selected per step; a short list holds its last entry. `null`
-uses the current weights; `"base"` disables adapters. Comparing two variants on
-the same positive condition gives the constant-lambda signed combination:
-
-```jsonc
-"guidance": {
-  "type": "cfg",
-  "scale": 2.0,
-  "positive_variant": ["default", "default", "base"],
-  "negative_variant": "base",
-  "negative_condition": "positive"
-}
-```
-
-The variant context restores active adapters, disabled state, and parameter
-trainability, including checkpoint recomputation. An outer base/reference
-context takes precedence over branch choices. Loading/training two independent
-weight sets and learning a density-ratio classifier are separate work.
-
-Differential Diffusion is a projector consuming the whole-image inpaint mask
-and a selectable source, defaulting to the `inpaint` condition image:
-
-```jsonc
-"projectors": [{"type": "differential", "source": "inpaint"}]
-```
-
-It preserves the previous pre-transition mask schedule. `post_combine` is the
-second extension hook, called after each evaluation; no post-step blend is
-introduced.
-
-## Composition and state
-
-The existing `guidance` field now accepts a recursive prediction tree. Core
-nodes are `model`, `tiled`, `cfg`, and `cfg_pp`; the Momentum plugin adds
-`momentum`. All use `bind(row, negative_row) -> Predictor`, where
-`Predictor(request, ctx) -> Calls[Tensor]`. Configuration declares children and
-execution requirements; a bound predictor owns its runtime history. Actual
-evaluation latents always come from `request.latents`, including SA substeps
-and tile slices, rather than the step-start latent in `ctx`.
-
-CFG's default child is `model`; tiling is opt-in. A row whose processor wrote a
-tile layout (`tiled_t2i`) must be evaluated under a `tiled` node, and the model
-leaf rejects it otherwise. Put `tiled` inside CFG
-(`{"type": "cfg", "scale": 4.5, "inner": "tiled"}`) to guide the stitched whole
-image, with renorm after reconstruction, or place CFG inside tiling to guide
-each tile before stitching:
-
-```jsonc
-"guidance": {
-  "type": "tiled",
-  "inner": {"type": "cfg", "scale": 4.5, "renorm": true, "inner": "model"}
-}
-```
-
-Momentum composes with CFG instead of inheriting its configuration or methods:
-
-```jsonc
-"imports": ["flow_control.contrib.momentum_guidance"],
-"sampler": {
-  "guidance": {
-    "type": "momentum", "alpha": 0.5, "beta": 0.25,
-    "inner": {"type": "cfg", "scale": 4.5}
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 20,
+    "shift": "linear", // Shorthand for {"type": "linear"}
+    // "sigma_end": 0.0
+    // "transition": "euler" // Shorthand for {"type": "euler"}
   }
 }
 ```
 
-`Momentum(CFG(...))` tracks the combined velocity. Conversely,
-`CFG(Momentum(Model))` binds independent positive and negative histories, and
-`Tiled(Momentum(...))` binds one history per tile. All bindings are separate
-across samples, even when they share the same config instance. A branch's
-history follows that logical branch across a variant schedule. Momentum updates
-after every child evaluation, so SA's first transition updates twice. There is
-no branch-key dictionary or mutable state in the config. A single Momentum
-binding cannot be evaluated concurrently: ambiguous update ordering raises;
-independent branches must bind separate predictors.
-
-These orders are meaningful but need not be equivalent, particularly with
-renorm. CFG++ also follows the specified order: `Momentum(CFG++)` applies EMA
-extrapolation to CFG++'s effective velocity, while `CFG++(Momentum(Model))`
-first updates the two condition histories and then applies CFG++'s
-solver-dependent conversion. Neither denotes a separate momentum operation
-on just the guided term while keeping a raw unconditional term.
-
-CFG binds its child once per condition, so a child requesting another negative
-condition, including nested CFG, is rejected instead of guessing its meaning.
-CFG++ requires both conditions and a supported Flow/DDIM transition. Generic
-tree traversal collects child weight variants and detects stateful nodes for
-independent training/replay; the executor never dispatches on a concrete algorithm class.
-
-## Tiled evaluation
-
-Tiling is a processor task. Its settings are top-level processor fields:
+### With True CFG (50 Steps, CFG 2)
 
 ```jsonc
-"processor": {
-  "task": "tiled_t2i",
-  "preset": "flux1",
-  "tile_size": 1024,
-  "overlap": 128,
-  "save_negative": true
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 50,
+    "shift": "linear", // Shorthand for {"type": "linear"}
+    // "sigma_end": 0.0
+    "transition": {
+      "type": "euler",
+      "prediction": {
+        "type": "cfg",
+        "scale": 2.0,
+        // "prediction": "model" // Default to final model call
+      }
+    }
+  }
 }
 ```
 
-`TileConfig` in `processors/tiles.py` holds the square pixel `tile_size` and
-`overlap`; both must be multiples of the adapter's packed pixel stride
-(`patch_size * vae_scale_factor`), as must the image. Layouts are planned on
-the token grid by `utils/tiling.py` (`plan_tiles`): an axis no longer than the
-tile is one tile of its own length; otherwise tiles of exactly `tile_size` are
-spread evenly with the first and last flush to the edges, so adjacent overlaps
-are at least `overlap` and every origin is token-aligned.
-
-The processor preserves the full output `image_size` and writes:
-
-- `row["tiling"]`: a serialized `TileLayout` dictionary (`tile_size`, `overlap`, `stride`).
-- `row["model_image_size"]`: the actual tile size. Resolution-dependent shift
-  reads it, so a 4096-pixel output in 1024-pixel tiles gets the 1024-pixel grid.
-- `row["tiles"]`: complete row-major per-tile conditions. Inputs may supply a
-  `tiles` list with individual prompts and negative prompts; otherwise the
-  global encoded condition is shared by every tile without extra encoder calls
-  (the list may also be omitted entirely). With `save_negative=true` the
-  per-tile negative conditions go to `row["negative"]["tiles"]`, so
-  `get_negative_row` needs no tile logic.
-
-`TiledPrediction` in `samplers/tiling.py` owns tile expansion and merging for
-sampling and training trees that include it. It reads metadata, cuts
-`noisy_latents` on the token grid into per-tile rows (the tile's condition
-plus its latent slice and `image_size`), passes ordinary rows through, runs
-child predictors through the executor and adapter, and stitches their results
-with `stitch_tiles`. CFG may run inside or outside this node. Stitching feathers
-only edges shared with a neighbour (Hann ramps over the actual overlap) and
-normalizes by the total weight, so constant inputs reconstruct exactly; the
-solver draws one whole-image noise tensor. Adapters need no tile hooks and
-positional coordinates restart per tile.
-
-## Training and migration
-
-SFT/AWM/RAM/NFT/GRPO require a separate `train_predictor` tree. Nodes have no
-training-mode flag: omitting a wrapper is its no-op, and different parameters
-are ordinary configuration. Current, old/EMA, reference and precomputed targets
-all use this tree; rollout and validation keep their own sampler guidance.
+### SDEdit
 
 ```jsonc
-"rollout_sampler": {"steps": 20, "guidance": 4.5},
-"train_predictor": "model" // conditional model call, without CFG
+{
+  "sampler": [
+    { 
+      "type": "init_latent",
+      "from": "control[0]", // condition_image spec
+      "sigma_end": 0.5
+    },
+    {
+      "type": "grid",
+      "steps": 20,
+      "transition": {
+        "type": "euler",
+        "prediction": {
+          "type": "cfg",
+          "scale": 2.0
+        }
+      }
+    }
+  ] // Shorthand for {"type": "sequential", "steps": [...]}
+}
 ```
 
-Tiled processors need `"train_predictor": "tiled"` (conditional
-`Tiled(Model)`); the model leaf rejects a tiled row without it. To keep
-training CFG, specify for example `{"type":"cfg","scale":4.5,"inner":"tiled"}`
-or `{"type":"cfg","scale":4.5}` for ordinary rows. Training resolves its own
-negative conditions regardless of whether rollout needed them; missing required
-negative data raises. SFT dropout retains the original negative condition.
+### Time Travel (By JSON Config)
 
-`BasePrediction.velocity(row, timestep, negative_row)` evaluates any tree
-at an independent timestep, replacing the removed `conditional_velocity`.
-SFT and continuous training timesteps (`train_timesteps: continuous`, the RAM
-preset) use this through `TrainingPredictionMixin.predict_training`; they have
-no solver transition and use index 0 for variant schedules. Consequently CFG++
-is undefined there and raises. Grid training timesteps (`train_timesteps:
-grid`, the NFT and AWM presets) and GRPO replay instead use
-`make_run(plan=executed_plan, predictor=train_predictor)` plus
-`guided_velocity(x_t, grid_index)` to preserve actual sigma, successor sigma,
-eta, execution index and post-projectors.
-
-Training timesteps are independent, so stateful training nodes are rejected;
-Momentum would otherwise reset on every call and silently become identity.
-Stateful rollout trees remain valid, including with GRPO collection.
-
-GRPO's `training/grpo_sampling.py` owns collection, records, likelihood replay,
-and mean/std reconstruction. It records every supported step with eta > 0 and
-rejects empty stochastic trajectories. Flow/DDIM/CPS/
-Dance/Flash retain their existing likelihood/KL conventions, including Flash's
-Gaussian approximation when clipping noise. Inference solvers do not compute
-log probabilities. GRPO keeps the **actual rollout's recorded score** as the
-ratio denominator and evaluates the current/reference model through the training
-tree. Different trees can produce a non-unit initial ratio and nonzero clipfrac;
-the denominator is not recomputed to hide that difference. This preserves the
-existing GRPO surrogate (dimension-averaged log probabilities and the existing
-CPS/Flash conventions), rather than introducing a new importance-weight formula.
-All replay items/ranks share the configured training tree and grid length.
-
-Migration: add `train_predictor` explicitly: `"model"` for ordinary rows (what
-the examples use), `"tiled"` for tiled processors; copy the old rollout guidance
-into this field to preserve stateless NFT/GRPO behavior. Include tiling in both
-trees when training and sampling should use the same tile evaluation.
-
-Rollout prompts come from `RowCursor` (`chunked`: consecutive rows of the
-cost-grouped plan, no repeats within a pass over the dataset; `independent`: a
-fresh random subset per epoch) and `expand_rollouts` splits the `M × K` rollouts
-across ranks with a stride, so the i-th rollout of every rank comes from
-cost-adjacent prompts while every prompt keeps exactly K rollouts. Short plan
-groups are padded at plan time (`padding`) and the cursor skips the padding;
-there are no buckets. Pairwise rewards group completions by `key` in the
-reward executor; `expand_rollouts(whole_prompts=True)` keeps all K rollouts of a
-prompt on one rank and incomplete groups raise instead of comparing different
-prompts. See the data section of [modules.md](modules.md).
-
-Migration: move `rollout_recipe[0].transforms` into `rollout_sampler.transforms`
-and remove `record`; inference uses `sampler.start/transforms`. `recipe`, phases,
-inversion, `from_previous`, and core replay APIs have been removed. Old config
-keys fail validation. Regenerate editor schemas with `uv run flow-control schema`.
-CFG++ now owns its CFG parameters directly: replace
-`{"type":"cfg_pp","inner":{"type":"cfg","scale":0.5}}` with
-`{"type":"cfg_pp","scale":0.5}`. `inner` now means the predictor evaluated
-separately for each condition. Move Momentum's old inherited CFG fields under
-its `inner` CFG object. Predictor plugins register with `prediction_registry`
-and implement `bind`, replacing `guidance_registry` and `branches/combine`.
-For tiled configurations, move the old `sampler.tiled` fields to the processor
-and select `task="tiled_t2i"`; regenerate preprocessed rows to store their
-layout. Plain `t2i` handles ordinary text-to-image preprocessing.
-
-DDNM, dual-weight training, time travel and SamplingPipeline are deferred. The adapter
-exposes `model.micro_batch_size` as its physical forward limit. Remove obsolete
-`micro_batch_size` from inference and `validation_micro_batch_size` /
-`rollout_micro_batch_size` from trainers, moving their intended forward limit
-under `model`. `train_micro_batch_size` still counts logical loss items per
-backward; branch/tile expansion is independently chunked by the adapter.
-
-Validation retains the 21 pre-refactor solver fixtures unchanged, and includes
-cross-module tests for CFG++/replay, variants, tiling, and the rollout cursor, plus real
-distributed CPU/GPU worker harnesses.
-
-## Planned DDNM extensions
-
-These components are not implemented yet. The intended split is:
-
-- `DDNMProjector`: correct a whole-image clean estimate in `post_combine`, after
-  the prediction tree has returned its velocity. Tiling and guidance remain
-  ordinary predictor composition; the projector needs no tile knowledge.
-- `DDNMPlusSampler`: own the supported trajectory, noise adjustment and time
-  travel. It can restrict solver/parameterization choices to those for which its
-  formulas are defined; it need not support every registered solver.
-
-The projector's velocity conversion follows directly from this repository's
-flow convention, `x_sigma = (1 - sigma) * x0 + sigma * noise`. For `sigma > 0`,
-with linear degradation `A`, pseudoinverse `A_dagger`, and a measurement `y` in
-the **same coordinate convention**:
-
-```text
-x0_hat = x_sigma - sigma * v
-delta = A_dagger(y - A(x0_hat))
-x0_projected = x0_hat + delta
-v_projected = (x_sigma - x0_projected) / sigma = v - delta / sigma
+```jsonc
+{
+  "sampler": [
+    { 
+      "type": "init_latent",
+      "from": "control[0]", // condition_image spec
+      "sigma_end": 0.5
+    },
+    {
+      "type": "grid",
+      "steps": 5,
+      "sigma_end": 0.2
+    },
+    {
+      "type": "renoise",
+      "sigma_end": 0.3
+    },
+    {
+      "type": "grid",
+      "steps": 5,
+      "sigma_end": 0.0
+    }
+  ]
+}
 ```
 
-Thus the existing velocity-returning projector interface can express the
-clean-estimate projection without changing solver or executor interfaces.
-`sigma == 0` requires an explicit endpoint policy instead of this division.
-This algebra alone does not specify a DDNM+ transition or its noise covariance.
+### Tiled CFG
 
-The [row contract's DDNM boundary](row-contract.md#ddnm-inputoutput-boundary-planned)
-records the remaining observation, normalization and noise-unit requirements.
-Sampler registration and richer/data-dependent transition streams are still
-future work; existing replay and plan consumers need an explicit compatibility
-contract when those streams are introduced.
+```jsonc
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 20,
+    "shift": "linear", // Shorthand for {"type": "linear"}
+    // "sigma_end": 0.0
+    "transition": {
+      "type": "euler",
+      "prediction": {
+        "type": "tiled",
+        "prediction": {
+          "type": "cfg",
+          "scale": 2.0
+        },
+      }
+    }
+  }
+}
+```
+
+### Krea2 Piecewise CFG
+
+Dummy example, not real default parameters, just to show how to use piecewise CFG.
+
+```jsonc
+{
+  "sampler": [
+    {
+      "type": "grid",
+      "steps": 15,
+      "sigma_end": 0.2,
+      "transition": {
+        "type": "euler",
+        "prediction": {
+          "type": "cfg",
+          "scale": 2.0
+        }
+      }
+    },
+    {
+      "type": "grid",
+      "steps": 5,
+      "sigma_end": 0.0,
+      "transition": {
+        "type": "euler",
+        "prediction": {
+          "type": "cfg",
+          "scale": 3.5
+        }
+      }
+    }
+  ]
+}
+```
+
+### Differential Diffusion
+
+Projects between solver steps
+
+```jsonc
+{
+  "sampler": [
+    {
+      "type": "grid",
+      "steps": 20,
+      "transition": {
+        "type": "differential_diffusion",
+        "from": "inpaint", // condition_image spec
+        "transition": {
+          "type": "euler",
+          "prediction": {
+            "type": "cfg",
+            "scale": 2.0
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+### SDE and Flow-GRPO SDE Window
+
+```jsonc
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 20,
+    "transition": {
+      "type": "euler",
+      "eta": 0.9,
+      "prediction": {
+        "type": "cfg",
+        "scale": 2.0
+      }
+    }
+  }
+}
+```
+
+The SDE window mechanism selects different eta steps for different rows, so it can not be expressed in a `sequential` sampler. It registers a special `grid` sampler and modifies the `eta` parameter for transition calls.
+
+```jsonc
+{
+  "sampler": {
+    "type": "sde_window_grid",
+    "steps": 10,
+    "size": 3,
+    "window_range": [2, 7],
+    "eta": 0.9,
+    "transition": {
+      "type": "euler",
+      "eta": 0.0, // For steps in selected window, sde_window_grid will override this value with the window eta
+      "prediction": {
+        "type": "cfg",
+        "scale": 2.0
+      }
+    }
+  }
+}
+```
+
+Such mechanism can also be used to generate complex time-travel plans with custom grid.
+
+### DDNM
+
+At velocity:
+
+```jsonc
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 20,
+    "transition": {
+      "type": "euler",
+      "prediction": {
+        "type": "ddnm",
+        "from": "control[0]", // condition_image spec
+        "operation": "colorize", // Selects a matrix for projection
+        "prediction": {
+          "type": "cfg", // So DDNM is applied after CFG
+          "scale": 2.0
+        }
+      }
+    }
+  }
+}
+```
+
+At latent, between steps:
+
+```jsonc
+{
+  "sampler": {
+    "type": "grid",
+    "steps": 20,
+    "transition": {
+      "type": "ddnm_latent",
+      "from": "control[0]", // condition_image spec
+      "operation": "colorize", // Selects a matrix for projection
+      "transition": {
+        "type": "euler",
+        "prediction": {
+          "type": "cfg",
+          "scale": 2.0
+        }
+      }
+    }
+  }
+}
+```
+
+## Python Spec
+
+Every sampling node is a pydantic config whose `__call__` is a generator. Nodes talk only through the row and the call chain kept on it.
+
+### Row
+
+```python
+row["noisy_latents"]  # current x, advanced in place
+row["sigma"]          # current σ; the engine starts it at 1.0
+row["_generator"]     # per-row RNG for every stochastic node
+row["_frame"]         # innermost active Frame, i.e. the call chain
+```
+
+A row is one sample at one point. A concurrent branch gets its own derived row, which is built once and kept on the parent.
+
+```python
+def derived[T](row: Row, key: str, make: Callable[[], T]) -> T:
+    if key not in row:
+        row[key] = make()
+    return row[key]
+
+def follow(sub: Row, row: Row) -> Row:  # move a derived row to the parent's point and call chain
+    sub.update(noisy_latents=row["noisy_latents"], sigma=row["sigma"], _frame=row["_frame"])
+    return sub
+
+def data(row: Row) -> Row:  # start of a new point of the same sample: the row without runtime keys
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+```
+
+### Calls and Executor
+
+```python
+@dataclass(slots=True)
+class ModelCall:
+    row: Row
+    variant: str | None = None
+
+type Calls[T] = Generator[list[ModelCall], list[Tensor], T]
+
+executor = Executor(model, variants=variants(sampler))
+for row in executor.stream((row, sampler(row)) for row in rows):  # rows in completion order
+    ...
+# Asserted every round: a row object appears in at most one call.
+```
+
+### Node, Frame, caller
+
+```python
+class Frame:
+    def __init__(self, node: object, parent: Frame | None):
+        self.node, self.parent = node, parent
+        self.root: RootFrame = parent.root if parent else self
+
+    def snapshot(self) -> Frame: ...  # copy of the chain, tensors dropped; for replay
+
+type Observer = Callable[[Row, Frame], None]
+
+class RootFrame(Frame):  # placed on the row by the engine
+    def __init__(
+        self,
+        engine: object,
+        observers: Sequence[tuple[type, Observer]] = (),
+        on_call: Callable[[Row], None] | None = None,  # progress; see Progress
+    ): ...
+
+class BaseNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str
+    frame_type: ClassVar[type[Frame]] = Frame
+
+    @contextmanager
+    def enter(self, row: Row) -> Iterator[Frame]:
+        frame = row["_frame"] = self.frame_type(self, row["_frame"])
+        try:
+            yield frame
+        finally:
+            row["_frame"] = frame.parent
+        for kind, observer in frame.root.observers:  # only on normal return
+            if isinstance(self, kind):
+                observer(row, frame)
+
+def caller(row: Row, kind: type, who: str) -> Frame:
+    """Nearest enclosing frame whose node is a `kind`; otherwise raise, naming `who` and the chain."""
+```
+
+### Layers
+
+```python
+class BaseTrajectory(BaseNode):  # moves the row from its σ to wherever the node ends
+    def __call__(self, row: Row) -> Calls[None]:
+        with self.enter(row) as frame:
+            yield from self.run(row, frame)
+
+class StepFrame(Frame):
+    sigma: float
+    sigma_next: float
+    latents: Tensor
+    next_latents: Tensor
+    velocity: Tensor | None  # the step's last velocity; never stored on the row
+
+class BaseTransition(BaseNode):  # one step: row σ -> sigma_next
+    frame_type = StepFrame
+
+    def __call__(self, row: Row, sigma_next: float) -> Calls[None]:
+        with self.enter(row) as step:
+            step.sigma, step.sigma_next = row["sigma"], sigma_next
+            step.latents, step.velocity = row["noisy_latents"], None
+            yield from self.run(row, step)
+            assert row["sigma"] == sigma_next
+            step.next_latents = row["noisy_latents"]
+
+class BasePrediction(BaseNode):  # velocity at the row's point; the row does not move
+    def __call__(self, row: Row) -> Calls[Tensor]:
+        with self.enter(row) as frame:
+            return (yield from self.run(row, frame))
+
+Trajectory = Annotated[BaseTrajectory, RegistryUnion(trajectory_registry, "type", list_as=("sequential", "steps"))]
+Transition = Annotated[BaseTransition, RegistryUnion(transition_registry, "type")]  # "euler"
+Prediction = Annotated[BasePrediction, RegistryUnion(prediction_registry, "type")]  # "model"
+```
+
+### Trajectory Nodes
+
+`sigma_end` is the σ the row holds when the node returns. Inversion is a `grid` whose `sigma_end` is above the row's σ.
+
+```python
+class GridFrame(Frame):
+    sigmas: list[float]
+    index: int
+
+@trajectory_registry.register("grid")
+class Grid(BaseTrajectory):
+    type: Literal["grid"] = "grid"
+    steps: int = 50
+    sigma_end: float = 0.0
+    shift: Shift = ConstantShift()
+    custom_sigmas: list[float] | None = None  # skips shift; must run from the row σ to sigma_end
+    transition: Transition = Euler()
+    frame_type = GridFrame
+
+    def sigmas(self, row: Row) -> list[float]:
+        start, end = row["sigma"], self.sigma_end
+        if self.custom_sigmas is not None:
+            return check_endpoints(self.custom_sigmas, start, end)
+        curve = self.shift.curve(row, num_steps=round(self.steps / abs(start - end)))  # full 1 -> 0 steps
+        u = torch.linspace(curve.inverse(start), curve.inverse(end), self.steps + 1)
+        return [start, *curve(u[1:-1]).tolist(), end]
+
+    def run(self, row: Row, grid: GridFrame) -> Calls[None]:
+        grid.sigmas = self.sigmas(row)
+        for grid.index in range(self.steps):
+            yield from self.step(row, grid)(row, grid.sigmas[grid.index + 1])
+
+    def step(self, row: Row, grid: GridFrame) -> BaseTransition:
+        return self.transition
+
+class SdeWindowFrame(GridFrame):
+    window: tuple[int, int]
+
+@trajectory_registry.register("sde_window_grid")
+class SdeWindowGrid(Grid):
+    type: Literal["sde_window_grid"] = "sde_window_grid"
+    size: int
+    window_range: tuple[int, int] | None = None
+    eta: float
+    frame_type = SdeWindowFrame
+
+    def run(self, row: Row, grid: SdeWindowFrame) -> Calls[None]:
+        grid.window = select_sde_window(self.steps, self.size, self.window_range, row["_generator"])
+        yield from super().run(row, grid)
+
+    def step(self, row: Row, grid: SdeWindowFrame) -> BaseTransition:
+        start, end = grid.window
+        return self._sde if start <= grid.index < end else self.transition
+
+    @cached_property
+    def _sde(self) -> BaseTransition:  # setup rejects a transition without `eta`
+        return self.transition.model_copy(update={"eta": self.eta})
+
+@trajectory_registry.register("sequential")
+class Sequential(BaseTrajectory):
+    type: Literal["sequential"] = "sequential"
+    steps: list[Trajectory]
+
+    def run(self, row: Row, frame: Frame) -> Calls[None]:
+        for child in self.steps:
+            yield from child(row)
+
+@trajectory_registry.register("renoise")
+class Renoise(BaseTrajectory):  # forward process x_σ -> x_σend for σend >= σ; no model call
+    type: Literal["renoise"] = "renoise"
+    sigma_end: float
+
+    def run(self, row: Row, frame: Frame) -> Calls[None]:
+        a, b = row["sigma"], self.sigma_end
+        if b == a:
+            return
+        c = (1 - b) / (1 - a)
+        row["noisy_latents"] = c * row["noisy_latents"] + math.sqrt(b**2 - (c * a) ** 2) * randn(row)
+        row["sigma"] = b
+        yield from ()
+
+@trajectory_registry.register("init_latent")
+class InitLatent(BaseTrajectory):  # x = source at σ = 0, then renoise
+    type: Literal["init_latent"] = "init_latent"
+    source: ConditionImageSpec = Field(alias="from")
+    sigma_end: float = 1.0
+
+    def run(self, row: Row, frame: Frame) -> Calls[None]:
+        row["noisy_latents"] = ConditionImage.parse(self.source).latents(row).float()
+        row["sigma"] = 0.0
+        yield from Renoise(sigma_end=self.sigma_end)(row)
+```
+
+Multistep solvers (DPM++, UniPC) are `Grid` subclasses, and their history is a local variable of `run`.
+
+### Shift
+
+```python
+class Curve(Protocol):  # σ = F(u); invertible on [0, 1]
+    def __call__(self, u: Tensor) -> Tensor: ...
+    def inverse(self, sigma: float) -> float: ...
+
+class BaseShift(BaseModel):
+    def curve(self, row: Row, num_steps: int) -> Curve: ...
+    # F = terminal stretch ∘ (s·u / (1 + (s − 1)·u)); the stretch scale comes from the full num_steps grid
+```
+
+Acceptance check: for every shift, a `Grid(steps=n)` from 1 to 0 must produce exactly the sigmas of the current `Sampler.make_sigmas`.
+
+### Transition Nodes
+
+```python
+@transition_registry.register("euler")
+class Euler(BaseTransition):
+    type: Literal["euler"] = "euler"
+    eta: float = 0.0
+    prediction: Prediction = Model()
+
+    def run(self, row: Row, step: StepFrame) -> Calls[None]:
+        step.velocity = yield from self.prediction(row)
+        mean, std = euler_moments(row["noisy_latents"], step.velocity, step.sigma, step.sigma_next, self.eta)
+        row["noisy_latents"] = mean + std * randn(row) if self.eta else mean
+        row["sigma"] = step.sigma_next
+
+@transition_registry.register("differential_diffusion")
+class DifferentialDiffusion(BaseTransition):  # project, then step
+    type: Literal["differential_diffusion"] = "differential_diffusion"
+    source: ConditionImageSpec = Field("inpaint", alias="from")
+    transition: Transition = Euler()
+
+    def run(self, row: Row, step: StepFrame) -> Calls[None]:
+        row["noisy_latents"] = blend_by_mask(row, self.source, step.sigma)
+        yield from self.transition(row, step.sigma_next)
+```
+
+### Prediction Nodes
+
+```python
+@prediction_registry.register("model")
+class Model(BasePrediction):
+    type: Literal["model"] = "model"
+    variant: str | None = None  # a model variant (model-variants.md); None: the engine's
+
+    def run(self, row: Row, frame: Frame) -> Calls[Tensor]:
+        (velocity,) = yield [ModelCall(row, self.variant)]
+        return velocity
+
+@prediction_registry.register("cfg")
+class Cfg(BasePrediction):
+    type: Literal["cfg"] = "cfg"
+    scale: float = 1.0
+    prediction: Prediction = Model()
+    negative: Prediction | None = None  # defaults to `prediction`
+    negative_condition: Literal["negative", "positive"] = "negative"
+
+    def run(self, row: Row, frame: Frame) -> Calls[Tensor]:
+        if self.scale == 1.0:
+            return (yield from self.prediction(row))
+        uncond = follow(derived(row, "_uncond", lambda: uncond_row(row, self.negative_condition)), row)
+        cond, neg = yield from gather([self.prediction(row), (self.negative or self.prediction)(uncond)])
+        return self.guide(row, cond, neg)
+
+    def guide(self, row: Row, cond: Tensor, neg: Tensor) -> Tensor:
+        return neg + self.scale * (cond - neg)
+
+@prediction_registry.register("cfg_pp")
+class CfgPlusPlus(Cfg):
+    def guide(self, row: Row, cond: Tensor, neg: Tensor) -> Tensor:
+        step = caller(row, Euler, who="cfg_pp: needs the step's sigma_next and eta")
+        return neg + kappa(step.sigma, step.sigma_next, step.node.eta) * self.scale * (cond - neg)
+
+@prediction_registry.register("tiled")
+class Tiled(BasePrediction):
+    type: Literal["tiled"] = "tiled"
+    prediction: Prediction = Model()
+
+    def run(self, row: Row, frame: Frame) -> Calls[Tensor]:
+        layout = TileLayout.of(row)
+        tiles = derived(row, "_tiles", lambda: [tile_row(row, spec) for spec in layout])
+        for tile, spec in zip(tiles, layout, strict=True):
+            follow(tile, row)["noisy_latents"] = spec.crop(row["noisy_latents"])
+        return layout.blend((yield from gather([self.prediction(tile) for tile in tiles])))
+
+@prediction_registry.register("ddnm")
+class Ddnm(BasePrediction):  # replace the range-space part of x̂0
+    type: Literal["ddnm"] = "ddnm"
+    source: ConditionImageSpec = Field(alias="from")
+    operation: DdnmOperation
+    prediction: Prediction = Model()
+
+    def run(self, row: Row, frame: Frame) -> Calls[Tensor]:
+        velocity = yield from self.prediction(row)
+        x0 = row["noisy_latents"] - row["sigma"] * velocity
+        return velocity_for_x0(row, self.operation.project(x0, ConditionImage.parse(self.source).latents(row)))
+```
+
+### Static Walk
+
+Setup checks and collective requirements are queries over the config tree.
+
+```python
+def walk(tree: BaseModel) -> Iterator[BaseModel]: ...  # every node: fields, lists, dicts
+
+def variants(tree: BaseModel) -> list[str | None]:  # same order on every rank
+    return list(dict.fromkeys(n.variant for n in walk(tree) if isinstance(n, Model)))
+
+cfg = next(n for n in walk(sampler) if isinstance(n, Cfg))  # serving's guidance slider
+```
+
+### Progress
+
+The number of model calls can depend on the row or on runtime choices, so progress is only an estimate. Serving reports it; training does not report per-sample progress.
+
+```python
+class BaseNode:
+    def estimate_calls(self, row: Row) -> int:  # default: sum over the direct child nodes
+        return sum(child.estimate_calls(row) for child in children(self))
+
+class Model:
+    def estimate_calls(self, row: Row) -> int:
+        return 1
+
+class Grid:
+    def estimate_calls(self, row: Row) -> int:
+        return self.steps * self.transition.estimate_calls(row)
+
+class Cfg:
+    def estimate_calls(self, row: Row) -> int:
+        cond = self.prediction.estimate_calls(row)
+        return cond if self.scale == 1.0 else cond + (self.negative or self.prediction).estimate_calls(row)
+
+class Tiled:
+    def estimate_calls(self, row: Row) -> int:
+        return len(TileLayout.of(row)) * self.prediction.estimate_calls(row)
+
+# Executor, after each forward; derived rows share their parent's root
+for call in calls:
+    if (on_call := call.row["_frame"].root.on_call) is not None:
+        on_call(call.row)
+
+# Serving: one counter per request
+total, done = sampler.estimate_calls(row), 0
+
+def on_call(_: Row) -> None:
+    nonlocal done
+    done += 1
+    report_progress(min(done / total, 1.0), f"{done}/{total} model calls")
+
+row["_frame"] = RootFrame(self, on_call=on_call)
+```
+
+### Consumers
+
+The consumer looks up what it needs and validates it. Nothing is exported specially for it.
+
+```python
+# Engine: set the starting point and the chain root, then stream.
+for row in rows:
+    row.update(noisy_latents=noise(row), sigma=1.0, _generator=generator(row),
+               _frame=RootFrame(self, observers=self.observers))
+
+# FLUX.3 distilled (flow map) adapter
+step = caller(row, Euler, who="flux3 distilled: a flow map needs the step's target sigma")
+if step.node.eta:
+    raise ValueError("flux3 distilled is a flow map: deterministic Euler steps only.")
+target_timestep = step.sigma_next
+
+# Epoch-dependent reward: the engine wrote row["epoch"] when the rollout was produced.
+# Reward components read it from the row; remote rewards get it via _row_fields.
+
+# GRPO: observers = [(Euler, record)] on the rollout RootFrame
+def record(row: Row, step: StepFrame) -> None:
+    if step.node.eta > 0:
+        point = {"noisy_latents": step.latents, "sigma": step.sigma,
+                 "next_latents": step.next_latents, "_frame": step.snapshot()}
+        point["log_prob"] = step_log_prob(point, step.velocity)
+        row.setdefault("trajectory", []).append(point)
+
+def replay(rollout: Row, recorded: Row) -> Calls[Tensor]:  # one new row per replayed point
+    point = {**data(rollout), **recorded}
+    velocity = yield from point["_frame"].node.prediction(point)
+    return step_log_prob(point, velocity)
+
+# Training (SFT / NFT / AWM): a training point is a new row whose chain holds no step.
+point = {**data(rollout), "noise": eps, "sigma": t, "_frame": RootFrame(self),
+         "noisy_latents": (1 - t) * rollout["clean_latents"] + t * eps}
+velocity = yield from self.train_prediction(point)  # cfg_pp and flux3 distilled raise here
+```
