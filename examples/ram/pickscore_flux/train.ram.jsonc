@@ -15,7 +15,6 @@
   "experiment_name": "flux_pickscore_ram",
 
   "rollout_storage_device": "device",
-  "precompute_aux_model_outputs": true,
 
   // 12 x 4 = 48 unique prompts, x24 rollouts = 1152 rollouts.
   "num_prompts_per_epoch": 48,
@@ -42,30 +41,24 @@
   "train_epochs": 500,
   "checkpoint_interval": 10,
   "validation_epochs": 10,
+  "validation_variants": ["ema"],
   "max_checkpoints": 10,
   "validation_log_images": 64,
 
   "model": {
     "arch": "flux1",
     "type": "base",
-    "peft_lora_rank": 64,
-    "peft_lora_config": {
-      "lora_alpha": 128,
-      "init_lora_weights": "gaussian",
-      "target_modules": [
-        "attn.to_k",
-        "attn.to_q",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_k_proj",
-        "attn.add_q_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-        "ff.net.0.proj",
-        "ff.net.2",
-        "ff_context.net.0.proj",
-        "ff_context.net.2",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
+      "old": {
+        "type": "ema",
+        "of": "default",
+        "every": "epoch",
+        "decay": 0.9,
+        "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.01 },
+      },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -77,22 +70,11 @@
   "train_predictor": "model",
 
   "rollout_sampler": {
-    // FLUX distilled: no true CFG -> default guidance (vs RAM's SD3 CFG 2.0).
+    // FLUX distilled: no true CFG -> no cfg node (vs RAM's SD3 CFG 2.0).
+    "type": "grid",
     "steps": 20,
-    "shift": { "type": "linear" },
-    "solver": { "type": "flow", "eta": 0.0 },
-  },
-
-  "ema_old": {
-    "decay": 0.9,
-    "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.01 },
-    "interval": 1,
-  },
-
-  "ema": {
-    "decay": 0.9,
-    "warmup": { "type": "standard" },
-    "interval": 1,
+    "shift": "linear",
+    "transition": { "type": "euler", "eta": 0.0 },
   },
 
   "reward": {
@@ -122,10 +104,7 @@
     "limit": 256,
   },
 
-  "validation_sampler": {
-    "steps": 28,
-    "shift": { "type": "linear" },
-  },
+  "validation_sampler": { "type": "grid", "steps": 28, "shift": "linear" },
 
   "processor": {
     "task": "t2i",

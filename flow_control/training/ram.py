@@ -2,7 +2,7 @@
 
 :class:`RamObjective` is the math, :class:`RamTrainer` the
 :class:`~flow_control.training.endpoint.EndpointTrainer` preset. Rollouts are
-sampled by the lagged EMA policy, which also supplies ``v_old``; training
+sampled by the ``old`` variant, which also supplies ``v_old``; training
 timesteps are continuous power-law draws, ``K = 8`` per endpoint (reference
 ``num_loss_targets_per_sample``). The reference draws them on the scheduler's
 *shifted* grid, so a faithful config sets ``train_timesteps.weighting.shift``
@@ -14,15 +14,13 @@ from typing import Literal
 
 import torch
 
-from .ema import EMAConfig, LinearRampWarmup
+from flow_control.samplers import Row
+
 from .endpoint import (
     BaseObjective,
     EndpointTrainer,
     LossOutput,
     Objective,
-    PolicyRole,
-    PolicyVelocities,
-    TrainPoint,
     objective_registry,
 )
 from .mixins import trainer_registry
@@ -55,23 +53,26 @@ class RamObjective(BaseObjective):
     adv_clip_max: float | None = None
     """Optional symmetric advantage clip; the reference does not clip."""
 
-    def rollout_policy(self) -> Literal["current", "old"]:
+    def rollout_variant(self) -> str:
         return "old"
 
-    def required_policies(self) -> frozenset[PolicyRole]:
+    def required_variants(self) -> frozenset[str]:
         return frozenset({"old", "ref"})
 
-    def compute(self, point: TrainPoint, velocities: PolicyVelocities) -> LossOutput:
-        forward_prediction = velocities.current
-        base_prediction = self._require(velocities, "ref")
-        old_prediction = self._require(velocities, "old")
+    def compute(
+        self, point: Row, current: torch.Tensor, aux: dict[str, torch.Tensor]
+    ) -> LossOutput:
+        forward_prediction = current
+        base_prediction = aux["ref"].detach()
+        old_prediction = aux["old"].detach()
+        x0 = point["clean_latents"]
 
-        adv = point.advantage
+        adv = point["advantage"]
         if self.adv_clip_max is not None:
             adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
-        scaled_adv = self.reward_multiplier * adv.view(-1, *([1] * (point.x0.ndim - 1)))
+        scaled_adv = self.reward_multiplier * adv.view(-1, *([1] * (x0.ndim - 1)))
 
-        reward_direction = point.noise - point.x0
+        reward_direction = point["noise"] - x0
         target = base_prediction + scaled_adv * (reward_direction - old_prediction)
         loss = ((forward_prediction - target.detach()) ** 2).mean()
 
@@ -92,11 +93,6 @@ class RamTrainer(EndpointTrainer):
     train_timesteps: TrainTimesteps = ContinuousTimesteps(
         count=8, weighting=PowerLawTimestepWeighting(alpha=1.0)
     )
-    ema_old: EMAConfig = EMAConfig(
-        decay=0.9, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.01)
-    )
-    """Old/lagged EMA config (stepped once per epoch): samples endpoints and
-    supplies ``v_old`` in the loss target."""
     clip_grad_norm: float = 0.0
 
 
@@ -105,24 +101,21 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
     shape = (1, 4, 6, 6)
-    point = TrainPoint(
-        x0=torch.randn(shape),
-        noise=torch.randn(shape),
-        t=torch.tensor([0.7]),
-        advantage=torch.tensor([1.5]),
+    x0, noise = torch.randn(shape), torch.randn(shape)
+    point: Row = {
+        "clean_latents": x0,
+        "noise": noise,
+        "sigma": 0.7,
+        "noisy_latents": 0.3 * x0 + 0.7 * noise,
+        "advantage": torch.tensor([1.5]),
+    }
+    current = torch.randn(shape, requires_grad=True)
+    aux = {"old": torch.randn(shape), "ref": torch.randn(shape)}
+    out = RamObjective().compute(point, current, aux)
+    (grad,) = torch.autograd.grad(out.loss, current)
+    assert out.loss.ndim == 0 and out.loss.requires_grad
+    assert all(m.ndim == 0 and not m.requires_grad for m in out.metrics.values())
+    print(
+        f"|grad|={grad.norm().item():.4f}",
+        {k: round(v.item(), 4) for k, v in out.metrics.items()},
     )
-    velocities = PolicyVelocities(
-        current=torch.randn(shape, requires_grad=True),
-        old=torch.randn(shape),
-        ref=torch.randn(shape),
-    )
-    for objective in (RamObjective(),):
-        out = objective.compute(point, velocities)
-        (grad,) = torch.autograd.grad(out.loss, velocities.current)
-        assert out.loss.ndim == 0 and out.loss.requires_grad
-        assert all(m.ndim == 0 and not m.requires_grad for m in out.metrics.values())
-        print(objective, f"required={sorted(objective.required_policies())}")
-        print(
-            f"|grad|={grad.norm().item():.4f}",
-            {k: round(v.item(), 4) for k, v in out.metrics.items()},
-        )

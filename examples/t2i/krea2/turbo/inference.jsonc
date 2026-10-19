@@ -6,24 +6,14 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "krea2",
-    "type": "turbo"
-  },
+  "model": { "arch": "krea2", "type": "turbo" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_krea2_turbo_t2i"
   },
-  "sampler": {
-    // Krea 2 Turbo is 8-step distilled and guidance-free: default guidance (cfg
-    // scale 1.0, no negative batch). Distilled path uses a fixed shift mu=1.15
-    // -> constant shift exp(1.15)=3.158.
-    "steps": 8,
-    "shift": {
-      "type": "constant",
-      "shift_value": 3.158
-    }
-  },
+  // Krea 2 Turbo is 8-step distilled and guidance-free: no cfg node (no negative
+  // batch). Distilled path uses a fixed shift mu=1.15 -> constant shift exp(1.15)=3.158.
+  "sampler": { "type": "grid", "steps": 8, "shift": 3.158 },
   "processor": {
     "task": "t2i",
     "preset": "krea2_turbo"

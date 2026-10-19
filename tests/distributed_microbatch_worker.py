@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from functools import partial
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -15,8 +16,15 @@ from flow_control.data import (
     groups_plain,
     is_padding,
 )
-from flow_control.samplers import Executor, Sampler, SampleRequest
-from flow_control.samplers.guidance import CfgPlusPlusGuidance, ClassifierFreeGuidance
+from flow_control.samplers import (
+    Cfg,
+    CfgPlusPlus,
+    Executor,
+    Grid,
+    RootFrame,
+    Row,
+    variants,
+)
 
 
 def make_batch(tokens: int, value: float = 0.0) -> Batch:
@@ -26,6 +34,10 @@ def make_batch(tokens: int, value: float = 0.0) -> Batch:
         "clean_latents": torch.zeros_like(latents),
         "noisy_latents": latents,
     }
+
+
+def point(batch: Any, sigma: float = 1.0) -> Row:
+    return {**batch, "sigma": sigma, "_generator": None, "_frame": RootFrame(None)}
 
 
 class DistributedFakeAdapter(BaseModelAdapter[ModelMixin, Batch]):
@@ -163,50 +175,48 @@ def test_unequal_counts_pad_with_dummy_forwards(rank: int) -> None:
 
 
 def test_mixed_cfg_is_globally_synchronized(rank: int) -> None:
-    # A rank with a negative row and one without issue the same forward
-    # sequence: one predict_velocity_batched per variant per round, carrying
-    # whatever branches the rank has (two here, one there); equal physical
-    # forward counts are the adapter's job, so the fake only sees its own list.
-    sampler = Sampler(guidance=ClassifierFreeGuidance(scale=2.0), steps=1)
+    # A guided rank and an unguided one issue the same forward sequence: one
+    # predict_velocity_batched per variant per round, carrying whatever
+    # branches the rank has (two here, one there); equal physical forward
+    # counts are the adapter's job, so the fake only sees its own list.
     model = DistributedSamplerModel()
-    batch = make_batch(1, value=3.0)
-    negative_row = make_batch(1, value=1.0) if rank == 0 else None
-    run = sampler.make_run(SampleRequest(batch, negative_row), plan=sampler.plan(batch))
-    Executor(model, sampler.variant_keys()).evaluate(
-        [run.guided_velocity(batch["noisy_latents"], 0)]
-    )
+    batch: Any = {
+        **make_batch(1, value=3.0),
+        "negative": {"clean_latents": torch.full((1, 1, 2), 1.0)},
+    }
+    prediction = Cfg(scale=2.0 if rank == 0 else 1.0)
+    Executor(model, variants(prediction)).evaluate([prediction(point(batch))])
     assert model.calls == ([2] if rank == 0 else [1])
 
-    # CFG++ cannot fall back to a conditional-only velocity: a request without
-    # its negative row is rejected when the run is built, before any
+    # CFG++ cannot fall back to a conditional-only velocity: a row without
+    # its negative is rejected when the branch rows are built, before any
     # collective, so no rank can be left waiting in a forward.
-    sampler = Sampler(guidance=CfgPlusPlusGuidance(), steps=1)
     try:
-        sampler.make_run(SampleRequest(batch), plan=sampler.plan(batch))
+        Executor(model).evaluate([CfgPlusPlus()(point(make_batch(1, value=3.0)))])
     except ValueError as error:
-        assert "negative row" in str(error)
+        assert "negative" in str(error)
     else:
-        raise AssertionError("Missing CFG++ negative row was not rejected.")
+        raise AssertionError("Missing CFG++ negative was not rejected.")
 
 
 def test_stream_drains_unequal_request_counts(rank: int) -> None:
-    # Rank 0 streams two requests and rank 1 one. The executor keeps rank 1 in
-    # the extra round with an empty call list and the adapter fills it with a
+    # Rank 0 streams two rows and rank 1 one. The executor keeps rank 1 in the
+    # extra round with an empty call list and the adapter fills it with a
     # dummy forward, so both ranks run two forwards and neither hangs; a
     # one-step Euler run with velocity == latents lands on zero.
     adapter = make_adapter(1)
-    sampler = Sampler(steps=1)
+    sampler = Grid(steps=1)
     values = [3.0, 5.0] if rank == 0 else [3.0]
     with torch.no_grad():
-        runs = list(
-            sampler.sample(
-                adapter, [SampleRequest(row=make_batch(4, value)) for value in values]
+        rows = list(
+            Executor(adapter, variants(sampler)).stream(
+                (row, sampler(row)) for row in [point(make_batch(4, v)) for v in values]
             )
         )
     assert adapter._forward_batch_sizes == [1, 1]
-    assert len(runs) == len(values)
-    for run in runs:
-        torch.testing.assert_close(run.ctx.latents, torch.zeros(1, 4, 2))
+    assert len(rows) == len(values)
+    for row in rows:
+        torch.testing.assert_close(row["noisy_latents"], torch.zeros(1, 4, 2))
 
 
 class _TinyStore:

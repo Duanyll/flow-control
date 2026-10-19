@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from flow_control.adapters import ModelAdapter
 from flow_control.processors import Processor
-from flow_control.samplers import Sampler
+from flow_control.samplers import Trajectory
 from flow_control.utils.device import default_device
 from flow_control.utils.types import TorchDevice
 
@@ -23,9 +23,11 @@ class ServeConfig(BaseModel):
 
     model: ModelAdapter
     processor: Processor
-    sampler: Sampler
+    sampler: Trajectory
+    seed: int = 42
 
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
     checkpoint_root: str | None = None
-    use_ema: bool = False
+    variant: str | None = None
+    """The model variant that serves requests naming none (docs/model-variants.md)."""

@@ -8,12 +8,12 @@ Whether a dataset is preprocessed online is decided by the store type alone
 """
 
 import asyncio
+from collections.abc import Sequence
 from functools import partial
 from typing import Literal, cast
 
 import torch
 
-from flow_control.adapters.base import Batch
 from flow_control.data import (
     COST,
     KEY,
@@ -34,7 +34,7 @@ from flow_control.data import (
 )
 from flow_control.processors import Processor
 from flow_control.processors.base import ProcessedRow
-from flow_control.samplers import Sampler, SampleRequest, derive_seed
+from flow_control.samplers import Observer, RootFrame, derive_seed
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_move_to_device
 
@@ -190,22 +190,26 @@ class DataMixin(BaseTrainer):
         )
         return cast(ProcessedRow, self.processor.resample(row, generator))
 
-    def build_sample_request(
+    def start_row(
         self,
-        sampler: Sampler,
-        row: Batch,
+        row: Row,
         generator: torch.Generator,
-    ) -> SampleRequest:
-        negative_row = (
-            self.processor.get_negative_row(cast(ProcessedRow, row))
-            if sampler.guidance.requires_negative(sampler.steps)
-            else None
+        dtype: torch.dtype,
+        observers: Sequence[tuple[type, Observer]] = (),
+    ) -> Row:
+        """``row`` at σ = 1: fresh fp32 latents drawn in ``dtype``, its RNG and the chain root."""
+        row.update(
+            noisy_latents=self.processor.initialize_latents(
+                cast(ProcessedRow, row),
+                generator=generator,
+                device=self.device,
+                dtype=dtype,
+            ).float(),
+            sigma=1.0,
+            _generator=generator,
+            _frame=RootFrame(self, observers),
         )
-        return SampleRequest(
-            row=row,
-            negative_row=cast(Batch | None, negative_row),
-            generator=generator,
-        )
+        return row
 
 
 if __name__ == "__main__":

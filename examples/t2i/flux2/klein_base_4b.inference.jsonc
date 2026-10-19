@@ -23,10 +23,12 @@
     "path": "./demo/preprocess_flux2_klein_4b_t2i"
   },
   "sampler": {
+    "type": "grid",
     "steps": 50,
-    "guidance": { "type": "cfg", "scale": 3.5 },
-    "shift": {
-      "type": "flux2"
+    "shift": "flux2",
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 3.5 }
     }
   },
   "processor": {

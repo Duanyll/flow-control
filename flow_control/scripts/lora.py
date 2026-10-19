@@ -1,12 +1,11 @@
-"""Offline LoRA conversion and fusion backed by Diffusers and PEFT."""
+"""Offline LoRA conversion backed by Diffusers and PEFT; training itself uses native slots."""
 
 from __future__ import annotations
 
-import copy
 import json
 import math
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -24,26 +23,25 @@ from diffusers.loaders.lora_base import (
     LoraBaseMixin,
     _fetch_state_dict,
 )
+from peft import LoraConfig
 from peft.tuners.lora.layer import LoraLayer
-from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
+from peft.utils import get_peft_model_state_dict
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_model_state_dict,
-    get_optimizer_state_dict,
-    set_model_state_dict,
-    set_optimizer_state_dict,
-)
 
 from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
-from flow_control.training.ema import EMAConfig, EMAOptimizer
+from flow_control.adapters.variants import (
+    EmaVariant,
+    LoraVariant,
+    VariantModule,
+    lora_metadata,
+    lora_pairs,
+)
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-CheckpointWeights = Literal["current", "ema", "ema_old"]
 
 _DIFFUSERS_LORA_LOADERS: dict[str, type[LoraBaseMixin]] = {}
 
@@ -122,181 +120,90 @@ def _validate_fuse_scale(scale: float) -> None:
 
 
 def _make_model_adapter(
-    config: dict[str, Any],
-    *,
-    include_training_adapter: bool,
+    config: dict[str, Any], *, variants: bool, device: str = "cpu"
 ) -> BaseModelAdapter:
+    """The config's transformer; ``variants=False`` is a plain copy PEFT can wrap."""
     raw_model = config.get("model")
     if not isinstance(raw_model, dict):
         raise ValueError("The config must contain a model object.")
-
-    model_config = copy.deepcopy(raw_model)
-    hf_model = model_config.get("hf_model")
-    if not isinstance(hf_model, dict) or hf_model.get("library") != "diffusers":
-        raise ValueError(
-            "The first LoRA CLI implementation supports Diffusers transformers "
-            "only (model.hf_model.library must be 'diffusers')."
-        )
+    adapter = parse_model_adapter(
+        raw_model if variants else {**raw_model, "variants": {}, "trainable": False}
+    )
     # A CPU-only converter must not inherit a serving/training CUDA device map.
-    hf_model["device_memory_distribution"] = None
-
-    if not include_training_adapter:
-        model_config["peft_lora_rank"] = 0
-        model_config["all_trainable"] = False
-        model_config["extra_trainable_modules"] = []
-
-    adapter = parse_model_adapter(model_config)
-    if include_training_adapter:
-        _validate_training_lora(adapter)
-    adapter.load_transformer(torch.device("cpu"))
-    if not hasattr(adapter.transformer, "load_lora_adapter"):
-        raise TypeError(
-            f"{type(adapter.transformer).__name__} does not expose Diffusers "
-            "load_lora_adapter()."
-        )
-    if include_training_adapter:
-        _validate_pure_lora_parameters(adapter.transformer)
+    adapter.hf_model.device_memory_distribution = None
+    adapter.load_transformer(torch.device(device))
     return adapter
 
 
-def _validate_training_lora(adapter: BaseModelAdapter) -> None:
-    if adapter.peft_lora_rank <= 0:
+def _lora_slots(adapter: BaseModelAdapter, name: str) -> tuple[str, LoraVariant]:
+    """The resolved slot name and the LoRA config shaping it (an EMA shares its source's)."""
+    name = adapter.resolve(name)
+    variant = adapter.variants.get(name)
+    while isinstance(variant, EmaVariant):
+        variant = adapter.variants.get(adapter.resolve(variant.of))
+    if not isinstance(variant, LoraVariant):
         raise ValueError(
-            "DCP LoRA export requires model.peft_lora_rank > 0 so the adapter "
-            "state has a concrete PEFT skeleton."
+            f"Variant {name!r} is not realized by LoRA slots; Diffusers LoRA cannot "
+            "represent it."
         )
-    if adapter.all_trainable or adapter.extra_trainable_modules:
-        raise ValueError(
-            "DCP LoRA export does not support full fine-tuning or "
-            "extra_trainable_modules because Diffusers LoRA output cannot "
-            "represent those parameters."
-        )
-
-
-def _validate_pure_lora_parameters(
-    transformer: torch.nn.Module,
-    adapter_name: str = "default",
-    *,
-    require_trainable: bool = True,
-) -> None:
-    trainable = [
-        name
-        for name, parameter in transformer.named_parameters()
-        if parameter.requires_grad
+    clones = [
+        fqn
+        for fqn, module in adapter.transformer.named_modules()
+        if isinstance(module, VariantModule) and name in module.clones
     ]
-    unexpected = [
-        name
-        for name in trainable
-        if f".{adapter_name}." not in name or "lora_" not in name
-    ]
-    if require_trainable and not trainable:
-        raise RuntimeError(
-            f"LoRA adapter {adapter_name!r} has no trainable parameters."
-        )
-    if unexpected:
+    if clones:
         raise ValueError(
-            "Offline LoRA conversion only represents PEFT LoRA tensors, but the "
-            f"model also has trainable parameters: {unexpected}"
+            f"Variant {name!r} clones whole modules (extra_trainable) {clones[:5]}; "
+            "Diffusers LoRA cannot represent them."
         )
+    return name, variant
 
 
-class _DcpLoraState:
-    """Training-checkpoint-shaped stateful that loads transformer and EMA only."""
-
-    def __init__(
-        self,
-        transformer: torch.nn.Module,
-        checkpoint_weights: CheckpointWeights,
-    ) -> None:
-        self.transformer = transformer
-        self.checkpoint_weights = checkpoint_weights
-        _validate_pure_lora_parameters(transformer)
-        trainable = [param for param in transformer.parameters() if param.requires_grad]
-        if not trainable:
-            raise RuntimeError("The transformer has no trainable LoRA parameters.")
-        self.ema_optimizer = (
-            EMAOptimizer(trainable, EMAConfig())
-            if checkpoint_weights != "current"
-            else None
+def _load_dcp_slots(transformer: torch.nn.Module, checkpoint: Path, name: str) -> None:
+    """Load `name`'s slot tensors from `app.transformer.*`; every one must be stored."""
+    keys = {
+        f"{fqn}.lora.{name}.{key}"
+        for fqn, pair in lora_pairs(transformer, name).items()
+        for key in pair.state_dict()
+    }
+    stored = dcp.FileSystemReader(checkpoint).read_metadata().state_dict_metadata
+    missing = sorted(key for key in keys if f"app.transformer.{key}" not in stored)
+    if missing:
+        raise ValueError(
+            f"{checkpoint} lacks {len(missing)} tensors of variant {name!r}, "
+            f"e.g. {missing[:3]}."
         )
-
-    @property
-    def ema_key(self) -> str:
-        return "optim_ema" if self.checkpoint_weights == "ema" else "optim_ema_old"
-
-    def state_dict(self) -> dict[str, Any]:
-        options = StateDictOptions(strict=False, ignore_frozen_params=True)
-        state: dict[str, Any] = {
-            "transformer": get_model_state_dict(self.transformer, options=options)
-        }
-        if self.ema_optimizer is not None:
-            state[self.ema_key] = get_optimizer_state_dict(
-                self.transformer,
-                self.ema_optimizer,
-                options=options,
-            )
-        return state
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        options = StateDictOptions(strict=False, ignore_frozen_params=True)
-        set_model_state_dict(
-            self.transformer,
-            state_dict["transformer"],
-            options=options,
-        )
-        if self.ema_optimizer is not None:
-            set_optimizer_state_dict(
-                self.transformer,
-                self.ema_optimizer,
-                state_dict[self.ema_key],
-                options=options,
-            )
-            self.ema_optimizer.coerce_buffer_dtype()
-
-    def apply_selected_weights(self) -> None:
-        if self.ema_optimizer is not None:
-            self.ema_optimizer.apply_shadow()
-
-
-def _validate_dcp_payload(
-    checkpoint: Path,
-    checkpoint_weights: CheckpointWeights,
-) -> None:
-    metadata = dcp.FileSystemReader(checkpoint).read_metadata()
-    keys = metadata.state_dict_metadata.keys()
-    if not any(key.startswith("app.transformer.") for key in keys):
-        raise ValueError(f"DCP checkpoint has no app.transformer state: {checkpoint}")
-    if checkpoint_weights != "current":
-        ema_key = "optim_ema" if checkpoint_weights == "ema" else "optim_ema_old"
-        if not any(key.startswith(f"app.{ema_key}.") for key in keys):
-            raise ValueError(
-                f"DCP checkpoint has no app.{ema_key} state required by "
-                f"--weights {checkpoint_weights}: {checkpoint}"
-            )
-
-
-def _load_dcp_lora(
-    transformer: torch.nn.Module,
-    checkpoint_dir: str,
-    checkpoint_weights: CheckpointWeights,
-) -> None:
-    checkpoint = _require_dcp_checkpoint(checkpoint_dir)
-    _validate_dcp_payload(checkpoint, checkpoint_weights)
-    state = _DcpLoraState(transformer, checkpoint_weights)
+    state = {
+        key: value for key, value in transformer.state_dict().items() if key in keys
+    }
     dcp.load(
-        {"app": state},
+        {"app": {"transformer": state}},
         checkpoint_id=checkpoint,
         no_dist=True,
-        # Extra state from a full training checkpoint is fine, but every LoRA
-        # tensor in our configured skeleton must be present.
-        planner=DefaultLoadPlanner(allow_partial_load=False),
+        planner=DefaultLoadPlanner(allow_partial_load=True),
     )
-    state.apply_selected_weights()
-    logger.info(
-        "Loaded %s LoRA weights from DCP checkpoint %s",
-        checkpoint_weights,
-        checkpoint,
+    transformer.load_state_dict(state, strict=False)
+    logger.info("Loaded variant %r from DCP checkpoint %s", name, checkpoint)
+
+
+def _peft_copy(
+    source: torch.nn.Module, name: str, lora: LoraVariant, target: Any
+) -> None:
+    """Give `target` a PEFT adapter with `name`'s slot layout holding the slot tensors."""
+    pairs = lora_pairs(source, name)
+    target.add_adapter(
+        LoraConfig(
+            r=lora.rank,
+            # PEFT annotates an int, but any real alpha works: scaling = alpha / r.
+            lora_alpha=lora.scaling * lora.rank,  # ty: ignore[invalid-argument-type]
+            target_modules=sorted(pairs),
+            lora_bias=lora.bias,
+        )
     )
+    for fqn, pair in pairs.items():
+        layer = cast(LoraLayer, target.get_submodule(fqn))
+        layer.lora_A["default"].load_state_dict(pair.A.state_dict(), assign=True)
+        layer.lora_B["default"].load_state_dict(pair.B.state_dict(), assign=True)
 
 
 def _load_external_lora(
@@ -391,165 +298,6 @@ def _load_external_lora(
         )
 
 
-@torch.no_grad()
-def _copy_lora_adapter(
-    transformer: Any,
-    *,
-    source_name: str,
-    target_name: str,
-) -> None:
-    """Copy between adapters only when their effective PEFT layouts agree."""
-    source_state = get_peft_model_state_dict(
-        transformer,
-        adapter_name=source_name,
-    )
-    target_state = get_peft_model_state_dict(
-        transformer,
-        adapter_name=target_name,
-    )
-    _validate_lora_state_layout(source_state, target_state)
-    semantic_mismatches = _lora_semantic_mismatches(
-        transformer,
-        source_name=source_name,
-        target_name=target_name,
-    )
-    if semantic_mismatches:
-        raise ValueError(
-            "The imported LoRA scaling/configuration is incompatible with the "
-            "configured training adapter: " + ", ".join(semantic_mismatches)
-        )
-
-    incompatible = set_peft_model_state_dict(
-        transformer,
-        source_state,
-        adapter_name=target_name,
-    )
-    if incompatible.unexpected_keys:
-        raise ValueError(
-            "The configured training adapter cannot represent these imported "
-            f"LoRA tensors: {sorted(incompatible.unexpected_keys)}"
-        )
-    _rescale_target_adapter(
-        transformer,
-        source_name=source_name,
-        target_name=target_name,
-    )
-
-    transformer.delete_adapters(source_name)
-    transformer.set_adapters(target_name)
-
-
-def _validate_lora_state_layout(
-    source_state: dict[str, torch.Tensor],
-    target_state: dict[str, torch.Tensor],
-) -> None:
-    if not source_state or not target_state:
-        raise RuntimeError("Source and target LoRA adapters must both have parameters.")
-
-    source_keys = set(source_state)
-    target_keys = set(target_state)
-    if source_keys != target_keys:
-        raise ValueError(
-            "The imported and configured LoRA target layouts differ. Configure "
-            "the same target modules and adapter variant before importing; "
-            f"missing from input: {sorted(target_keys - source_keys)}, "
-            f"not representable by target: {sorted(source_keys - target_keys)}"
-        )
-    shape_mismatches = {
-        key: (tuple(source_state[key].shape), tuple(target_state[key].shape))
-        for key in source_keys
-        if source_state[key].shape != target_state[key].shape
-    }
-    if shape_mismatches:
-        raise ValueError(
-            f"The imported and configured LoRA ranks/shapes differ: {shape_mismatches}"
-        )
-
-
-def _lora_semantic_mismatches(
-    transformer: torch.nn.Module,
-    *,
-    source_name: str,
-    target_name: str,
-) -> list[str]:
-    semantic_mismatches: list[str] = []
-    for module_name, module in transformer.named_modules():
-        if not isinstance(module, LoraLayer):
-            continue
-        has_source = source_name in module.r
-        has_target = target_name in module.r
-        if has_source != has_target:
-            semantic_mismatches.append(f"{module_name}: adapter coverage")
-            continue
-        if not has_source:
-            continue
-        semantic_mismatches.extend(
-            f"{module_name}: {reason}"
-            for reason in _lora_layer_mismatches(module, source_name, target_name)
-        )
-    return semantic_mismatches
-
-
-def _lora_layer_mismatches(
-    module: LoraLayer,
-    source_name: str,
-    target_name: str,
-) -> list[str]:
-    mismatches = []
-    for attribute in ("r", "use_dora", "lora_bias"):
-        values = getattr(module, attribute)
-        if values[source_name] != values[target_name]:
-            mismatches.append(attribute)
-
-    if type(module.lora_variant.get(source_name)) is not type(
-        module.lora_variant.get(target_name)
-    ):
-        mismatches.append("LoRA variant")
-
-    source_scale = float(module.scaling[source_name])
-    target_scale = float(module.scaling[target_name])
-    if (
-        not math.isfinite(source_scale)
-        or not math.isfinite(target_scale)
-        or target_scale == 0.0
-    ):
-        mismatches.append("invalid scaling")
-    elif source_scale != target_scale and (
-        module.use_dora[source_name]
-        or source_name in module.lora_variant
-        or target_name in module.lora_variant
-    ):
-        mismatches.append("variant scaling cannot be reparameterized")
-    return mismatches
-
-
-def _rescale_target_adapter(
-    transformer: torch.nn.Module,
-    *,
-    source_name: str,
-    target_name: str,
-) -> None:
-    """Preserve the effective delta when source and target alpha differ."""
-    for module_name, module in transformer.named_modules():
-        if not isinstance(module, LoraLayer) or source_name not in module.r:
-            continue
-        ratio = float(module.scaling[source_name]) / float(module.scaling[target_name])
-        if ratio == 1.0:
-            continue
-        if target_name in module.lora_B:
-            target_b = module.lora_B[target_name]
-            cast(torch.Tensor, target_b.weight).mul_(ratio)
-            target_bias = cast(torch.Tensor | None, target_b.bias)
-            if target_bias is not None:
-                target_bias.mul_(ratio)
-        elif target_name in module.lora_embedding_B:
-            module.lora_embedding_B[target_name].mul_(ratio)
-        else:
-            raise ValueError(
-                f"Cannot reparameterize LoRA scaling for module {module_name!r}."
-            )
-
-
 def _save_diffusers_lora(
     transformer: Any,
     output_dir: str,
@@ -562,11 +310,6 @@ def _save_diffusers_lora(
     peft_config = getattr(transformer, "peft_config", {})
     if adapter_name not in peft_config:
         raise ValueError(f"Adapter {adapter_name!r} is not loaded in the transformer.")
-    _validate_pure_lora_parameters(
-        transformer,
-        adapter_name,
-        require_trainable=False,
-    )
 
     state_dict = get_peft_model_state_dict(transformer, adapter_name=adapter_name)
     if not state_dict:
@@ -593,23 +336,34 @@ def _save_diffusers_lora(
     logger.info("Saved Diffusers LoRA to %s", output / weight_name)
 
 
-def _save_dcp_adapter(
-    adapter: BaseModelAdapter,
-    output_dir: str,
+def _save_native_lora(
+    transformer: Any, path: Path, adapter_name: str = "default"
 ) -> None:
-    output = _require_new_output(output_dir)
-    _validate_pure_lora_parameters(adapter.transformer)
-    options = StateDictOptions(strict=False, ignore_frozen_params=True)
-    transformer_state = get_model_state_dict(adapter.transformer, options=options)
-    if not transformer_state or not any("lora_" in key for key in transformer_state):
-        raise RuntimeError("No trainable LoRA parameters were found for DCP output.")
-
-    dcp.save(
-        {"app": {"transformer": transformer_state}},
-        checkpoint_id=output,
-        no_dist=True,
-    )
-    logger.info("Saved transformer-only DCP LoRA checkpoint to %s", output)
+    """Write a PEFT adapter as a native file (`<linear_fqn>.{A.weight,B.weight,B.bias}`)."""
+    layers = {
+        fqn: cast(LoraLayer, module)
+        for fqn, module in transformer.named_modules()
+        if isinstance(module, LoraLayer) and adapter_name in module.lora_A
+    }
+    shapes = {
+        (layer.r[adapter_name], layer.scaling[adapter_name])
+        for layer in layers.values()
+    }
+    if len(shapes) != 1:
+        raise ValueError(
+            f"A native LoRA file has one rank and alpha; the adapter has {sorted(shapes)}."
+        )
+    ((rank, scaling),) = shapes
+    tensors = {
+        f"{fqn}.{half}.{key}": tensor.detach().cpu().contiguous()
+        for fqn, layer in layers.items()
+        for half, module in (("A", layer.lora_A), ("B", layer.lora_B))
+        for key, tensor in module[adapter_name].state_dict().items()
+    }
+    variant = LoraVariant(rank=rank, alpha=scaling * rank)
+    path.parent.mkdir(parents=True)
+    save_file(tensors, path, metadata=lora_metadata(variant))
+    logger.info("Saved native LoRA to %s", path)
 
 
 def _fuse_transformer(
@@ -636,51 +390,36 @@ def export_dcp(
     *,
     checkpoint_dir: str,
     output_dir: str,
-    checkpoint_weights: CheckpointWeights = "current",
-    adapter_name: str = "default",
+    variant: str = "default",
     weight_name: str = LORA_WEIGHT_NAME_SAFE,
 ) -> None:
-    """Export one weight view from a DCP training checkpoint to Diffusers LoRA."""
+    """Export one LoRA variant of a DCP training checkpoint as a Diffusers LoRA."""
     _require_new_output(output_dir)
     _validate_output_weight_name(weight_name)
     checkpoint = _require_dcp_checkpoint(checkpoint_dir)
-    _validate_dcp_payload(checkpoint, checkpoint_weights)
-    adapter = _make_model_adapter(config, include_training_adapter=True)
-    _load_dcp_lora(
-        adapter.transformer,
-        checkpoint_dir,
-        checkpoint_weights,
-    )
-    _save_diffusers_lora(
-        adapter.transformer,
-        output_dir,
-        adapter_name=adapter_name,
-        weight_name=weight_name,
-    )
+    adapter = _make_model_adapter(config, variants=True)
+    name, lora = _lora_slots(adapter, variant)
+    _load_dcp_slots(adapter.transformer, checkpoint, name)
+    # The PEFT host only carries the LoRA tensors: a fresh meta copy, not the cached one.
+    HfModelLoader.invalidate_cache(adapter.hf_model.config_key)
+    target = _make_model_adapter(config, variants=False, device="meta").transformer
+    _peft_copy(adapter.transformer, name, lora, target)
+    _save_diffusers_lora(target, output_dir, weight_name=weight_name)
 
 
-def import_dcp(
+def import_lora(
     config: dict[str, Any],
     *,
     lora_path: str,
     output_dir: str,
+    name: str = "lora",
     weight_name: str | None = None,
 ) -> None:
-    """Convert a Diffusers-compatible LoRA to transformer-only DCP state."""
-    _require_new_output(output_dir)
-    adapter = _make_model_adapter(config, include_training_adapter=True)
-    _load_external_lora(
-        adapter.transformer,
-        lora_path,
-        weight_name=weight_name,
-        adapter_name="imported",
-    )
-    _copy_lora_adapter(
-        adapter.transformer,
-        source_name="imported",
-        target_name="default",
-    )
-    _save_dcp_adapter(adapter, output_dir)
+    """Convert a Diffusers-compatible LoRA to a native file for a lora variant's ``path``."""
+    output = _require_new_output(output_dir)
+    adapter = _make_model_adapter(config, variants=False)
+    _load_external_lora(adapter.transformer, lora_path, weight_name=weight_name)
+    _save_native_lora(adapter.transformer, output / f"{name}.safetensors")
 
 
 def convert(
@@ -694,7 +433,7 @@ def convert(
     """Normalize a Diffusers-compatible input through its official loader."""
     _require_new_output(output_dir)
     _validate_output_weight_name(output_weight_name)
-    adapter = _make_model_adapter(config, include_training_adapter=False)
+    adapter = _make_model_adapter(config, variants=False)
     _load_external_lora(
         adapter.transformer,
         lora_path,
@@ -718,7 +457,7 @@ def fuse(
     """Fuse a Diffusers-compatible LoRA into a fresh CPU-loaded transformer."""
     _require_new_output(output_dir)
     _validate_fuse_scale(scale)
-    adapter = _make_model_adapter(config, include_training_adapter=False)
+    adapter = _make_model_adapter(config, variants=False)
     transformer: Any = adapter.transformer
     _load_external_lora(
         transformer,

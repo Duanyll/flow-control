@@ -2,23 +2,22 @@
 
 :class:`NftObjective` is the math, :class:`NftTrainer` the
 :class:`~flow_control.training.endpoint.EndpointTrainer` preset: rollouts are
-sampled by the old-teacher EMA and trained on the executed rollout grid.
+sampled by the ``old`` variant (an EMA stepped once per epoch).
 """
 
 from typing import Literal
 
 import torch
 
-from .ema import EMAConfig, LinearRampWarmup
+from flow_control.samplers import Row
+
 from .endpoint import (
     BaseObjective,
     EndpointTrainer,
     LossOutput,
     Objective,
-    PolicyRole,
-    PolicyVelocities,
-    TrainPoint,
     objective_registry,
+    sigma_like,
 )
 from .mixins import trainer_registry
 from .train_timesteps import GridTimesteps, TrainTimesteps
@@ -46,24 +45,23 @@ class NftObjective(BaseObjective):
     adv_mode: Literal["all", "positive_only", "negative_only", "binary"] = "all"
     """Optional advantage clipping mode."""
 
-    def rollout_policy(self) -> Literal["current", "old"]:
+    def rollout_variant(self) -> str:
         return "old"
 
-    def required_policies(self) -> frozenset[PolicyRole]:
-        roles: set[PolicyRole] = {"old"}
-        if self.kl_beta > 0:
-            roles.add("ref")
-        return frozenset(roles)
+    def required_variants(self) -> frozenset[str]:
+        return frozenset({"old", "ref"} if self.kl_beta > 0 else {"old"})
 
-    def compute(self, point: TrainPoint, velocities: PolicyVelocities) -> LossOutput:
-        forward_prediction = velocities.current
-        old_prediction = self._require(velocities, "old")
-        ref_prediction = self._require(velocities, "ref") if self.kl_beta > 0 else None
-        x0 = point.x0
-        xt = point.xt
-        t_expanded = point.t.view(-1, *([1] * (x0.ndim - 1)))
+    def compute(
+        self, point: Row, current: torch.Tensor, aux: dict[str, torch.Tensor]
+    ) -> LossOutput:
+        forward_prediction = current
+        old_prediction = aux["old"].detach()
+        ref_prediction = aux["ref"].detach() if self.kl_beta > 0 else None
+        x0 = point["clean_latents"]
+        xt = point["noisy_latents"]
+        t_expanded = sigma_like(point, x0)
 
-        adv = point.advantage
+        adv = point["advantage"]
         adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
         if self.adv_mode == "positive_only":
             adv = torch.clamp(adv, 0, self.adv_clip_max)
@@ -74,16 +72,12 @@ class NftObjective(BaseObjective):
 
         r = (adv / self.adv_clip_max) / 2.0 + 0.5
         r = torch.clamp(r, 0.0, 1.0)
-        # Expand r to match spatial dims
         r = r.view(-1, *([1] * (x0.ndim - 1)))
 
         beta = self.beta
-
-        # Positive & negative predictions
         positive_pred = beta * forward_prediction + (1 - beta) * old_prediction
         negative_pred = (1 + beta) * old_prediction - beta * forward_prediction
 
-        # Predicted x0 from positive prediction
         x0_pos = xt - t_expanded * positive_pred
         with torch.no_grad():
             weight_pos = (
@@ -93,7 +87,6 @@ class NftObjective(BaseObjective):
             )
         pos_loss = ((x0_pos - x0) ** 2 / weight_pos).mean(dim=tuple(range(1, x0.ndim)))
 
-        # Predicted x0 from negative prediction
         x0_neg = xt - t_expanded * negative_pred
         with torch.no_grad():
             weight_neg = (
@@ -103,7 +96,6 @@ class NftObjective(BaseObjective):
             )
         neg_loss = ((x0_neg - x0) ** 2 / weight_neg).mean(dim=tuple(range(1, x0.ndim)))
 
-        # Flatten r for per-sample weighting
         r_flat = r.view(r.shape[0], -1)[:, 0]
         policy_loss_per_sample = (
             r_flat * pos_loss / beta + (1.0 - r_flat) * neg_loss / beta
@@ -111,8 +103,6 @@ class NftObjective(BaseObjective):
         policy_loss = (policy_loss_per_sample * self.adv_clip_max).mean()
 
         loss = policy_loss
-
-        # KL regularisation (MSE to reference)
         if ref_prediction is not None:
             kl_loss = ((forward_prediction - ref_prediction) ** 2).mean(
                 dim=tuple(range(1, x0.ndim))
@@ -136,10 +126,6 @@ class NftTrainer(EndpointTrainer):
     training_type: str = "nft"
     objective: Objective = NftObjective()
     train_timesteps: TrainTimesteps = GridTimesteps()
-    ema_old: EMAConfig = EMAConfig(
-        decay=0.5, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001)
-    )
-    """Old-teacher EMA config (stepped once per epoch)."""
 
 
 if __name__ == "__main__":
@@ -147,31 +133,23 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
     shape = (1, 4, 6, 6)
-    point = TrainPoint(
-        x0=torch.randn(shape),
-        noise=torch.randn(shape),
-        t=torch.tensor([0.7]),
-        advantage=torch.tensor([1.5]),
-    )
-    velocities = PolicyVelocities(
-        current=torch.randn(shape, requires_grad=True),
-        old=torch.randn(shape),
-        ref=torch.randn(shape),
-    )
+    x0, noise = torch.randn(shape), torch.randn(shape)
+    point: Row = {
+        "clean_latents": x0,
+        "noise": noise,
+        "sigma": 0.7,
+        "noisy_latents": 0.3 * x0 + 0.7 * noise,
+        "advantage": torch.tensor([1.5]),
+    }
+    current = torch.randn(shape, requires_grad=True)
+    aux = {"old": torch.randn(shape), "ref": torch.randn(shape)}
     for objective in (NftObjective(), NftObjective(kl_beta=0.0, adv_mode="binary")):
-        out = objective.compute(point, velocities)
-        (grad,) = torch.autograd.grad(out.loss, velocities.current)
+        out = objective.compute(point, current, aux)
+        (grad,) = torch.autograd.grad(out.loss, current)
         assert out.loss.ndim == 0 and out.loss.requires_grad
         assert all(m.ndim == 0 and not m.requires_grad for m in out.metrics.values())
-        print(objective, f"required={sorted(objective.required_policies())}")
+        print(objective, f"required={sorted(objective.required_variants())}")
         print(
             f"|grad|={grad.norm().item():.4f}",
             {k: round(v.item(), 4) for k, v in out.metrics.items()},
         )
-
-    try:
-        NftObjective().compute(point, PolicyVelocities(current=velocities.current))
-    except RuntimeError as exc:
-        print(f"[green]missing role raises:[/] {exc}")
-    else:
-        raise AssertionError("missing 'old' velocity must raise")

@@ -22,12 +22,7 @@
     "type": "cache",
     "path": "./demo/preprocess_zimage_t2i"
   },
-  "sampler": {
-    "steps": 8,
-    "shift": {
-      "type": "linear"
-    }
-  },
+  "sampler": { "type": "grid", "steps": 8, "shift": "linear" },
   "processor": {
     "task": "t2i",
     "preset": "zimage"

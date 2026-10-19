@@ -6,22 +6,23 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "qwen",
-    "type": "edit"
-  },
+  "model": { "arch": "qwen", "type": "edit" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_qwen_tie"
   },
   "sampler": {
+    "type": "grid",
     "steps": 28,
-    "guidance": { "type": "cfg", "scale": 4.0, "renorm": true, "renorm_max": null },
     "shift": {
       "type": "linear",
       "max_image_seq_len": 8192,
       "max_shift": 0.9,
       "shift_terminal": 0.02
+    },
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 4.0, "renorm": true, "renorm_max": null }
     }
   },
   "processor": {

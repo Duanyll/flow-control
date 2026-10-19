@@ -1,6 +1,6 @@
 """Run with ``torchrun --standalone --nproc-per-node=2`` to check tiled evaluation across ranks."""
 
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -8,7 +8,7 @@ from diffusers import ModelMixin
 from pydantic import PrivateAttr
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.samplers import Executor, TiledPrediction
+from flow_control.samplers import Executor, RootFrame, Tiled
 from flow_control.utils.tiling import TileLayout
 
 
@@ -30,14 +30,15 @@ class TileAdapter(BaseModelAdapter[ModelMixin, Batch]):
         return 2 * batch["noisy_latents"]
 
 
-def make_batch(height: int, width: int) -> Batch:
+def make_batch(height: int, width: int) -> dict[str, Any]:
     x = torch.arange(height * width, dtype=torch.float32)[None, :, None]
-    batch: dict[str, Any] = {
+    return {
         "image_size": (height, width),
         "noisy_latents": x.requires_grad_(),
+        "sigma": 0.5,
+        "_frame": RootFrame(None),
         "tiling": TileLayout(tile_size=4, overlap=2, stride=1).model_dump(),
     }
-    return cast(Batch, batch)
 
 
 def main() -> None:
@@ -45,7 +46,6 @@ def main() -> None:
     try:
         assert dist.get_world_size() == 2
         rank = dist.get_rank()
-        timesteps = [torch.tensor([0.5])]
 
         # Equal tile counts: four tiles per rank share one dense forward, and the
         # stitched velocity and gradients match the tokenwise oracle up to feathering rounding.
@@ -53,9 +53,7 @@ def main() -> None:
             arch="fake", type="fake", micro_batch_size=4
         )
         batch = make_batch(6, 6)
-        velocity = Executor(adapter).evaluate(
-            [TiledPrediction().velocity(batch, timesteps[0])]
-        )[0]
+        velocity = Executor(adapter).evaluate([Tiled()(batch)])[0]
         x = batch["noisy_latents"]
         torch.testing.assert_close(velocity, 2 * x, rtol=1e-6, atol=1e-5)
         velocity.sum().backward()
@@ -69,9 +67,7 @@ def main() -> None:
             arch="fake", type="fake", micro_batch_size=2
         )
         batch = make_batch(4, 6) if rank == 0 else make_batch(6, 6)
-        velocity = Executor(adapter).evaluate(
-            [TiledPrediction().velocity(batch, timesteps[0])]
-        )[0]
+        velocity = Executor(adapter).evaluate([Tiled()(batch)])[0]
         torch.testing.assert_close(
             velocity, 2 * batch["noisy_latents"], rtol=1e-6, atol=1e-5
         )

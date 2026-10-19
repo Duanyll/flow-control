@@ -6,27 +6,28 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "krea2",
-    "type": "base"
-  },
+  "model": { "arch": "krea2", "type": "base" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_krea2_raw_t2i"
   },
   "sampler": {
     // Krea 2 Raw is undistilled: use true CFG with a negative batch (the preset sets
-    // save_negative=true). Krea's guidance_scale=g maps to our guidance.scale = 1 + g
+    // save_negative=true). Krea's guidance_scale=g maps to our cfg scale = 1 + g
     // (default g=4.5 -> 5.5). Shift is the resolution-aware exponential schedule; our
     // LinearShift == Krea's calculate_shift (exp(mu)).
+    "type": "grid",
     "steps": 28,
-    "guidance": { "type": "cfg", "scale": 5.5 },
     "shift": {
       "type": "linear",
       "base_image_seq_len": 256,
       "max_image_seq_len": 6400,
       "base_shift": 0.5,
       "max_shift": 1.15
+    },
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 5.5 }
     }
   },
   "processor": {

@@ -2,26 +2,26 @@
 
 :class:`AwmObjective` is the math, :class:`AwmTrainer` the
 :class:`~flow_control.training.endpoint.EndpointTrainer` preset. Rollouts are
-sampled by the current policy (the lagged EMA when ``objective.off_policy``);
-training timesteps are stratified rollout-grid indices over the noisiest 90%
-of the plan, skipping the pure-noise step (reference ``discrete_wo_init``).
-The lagged EMA is the reference's TRPO-EMA, ``decay = min(0.3, 0.001 * step)``.
+sampled by the current policy (the ``old`` variant when
+``objective.off_policy``); training timesteps are stratified rollout-grid
+indices over the noisiest 90% of the grid, skipping the pure-noise step
+(reference ``discrete_wo_init``). The reference's TRPO-EMA is an ``old``
+variant with ``decay = min(0.3, 0.001 * step)``.
 """
 
 from typing import Literal
 
 import torch
 
-from .ema import EMAConfig, LinearRampWarmup
+from flow_control.samplers import Row
+
 from .endpoint import (
     BaseObjective,
     EndpointTrainer,
     LossOutput,
     Objective,
-    PolicyRole,
-    PolicyVelocities,
-    TrainPoint,
     objective_registry,
+    sigma_like,
 )
 from .mixins import trainer_registry
 from .train_timesteps import GridTimesteps, TrainTimesteps
@@ -77,16 +77,16 @@ class AwmObjective(BaseObjective):
     """Sample rollout endpoints and the ratio denominator from the lagged EMA
     policy instead of the current policy."""
 
-    def rollout_policy(self) -> Literal["current", "old"]:
-        return "old" if self.off_policy else "current"
+    def rollout_variant(self) -> str:
+        return "old" if self.off_policy else "default"
 
-    def required_policies(self) -> frozenset[PolicyRole]:
-        roles: set[PolicyRole] = set()
+    def required_variants(self) -> frozenset[str]:
+        names: set[str] = set()
         if self.beta > 0:
-            roles.add("ref")
+            names.add("ref")
         if self.ema_beta > 0 or self.off_policy:
-            roles.add("old")
-        return frozenset(roles)
+            names.add("old")
+        return frozenset(names)
 
     def _flow_matching_logp(
         self,
@@ -127,24 +127,23 @@ class AwmObjective(BaseObjective):
             diff = diff / (2 * std_dev**2)
         return diff.mean()
 
-    def compute(self, point: TrainPoint, velocities: PolicyVelocities) -> LossOutput:
-        forward_prediction = velocities.current
-        ref_prediction = self._require(velocities, "ref") if self.beta > 0 else None
-        ema_prediction = self._require(velocities, "old") if self.ema_beta > 0 else None
+    def compute(
+        self, point: Row, current: torch.Tensor, aux: dict[str, torch.Tensor]
+    ) -> LossOutput:
+        forward_prediction = current
+        ref_prediction = aux["ref"].detach() if self.beta > 0 else None
+        ema_prediction = aux["old"].detach() if self.ema_beta > 0 else None
+        x0, noise = point["clean_latents"], point["noise"]
+        t = sigma_like(point, x0)
 
-        log_prob = self._flow_matching_logp(
-            forward_prediction, point.noise, point.x0, point.t
-        )
-
+        log_prob = self._flow_matching_logp(forward_prediction, noise, x0, t)
         if self.off_policy:
-            old_log_prob = self._flow_matching_logp(
-                self._require(velocities, "old"), point.noise, point.x0, point.t
-            )
+            old_log_prob = self._flow_matching_logp(aux["old"].detach(), noise, x0, t)
         else:
             old_log_prob = log_prob.detach()
         ratio = torch.exp(log_prob - old_log_prob.detach())
 
-        adv = point.advantage
+        adv = point["advantage"]
         adv = torch.clamp(adv, -self.adv_clip_max, self.adv_clip_max)
         adv = adv / self.adv_clip_max * self.advantage_max
         adv = adv.view(-1)
@@ -161,12 +160,12 @@ class AwmObjective(BaseObjective):
 
         if ref_prediction is not None:
             kl_loss = self._kl_term(
-                forward_prediction, ref_prediction, point.t, self.kl_weight
+                forward_prediction, ref_prediction, t, self.kl_weight
             )
             loss = loss + self.beta * kl_loss
         if ema_prediction is not None:
             ema_kl_loss = self._kl_term(
-                forward_prediction, ema_prediction, point.t, self.kl_ema_weight
+                forward_prediction, ema_prediction, t, self.kl_ema_weight
             )
             loss = loss + self.ema_beta * ema_kl_loss
 
@@ -191,10 +190,6 @@ class AwmTrainer(EndpointTrainer):
     train_timesteps: TrainTimesteps = GridTimesteps(
         count=6, window=0.9, exclude_first=True, mode="stratified"
     )
-    ema_old: EMAConfig = EMAConfig(
-        decay=0.3, warmup=LinearRampWarmup(flat_steps=0, ramp_rate=0.001)
-    )
-    """TRPO-EMA config (stepped once per epoch)."""
 
 
 if __name__ == "__main__":
@@ -202,26 +197,25 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
     shape = (1, 4, 6, 6)
-    point = TrainPoint(
-        x0=torch.randn(shape),
-        noise=torch.randn(shape),
-        t=torch.tensor([0.7]),
-        advantage=torch.tensor([1.5]),
-    )
-    velocities = PolicyVelocities(
-        current=torch.randn(shape, requires_grad=True),
-        old=torch.randn(shape),
-        ref=torch.randn(shape),
-    )
+    x0, noise = torch.randn(shape), torch.randn(shape)
+    point: Row = {
+        "clean_latents": x0,
+        "noise": noise,
+        "sigma": 0.7,
+        "noisy_latents": 0.3 * x0 + 0.7 * noise,
+        "advantage": torch.tensor([1.5]),
+    }
+    current = torch.randn(shape, requires_grad=True)
+    aux = {"old": torch.randn(shape), "ref": torch.randn(shape)}
     for objective in (
         AwmObjective(),
         AwmObjective(off_policy=True, weighting="uniform"),
     ):
-        out = objective.compute(point, velocities)
-        (grad,) = torch.autograd.grad(out.loss, velocities.current)
+        out = objective.compute(point, current, aux)
+        (grad,) = torch.autograd.grad(out.loss, current)
         assert out.loss.ndim == 0 and out.loss.requires_grad
         assert all(m.ndim == 0 and not m.requires_grad for m in out.metrics.values())
-        print(objective, f"required={sorted(objective.required_policies())}")
+        print(objective, f"required={sorted(objective.required_variants())}")
         print(
             f"|grad|={grad.norm().item():.4f}",
             {k: round(v.item(), 4) for k, v in out.metrics.items()},

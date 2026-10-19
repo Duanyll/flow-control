@@ -1,19 +1,12 @@
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from pydantic import ConfigDict, model_validator
 from rich.progress import Progress, TaskID
 from rich.table import Table
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_model_state_dict,
-    get_optimizer_state_dict,
-    set_model_state_dict,
-    set_optimizer_state_dict,
-)
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
@@ -29,14 +22,20 @@ from flow_control.data import (
 )
 from flow_control.rewards import Reward, _has_pairwise_child, execute_reward
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import Sampler, SampleRequest, derive_seed
+from flow_control.samplers import (
+    Calls,
+    Executor,
+    Row,
+    Trajectory,
+    derive_seed,
+    variants,
+)
 from flow_control.utils.logging import console, dump_if_failed, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
     deep_move_to_device,
 )
 
-from .ema import EMAConfig, EMAOptimizer
 from .mixins import (
     BaseTrainer,
     DataMixin,
@@ -45,6 +44,7 @@ from .mixins import (
     distributed_main,
     trainer_registry,
 )
+from .mixins.base import load_model_state_dict, model_state_dict
 
 logger = get_logger(__name__)
 
@@ -63,7 +63,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
     model_config = ConfigDict(extra="forbid")
 
     model: ModelAdapter
-    sampler: Sampler
+    sampler: Trajectory
     report: ReportConfig
     """Where the outputs go (design §10): ``metrics.jsonl`` with one line per
     sample, ``previews/<key>.png`` and optionally ``records/`` (a random cache of
@@ -72,14 +72,8 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
 
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
-    checkpoint_weights: Literal["current", "ema", "ema_old"] = "current"
-    """Which weights to apply from a training DCP checkpoint.
-
-    ``ema`` selects the validation EMA stored as ``optim_ema`` and ``ema_old``
-    selects the lagged rollout EMA stored as ``optim_ema_old``. The EMA options
-    require a checkpoint produced by a trainer that saves the corresponding
-    optimizer state.
-    """
+    variant: str | None = None
+    """Model variant for the sampler's model leaves that name none (``docs/model-variants.md``)."""
     save_extra: bool = False
     """``records/`` rows hold the whole working row (source fields, conditions,
     decoded outputs) instead of only the decoded outputs plus key / cost /
@@ -90,12 +84,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
     Records and rewards always see the clean ``clean_image``."""
 
     @model_validator(mode="after")
-    def check_checkpoint_weights(self):
-        if self.checkpoint_weights != "current" and self.checkpoint_dir is None:
-            raise ValueError(
-                f"checkpoint_weights={self.checkpoint_weights!r} requires "
-                "checkpoint_dir to be specified."
-            )
+    def check_reward(self):
         if self.reward is not None and _has_pairwise_child(self.reward):
             raise ValueError(
                 "A pairwise reward compares the rollouts of one prompt and cannot "
@@ -108,7 +97,6 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
     # ------------------------------- Lazy state --------------------------------- #
     _stream: RowStream | None = None
     _dataloader: StatefulDataLoader | None = None
-    _checkpoint_ema_optimizer: EMAOptimizer | None = None
 
     @property
     def transformer(self):
@@ -134,66 +122,28 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
 
     # ------------------------------- Checkpointing ------------------------------ #
 
-    def make_checkpoint_ema_optimizer(self) -> None:
-        if self.checkpoint_weights == "current":
-            return
-        params = [p for p in self.transformer.parameters() if p.requires_grad]
-        if not params:
-            raise RuntimeError(
-                f"checkpoint_weights={self.checkpoint_weights!r} requires trainable "
-                "parameters, but none were found."
-            )
-        # The saved optimizer state supplies the EMA buffers. Its configured
-        # decay is irrelevant because inference never steps this optimizer.
-        self._checkpoint_ema_optimizer = EMAOptimizer(params, EMAConfig())
-
     def state_dict(self):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        state: dict[str, Any] = {
-            "transformer": get_model_state_dict(self.transformer, options=opts),
-        }
-        if self._checkpoint_ema_optimizer is not None:
-            key = "optim_ema" if self.checkpoint_weights == "ema" else "optim_ema_old"
-            state[key] = get_optimizer_state_dict(
-                self.transformer,
-                self._checkpoint_ema_optimizer,
-                options=opts,
-            )
-        return state
+        return {"transformer": model_state_dict(self.model)}
 
     def load_state_dict(self, state_dict: dict[str, Any]):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
-        if self._checkpoint_ema_optimizer is not None:
-            key = "optim_ema" if self.checkpoint_weights == "ema" else "optim_ema_old"
-            set_optimizer_state_dict(
-                self.transformer,
-                self._checkpoint_ema_optimizer,
-                state_dict[key],
-                options=opts,
-            )
-            self._checkpoint_ema_optimizer.coerce_buffer_dtype()
+        load_model_state_dict(self.model, state_dict["transformer"])
 
     # ---------------------------------- Sampling -------------------------------- #
 
-    def _requests(self) -> Iterator[SampleRequest]:
-        """Prepare one row at a time as the sampler asks for it."""
+    def _runs(self) -> Iterator[tuple[Row, Calls[None]]]:
+        """Prepare one row at a time as the executor asks for it."""
         for items in self.dataloader:
             for item in items:
                 with dump_if_failed(logger, item):
-                    row = self.prepare_row(item, mode="inference", epoch=0)
-                    row = deep_cast_float_dtype(row, self.model.dtype)
+                    row = deep_cast_float_dtype(
+                        self.prepare_row(item, mode="inference", epoch=0),
+                        self.model.dtype,
+                    )
                     generator = torch.Generator(device=self.device).manual_seed(
                         derive_seed(self.seed, row[KEY])
                     )
-                    self.processor.initialize_latents(
-                        row,
-                        generator=generator,
-                        device=self.device,
-                        dtype=self.model.dtype,
-                    )
-                    request = self.build_sample_request(self.sampler, row, generator)
-                yield request
+                    row = self.start_row(row, generator, self.model.dtype)
+                yield row, self.sampler(row)
 
     def _sample_submitter(
         self,
@@ -211,9 +161,9 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         across ranks) but are not yielded for scoring or output.
         """
         cpu = torch.device("cpu")
-        for run in self.sampler.sample(self.model, self._requests()):
-            row: Any = run.row
-            decoded = self.processor.decode_output(run.ctx.latents, row)
+        executor = Executor(self.model, variants(self.sampler))
+        for row in executor.stream(self._runs()):
+            decoded = self.processor.decode_output(row["noisy_latents"], row)
             row.update(decoded)
             progress.advance(task)
             if is_padding(row):
@@ -322,6 +272,8 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
     @torch.no_grad()
     @distributed_main
     def run(self):
+        if self.variant is not None:
+            self.model.resolve(self.variant)
         self.set_seed()
         # Dump the run description before any weights load (as init_tracker does).
         meta = {"config": self.model_dump(mode="json", warnings="none")}
@@ -332,14 +284,7 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
             self.reward.load_model(self.device)
 
         if self.checkpoint_dir is not None:
-            self.make_checkpoint_ema_optimizer()
             self.load_dcp_checkpoint(self.checkpoint_dir)
-            if self._checkpoint_ema_optimizer is not None:
-                self._checkpoint_ema_optimizer.apply_shadow()
-                logger.info(
-                    f"Applied checkpoint {self.checkpoint_weights} weights for "
-                    "inference."
-                )
 
         writer = self.report.open(self.rank)
         logger.info(f"Writing the report to {self.report.path}")
@@ -354,7 +299,11 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
         assert self._stream is not None
         task = progress.add_task("Inference", total=len(self._stream))
 
-        with self.profile_scope("inference"), progress:
+        with (
+            self.profile_scope("inference"),
+            progress,
+            self.model.use_variant(self.variant),
+        ):
             submitter = self._sample_submitter(progress, task)
             if self.reward is not None:
 

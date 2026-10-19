@@ -18,29 +18,16 @@
   "train_epochs": 20,
   "checkpoint_interval": 5,
   "validation_epochs": 5,
+  "validation_variants": ["ema"],
 
   "model": {
     "arch": "flux1",
     "type": "base",
     "guidance": 3.5,
-    "peft_lora_rank": 64,
-    "peft_lora_config": {
-      "lora_alpha": 128,
-      "init_lora_weights": "gaussian",
-      "target_modules": [
-        "attn.to_k",
-        "attn.to_q",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_k_proj",
-        "attn.add_q_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-        "ff.net.0.proj",
-        "ff.net.2",
-        "ff_context.net.0.proj",
-        "ff_context.net.2",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -52,15 +39,10 @@
   "train_predictor": "model",
 
   "rollout_sampler": {
+    "type": "grid",
     "steps": 6,
-    "shift": { "type": "linear" },
-    "solver": { "type": "flow", "eta": 0.7 },
-  },
-
-  "ema": {
-    "decay": 0.9,
-    "warmup": { "type": "standard" },
-    "interval": 1,
+    "shift": "linear",
+    "transition": { "type": "euler", "eta": 0.7 },
   },
 
   "reward": {
@@ -89,10 +71,7 @@
     "limit": 8,
   },
 
-  "validation_sampler": {
-    "steps": 28,
-    "shift": { "type": "linear" },
-  },
+  "validation_sampler": { "type": "grid", "steps": 28, "shift": "linear" },
 
   "processor": {
     "task": "t2i",

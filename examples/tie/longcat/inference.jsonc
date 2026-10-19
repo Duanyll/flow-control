@@ -6,19 +6,18 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "longcat",
-    "type": "edit"
-  },
+  "model": { "arch": "longcat", "type": "edit" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_longcat_tie"
   },
   "sampler": {
+    "type": "grid",
     "steps": 50,
-    "guidance": { "type": "cfg", "scale": 4.5, "renorm": true },
-    "shift": {
-      "type": "linear"
+    "shift": "linear",
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 4.5, "renorm": true }
     }
   },
   "processor": {

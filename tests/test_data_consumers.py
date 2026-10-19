@@ -19,7 +19,7 @@ from test_microbatching import FakeSamplerModel
 
 from flow_control.data import PADDING
 from flow_control.processors import parse_processor
-from flow_control.samplers import Sampler
+from flow_control.samplers import Grid, Trajectory
 from flow_control.training.sft import SftTrainer
 from flow_control.training.weighting import LogitNormalTimestepWeighting
 
@@ -34,7 +34,7 @@ class _ProbeOverrides(BaseModel):
     checkpoint_root: str = ""
     experiment_name: str = "probe"
     seed_checkpoint_dir: str = ""
-    validation_sampler: Sampler = Field(default_factory=Sampler)
+    validation_sampler: Trajectory = Field(default_factory=Grid)
 
     @property
     def device(self):

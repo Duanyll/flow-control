@@ -71,14 +71,14 @@ def main():
         action.add_argument("--output-dir", required=True)
 
     lora_export = lora_actions.add_parser(
-        "export", help="Export DCP training weights to Diffusers LoRA."
+        "export", help="Export one LoRA variant of a DCP checkpoint to Diffusers LoRA."
     )
     add_lora_config(lora_export)
     lora_export.add_argument("--checkpoint-dir", required=True)
     lora_export.add_argument(
-        "--weights",
-        choices=("current", "ema", "ema_old"),
-        default="current",
+        "--variant",
+        default="default",
+        help="A lora variant of model.variants, or an ema of one (default: default).",
     )
     lora_export.add_argument("--output-dir", required=True)
     lora_export.add_argument(
@@ -86,10 +86,17 @@ def main():
     )
 
     lora_import = lora_actions.add_parser(
-        "import", help="Convert a Diffusers-compatible LoRA to transformer-only DCP."
+        "import",
+        help=(
+            "Convert a Diffusers-compatible LoRA to the native file "
+            '<output-dir>/<name>.safetensors, usable as a lora variant\'s "path".'
+        ),
     )
     add_lora_config(lora_import)
     add_external_lora(lora_import)
+    lora_import.add_argument(
+        "--name", default="lora", help="Output file name without .safetensors."
+    )
 
     lora_convert = lora_actions.add_parser(
         "convert",
@@ -177,14 +184,15 @@ def _dispatch_lora(args: argparse.Namespace) -> None:
             config,
             checkpoint_dir=args.checkpoint_dir,
             output_dir=args.output_dir,
-            checkpoint_weights=args.weights,
+            variant=args.variant,
             weight_name=args.weight_name,
         )
     elif args.lora_action == "import":
-        lora.import_dcp(
+        lora.import_lora(
             config,
             lora_path=args.lora,
             output_dir=args.output_dir,
+            name=args.name,
             weight_name=args.weight_name,
         )
     elif args.lora_action == "convert":

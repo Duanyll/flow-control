@@ -7,8 +7,9 @@ from pathlib import Path
 
 import torch
 
+from flow_control.samplers import Row
 from flow_control.training.awm import AwmObjective
-from flow_control.training.endpoint import BaseObjective, PolicyVelocities, TrainPoint
+from flow_control.training.endpoint import BaseObjective
 from flow_control.training.nft import NftObjective
 from flow_control.training.ram import RamObjective
 
@@ -19,11 +20,14 @@ capture = importlib.import_module("objective_baseline_capture")
 
 
 def _grad(
-    objective: BaseObjective, point: TrainPoint, velocities: PolicyVelocities
+    objective: BaseObjective,
+    point: Row,
+    current: torch.Tensor,
+    aux: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Loss and d loss / d current for one compute call."""
-    out = objective.compute(point, velocities)
-    (grad,) = torch.autograd.grad(out.loss, velocities.current)
+    out = objective.compute(point, current, aux)
+    (grad,) = torch.autograd.grad(out.loss, current)
     return out.loss.detach(), grad
 
 
@@ -34,7 +38,7 @@ class ObjectiveParityTest(unittest.TestCase):
         The fixtures in ``tests/fixtures/objective_baselines`` were captured
         from the trainer-era ``_nft_objective`` / ``_ram_objective`` /
         ``_awm_objective`` (commit 97a84b3). Every case must reproduce loss and
-        d loss/d current with ``torch.equal``, the required roles must match
+        d loss/d current with ``torch.equal``, the required variants must match
         the roles the old ``*_loss_batched`` gating computed, and ``old``/``ref``
         must receive no gradient (the trainer-era code leaked into them; the
         contract detaches).
@@ -50,27 +54,18 @@ class ObjectiveParityTest(unittest.TestCase):
                 for combo in inputs:
                     with self.subTest(kind=kind, case=case, combo=combo.name):
                         stored = {
-                            role
-                            for role in ("old", "ref")
-                            if getattr(combo, role) is not None
+                            name
+                            for name in ("old", "ref")
+                            if getattr(combo, name) is not None
                         }
-                        self.assertEqual(set(objective.required_policies()), stored)
+                        self.assertEqual(set(objective.required_variants()), stored)
 
                         current = combo.forward.clone().requires_grad_(True)
                         aux = {
-                            role: getattr(combo, role).clone().requires_grad_(True)
-                            for role in sorted(stored)
+                            name: getattr(combo, name).clone().requires_grad_(True)
+                            for name in sorted(stored)
                         }
-                        point = TrainPoint(
-                            x0=combo.x0,
-                            noise=combo.noise,
-                            t=combo.t,
-                            advantage=combo.adv,
-                        )
-                        out = objective.compute(
-                            point,
-                            PolicyVelocities(current, aux.get("old"), aux.get("ref")),
-                        )
+                        out = objective.compute(combo.point(), current, aux)
                         grads = torch.autograd.grad(
                             out.loss, [current, *aux.values()], allow_unused=True
                         )
@@ -82,8 +77,8 @@ class ObjectiveParityTest(unittest.TestCase):
                         self.assertTrue(
                             torch.equal(grads[0], fixture[f"{prefix}/grad"])
                         )
-                        for role, aux_grad in zip(aux, grads[1:], strict=True):
-                            self.assertIsNone(aux_grad, f"gradient leaked into {role}")
+                        for name, aux_grad in zip(aux, grads[1:], strict=True):
+                            self.assertIsNone(aux_grad, f"gradient leaked into {name}")
                         for name, value in out.metrics.items():
                             self.assertEqual(value.ndim, 0, name)
                             self.assertFalse(value.requires_grad, name)
@@ -114,13 +109,19 @@ class ObjectiveGradientIdentityTest(unittest.TestCase):
             v = randn().requires_grad_(True)
             t = torch.tensor([t_value], dtype=torch.float64)
             adv = torch.tensor([adv_value], dtype=torch.float64)
-            point = TrainPoint(x0=x0, noise=noise, t=t, advantage=adv)
+            point: Row = {
+                "clean_latents": x0,
+                "noise": noise,
+                "sigma": t_value,
+                "noisy_latents": (1 - t) * x0 + t * noise,
+                "advantage": adv,
+            }
             target = noise - x0
-            velocities = PolicyVelocities(current=v, old=v_old, ref=v_ref)
+            aux = {"old": v_old, "ref": v_ref}
 
             with self.subTest(objective="ram", t=t_value, adv=adv_value):
                 m = 100.0
-                _, grad = _grad(RamObjective(reward_multiplier=m), point, velocities)
+                _, grad = _grad(RamObjective(reward_multiplier=m), point, v, aux)
                 target_ram = v_ref + m * adv * (target - v_old)
                 torch.testing.assert_close(
                     grad, 2.0 / n * (v - target_ram), rtol=rtol, atol=0
@@ -136,7 +137,7 @@ class ObjectiveGradientIdentityTest(unittest.TestCase):
                     clip_range=1.0,
                     weighting="uniform",
                 )
-                _, grad = _grad(objective, point, velocities)
+                _, grad = _grad(objective, point, v, aux)
                 adv_scaled = adv.clamp(-clip, clip) / clip * adv_max
                 expected = (
                     adv_scaled * 2.0 / n * (v - target)
@@ -150,9 +151,7 @@ class ObjectiveGradientIdentityTest(unittest.TestCase):
                 objective = NftObjective(
                     beta=beta, kl_beta=0.0, adv_clip_max=c, adv_mode="all"
                 )
-                _, grad = _grad(
-                    objective, point, PolicyVelocities(current=v, old=v_old)
-                )
+                _, grad = _grad(objective, point, v, {"old": v_old})
                 with torch.no_grad():
                     v_pos = beta * v + (1 - beta) * v_old
                     v_neg = (1 + beta) * v_old - beta * v

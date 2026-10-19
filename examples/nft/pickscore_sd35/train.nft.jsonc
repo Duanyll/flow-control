@@ -14,7 +14,6 @@
 
   "gradient_checkpointing": false,
   "rollout_storage_device": "device",
-  "precompute_aux_model_outputs": true,
 
   "num_prompts_per_epoch": 48,
   "num_rollouts_per_prompt": 24,
@@ -40,28 +39,24 @@
   "train_epochs": 500,
   "checkpoint_interval": 10,
   "validation_epochs": 10,
+  "validation_variants": ["ema"],
   "max_checkpoints": 10,
 
   "model": {
     "arch": "sd3",
     "type": "base",
     "micro_batch_size": 4,
-    "peft_lora_rank": 32,
-    "peft_lora_config": {
-      "lora_alpha": 64,
-      "init_lora_weights": "gaussian",
-      // Must be explicit: a partial peft_lora_config replaces the SD3Adapter
-      // default (no deep-merge), and PEFT can't infer targets for SD3.
-      "target_modules": [
-        "attn.to_q",
-        "attn.to_k",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_q_proj",
-        "attn.add_k_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 32, "alpha": 64 },
+      "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
+      "old": {
+        "type": "ema",
+        "of": "default",
+        "every": "epoch",
+        "decay": 0.5,
+        "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.001 },
+      },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -72,23 +67,7 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "steps": 10,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-    "solver": { "type": "dpm", "order": 2 },
-  },
-
-  "ema_old": {
-    "decay": 0.5,
-    "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.001 },
-    "interval": 1,
-  },
-
-  "ema": {
-    "decay": 0.9,
-    "warmup": { "type": "standard" },
-    "interval": 1,
-  },
+  "rollout_sampler": { "type": "dpm", "steps": 10, "shift": 3.0, "order": 2 },
 
   "reward": {
     "type": "pickscore",
@@ -115,10 +94,7 @@
     "path": "./data/pickscore_sd35/validation",
   },
 
-  "validation_sampler": {
-    "steps": 40,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-  },
+  "validation_sampler": { "type": "grid", "steps": 40, "shift": 3.0 },
 
   "processor": {
     "task": "t2i",

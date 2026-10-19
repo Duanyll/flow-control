@@ -6,21 +6,13 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "flux2",
-    "type": "kv"
-  },
+  "model": { "arch": "flux2", "type": "kv" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux2_klein_9b_kv"
   },
-  "sampler": {
-    "seed": 0,
-    "steps": 4,
-    "shift": {
-      "type": "flux2"
-    }
-  },
+  "seed": 0,
+  "sampler": { "type": "grid", "steps": 4, "shift": "flux2" },
   "processor": {
     "task": "t2i",
     "preset": "flux2_klein_9b_kv"

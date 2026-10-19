@@ -26,7 +26,14 @@ from flow_control.data import (
 )
 from flow_control.rewards import Reward, RewardLoopThread, execute_reward
 from flow_control.rewards.base import BaseReward, RewardResult
-from flow_control.samplers import Sampler, SampleRequest, derive_seed
+from flow_control.samplers import (
+    Calls,
+    Executor,
+    Row,
+    Trajectory,
+    derive_seed,
+    variants,
+)
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import deep_cast_float_dtype
 
@@ -57,9 +64,11 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     """Validate before the first training step (the seed weights, or the resumed
     checkpoint's). ``false`` skips that pass, e.g. when relaunching a run whose
     step-0 numbers are already logged."""
+    validation_variants: list[str] = ["default"]
+    """Model variants to validate; the first logs as ``val``, the others as ``val/<name>``."""
     seed: int = 42
 
-    validation_sampler: Sampler
+    validation_sampler: Trajectory
 
     # -------------------------------- Properties -------------------------------- #
 
@@ -98,9 +107,9 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             f"({len(self._validation_stream)} per rank)."
         )
 
-    def _validation_requests(
+    def _validation_runs(
         self, model: ModelAdapter, step: int
-    ) -> Iterator[SampleRequest]:
+    ) -> Iterator[tuple[Row, Calls[None]]]:
         base_seed = self.seed if self.validation_same_seed else self.seed + step
         epoch = 0 if self.validation_same_seed else step
         online = isinstance(self._validation_store, OnlineStore)
@@ -113,13 +122,8 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                 generator = torch.Generator(device=self.device).manual_seed(
                     derive_seed(base_seed, row[KEY])
                 )
-                self.processor.initialize_latents(
-                    row,
-                    generator=generator,
-                    device=self.device,
-                    dtype=model.dtype,
-                )
-                yield self.build_sample_request(self.validation_sampler, row, generator)
+                row = self.start_row(row, generator, model.dtype)
+                yield row, self.validation_sampler(row)
 
     @staticmethod
     def _reward_metrics(
@@ -153,6 +157,27 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                 normalized[:, i].std(correction=0).item()
             )
         return metrics
+
+    def validate_variants(
+        self,
+        model: ModelAdapter,
+        step: int,
+        reward: BaseReward | None = None,
+        reward_loop: RewardLoopThread | None = None,
+    ) -> None:
+        """Validate once per ``validation_variants`` entry."""
+        for index, name in enumerate(self.validation_variants):
+            suffix = f"/{name}" if index else ""
+            with model.use_variant(name):
+                self.validate_and_log(
+                    model,
+                    step,
+                    reward=reward,
+                    metric_prefix=f"val{suffix}",
+                    image_name=f"validation{suffix}",
+                    profile_prefix=f"profile/validation{suffix}",
+                    reward_loop=reward_loop,
+                )
 
     @torch.no_grad()
     def validate_and_log(
@@ -198,14 +223,12 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
         def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:
             image_count = 0
+            executor = Executor(model, variants(self.validation_sampler))
             with progress:
-                for run in self.validation_sampler.sample(
-                    model, self._validation_requests(model, step)
-                ):
-                    row: Any = run.row
+                for row in executor.stream(self._validation_runs(model, step)):
                     key = row[KEY]
                     padding = is_padding(row)
-                    decoded = self.processor.decode_output(run.ctx.latents, row)
+                    decoded = self.processor.decode_output(row["noisy_latents"], row)
                     row.update(decoded)
 
                     if (

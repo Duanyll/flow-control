@@ -18,7 +18,7 @@ from flow_control.utils.tensor import (
     tensor_to_pil,
 )
 
-from .engine import ServingEngine, cfg_scale_for_display
+from .engine import ServingEngine, cfg_scale_for_display, steps_for_display
 from .tasks import task_template_registry
 
 logger = get_logger(__name__)
@@ -116,7 +116,6 @@ def _wire_static_events(
     seed_ckpt_input: gr.Textbox,
     train_ckpt_input: gr.Dropdown | gr.Textbox,
     jsonc_box: gr.Code,
-    use_ema_checkbox: gr.Checkbox,
     info_box: gr.Code,
     task_state: gr.State,
 ) -> None:
@@ -140,7 +139,6 @@ def _wire_static_events(
         seed_ckpt: str,
         train_ckpt: str,
         config_jsonc: str,
-        use_ema: bool,
         progress: gr.Progress = gr.Progress(),  # noqa: B008
     ) -> tuple[str, str]:
         def _report(frac: float, desc: str) -> None:
@@ -152,7 +150,6 @@ def _wire_static_events(
                 config_jsonc=config_jsonc,
                 seed_checkpoint_dir=seed_ckpt.strip() or None,
                 checkpoint_dir=train_ckpt.strip() or None,
-                use_ema=use_ema,
             )
             return result, engine.processor.task
         except Exception as e:
@@ -163,7 +160,7 @@ def _wire_static_events(
 
     reload_btn.click(
         fn=on_reload,
-        inputs=[seed_ckpt_input, train_ckpt_input, jsonc_box, use_ema_checkbox],
+        inputs=[seed_ckpt_input, train_ckpt_input, jsonc_box],
         outputs=[info_box, task_state],
     )
 
@@ -219,7 +216,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         seed_ckpt = str(args[n_task + 3]).strip()
                         train_ckpt = str(args[n_task + 4]).strip()
                         config_jsonc = str(args[n_task + 5])
-                        use_ema = bool(args[n_task + 6])
+                        variant = str(args[n_task + 6]).strip() or None
                         bg_mode = str(args[n_task + 7])
 
                         try:
@@ -239,10 +236,10 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                                 seed=seed,
                                 steps=steps,
                                 cfg_scale=cfg_scale,
+                                variant=variant,
                                 config_jsonc=config_jsonc,
                                 seed_checkpoint_dir=seed_ckpt or None,
                                 checkpoint_dir=train_ckpt or None,
-                                use_ema=use_ema,
                             )
                         except Exception as e:
                             logger.exception("Generation failed")
@@ -274,7 +271,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                             seed_ckpt_input,
                             train_ckpt_input,
                             jsonc_box,
-                            use_ema_checkbox,
+                            variant_input,
                             bg_dropdown,
                         ],
                         outputs=[
@@ -293,7 +290,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         minimum=1,
                         maximum=100,
                         step=1,
-                        value=engine.sampler.steps,
+                        value=steps_for_display(engine.sampler) or 1,
                     )
                     cfg_slider = gr.Slider(
                         label="CFG Scale",
@@ -304,7 +301,7 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                     )
                     seed_input = gr.Number(
                         label="Seed",
-                        value=engine.sampler.seed,
+                        value=engine.seed,
                         precision=0,
                     )
 
@@ -324,9 +321,10 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
                         value=engine._seed_checkpoint_dir or "",
                     )
                     train_ckpt_input = _render_checkpoint_input(engine)
-                    use_ema_checkbox = gr.Checkbox(
-                        label="Use EMA weights",
-                        value=engine._use_ema,
+                    variant_input = gr.Textbox(
+                        label="Model Variant",
+                        placeholder="Variant name from model.variants (empty: engine default)",
+                        value=engine.variant or "",
                     )
 
                 with gr.Row():
@@ -358,7 +356,6 @@ def create_gradio_app(engine: ServingEngine) -> gr.Blocks:
             seed_ckpt_input=seed_ckpt_input,
             train_ckpt_input=train_ckpt_input,
             jsonc_box=jsonc_box,
-            use_ema_checkbox=use_ema_checkbox,
             info_box=info_box,
             task_state=task_state,
         )

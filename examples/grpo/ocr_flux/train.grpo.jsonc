@@ -20,6 +20,7 @@
   "train_epochs": 500,
   "checkpoint_interval": 10,
   "validation_epochs": 10,
+  "validation_variants": ["ema"],
   "max_checkpoints": 10,
   // Score a 256-prompt validation subset for a stable online reward metric,
   // but only push the first 64 image samples to trackio (mirrors pickscore).
@@ -29,24 +30,10 @@
     "arch": "flux1",
     "type": "base",
     "guidance": 3.5,
-    "peft_lora_rank": 64,
-    "peft_lora_config": {
-      "lora_alpha": 128,
-      "init_lora_weights": "gaussian",
-      "target_modules": [
-        "attn.to_k",
-        "attn.to_q",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_k_proj",
-        "attn.add_q_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-        "ff.net.0.proj",
-        "ff.net.2",
-        "ff_context.net.0.proj",
-        "ff_context.net.2",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -58,17 +45,12 @@
   "train_predictor": "model",
 
   "rollout_sampler": {
-    "steps": 6,
-    "shift": { "type": "linear" },
     // Full-trajectory Flow-SDE rollout, not the fast CPS windowed setting.
-    // The OCR SD3.5 setting used noise_level=0.7; start there for OCR stability.
-    "solver": { "type": "flow", "eta": 0.7 },
-  },
-
-  "ema": {
-    "decay": 0.9,
-    "warmup": { "type": "standard" },
-    "interval": 1,
+    // The OCR SD3.5 setting used eta 0.7; start there for OCR stability.
+    "type": "grid",
+    "steps": 6,
+    "shift": "linear",
+    "transition": { "type": "euler", "eta": 0.7 },
   },
 
   "reward": {
@@ -97,10 +79,7 @@
     "limit": 256,
   },
 
-  "validation_sampler": {
-    "steps": 28,
-    "shift": { "type": "linear" },
-  },
+  "validation_sampler": { "type": "grid", "steps": 28, "shift": "linear" },
 
   "processor": {
     "task": "t2i",

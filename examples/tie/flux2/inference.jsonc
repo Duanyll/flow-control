@@ -7,20 +7,12 @@
     "records": false
   },
   "hsdp_shard_dim": 2,
-  "model": {
-    "arch": "flux2",
-    "type": "base"
-  },
+  "model": { "arch": "flux2", "type": "base" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux2_tie"
   },
-  "sampler": {
-    "steps": 28,
-    "shift": {
-      "type": "flux2"
-    }
-  },
+  "sampler": { "type": "grid", "steps": 28, "shift": "flux2" },
   "processor": {
     "task": "tie",
     "preset": "flux2",

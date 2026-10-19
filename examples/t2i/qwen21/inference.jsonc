@@ -6,16 +6,14 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "qwen21",
-    "type": "base"
-  },
+  "model": { "arch": "qwen21", "type": "base" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_qwen21"
   },
+  "seed": 42,
   "sampler": {
-    "seed": 42,
+    "type": "grid",
     "steps": 40,
     "shift": {
       "type": "linear",

@@ -68,7 +68,7 @@ class SamplerModel(Protocol):
     @property
     def micro_batch_size(self) -> int: ...
 
-    def use_variant(self, variant: str | None) -> AbstractContextManager[None]: ...
+    def use_variant(self, variant: str | None, /) -> AbstractContextManager[None]: ...
 
     def predict_velocity_batched(
         self,
@@ -622,8 +622,13 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 self._share_dummy(donor - 1)
             velocities: list[torch.Tensor] = []
             dummies: list[torch.Tensor] = []
-            # fp32 EMA weights (copy, slots, clones) compute in the model dtype.
-            ema = isinstance(self.variants.get(self._active.get()), EmaVariant)
+            # An fp32 EMA copy of a full module computes in the model dtype;
+            # LoRA slots and clones cast themselves.
+            active = self._active.get()
+            ema = (
+                isinstance(self.variants.get(active), EmaVariant)
+                and self._kind(active) == "full"
+            )
             # Run the longest rank's chunk count; slicing past our own end is empty.
             with torch.autocast(self.device.type, self.dtype, enabled=ema):
                 for start in range(0, chunks * size, size):

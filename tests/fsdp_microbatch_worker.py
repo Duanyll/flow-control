@@ -1,34 +1,43 @@
 import os
-from copy import deepcopy
 from typing import Any, ClassVar, cast
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from diffusers import ModelMixin
-from diffusers.loaders import PeftAdapterMixin
-from peft import LoraConfig
-from pydantic import PrivateAttr
+from pydantic import Field, PrivateAttr
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.contrib.momentum_guidance import MomentumGuidance
+from flow_control.contrib.momentum_guidance import Momentum
 from flow_control.samplers import (
+    BaseTrajectory,
+    BaseTransition,
+    Cfg,
+    Euler,
     Executor,
-    ModelPrediction,
-    Sampler,
-    SampleRequest,
-    TiledPrediction,
+    Grid,
+    Model,
+    RootFrame,
+    Row,
+    SaGrid,
+    StepFrame,
+    Tiled,
+    variants,
 )
-from flow_control.samplers.guidance import ClassifierFreeGuidance
-from flow_control.samplers.plan import EvalRequest, StepContext
-from flow_control.samplers.solver import SASolver
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tiling import TileLayout
 
 logger = get_logger(__name__)
+
+LORA: dict[str, Any] = {
+    "default": {"type": "lora", "rank": 2, "alpha": 2},
+    "other": {"type": "lora", "rank": 2, "alpha": 2},
+}
 
 
 class TinyBlock(nn.Module):
@@ -40,7 +49,7 @@ class TinyBlock(nn.Module):
         return torch.nn.functional.silu(self.proj(inputs))
 
 
-class TinyTransformer(ModelMixin, PeftAdapterMixin):
+class TinyTransformer(ModelMixin):
     _no_split_modules = ["TinyBlock"]
     _supports_gradient_checkpointing = True
 
@@ -59,23 +68,18 @@ class TinyTransformer(ModelMixin, PeftAdapterMixin):
         return self.output(hidden)
 
 
-class TinyAdapter(BaseModelAdapter[TinyTransformer, Batch]):
+class TinyAdapter(BaseModelAdapter[ModelMixin, Batch]):
+    arch: str = "tiny"
+    type: str = "tiny"
+    hf_model: HfModelLoader[ModelMixin] = Field(
+        default_factory=lambda: HfModelLoader(
+            library="custom", class_name="Tiny", pretrained_model_id="tiny"
+        )
+    )
     supports_dense_batching: ClassVar[bool] = True
     dense_batch_fields = ("image_size", "noisy_latents")
-    _tiny_transformer: TinyTransformer = PrivateAttr(default_factory=TinyTransformer)
+    lora_target_modules = ("proj",)
     _forward_count: int = PrivateAttr(default=0)
-
-    @property
-    def transformer(self) -> TinyTransformer:
-        return self._tiny_transformer
-
-    @transformer.setter
-    def transformer(self, value: TinyTransformer) -> None:
-        self._tiny_transformer = value
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return self.transformer.dtype
 
     def _predict_velocity(
         self,
@@ -83,11 +87,35 @@ class TinyAdapter(BaseModelAdapter[TinyTransformer, Batch]):
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         self._forward_count += 1
-        return self.transformer(batch["noisy_latents"])
+        return self.module()(batch["noisy_latents"])
 
 
 class FallbackTinyAdapter(TinyAdapter):
     supports_dense_batching: ClassVar[bool] = False
+
+
+def make_adapter(
+    cls: type[TinyAdapter],
+    device: torch.device,
+    *,
+    variants: dict[str, Any],
+    trainable: bool,
+    micro_batch_size: int = 1,
+) -> TinyAdapter:
+    """A seeded adapter realized like ``load_transformer`` does, with the loader faked."""
+    torch.manual_seed(2718)
+    adapter = cls(
+        variants=variants, trainable=trainable, micro_batch_size=micro_batch_size
+    )
+    adapter.transformer = TinyTransformer().requires_grad_(trainable)
+    with patch.object(HfModelLoader, "load_model", return_value=True):
+        adapter.load_transformer(torch.device("cpu"))
+    with torch.no_grad():  # LoRA B starts at zero; make every branch distinct
+        for name in variants:
+            for weight in adapter._weights(name):
+                weight.normal_()
+    nn.Module.to(adapter.transformer, device=device)
+    return adapter
 
 
 def make_batch(tokens: int, device: torch.device) -> Batch:
@@ -97,6 +125,15 @@ def make_batch(tokens: int, device: torch.device) -> Batch:
         "clean_latents": torch.zeros_like(latents),
         "noisy_latents": latents,
     }
+
+
+def point(batch: Any, sigma: float = 0.5) -> Row:
+    return {**batch, "sigma": sigma, "_generator": None, "_frame": RootFrame(None)}
+
+
+def sample(model: Any, sampler: BaseTrajectory, rows: list[Row]) -> list[Row]:
+    executor = Executor(model, variants(sampler))
+    return list(executor.stream((row, sampler(row)) for row in rows))
 
 
 def run_case(
@@ -119,34 +156,21 @@ def run_case(
     optimizer.zero_grad(set_to_none=True)
 
 
-def make_peft_pair(
+def make_lora_pair(
     mesh: DeviceMesh,
     device: torch.device,
     *,
     fallback: bool = False,
     train_base: bool = False,
 ) -> tuple[TinyAdapter, TinyAdapter]:
-    """Load both variants before sharding; the oracle has no checkpointing."""
-    torch.manual_seed(2718)
+    """Two identically seeded adapters; the first is sharded with checkpointing."""
     adapter_class = FallbackTinyAdapter if fallback else TinyAdapter
-    sharded = adapter_class.model_construct(
-        arch="tiny", type="tiny", micro_batch_size=2
+    sharded = make_adapter(
+        adapter_class, device, variants=LORA, trainable=train_base, micro_batch_size=2
     )
-    for variant in ("default", "other"):
-        sharded.transformer.add_adapter(
-            LoraConfig(
-                r=2, lora_alpha=2, target_modules=["proj"], init_lora_weights=False
-            ),
-            adapter_name=variant,
-        )
-    sharded.transformer.set_adapter("default")
-    for name, parameter in sharded.transformer.named_parameters():
-        parameter.requires_grad_(train_base or "lora_" in name)
-    nn.Module.to(sharded.transformer, device=device)
-    control = adapter_class.model_construct(arch="tiny", type="tiny")
-    control.transformer = deepcopy(sharded.transformer)
-    sharded.transformer.enable_gradient_checkpointing()
-    fully_shard(sharded.transformer.block, mesh=mesh)
+    control = make_adapter(adapter_class, device, variants=LORA, trainable=train_base)
+    sharded.enable_gradient_checkpointing()
+    fully_shard(cast(Any, sharded.transformer).block, mesh=mesh)
     fully_shard(sharded.transformer, mesh=mesh)
     return sharded, control
 
@@ -187,42 +211,23 @@ def compare_gradients(sharded: TinyAdapter, control: TinyAdapter, label: str) ->
 def run_branch_case(
     mesh: DeviceMesh, device: torch.device, *, different_variants: bool
 ) -> None:
-    """Rethink A1: variant restoration must survive checkpoint recomputation,
+    """Rethink A1: the forward's variant must survive checkpoint recomputation,
     and rank-local branch dummies must participate in FSDP backward.
     """
-    sharded, control = make_peft_pair(mesh, device, train_base=not different_variants)
-    guidance = (
-        ClassifierFreeGuidance(positive_variant=["default", "other"])
+    sharded, control = make_lora_pair(mesh, device, train_base=not different_variants)
+    prediction = (
+        Model(variant=("default", "other")[dist.get_rank()])
         if different_variants
-        else ClassifierFreeGuidance(
-            scale=2.0,
-            positive_variant="default",
-            negative_variant="base",
-            negative_condition="positive",
+        else Cfg(
+            scale=2.0, negative_condition="positive", negative=Model(variant="base")
         )
     )
     torch.manual_seed(100 + dist.get_rank())
     batch = make_batch(4, device)
-    # Training selects its own branches/variants despite a plain rollout tree.
-    sampler = Sampler(steps=2, guidance=ModelPrediction())
-    outputs = []
-    for adapter in (sharded, control):
-        index = dist.get_rank() if different_variants else 0
-        run = sampler.make_run(
-            SampleRequest(batch), plan=sampler.plan(batch), predictor=guidance
-        )
-        gen = (
-            run.guided_velocity(batch["noisy_latents"], index)
-            if adapter is sharded
-            else guidance.bind(batch)(
-                EvalRequest(batch["noisy_latents"], run.plan[index].sigma),
-                StepContext(batch["noisy_latents"], None, None, index, len(run.plan)),
-            )
-        )
-        output = Executor(adapter, guidance.variant_keys(sampler.steps)).evaluate(
-            [gen]
-        )[0]
-        outputs.append(output)
+    outputs = [
+        Executor(adapter, variants(prediction)).evaluate([prediction(point(batch))])[0]
+        for adapter in (sharded, control)
+    ]
     torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-5, atol=1e-6)
     for output in outputs:
         output.square().mean().backward()
@@ -238,18 +243,19 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
     """Rethink A4: tiled evaluation runs sequential leaf forwards under FSDP and
     stitches them; the sharded gradients must match an untiled unsharded oracle.
     """
-    sharded, control = make_peft_pair(mesh, device, fallback=True)
+    sharded, control = make_lora_pair(mesh, device, fallback=True)
     torch.manual_seed(200 + dist.get_rank())
     batch = make_batch(7, device)
     timesteps = [torch.tensor([0.5], device=device)]
     stride = sharded.patch_size * sharded.vae_scale_factor
     # Seven tokens tall, one wide: two-token tiles overlapping by one give six.
-    cast(dict[str, Any], batch)["tiling"] = TileLayout(
-        tile_size=2 * stride, overlap=stride, stride=stride
-    ).model_dump()
-    actual = Executor(sharded).evaluate(
-        [TiledPrediction().velocity(batch, timesteps[0])]
-    )[0]
+    tiled: Any = {
+        **batch,
+        "tiling": TileLayout(
+            tile_size=2 * stride, overlap=stride, stride=stride
+        ).model_dump(),
+    }
+    actual = Executor(sharded).evaluate([Tiled()(point(tiled))])[0]
     # The toy network is tokenwise: an untiled, unsharded forward is an oracle
     # for overlap normalization and for every tile's gradient.
     expected = control.predict_velocity_batched([batch], timesteps)[0]
@@ -261,45 +267,45 @@ def run_tiled_case(mesh: DeviceMesh, device: torch.device) -> None:
 
     # Deeply nested local joins must preserve FSDP's forward order. SA also
     # exercises two sequential EMA updates inside its first transition.
-    untiled = {key: value for key, value in batch.items() if key != "tiling"}
-    composed = Sampler(
+    composed = SaGrid(
         steps=4,
-        solver=SASolver(eta=0),
-        guidance=TiledPrediction(
-            inner=ClassifierFreeGuidance(
+        eta=0,
+        prediction=Tiled(
+            prediction=Cfg(
                 scale=2,
                 renorm=True,
                 negative_condition="positive",
-                negative_variant="base",
-                inner=MomentumGuidance(alpha=0.5, beta=0.25, inner=ModelPrediction()),
+                negative=Model(variant="base"),
+                prediction=Momentum(alpha=0.5, beta=0.25, prediction=Model()),
             )
         ),
     )
     with torch.no_grad():
-        (actual_run,) = composed.sample(sharded, [SampleRequest(batch)])
-        (expected_run,) = composed.sample(
-            control, [SampleRequest(cast(Batch, untiled))]
-        )
+        (actual_run,) = sample(sharded, composed, [point(tiled, 1.0)])
+        (expected_run,) = sample(control, composed, [point(batch, 1.0)])
     torch.testing.assert_close(
-        actual_run.ctx.latents, expected_run.ctx.latents, rtol=1e-5, atol=1e-6
+        actual_run["noisy_latents"],
+        expected_run["noisy_latents"],
+        rtol=1e-5,
+        atol=1e-6,
     )
     logger.info("GPU regression passed: Tiled(CFG(Momentum(Model))) with SA and FSDP")
 
     # Complete tiled sampling must match the tokenwise whole-image oracle.
-    # Run real bf16 Linear forwards while every solver/collector tensor is fp32.
-    def check_step(run, step):
+    # Run real bf16 Linear forwards while every step tensor stays fp32.
+    def check_step(row: Row, step: StepFrame) -> None:
         assert step.latents.dtype == step.next_latents.dtype == torch.float32
         assert step.velocity is not None and step.velocity.dtype == torch.float32
 
-    sampler = Sampler(steps=3, guidance=MomentumGuidance(alpha=0.5, beta=0.25))
+    sampler = Grid(steps=3, transition=Euler(prediction=Momentum(alpha=0.5, beta=0.25)))
     nn.Module.to(control.transformer, dtype=torch.bfloat16)
+    observed = point(tiled, 1.0)
+    observed["_frame"] = RootFrame(None, [(BaseTransition, check_step)])
     with torch.no_grad():
-        (tiled_run,) = sampler.sample(
-            control, [SampleRequest(batch)], collector=check_step
-        )
-        (plain_run,) = sampler.sample(control, [SampleRequest(cast(Batch, untiled))])
+        (tiled_run,) = sample(control, sampler, [observed])
+        (plain_run,) = sample(control, sampler, [point(batch, 1.0)])
     torch.testing.assert_close(
-        tiled_run.ctx.latents, plain_run.ctx.latents, rtol=1e-5, atol=1e-6
+        tiled_run["noisy_latents"], plain_run["noisy_latents"], rtol=1e-5, atol=1e-6
     )
     logger.info("GPU regression passed: bf16 tiled sampling with fp32 steps")
 
@@ -311,13 +317,12 @@ def main() -> None:
     dist.init_process_group("nccl", device_id=device)
     try:
         mesh = dist.device_mesh.init_device_mesh("cuda", (dist.get_world_size(),))
-        adapter = TinyAdapter.model_construct(
-            arch="tiny", type="tiny", micro_batch_size=2
+        adapter = make_adapter(
+            TinyAdapter, device, variants={}, trainable=True, micro_batch_size=2
         )
-        nn.Module.to(adapter.transformer, device=device)
-        fully_shard(adapter.transformer.block, mesh=mesh)
+        fully_shard(cast(Any, adapter.transformer).block, mesh=mesh)
         fully_shard(adapter.transformer, mesh=mesh)
-        optimizer = torch.optim.AdamW(adapter.transformer.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(adapter.trainable_parameters(), lr=1e-3)
 
         run_case(adapter, optimizer, (4, 4))
         run_case(adapter, optimizer, (4, 5))

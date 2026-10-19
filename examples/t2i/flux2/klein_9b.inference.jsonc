@@ -21,12 +21,7 @@
     "type": "cache",
     "path": "./demo/preprocess_flux2_klein_9b_t2i"
   },
-  "sampler": {
-    "steps": 4,
-    "shift": {
-      "type": "flux2"
-    }
-  },
+  "sampler": { "type": "grid", "steps": 4, "shift": "flux2" },
   "processor": {
     "task": "t2i",
     "preset": "flux2_klein_9b"

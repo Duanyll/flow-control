@@ -7,30 +7,27 @@
   "experiment_name": "flux_sft_demo",
   "max_checkpoints": 10,
   "validation_steps": 20,
+  "validation_variants": ["ema"],
   "checkpoint_interval": 20,
 
   "gradient_checkpointing": true,
   "train_batch_size": 16,
   "train_steps": 200,
 
-  "ema": {
-    "decay": 1.0
-  },
-
   "hsdp_shard_dim": 1,
 
   "model": {
     "arch": "flux1",
     "type": "base",
-    "peft_lora_rank": 16
+    "variants": {
+      "default": { "type": "lora", "rank": 16, "alpha": 8 },
+      "ema": { "type": "ema", "of": "default", "decay": 1.0, "warmup": "standard" }
+    }
   },
 
   "train_predictor": "model",
 
-  "validation_sampler": {
-    "steps": 20,
-    "shift": { "type": "linear" }
-  },
+  "validation_sampler": { "type": "grid", "steps": 20, "shift": "linear" },
 
   "processor": {
     "task": "t2i",

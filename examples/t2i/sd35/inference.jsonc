@@ -6,23 +6,21 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "sd3",
-    "type": "base"
-  },
+  "model": { "arch": "sd3", "type": "base" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_sd35_t2i"
   },
   "sampler": {
-    // SD3.5 is not guidance-distilled: use true CFG (guidance scale > 1 with a
+    // SD3.5 is not guidance-distilled: use true CFG (cfg scale > 1 with a
     // negative batch, produced because the preset sets save_negative=true) and a
     // constant resolution-independent shift ~= 3.0.
+    "type": "grid",
     "steps": 28,
-    "guidance": { "type": "cfg", "scale": 7.0 },
-    "shift": {
-      "type": "constant",
-      "shift_value": 3.0
+    "shift": 3.0,
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 7.0 }
     }
   },
   "processor": {

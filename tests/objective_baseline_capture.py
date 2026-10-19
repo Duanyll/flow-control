@@ -1,13 +1,12 @@
-"""Freeze the NFT / RAM / AWM objective numerics across the trainer split.
+"""Freeze the NFT / RAM / AWM objective numerics across refactors.
 
 The fixtures were captured from the pre-refactor per-item losses
 (``_nft_objective``, ``_ram_objective``, ``_awm_objective``) that the
-trainer-layering refactor (``draft/sampler-rethink/09-trainer-layering.md``
-§C.1) ported verbatim behind one ``Objective.compute`` contract
-(``flow_control.training.endpoint``). This harness evaluates the objectives on
-fixed inputs and stores loss, gradient and the inputs themselves, so the port
-is proven bitwise instead of "close enough"; ``tests/test_objectives.py``
-replays the same fixtures as a collected test.
+trainer-layering refactor ported verbatim behind one ``Objective.compute``
+contract (``flow_control.training.endpoint``). This harness evaluates the
+objectives on fixed inputs and stores loss, gradient and the inputs
+themselves, so a port is proven bitwise instead of "close enough";
+``tests/test_objectives.py`` replays the same fixtures as a collected test.
 
 Fixture layout, ``tests/fixtures/objective_baselines/{nft,ram,awm}.pt`` — one
 flat ``dict[str, Tensor]`` per kind, loadable with ``weights_only=True``:
@@ -17,9 +16,9 @@ flat ``dict[str, Tensor]`` per kind, loadable with ``weights_only=True``:
     <case>/<combo>/x0|noise|forward   latent-shaped float32 inputs
     <case>/<combo>/t|adv          ``[1]`` float32 timestep (1 = pure noise) and
                                   advantage
-    <case>/<combo>/old|ref        auxiliary-policy velocities; present only when
-                                  ``objective.required_policies()`` contains the
-                                  role (AWM's ``ema_prediction`` is ``old``)
+    <case>/<combo>/old|ref        auxiliary-variant velocities; present only when
+                                  ``objective.required_variants()`` contains the
+                                  name (AWM's ``ema_prediction`` is ``old``)
 
 Regenerate only when an objective changes on purpose, and commit the new
 fixtures together with the change that caused them.
@@ -37,13 +36,9 @@ from typing import Any
 import torch
 from pydantic import TypeAdapter
 
+from flow_control.samplers import Row
 from flow_control.training import import_builtin_trainers
-from flow_control.training.endpoint import (
-    BaseObjective,
-    Objective,
-    PolicyVelocities,
-    TrainPoint,
-)
+from flow_control.training.endpoint import BaseObjective, Objective
 from flow_control.utils.logging import console
 
 BASELINE_DIR = Path(__file__).resolve().parent / "fixtures/objective_baselines"
@@ -100,6 +95,17 @@ class ComboInputs:
     ref: torch.Tensor | None
     forward: torch.Tensor
 
+    def point(self) -> Row:
+        """The training point the trainer would build: ``x_t`` from ``x0``, ``noise`` and ``t``."""
+        t = self.t.view(-1, *([1] * (self.x0.ndim - 1)))
+        return {
+            "clean_latents": self.x0,
+            "noise": self.noise,
+            "sigma": float(self.t),
+            "noisy_latents": (1.0 - t) * self.x0 + t * self.noise,
+            "advantage": self.adv,
+        }
+
 
 def _randn(shape: tuple[int, ...], generator: torch.Generator) -> torch.Tensor:
     return torch.randn(shape, generator=generator, dtype=torch.float32)
@@ -153,15 +159,12 @@ def inputs_from_fixture(
 
 
 def evaluate_combo(
-    objective: BaseObjective, combo: ComboInputs, roles: frozenset[str]
+    objective: BaseObjective, combo: ComboInputs, names: frozenset[str]
 ) -> dict[str, torch.Tensor]:
     """Loss, gradient and the inputs used for one combo."""
-    aux = {role: getattr(combo, role) for role in sorted(roles)}
+    aux = {name: getattr(combo, name) for name in sorted(names)}
     forward = combo.forward.clone().requires_grad_(True)
-    point = TrainPoint(x0=combo.x0, noise=combo.noise, t=combo.t, advantage=combo.adv)
-    loss = objective.compute(
-        point, PolicyVelocities(forward, aux.get("old"), aux.get("ref"))
-    ).loss
+    loss = objective.compute(combo.point(), forward, aux).loss
     (grad,) = torch.autograd.grad(loss, forward)
     return {
         "loss": loss.detach(),
@@ -180,10 +183,10 @@ def evaluate_case(
 ) -> dict[str, torch.Tensor]:
     """Flat ``<combo>/<field>`` records for one case."""
     objective = make_objective(kind, kwargs)
-    roles = objective.required_policies()
+    names = objective.required_variants()
     out: dict[str, torch.Tensor] = {}
     for combo in inputs:
-        for field, value in evaluate_combo(objective, combo, roles).items():
+        for field, value in evaluate_combo(objective, combo, names).items():
             out[f"{combo.name}/{field}"] = value
     return out
 

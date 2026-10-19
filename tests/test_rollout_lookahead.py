@@ -1,29 +1,37 @@
-"""``rollout_lookahead`` (N-step-off, local/n-step-off/README.md §4): the RL epoch
-loop with batches sampled ahead of training, resume with a batch in flight, and
-arm B's behaviour-teacher cache. CPU, world size 1, real NFT trainer code with
-only the reward backend, the store and the DiT faked."""
+"""The RL epoch loop on the real NFT trainer code with the DiT faked: a tiny
+LoRA adapter with ``ema`` / ``old`` / ``ref`` variants, the reward backend and
+the store stubbed. CPU, world size 1."""
 
 import asyncio
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import torch
-from pydantic import PrivateAttr
-from test_microbatching import FakeSamplerModel, make_sampler_batch
+from diffusers import ModelMixin
+from pydantic import Field, PrivateAttr
 from test_trainer_recipe_config import _NftProbe, _ProbeOverrides
+from test_variants import TinyTransformer
 
+from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.data import KEY, Index, IndexEntry, RowCursor
 from flow_control.rewards import PendingRewards
 from flow_control.rewards.base import BaseReward
 from flow_control.rewards.pairwise import PairwiseReward
-from flow_control.training.ema import apply_ema_maybe
-from flow_control.training.endpoint import EndpointTrainItem
+from flow_control.samplers import Grid
 from flow_control.training.mixins import PendingRollouts, Rollout
 from flow_control.training.nft import NftTrainer
+from flow_control.utils.hf_model import HfModelLoader
+from flow_control.utils.tensor import deep_apply_tensor_fn
 
 SUBMIT_REWARD = "flow_control.training.mixins.rollout.submit_reward"
+VARIANTS: dict[str, Any] = {
+    "default": {"type": "lora", "rank": 2},
+    "ema": {"type": "ema", "decay": 0.5},
+    "old": {"type": "ema", "decay": 0.9, "every": "epoch"},
+    "ref": {"type": "alias", "of": "base"},
+}
 
 
 class _KeyReward(BaseReward):
@@ -69,33 +77,38 @@ class _KeyPairwise(PairwiseReward):
         return 0.5
 
 
-class _GainTransformer(torch.nn.Module):
-    """One trainable scalar, so optimizer, EMAs and reference backup are real."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.gain = torch.nn.Parameter(torch.tensor(1.0))
-
+class _Transformer(TinyTransformer):
     def set_requires_gradient_sync(self, flag: bool) -> None:
         """FSDP's hook, called by the update loop."""
 
 
-class _GainModel(FakeSamplerModel):
-    peft_lora_rank = 0
+class _Adapter(BaseModelAdapter[ModelMixin, Batch]):
+    """The tiny two-block DiT; journals the variant of every forward."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.transformer = _GainTransformer()
+    arch: str = "tiny"
+    type: str = "tiny"
+    hf_model: HfModelLoader[ModelMixin] = Field(
+        default_factory=lambda: HfModelLoader(
+            library="custom", class_name="Tiny", pretrained_model_id="tiny"
+        )
+    )
+    lora_target_modules = ("to_q",)
+    _forwards: list[str] = PrivateAttr(default_factory=list)
 
-    @property
-    def gain(self) -> torch.nn.Parameter:
-        return self.transformer.gain
+    def _predict_velocity(self, batch: Batch, timestep: torch.Tensor) -> torch.Tensor:
+        self._forwards.append(self._active.get())
+        return self.module()(batch["noisy_latents"], timestep)
 
-    def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
-        self.forward_batch_sizes.append(len(batches))
-        return [
-            self.gain * (b["prompt_embeds"] + 0.1 * b["noisy_latents"]) for b in batches
-        ]
+
+def _load(seed: int = 0) -> _Adapter:
+    """Realize ``VARIANTS`` on a fresh transformer the way ``load_transformer`` does."""
+    torch.manual_seed(seed)
+    adapter = _Adapter(variants=VARIANTS)
+    adapter.hf_model.dtype = torch.float32
+    adapter.transformer = _Transformer().requires_grad_(False)
+    with patch.object(HfModelLoader, "load_model", return_value=True):
+        adapter.load_transformer(torch.device("cpu"))
+    return adapter
 
 
 class _RowStore:
@@ -111,9 +124,10 @@ class _RowStore:
 
     def get(self, row_id: int) -> dict[str, Any]:
         return {
-            **make_sampler_batch(0.3, 0.9),
             KEY: str(row_id),
-            "prompt_embeds": torch.tensor([[[float(row_id)]]]),
+            "image_size": (8, 8),
+            "clean_latents": torch.zeros(1, 1, 2),
+            "noisy_latents": torch.full((1, 1, 2), 0.9),
         }
 
 
@@ -130,10 +144,11 @@ class _ScheduleProbe(_ProbeOverrides, NftTrainer):
     update loop saw them."""
     _emitted: list[tuple[int, dict[str, float]]] = PrivateAttr(default_factory=list)
 
-    def _on_rollouts_started(self, pending: PendingRollouts) -> None:
+    def _start_rollouts(self, epoch: int) -> PendingRollouts:
+        pending = super()._start_rollouts(epoch)
         self._events.append(("start", pending.epoch, pending.policy_version))
         self._sampled[pending.epoch] = [r.key for r in pending.rollouts]
-        super()._on_rollouts_started(pending)
+        return pending
 
     def _finish_rollouts(self, pending: PendingRollouts) -> list[Rollout]:
         self._events.append(("finish", pending.epoch))
@@ -145,20 +160,13 @@ class _ScheduleProbe(_ProbeOverrides, NftTrainer):
         return (rewards - rewards.mean()).squeeze(-1)
 
     def _train_on_rollouts(
-        self,
-        rollouts: list[Rollout],
-        advantages: torch.Tensor,
-        train_plan: list[list[EndpointTrainItem]] | None = None,
+        self, rollouts: list[Rollout], advantages: torch.Tensor
     ) -> None:
         self._events.append(("train", self._current_epoch))
         self._trained.append(
             [(r.key, r.reward.item(), list(r.reward_labels)) for r in rollouts]
         )
-        super()._train_on_rollouts(rollouts, advantages, train_plan=train_plan)
-
-    def _after_train_epoch(self) -> None:
-        self._events.append(("ema_step",))
-        super()._after_train_epoch()
+        super()._train_on_rollouts(rollouts, advantages)
 
     def _emit_metrics(self, metrics: dict[str, float], step: int) -> None:
         self._emitted.append((step, dict(metrics)))
@@ -168,19 +176,18 @@ def _make_trainer(
     cls: type[Any],
     config: dict[str, Any],
     store: _RowStore,
-    model: _GainModel,
+    model: _Adapter,
     reward: BaseReward | None = None,
 ) -> Any:
-    """``run()``'s setup for a CPU probe: seed, fakes, cursor, real optimizers."""
+    """``run()``'s setup for a CPU probe: seed, fakes, cursor, real optimizer."""
     trainer = cls.model_validate(
-        {"train_predictor": "model", "rollout_sampler": {"steps": 4}, **config}
+        {"train_predictor": "model", "rollout_sampler": Grid(steps=4), **config}
     )
     trainer.set_seed()
     trainer.model = model
     trainer.processor = SimpleNamespace(
-        initialize_latents=lambda row, **kwargs: None,
+        initialize_latents=lambda row, **kwargs: row["noisy_latents"],
         decode_output=lambda latents, row: {},
-        get_negative_row=lambda row: None,
         resample=lambda row, generator: row,
     )
     trainer.reward = reward
@@ -203,14 +210,14 @@ def _drain(reward, submitter, loop, profile) -> PendingRewards[int]:
 def _expected_schedule(lookahead: int, train_epochs: int) -> list[tuple[Any, ...]]:
     """Plan §4.1: prime ``N`` batches under the initial weights; epoch ``k``
     samples ``k + N`` (under the weights after epoch ``k - 1``) before it waits
-    for batch ``k``, trains on it and steps the old EMA."""
+    for batch ``k`` and trains on it."""
     events: list[tuple[Any, ...]] = [
         ("start", epoch, 0) for epoch in range(min(lookahead, train_epochs))
     ]
     for k in range(train_epochs):
         if k + lookahead < train_epochs:
             events.append(("start", k + lookahead, k))
-        events += [("finish", k), ("train", k), ("ema_step",)]
+        events += [("finish", k), ("train", k)]
     return events
 
 
@@ -220,6 +227,12 @@ def _policy_lags(trainer: _ScheduleProbe) -> list[float]:
         for _, m in trainer._emitted
         if "rollout/policy_lag" in m
     ]
+
+
+def _lora(adapter: _Adapter, variant: str) -> dict[str, torch.Tensor]:
+    """``blocks.0.to_q``'s A / B of one variant, cloned."""
+    pair = cast(Any, adapter.transformer).blocks[0].to_q.lora[variant]
+    return {"A": pair.A.weight.detach().clone(), "B": pair.B.weight.detach().clone()}
 
 
 class RolloutLookaheadTest(unittest.TestCase):
@@ -238,8 +251,9 @@ class RolloutLookaheadTest(unittest.TestCase):
     def test_lookahead_schedule_and_resume(self) -> None:
         """The loop must sample batch ``k + N`` before waiting for ``k`` and
         still train on ``k`` with ``k``'s rewards; the checkpoint must rewind the
-        prompt cursor past the batch it drops. Eight distinct prompts over four
-        epochs make every batch identifiable by its keys."""
+        prompt cursor past the batch it drops and carry the frozen ``old`` EMA
+        with its epoch count. Eight distinct prompts over four epochs make every
+        batch identifiable by its keys."""
         for lookahead in (0, 1, 2):
             with self.subTest(lookahead=lookahead):
                 reward = _KeyReward()
@@ -247,7 +261,7 @@ class RolloutLookaheadTest(unittest.TestCase):
                     _ScheduleProbe,
                     {**self.SCHEDULE_CONFIG, "rollout_lookahead": lookahead},
                     _RowStore(8),
-                    _GainModel(),
+                    _load(),
                     reward,
                 )
                 trainer._prime_rollouts()
@@ -308,7 +322,7 @@ class RolloutLookaheadTest(unittest.TestCase):
                     "num_rollouts_per_prompt": 2,
                 },
                 _RowStore(8),
-                _GainModel(),
+                _load(),
                 reward,
             )
             trainer._prime_rollouts()
@@ -332,41 +346,42 @@ class RolloutLookaheadTest(unittest.TestCase):
 
         with self.subTest("resume with a batch in flight"):
             config = {**self.SCHEDULE_CONFIG, "rollout_lookahead": 1}
+            model = _load()
             trainer = _make_trainer(
-                _ScheduleProbe, config, _RowStore(8), _GainModel(), _KeyReward()
+                _ScheduleProbe, config, _RowStore(8), model, _KeyReward()
             )
             trainer._prime_rollouts()
             for _ in range(2):
                 trainer._run_epoch()
             in_flight = trainer._pending_rollouts[0]
             self.assertEqual(in_flight.epoch, 2)
-            state = trainer.state_dict()
+            # A plain module's state dict aliases the live weights; DCP would not.
+            state = deep_apply_tensor_fn(trainer.state_dict(), lambda t: t.clone())
             # The cursor already walked past batch 2's prompts; saving it as is
             # would skip those prompts after the resume.
             self.assertEqual(state["cursor"], in_flight.cursor_state_before)
             self.assertNotEqual(state["cursor"], trainer._cursor.state_dict())
             self.assertEqual(state["current_epoch"], 2)
-            # DCP's get_optimizer_state_dict keeps only state / param_groups and
-            # bypasses EMAOptimizer.state_dict(), so the step counter restarted
-            # at 0 on every resume and a linear_ramp warmup fell back to decay 0
-            # (old policy == current policy again). Stepped once per epoch here.
-            self.assertEqual(state["ema_old_step_count"], 2)
+            # The trained LoRA and every frozen variant (EMA slots, counters)
+            # are in the model state; the frozen base weights are not.
+            weights = state["transformer"]
+            self.assertEqual(int(weights["variant_counts.old"]), 2)
+            for variant in ("default", "ema", "old"):
+                self.assertIn(f"blocks.0.to_q.lora.{variant}.B.weight", weights)
+            self.assertNotIn("blocks.0.to_q.weight", weights)
 
+            resumed_model = _load(seed=1)
             resumed = _make_trainer(
-                _ScheduleProbe, config, _RowStore(8), _GainModel(), _KeyReward()
+                _ScheduleProbe, config, _RowStore(8), resumed_model, _KeyReward()
             )
             resumed.load_state_dict(state)
-            self.assertEqual(resumed._old_ema.ema_step_count, 2)
-            # Checkpoints written before the counter was saved resume it from
-            # the epoch count, which is exact for the per-epoch old EMA.
-            legacy = _make_trainer(
-                _ScheduleProbe, config, _RowStore(8), _GainModel(), _KeyReward()
+            self.assertEqual(
+                int(cast(Any, resumed_model.transformer).variant_counts.old), 2
             )
-            legacy.load_state_dict(
-                {k: v for k, v in state.items() if k != "ema_old_step_count"}
-            )
-            self.assertEqual(legacy._old_ema.ema_step_count, 2)
-            legacy.close_reward_loop()
+            for variant in ("default", "ema", "old"):
+                torch.testing.assert_close(
+                    _lora(resumed_model, variant), _lora(model, variant), rtol=0, atol=0
+                )
             resumed._prime_rollouts()
             self._run_to_end(trainer)
             self._run_to_end(resumed)
@@ -379,10 +394,8 @@ class RolloutLookaheadTest(unittest.TestCase):
                     ("start", 3, 2),
                     ("finish", 2),
                     ("train", 2),
-                    ("ema_step",),
                     ("finish", 3),
                     ("train", 3),
-                    ("ema_step",),
                 ],
             )
             self.assertEqual(_policy_lags(resumed), [0, 1])
@@ -390,101 +403,59 @@ class RolloutLookaheadTest(unittest.TestCase):
                 resumed._sampled, {epoch: trainer._sampled[epoch] for epoch in (2, 3)}
             )
 
-    def test_behavior_teacher_cache_matches_sampling_weights(self) -> None:
-        """Arm B (plan §4.3): with ``lookahead_teacher="behavior"`` the in-flight
-        batch's old / ref velocities are cached inside the rollout scope, so they
-        must equal a forward under the weights that sampled the batch even after
-        the policy and the old EMA moved on; and running "old" inside the already
-        applied EMA shadow must leave the live weights intact on exit."""
-        base: dict[str, Any] = {
-            "num_inner_epochs": 2,
-            "precompute_aux_model_outputs": True,
-            "ema_old": {"decay": 0.0, "warmup": {"type": "none"}},
-        }
-        model = _GainModel()
-        with torch.no_grad():
-            model.gain.fill_(0.5)
+    def test_nft_epoch_runs_under_the_declared_variants(self) -> None:
+        """One NFT epoch through the real loop: rollouts sample under ``old``,
+        each microbatch reads ``old`` and ``ref`` (the base) under no_grad
+        before the ``default`` forward, only the LoRA trains, ``ema`` moves on
+        the optimizer step and ``old`` at the end of the epoch, and the
+        checkpoint carries every variant without the frozen base."""
+        model = _load()
         trainer = _make_trainer(
             _NftProbe,
-            {**base, "lookahead_teacher": "behavior", "rollout_lookahead": 1},
-            _RowStore(1),
+            {
+                "num_prompts_per_epoch": 2,
+                "num_rollouts_per_prompt": 2,
+                "group_size": 4,
+                "train_batch_size": 16,
+                "train_epochs": 1,
+            },
+            _RowStore(2),
             model,
+            _KeyReward(),
         )
         self.addCleanup(trainer.close_reward_loop)
-        # reference (init backup) = 0.5, behaviour (old EMA) = 1.0, live = 2.0
-        with torch.no_grad():
-            model.gain.fill_(1.0)
-        trainer._old_ema.step()
-        with torch.no_grad():
-            model.gain.fill_(2.0)
-
-        with patch(SUBMIT_REWARD, side_effect=_drain):
-            trainer._launch_rollouts(0)
-        # A nested apply_shadow would back up the shadow itself and leave the
-        # live weights at the EMA value once the rollout scope exits.
-        self.assertEqual(model.gain.item(), 2.0)
-        pending = trainer._pending_rollouts[0]
-        assert pending.train_plan is not None
-        items = [item for epoch in pending.train_plan for item in epoch]
-        self.assertEqual(len(items), 4 * 2)  # grid steps x inner epochs
-        for item in items:
-            assert item.noise is not None
-            self.assertEqual(item.noise.device.type, "cpu")
-            self.assertEqual(set(item.cache), {"old", "ref"})
-            self.assertEqual({v.device.type for v in item.cache.values()}, {"cpu"})
-
-        def forward() -> list[torch.Tensor]:
-            with torch.no_grad():
-                return trainer._predict(
-                    trainer._prepare(items, pending.rollouts, torch.zeros(1))
-                )
-
-        with apply_ema_maybe(trainer._old_ema):
-            behaviour = forward()
-        with trainer.reference_model():
-            reference = forward()
-        for item, old, ref in zip(items, behaviour, reference, strict=True):
-            torch.testing.assert_close(item.cache["old"], old, rtol=0, atol=0)
-            torch.testing.assert_close(item.cache["ref"], ref, rtol=0, atol=0)
-
-        # Epoch k's update and the old-EMA step after it: the "latest" teacher
-        # now differs from the one that sampled the batch.
-        with torch.no_grad():
-            model.gain.fill_(3.0)
-        trainer._after_train_epoch()
-        with apply_ema_maybe(trainer._old_ema):
-            latest = forward()
-        for item, new in zip(items, latest, strict=True):
-            self.assertFalse(torch.allclose(item.cache["old"], new))
-
-        # Training on the prebuilt plan neither rebuilds it nor precomputes
-        # again: exactly one (current-policy) forward per item.
-        model.forward_batch_sizes.clear()
-        with (
-            patch.object(_NftProbe, "_build_train_plan", side_effect=AssertionError),
-            patch.object(_NftProbe, "_precompute", side_effect=AssertionError),
+        base = cast(Any, model.transformer).embed.weight.detach().clone()
+        before = {name: _lora(model, name) for name in ("default", "ema", "old")}
+        self.assertTrue(
+            all(torch.equal(w["B"], torch.zeros(4, 2)) for w in before.values())
+        )
+        with patch.object(
+            _NftProbe, "_compute_advantages", _ScheduleProbe._compute_advantages
         ):
-            trainer._train_on_rollouts(
-                pending.rollouts, torch.zeros(1), train_plan=pending.train_plan
-            )
-        self.assertEqual(len(model.forward_batch_sizes), len(items))
-
-        for control in (
-            {"lookahead_teacher": "latest", "rollout_lookahead": 1},
-            {"lookahead_teacher": "behavior", "rollout_lookahead": 0},
-        ):
-            with self.subTest(**control):
-                other = _make_trainer(
-                    _NftProbe, {**base, **control}, _RowStore(1), _GainModel()
-                )
-                self.addCleanup(other.close_reward_loop)
-                with patch(SUBMIT_REWARD, side_effect=_drain):
-                    other._launch_rollouts(0)
-                self.assertIsNone(other._pending_rollouts[0].train_plan)
-        with self.assertRaisesRegex(ValueError, "precompute_aux_model_outputs"):
-            _NftProbe.model_validate(
-                {"train_predictor": "model", "lookahead_teacher": "behavior"}
-            )
+            trainer._prime_rollouts()
+            trainer._run_epoch()
+        # 4 rollouts x 4 steps under "old"; 16 items x (old, ref, default).
+        self.assertEqual(model._forwards[:16], ["old"] * 16)
+        self.assertEqual(model._forwards[16:], ["old", "base", "default"] * 16)
+        self.assertEqual(trainer._current_step, 1)
+        after = {name: _lora(model, name) for name in ("default", "ema", "old")}
+        torch.testing.assert_close(cast(Any, model.transformer).embed.weight, base)
+        trained = after["default"]["B"].float()  # trainable_dtype bf16; EMAs fp32
+        self.assertFalse(torch.equal(trained, before["default"]["B"].float()))
+        torch.testing.assert_close(after["ema"]["B"], 0.5 * trained)
+        torch.testing.assert_close(after["old"]["B"], 0.1 * trained)
+        counts = cast(Any, model.transformer).variant_counts
+        self.assertEqual((int(counts.ema), int(counts.old)), (1, 1))
+        weights = trainer.state_dict()["transformer"]
+        self.assertEqual(
+            {key for key in weights if key.startswith("blocks.0.to_q")},
+            {
+                f"blocks.0.to_q.lora.{variant}.{slot}.weight"
+                for variant in ("default", "ema", "old")
+                for slot in ("A", "B")
+            },
+        )
+        self.assertNotIn("embed.weight", weights)
 
 
 if __name__ == "__main__":

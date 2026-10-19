@@ -21,19 +21,11 @@
       "pretrained_model_id": "black-forest-labs/FLUX.2-dev",
       "subfolder": "transformer",
       "dtype": "bfloat16",
-      "device_memory_distribution": [
-        "36GiB",
-        "36GiB"
-      ]
+      "device_memory_distribution": ["36GiB", "36GiB"]
     }
   },
 
-  "sampler": {
-    "steps": 28,
-    "shift": {
-      "type": "flux2"
-    }
-  },
+  "sampler": { "type": "grid", "steps": 28, "shift": "flux2" },
 
   "processor": {
     "task": "tie",

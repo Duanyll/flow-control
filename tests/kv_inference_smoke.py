@@ -9,34 +9,44 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
 
 from flow_control.adapters import BaseModelAdapter
-from flow_control.adapters.base import Batch
 from flow_control.adapters.flux2.kv import Flux2KVAdapter
 from flow_control.adapters.qwen21 import QwenImage21Adapter
 from flow_control.processors import BaseProcessor, parse_processor
-from flow_control.samplers import Sampler, SampleRequest
+from flow_control.samplers import Executor, Grid, RootFrame, variants
 from flow_control.samplers.shift import Flux2Shift, LinearShift
 from flow_control.utils.logging import console
-from flow_control.utils.model_cache import cache_fields
 from flow_control.utils.tensor import tensor_to_pil
 
 
 def sample(
-    adapter: BaseModelAdapter, sampler: Sampler, row: dict[str, Any]
+    adapter: BaseModelAdapter,
+    sampler: Grid,
+    row: dict[str, Any],
+    noise: torch.Tensor,
+    seed: int,
 ) -> tuple[torch.Tensor, float, float]:
+    """Sample the row from ``noise``; the row keeps no cache from an earlier run."""
+    row.pop("_cache", None)
+    row.update(
+        noisy_latents=noise.clone(),
+        sigma=1.0,
+        _generator=torch.Generator(device=noise.device).manual_seed(seed),
+        _frame=RootFrame(None),
+    )
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.synchronize()
     start = time.perf_counter()
-    completed = list(sampler.sample(adapter, [SampleRequest(cast(Batch, row))]))[0]
+    list(Executor(adapter, variants(sampler)).stream([(row, sampler(row))]))
     torch.cuda.synchronize()
     seconds = time.perf_counter() - start
-    assert not cache_fields(completed.row)
-    assert torch.isfinite(completed.ctx.latents).all()
-    return completed.ctx.latents, seconds, torch.cuda.max_memory_allocated() / 2**30
+    latents = row["noisy_latents"]
+    assert torch.isfinite(latents).all()
+    return latents, seconds, torch.cuda.max_memory_allocated() / 2**30
 
 
 async def run(model: str, size: int, output: Path) -> None:
@@ -49,9 +59,9 @@ async def run(model: str, size: int, output: Path) -> None:
         # Match output_resolution: it also sets the official reference area.
         processor.total_pixels = size**2
     device = torch.device("cuda")
-    sampler = Sampler(
+    seed = 42 if qwen else 0
+    sampler = Grid(
         steps=40 if qwen else 4,
-        seed=42 if qwen else 0,
         shift=LinearShift(
             base_shift=0.5, max_shift=0.9, max_image_seq_len=8192, shift_terminal=0.02
         )
@@ -89,15 +99,16 @@ async def run(model: str, size: int, output: Path) -> None:
         }
         row: Any = await processor.prepare_inference_row(raw)
         processor.encoder.unload_model()
-        generator = torch.Generator(device=device).manual_seed(sampler.seed)
-        processor.initialize_latents(
-            row, generator=generator, device=device, dtype=torch.bfloat16
+        noise = processor.initialize_latents(
+            row,
+            generator=torch.Generator(device=device).manual_seed(seed),
+            device=device,
         )
         adapter.load_transformer(device)
         adapter.transformer.eval()
         console.print(f"{model}: sampling {name} ({sampler.steps} steps, KV enabled)")
         adapter.use_cache = True
-        latents, seconds, peak_gib = sample(adapter, sampler, row)
+        latents, seconds, peak_gib = sample(adapter, sampler, row, noise, seed)
         image = processor.decode_latents(latents, (size, size))
         tensor_to_pil(image).save(output / f"{name}.png")
         if name != "edit":
@@ -109,7 +120,7 @@ async def run(model: str, size: int, output: Path) -> None:
         result: dict[str, Any] = {
             "name": name,
             "prompt": prompt,
-            "seed": sampler.seed,
+            "seed": seed,
             "steps": sampler.steps,
             "size": size,
             "cached_seconds": seconds,
@@ -123,7 +134,9 @@ async def run(model: str, size: int, output: Path) -> None:
         if name == "edit":
             console.print(f"{model}: sampling edit with KV recomputed each step")
             adapter.use_cache = False
-            recomputed, plain_seconds, plain_peak = sample(adapter, sampler, row)
+            recomputed, plain_seconds, plain_peak = sample(
+                adapter, sampler, row, noise, seed
+            )
             difference = (
                 latents.float() - recomputed.float()
             ).norm() / recomputed.float().norm()

@@ -8,16 +8,13 @@ from rich.panel import Panel
 from rich.progress import Progress
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
-    get_model_state_dict,
     get_optimizer_state_dict,
-    set_model_state_dict,
     set_optimizer_state_dict,
 )
 
 from flow_control.adapters import ModelAdapter
-from flow_control.adapters.base import Batch
 from flow_control.data import is_padding
-from flow_control.samplers import Sampler
+from flow_control.samplers import Row
 from flow_control.utils.logging import (
     console,
     dump_if_failed,
@@ -35,7 +32,6 @@ from flow_control.utils.types import (
     parse_scheduler,
 )
 
-from .ema import EMAConfig, EMAOptimizer, apply_ema_maybe
 from .mixins import (
     CheckpointingMixin,
     EpochLoopMixin,
@@ -45,6 +41,7 @@ from .mixins import (
     distributed_main,
     trainer_registry,
 )
+from .mixins.base import load_model_state_dict, model_state_dict
 from .weighting import (
     LogitNormalTimestepWeighting,
     LossWeighting,
@@ -68,7 +65,6 @@ class SftTrainer(
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
-    validation_sampler: Sampler
 
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
@@ -85,7 +81,6 @@ class SftTrainer(
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     loss_weighting: LossWeighting = UniformLossWeighting()
 
-    ema: EMAConfig | None = None
     clip_grad_norm: float = 1.0
 
     cfg_drop_prob: float = 0.0
@@ -102,7 +97,6 @@ class SftTrainer(
     # ------------------------------- Lazy state --------------------------------- #
     _optimizer: torch.optim.Optimizer
     _scheduler: Any
-    _ema_optimizer: EMAOptimizer | None = None
 
     @property
     def transformer(self):
@@ -111,7 +105,7 @@ class SftTrainer(
     # ------------------------------- Setup methods ------------------------------ #
 
     def make_optimizer_and_scheduler(self):
-        params = [p for p in self.transformer.parameters() if p.requires_grad]
+        params = self.model.trainable_parameters()
         num_trainable_params = sum(p.numel() for p in params)
         if num_trainable_params == 0:
             raise RuntimeError("No trainable parameters found in the model.")
@@ -120,8 +114,6 @@ class SftTrainer(
             f"Created optimizer with {num_trainable_params / 1e6:.2f}M trainable parameters."
         )
         self._scheduler = parse_scheduler(self.scheduler_config, self._optimizer)
-        if self.ema is not None:
-            self._ema_optimizer = EMAOptimizer(params, self.ema)
 
     def make_train_dataloader(self):
         # The plan hands every rank the same number of rows per epoch (padding
@@ -141,51 +133,27 @@ class SftTrainer(
     # ------------------------------- Checkpointing ------------------------------ #
 
     def state_dict(self):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        transformer_sd = get_model_state_dict(self.transformer, options=opts)
-        if len(transformer_sd) == 0:
-            raise RuntimeError("Nothing to save in transformer state dict.")
-        state: dict[str, Any] = {
-            "transformer": transformer_sd,
+        return {
+            "transformer": model_state_dict(self.model),
             "optimizer": get_optimizer_state_dict(
-                self.transformer, self._optimizer, options=opts
+                self.transformer,
+                self._optimizer,
+                options=StateDictOptions(strict=False, ignore_frozen_params=True),
             ),
             "dataloader": self._dataloader.state_dict(),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
             "rng": self.get_rng_state_bytes(),
         }
-        if self._ema_optimizer is not None:
-            state["optim_ema"] = get_optimizer_state_dict(
-                self.transformer, self._ema_optimizer, options=opts
-            )
-            # DCP keeps only ``state`` / ``param_groups``; the warmup schedule
-            # needs the step counter too.
-            state["ema_step_count"] = self._ema_optimizer.ema_step_count
-        return state
 
     def load_state_dict(self, state_dict: dict[str, Any]):
-        opts = StateDictOptions(strict=False, ignore_frozen_params=True)
-        set_model_state_dict(self.transformer, state_dict["transformer"], options=opts)
+        load_model_state_dict(self.model, state_dict["transformer"])
         set_optimizer_state_dict(
             self.transformer,
             self._optimizer,
             state_dict["optimizer"],
-            options=opts,
+            options=StateDictOptions(strict=False, ignore_frozen_params=True),
         )
-        if self._ema_optimizer is not None and "optim_ema" in state_dict:
-            set_optimizer_state_dict(
-                self.transformer,
-                self._ema_optimizer,
-                state_dict["optim_ema"],
-                options=opts,
-            )
-            self._ema_optimizer.coerce_buffer_dtype()
-            # Stepped once per optimizer step, so older checkpoints without the
-            # counter resume it from the step count.
-            self._ema_optimizer.ema_step_count = state_dict.get(
-                "ema_step_count", state_dict["current_step"]
-            )
         self._dataloader.load_state_dict(state_dict["dataloader"])
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
@@ -194,57 +162,35 @@ class SftTrainer(
     # ------------------------------- Training ----------------------------------- #
 
     def train_step(self, rows: list[Any]) -> torch.Tensor:
-        timesteps: list[torch.Tensor] = []
-        targets: list[torch.Tensor] = []
+        points: list[Row] = []
         weights: list[torch.Tensor] = []
-        model_rows: list[Any] = []
-        negative_rows: list[Batch | None] = []
-
-        for original_batch in rows:
-            row: Any = original_batch
-            # Preserve the original negative condition before CFG dropout can
-            # replace the positive row (negative rows have no overlay).
-            negative = self.training_negative(original_batch)
-            negative_rows.append(negative)
+        for row in rows:
             if self.cfg_drop_prob > 0.0 and torch.rand(1).item() < self.cfg_drop_prob:
-                negative_row = (
-                    negative
-                    if negative is not None
-                    else self.processor.get_negative_row(row)
-                )
-                if negative_row is not None:
-                    row = negative_row
-                else:
+                negative = self.processor.get_negative_row(row)
+                if negative is None:
                     warn_once(
                         logger,
                         f"CFG drop prob is set to {self.cfg_drop_prob}, but no negative (unconditional) row available.",
                     )
-
-            timestep = self.timestep_weighting.sample_timesteps(1).to(
-                device=self.device, dtype=torch.float32
-            )
-            clean = row["clean_latents"].float()
-            noise = torch.randn_like(clean, dtype=torch.float32)
-            row["noisy_latents"] = (1.0 - timestep) * clean + timestep * noise
-
-            model_rows.append(row)
-            timesteps.append(timestep)
-            targets.append(noise - clean)
+                else:  # the dropped row keeps its negative for a guided train_predictor
+                    row = {**negative, "negative": row["negative"]}
+            timestep = self.timestep_weighting.sample_timesteps(1)
+            noise = torch.randn_like(row["clean_latents"], dtype=torch.float32)
+            points.append(self.noised_point(row, float(timestep), noise))
             weights.append(
                 self.loss_weighting.get_weights(timestep).to(
                     device=self.device, dtype=torch.float32
                 )
             )
 
-        predictions = self.predict_training(model_rows, timesteps, negative_rows)
         # Padding rows are forwarded (FSDP collectives stay balanced) but weigh
         # nothing; the mean is over the real rows of the microbatch.
         per_sample_losses = [
-            ((prediction - target) ** 2).mean()
+            ((prediction - (point["noise"] - point["clean_latents"])) ** 2).mean()
             * weight.mean()
             * (0.0 if is_padding(row) else 1.0)
-            for prediction, target, weight, row in zip(
-                predictions, targets, weights, rows, strict=True
+            for prediction, point, weight, row in zip(
+                self.predict_training(points), points, weights, rows, strict=True
             )
         ]
         real = max(1, sum(not is_padding(row) for row in rows))
@@ -258,8 +204,7 @@ class SftTrainer(
             )
 
         self._optimizer.step()
-        if self._ema_optimizer is not None:
-            self._ema_optimizer.step()
+        self.model.update_variants("step")
         self._scheduler.step()
         self._optimizer.zero_grad()
 
@@ -278,8 +223,7 @@ class SftTrainer(
         )
 
         if self._current_step % self.validation_steps == 0:
-            with apply_ema_maybe(self._ema_optimizer):
-                self.validate_and_log(self.model, self._current_step)
+            self.validate_variants(self.model, self._current_step)
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -296,6 +240,8 @@ class SftTrainer(
             self.run_cost_test()
             return
 
+        for name in self.validation_variants:
+            self.model.resolve(name)
         self.set_seed()
         self.resolve_run_context()
         self.init_tracker()
@@ -309,8 +255,7 @@ class SftTrainer(
         self.maybe_auto_resume(self.resume_from_dir)
 
         if self.validation_at_start:
-            with apply_ema_maybe(self._ema_optimizer):
-                self.validate_and_log(self.model, self._current_step)
+            self.validate_variants(self.model, self._current_step)
 
         progress = Progress(
             *self.get_progress_columns(),
@@ -349,10 +294,7 @@ class SftTrainer(
                 accumulated_loss = 0.0
                 progress.advance(task)
 
-        with apply_ema_maybe(self._ema_optimizer):
-            self.save_dcp_checkpoint(
-                self.get_checkpoint_dir(self._current_step) + "_final"
-            )
+        self.save_dcp_checkpoint(self.get_checkpoint_dir(self._current_step) + "_final")
 
         console.rule("[bold green]Training completed[/bold green]")
 

@@ -14,7 +14,7 @@ from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from itertools import groupby
 from operator import itemgetter
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -22,7 +22,6 @@ from pydantic import BaseModel
 from rich.progress import Progress
 
 from flow_control.adapters import ModelAdapter
-from flow_control.adapters.base import Batch
 from flow_control.data import (
     KEY,
     OnlineStore,
@@ -41,8 +40,16 @@ from flow_control.rewards import (
     submit_reward,
 )
 from flow_control.rewards.base import RewardResult
-from flow_control.samplers import Sampler, SampleRequest, derive_seed
-from flow_control.samplers.plan import Transition
+from flow_control.samplers import (
+    Calls,
+    Executor,
+    Observer,
+    Row,
+    Trajectory,
+    data,
+    derive_seed,
+    variants,
+)
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.tensor import (
     deep_cast_float_dtype,
@@ -50,7 +57,6 @@ from flow_control.utils.tensor import (
 )
 
 from ..advantage import Advantage, PerPromptAdvantage
-from ..grpo_sampling import GrpoCollector, RecordedStep
 from .base import BaseTrainer
 from .data import DataMixin
 from .logging import LoggingMixin
@@ -60,16 +66,13 @@ logger = get_logger(__name__)
 
 @dataclass
 class Rollout:
-    sampling_plan: list[Transition]
-    """The plan the sampler executed; ``row["clean_latents"]`` is its endpoint."""
     reward: torch.Tensor
     raw_reward: torch.Tensor
     reward_weights: torch.Tensor
     reward_labels: list[str]
     key: str
-    row: Batch
-    negative_row: Batch | None
-    recorded_steps: list[RecordedStep] | None = None
+    row: Row
+    """The finished sample: ``clean_latents`` plus whatever the observers wrote."""
 
 
 @dataclass
@@ -88,8 +91,6 @@ class PendingRollouts:
     cursor_state_before: dict[str, int]
     """``RowCursor`` state before this batch took its prompts; the checkpoint
     saves the oldest in-flight batch's so a resume re-takes the same prompts."""
-    train_plan: list[list[Any]] | None = None
-    """Prebuilt train plan (teacher outputs cached at sampling time), if any."""
 
 
 def _reward_writer(rollouts: list[Rollout]) -> Callable[[int, RewardResult], None]:
@@ -105,11 +106,7 @@ def _reward_writer(rollouts: list[Rollout]) -> Callable[[int, RewardResult], Non
 
 
 class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
-    """Mixin providing rollout collection and advantage computation.
-
-    Subclasses must implement :pyattr:`rollout_sampler_instance` and provide the
-    fields consumed here (``num_prompts_per_epoch``, ``reward``, etc.).
-    """
+    """Mixin providing rollout collection and advantage computation."""
 
     # ---------------------------------- Configs --------------------------------- #
     num_prompts_per_epoch: int
@@ -146,9 +143,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
     model: ModelAdapter
     reward: Reward
-    rollout_sampler: Sampler
-    _ROLLOUT_RECORD_STEPS: ClassVar[bool] = False
-    """Whether rollouts keep GRPO's stochastic-step records for replay."""
+    rollout_sampler: Trajectory
 
     _cursor: RowCursor
     _reward_loop: RewardLoopThread | None = None
@@ -177,8 +172,8 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
     @property
     def rollout_storage(self) -> torch.device:
-        """Where a batch's rollouts, and anything cached alongside them, live
-        between sampling and training (``rollout_storage_device``)."""
+        """Where a batch's rollouts live between sampling and training
+        (``rollout_storage_device``)."""
         if self.rollout_storage_device == "device":
             return self.device
         return torch.device("cpu")
@@ -200,6 +195,10 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         if self._reward_loop is not None:
             self._reward_loop.close()
             self._reward_loop = None
+
+    def _rollout_observers(self) -> list[tuple[type, Observer]]:
+        """Observers on every rollout's chain root (what the trainer records)."""
+        return []
 
     # ----------------------------- Rollout phase ----------------------------- #
 
@@ -252,7 +251,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         model = self.model
         processor = self.processor
         sampler = self.rollout_sampler
-        collector = GrpoCollector(sampler) if self._ROLLOUT_RECORD_STEPS else None
+        observers = self._rollout_observers()
         device = self.device
         rollout_storage = self.rollout_storage
         store = self._store
@@ -278,58 +277,43 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
         rollout_task = progress.add_task("Rollout", total=len(mine))
 
-        def requests() -> Iterator[SampleRequest]:
-            """Prepare lazily; the sampler pulls a request when it has room.
+        def runs() -> Iterator[tuple[Row, Calls[None]]]:
+            """Prepare lazily; the executor pulls a run when it has room.
 
             A prompt is fetched and resampled once and its rollouts share that
-            row through shallow copies: ``initialize_latents`` writes a fresh
-            ``noisy_latents`` into each copy and the sampler rebuilds the dict
-            per run, so nothing downstream mutates the shared tensors.
+            row through shallow copies; every rollout gets its own latents.
             """
             for prompt_id, group in groupby(mine, key=itemgetter(0)):
-                row = self.prepare_row(
-                    store.get(prompt_id), mode="inference", epoch=epoch
+                row = deep_cast_float_dtype(
+                    self.prepare_row(
+                        store.get(prompt_id), mode="inference", epoch=epoch
+                    ),
+                    model.dtype,
                 )
-                row = deep_cast_float_dtype(row, model.dtype)
                 for _, k in group:
-                    rollout_row = copy.copy(row)
                     generator = torch.Generator(device=device).manual_seed(
                         derive_seed(self.seed, f"rollout:{epoch}:{prompt_id}:{k}")
                     )
-                    processor.initialize_latents(
-                        rollout_row,
-                        generator=generator,
-                        device=device,
-                        dtype=model.dtype,
+                    rollout = self.start_row(
+                        copy.copy(row), generator, model.dtype, observers
                     )
-                    yield self.build_sample_request(sampler, rollout_row, generator)
+                    yield rollout, sampler(rollout)
 
-        def rollout_submitter() -> Generator[tuple[dict[str, Any], int]]:
+        def rollout_submitter() -> Generator[tuple[Row, int]]:
+            executor = Executor(model, variants(sampler))
             with progress, torch.no_grad():
-                for run in sampler.sample(model, requests(), collector=collector):
-                    row: Any = run.row
-                    row["clean_latents"] = run.ctx.latents
-                    row.update(processor.decode_output(run.ctx.latents, row))
+                for row in executor.stream(runs()):
+                    row["clean_latents"] = row["noisy_latents"]
+                    row.update(processor.decode_output(row["noisy_latents"], row))
                     rollouts.append(
                         Rollout(
-                            sampling_plan=run.plan,
-                            recorded_steps=(
-                                deep_move_to_device(
-                                    collector.take(run),
-                                    rollout_storage,
-                                    preserve_aliases=True,
-                                )
-                                if collector is not None
-                                else None
-                            ),
                             reward=torch.zeros(1),  # placeholder
                             raw_reward=torch.zeros(1),  # placeholder
                             reward_weights=torch.ones(1),  # placeholder
                             reward_labels=["reward"],  # placeholder
                             key=row[KEY],
-                            row=deep_move_to_device(row, rollout_storage),
-                            negative_row=deep_move_to_device(
-                                run.negative_row, rollout_storage
+                            row=deep_move_to_device(
+                                data(row), rollout_storage, preserve_aliases=True
                             ),
                         )
                     )

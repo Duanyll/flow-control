@@ -4,6 +4,7 @@ import random
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import wraps
+from typing import Any
 
 import numpy as np
 import torch
@@ -12,7 +13,9 @@ import torch.distributed.checkpoint as dcp
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
+    get_model_state_dict,
     get_state_dict,
+    set_model_state_dict,
 )
 from torch.distributed.fsdp import fully_shard
 from torch.profiler import ProfilerActivity
@@ -272,11 +275,8 @@ class BaseTrainer(BaseModel):
             model.load_transformer(device=load_device)
 
         if self.gradient_checkpointing:
-            if (
-                hasattr(model.transformer, "_supports_gradient_checkpointing")
-                and model.transformer._supports_gradient_checkpointing
-            ):
-                model.transformer.enable_gradient_checkpointing()
+            if getattr(model.transformer, "_supports_gradient_checkpointing", False):
+                model.enable_gradient_checkpointing()
             else:
                 logger.warning(
                     f"Gradient checkpointing is enabled but {model.transformer.__class__.__name__} does not support it."
@@ -348,6 +348,28 @@ class BaseTrainer(BaseModel):
             self._mesh = None
 
         logger.info("Cleaned up distributed resources.")
+
+
+def model_state_dict(model: BaseModelAdapter) -> dict[str, Any]:
+    """The trainable weights plus every variant's, so frozen EMA / full copies survive a resume."""
+    state = get_model_state_dict(
+        model.transformer,
+        options=StateDictOptions(strict=False, ignore_frozen_params=True),
+    )
+    state.update(
+        get_model_state_dict(
+            model.transformer,
+            submodules=model.variant_modules(),
+            options=StateDictOptions(strict=False),
+        )
+    )
+    return state
+
+
+def load_model_state_dict(model: BaseModelAdapter, state: dict[str, Any]) -> None:
+    set_model_state_dict(
+        model.transformer, state, options=StateDictOptions(strict=False)
+    )
 
 
 # tag -> trainer class, mapping a config's ``launch.type`` to its trainer. Lives

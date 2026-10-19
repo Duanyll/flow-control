@@ -37,24 +37,16 @@
   "model": {
     "arch": "flux1",
     "type": "base",
-    "peft_lora_rank": 64,
-    "peft_lora_config": {
-      "lora_alpha": 128,
-      "init_lora_weights": "gaussian",
-      "target_modules": [
-        "attn.to_k",
-        "attn.to_q",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_k_proj",
-        "attn.add_q_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-        "ff.net.0.proj",
-        "ff.net.2",
-        "ff_context.net.0.proj",
-        "ff_context.net.2",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "old": {
+        "type": "ema",
+        "of": "default",
+        "every": "epoch",
+        "decay": 0.5,
+        "warmup": { "type": "linear_ramp", "flat_steps": 0, "ramp_rate": 0.001 },
+      },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -65,20 +57,7 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "steps": 8,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-  },
-
-  "ema_old": {
-    "decay": 0.5,
-    "warmup": {
-      "flat_steps": 0,
-      "ramp_rate": 0.001,
-      "type": "linear_ramp",
-    },
-    "interval": 1,
-  },
+  "rollout_sampler": { "type": "grid", "steps": 8, "shift": 3.0 },
 
   "reward": {
     "type": "rational_rewards_t2i",
@@ -117,10 +96,7 @@
     "limit": 8,
   },
 
-  "validation_sampler": {
-    "steps": 28,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-  },
+  "validation_sampler": { "type": "grid", "steps": 28, "shift": 3.0 },
 
   "processor": {
     "task": "t2i",

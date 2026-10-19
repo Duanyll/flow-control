@@ -6,20 +6,12 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": {
-    "arch": "flux1",
-    "type": "base"
-  },
+  "model": { "arch": "flux1", "type": "base" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux_t2i"
   },
-  "sampler": {
-    "steps": 20,
-    "shift": {
-      "type": "linear"
-    }
-  },
+  "sampler": { "type": "grid", "steps": 20, "shift": "linear" },
   "processor": {
     "task": "t2i",
     "preset": "flux1"

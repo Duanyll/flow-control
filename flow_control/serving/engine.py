@@ -9,16 +9,22 @@ from typing import Any
 
 import json5
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.processors import parse_processor
 from flow_control.processors.base import BaseProcessor
 from flow_control.samplers import (
-    ClassifierFreeGuidance,
-    Sampler,
-    SampleRequest,
+    BaseGrid,
+    BaseTrajectory,
+    Cfg,
+    Executor,
+    RootFrame,
+    Trajectory,
+    data,
+    variants,
+    walk,
 )
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
@@ -31,23 +37,21 @@ from .config import ServeConfig
 logger = get_logger(__name__)
 
 
-def _classifier_free_guidance(
-    sampler: Sampler,
-) -> ClassifierFreeGuidance | None:
-    return next(
-        (
-            node
-            for node in sampler.guidance.walk()
-            if isinstance(node, ClassifierFreeGuidance)
-        ),
-        None,
-    )
+def first_node[T: BaseModel](tree: BaseModel, kind: type[T]) -> T | None:
+    """The first `kind` in a config tree: the UI's steps and CFG knobs."""
+    return next((node for node in walk(tree) if isinstance(node, kind)), None)
 
 
-def cfg_scale_for_display(sampler: Sampler) -> float:
-    """The serving UI's ``cfg_scale`` value; 1.0 for non-CFG guidance."""
-    guidance = _classifier_free_guidance(sampler)
-    return guidance.scale if guidance is not None else 1.0
+def cfg_scale_for_display(sampler: BaseTrajectory) -> float:
+    """The serving UI's ``cfg_scale`` value; 1.0 without a CFG node."""
+    cfg = first_node(sampler, Cfg)
+    return cfg.scale if cfg is not None else 1.0
+
+
+def steps_for_display(sampler: BaseTrajectory) -> int | None:
+    """The serving UI's ``steps`` value; None without a grid."""
+    grid = first_node(sampler, BaseGrid)
+    return grid.steps if grid is not None else None
 
 
 # --------------------------------------------------------------------------- #
@@ -100,8 +104,8 @@ def _load_dcp_seed(transformer: torch.nn.Module, path: str) -> None:
 def _load_dcp_training(transformer: torch.nn.Module, path: str) -> None:
     """Load a *training* checkpoint (nested ``app.transformer.<key>`` structure).
 
-    Only the transformer weights are loaded; optimizer / scheduler / dataloader
-    state is ignored via ``allow_partial_load``.
+    Only the transformer weights, variant slots included, are loaded; optimizer /
+    scheduler / dataloader state is ignored via ``allow_partial_load``.
     """
     import torch.distributed.checkpoint as dcp
     from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
@@ -115,71 +119,6 @@ def _load_dcp_training(transformer: torch.nn.Module, path: str) -> None:
         planner=DefaultLoadPlanner(allow_partial_load=True),
     )
     logger.info(f"Loaded training checkpoint from {path}")
-
-
-class _EMAStateful:
-    """``Stateful`` adapter that loads ``optim_ema`` EMA buffers from a
-    training checkpoint and applies them to the transformer parameters.
-
-    Must be constructed **after** the transformer weights are already loaded
-    so that the skeleton is initialised from the correct parameter values.
-    Unmatched entries (e.g. frozen base-model params that have no EMA state
-    in the checkpoint) stay at their current values — copying them back is a
-    harmless no-op.
-    """
-
-    def __init__(self, transformer: torch.nn.Module) -> None:
-        self._transformer = transformer
-
-    def state_dict(self) -> dict[str, Any]:
-        # Skeleton initialised from *current* param values (post-transformer-load).
-        # DCP will overwrite entries that exist in the checkpoint; the rest
-        # keep the loaded param values so apply is a no-op for those.
-        ema_state: dict[str, dict[str, torch.Tensor]] = {}
-        for name, param in self._transformer.named_parameters():
-            ema_state[name] = {"ema_buffer": param.data.clone().float()}
-        return {"optim_ema": {"state": ema_state}}
-
-    @torch.no_grad()
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        ema_state = state_dict.get("optim_ema", {}).get("state", {})
-        fqn_to_param = dict(self._transformer.named_parameters())
-        applied = 0
-        for fqn, param_state in ema_state.items():
-            buf = param_state.get("ema_buffer")
-            if buf is not None and fqn in fqn_to_param:
-                fqn_to_param[fqn].copy_(buf.to(fqn_to_param[fqn].dtype))
-                applied += 1
-        logger.info(f"Applied EMA buffers to {applied} parameters")
-
-
-def _load_dcp_training_with_ema(transformer: torch.nn.Module, path: str) -> None:
-    """Load a training checkpoint and apply its EMA shadow weights.
-
-    Two-phase DCP load:
-
-    1. Load ``app.transformer.*`` (same as :func:`_load_dcp_training`).
-    2. Build an EMA skeleton from the **now-loaded** parameters, load
-       ``app.optim_ema.state.*.ema_buffer`` on top, and copy the buffers
-       into the model.  Entries absent from the checkpoint keep the
-       just-loaded param values (no-op copy), so only truly EMA-tracked
-       parameters are affected.
-    """
-    import torch.distributed.checkpoint as dcp
-    from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-
-    # Phase 1 — load transformer weights
-    _load_dcp_training(transformer, path)
-
-    # Phase 2 — load EMA buffers on top (skeleton built from post-load params)
-    ema_adapter = _EMAStateful(transformer)
-    dcp.load(
-        {"app": ema_adapter},
-        checkpoint_id=path,
-        no_dist=True,
-        planner=DefaultLoadPlanner(allow_partial_load=True),
-    )
-    logger.info(f"Loaded EMA weights from {path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +145,9 @@ class ServingEngine:
         self.offload_processor = config.offload_processor
         self.model: BaseModelAdapter = config.model
         self.processor: BaseProcessor = config.processor
-        self.sampler: Sampler = config.sampler
+        self.sampler: BaseTrajectory = config.sampler
+        self.seed = config.seed
+        self.variant = config.variant
         self._gpu_lock = asyncio.Lock()
 
         self._seed_checkpoint_dir: str | None = config.seed_checkpoint_dir
@@ -219,8 +160,7 @@ class ServingEngine:
             with contextlib.suppress(ValueError):
                 ckpt = str(Path(ckpt).relative_to(self._checkpoint_root))
         self._checkpoint_dir: str | None = ckpt
-        self._use_ema: bool = config.use_ema
-        self._last_state_key: tuple[str, str | None, str | None, bool] | None = None
+        self._last_state_key: tuple[str, str | None, str | None] | None = None
 
     def _iter_model_loaders(
         self, obj: Any, seen: set[int] | None = None
@@ -320,7 +260,6 @@ class ServingEngine:
             config_jsonc,
             self._seed_checkpoint_dir,
             self._checkpoint_dir,
-            self._use_ema,
         )
         logger.info("All models loaded.")
 
@@ -330,14 +269,11 @@ class ServingEngine:
             _load_dcp_seed(self.model.transformer, self._seed_checkpoint_dir)
         resolved = self.resolve_checkpoint_dir(self._checkpoint_dir)
         if resolved:
-            if self._use_ema:
-                _load_dcp_training_with_ema(self.model.transformer, resolved)
-            else:
-                _load_dcp_training(self.model.transformer, resolved)
+            _load_dcp_training(self.model.transformer, resolved)
 
     def _parse_requested_state(
         self, config_jsonc: str
-    ) -> tuple[BaseModelAdapter, BaseProcessor, Sampler]:
+    ) -> tuple[BaseModelAdapter, BaseProcessor, BaseTrajectory]:
         conf = json5.loads(config_jsonc)
         if not isinstance(conf, dict):
             raise ValueError("Config must be a JSON object.")
@@ -349,7 +285,7 @@ class ServingEngine:
         return (
             parse_model_adapter(conf["model"]),
             parse_processor(processor_conf),
-            Sampler(**conf.get("sampler", {})),
+            TypeAdapter(Trajectory).validate_python(conf["sampler"]),
         )
 
     def _needs_fresh_transformer(
@@ -358,13 +294,11 @@ class ServingEngine:
         new_model: BaseModelAdapter,
         seed_checkpoint_dir: str | None,
         checkpoint_dir: str | None,
-        use_ema: bool,
         force_reload: bool,
     ) -> bool:
         ckpt_changed = (
             seed_checkpoint_dir != self._seed_checkpoint_dir
             or checkpoint_dir != self._checkpoint_dir
-            or use_ema != self._use_ema
         )
         transformer_key_changed = (
             new_model.hf_model.config_key != self.model.hf_model.config_key
@@ -376,8 +310,8 @@ class ServingEngine:
         *,
         new_model: BaseModelAdapter,
         new_processor: BaseProcessor,
-        new_sampler: Sampler,
-        state_key: tuple[str, str | None, str | None, bool],
+        new_sampler: BaseTrajectory,
+        state_key: tuple[str, str | None, str | None],
     ) -> None:
         self.model = new_model
         self.processor = new_processor
@@ -392,7 +326,6 @@ class ServingEngine:
         seed_checkpoint_dir: str | None,
         checkpoint_dir: str | None,
         force_reload: bool = False,
-        use_ema: bool = False,
     ) -> None:
         """Ensure engine state matches *config_jsonc* + checkpoint paths.
 
@@ -403,7 +336,7 @@ class ServingEngine:
         seed_checkpoint_dir = seed_checkpoint_dir or None
         checkpoint_dir = checkpoint_dir or None
 
-        state_key = (config_jsonc, seed_checkpoint_dir, checkpoint_dir, use_ema)
+        state_key = (config_jsonc, seed_checkpoint_dir, checkpoint_dir)
         if not force_reload and state_key == self._last_state_key:
             return
 
@@ -414,7 +347,6 @@ class ServingEngine:
             new_model=new_model,
             seed_checkpoint_dir=seed_checkpoint_dir,
             checkpoint_dir=checkpoint_dir,
-            use_ema=use_ema,
             force_reload=force_reload,
         )
         cache_refs_before = dict(HfModelLoader._model_cache)
@@ -438,20 +370,13 @@ class ServingEngine:
             if need_fresh_transformer:
                 self._seed_checkpoint_dir = seed_checkpoint_dir
                 self._checkpoint_dir = checkpoint_dir
-                self._use_ema = use_ema
                 if seed_checkpoint_dir:
                     report_progress(0.7, "Loading seed checkpoint...")
                     _load_dcp_seed(new_model.transformer, seed_checkpoint_dir)
                 resolved_ckpt = self.resolve_checkpoint_dir(checkpoint_dir)
                 if resolved_ckpt:
-                    if use_ema:
-                        report_progress(0.85, "Loading training checkpoint (EMA)...")
-                        _load_dcp_training_with_ema(
-                            new_model.transformer, resolved_ckpt
-                        )
-                    else:
-                        report_progress(0.85, "Loading training checkpoint...")
-                        _load_dcp_training(new_model.transformer, resolved_ckpt)
+                    report_progress(0.85, "Loading training checkpoint...")
+                    _load_dcp_training(new_model.transformer, resolved_ckpt)
 
             new_model.transformer.eval()
 
@@ -497,10 +422,10 @@ class ServingEngine:
         seed: int | None = None,
         steps: int | None = None,
         cfg_scale: float | None = None,
+        variant: str | None = None,
         config_jsonc: str | None = None,
         seed_checkpoint_dir: str | None = None,
         checkpoint_dir: str | None = None,
-        use_ema: bool = False,
         force_reload: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run single-sample inference with optional config/sampler overrides.
@@ -520,30 +445,37 @@ class ServingEngine:
                     seed_checkpoint_dir,
                     checkpoint_dir,
                     force_reload,
-                    use_ema,
                 )
 
             # Sampler overrides (config mutation at the request boundary)
             if steps is not None:
-                self.sampler.steps = steps
-            if cfg_scale is not None:
-                guidance = _classifier_free_guidance(self.sampler)
-                if guidance is not None:
-                    guidance.scale = cfg_scale
+                grid = first_node(self.sampler, BaseGrid)
+                if grid is not None:
+                    grid.steps = steps
                 else:
                     warn_once(
                         logger,
-                        "The request's cfg_scale is ignored: the configured "
-                        "sampler guidance is not classifier-free guidance.",
+                        "The request's steps is ignored: the sampler has no grid.",
                     )
-            seed = seed if seed is not None else self.sampler.seed
+            if cfg_scale is not None:
+                cfg = first_node(self.sampler, Cfg)
+                if cfg is not None:
+                    cfg.scale = cfg_scale
+                else:
+                    warn_once(
+                        logger,
+                        "The request's cfg_scale is ignored: the sampler has no cfg node.",
+                    )
+            seed = seed if seed is not None else self.seed
 
             # --- encode on processor_device (async) ---
             row = deep_move_to_device(input_row, self.processor_device)
             row = await self.processor.prepare_inference_row(row)
 
             # --- sample & decode (sync GPU work) ---
-            return await asyncio.to_thread(self._sample_and_decode, row, seed)
+            return await asyncio.to_thread(
+                self._sample_and_decode, row, seed, variant or self.variant
+            )
 
     async def reload(
         self,
@@ -551,7 +483,6 @@ class ServingEngine:
         config_jsonc: str,
         seed_checkpoint_dir: str | None = None,
         checkpoint_dir: str | None = None,
-        use_ema: bool = False,
     ) -> str:
         async with self._gpu_lock:
             await asyncio.to_thread(
@@ -560,7 +491,6 @@ class ServingEngine:
                 seed_checkpoint_dir,
                 checkpoint_dir,
                 True,
-                use_ema,
             )
             return "Models reloaded."
 
@@ -575,9 +505,7 @@ class ServingEngine:
 
     @torch.no_grad()
     def _sample_and_decode(
-        self,
-        row: Any,
-        seed: int,
+        self, row: Any, seed: int, variant: str | None
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Sample and decode, returning ``(result_dict, info_dict)``.
 
@@ -586,13 +514,7 @@ class ServingEngine:
         extracted from the processed row for display.
         """
         t0 = time.perf_counter()
-
         row = deep_cast_float_dtype(row, self.model.dtype)
-        negative_row: Any = (
-            self.processor.get_negative_row(row)
-            if self.sampler.guidance.requires_negative(self.sampler.steps)
-            else None
-        )
 
         # Offload processor to CPU before DiT sampling to free GPU memory
         if self.offload_processor:
@@ -602,30 +524,24 @@ class ServingEngine:
             # --- sample on model_device ---
             generator = torch.Generator(device=self.model_device).manual_seed(seed)
             self.processor.initialize_latents(
-                row,
-                generator=generator,
-                device=self.model_device,
-                dtype=self.model.dtype,
+                row, generator=generator, device=self.model_device
+            )
+            total, done = self.sampler.estimate_calls(row), 0
+
+            def on_call(_: Any) -> None:
+                nonlocal done
+                done += 1
+                report_progress(min(done / total, 1.0), f"{done}/{total} model calls")
+
+            row.update(
+                sigma=1.0,
+                _generator=generator,
+                _frame=RootFrame(self, on_call=on_call),
             )
             report_progress(0.0, "Sampling...")
-            run = next(
-                iter(
-                    self.sampler.sample(
-                        self.model,
-                        [
-                            SampleRequest(
-                                row=row,
-                                negative_row=negative_row,
-                                generator=generator,
-                            )
-                        ],
-                        collector=lambda run, step: report_progress(
-                            (step.index + 1) / len(run.plan),
-                            f"Sampling {step.index + 1}/{len(run.plan)}",
-                        ),
-                    )
-                )
-            )
+            with self.model.use_variant(variant):
+                executor = Executor(self.model, variants(self.sampler))
+                list(executor.stream([(row, self.sampler(row))]))
 
             # Reload processor back to GPU for decode
             if self.offload_processor:
@@ -633,7 +549,7 @@ class ServingEngine:
 
             # --- decode on processor_device ---
             report_progress(1.0, "Decoding...")
-            output_latent = run.ctx.latents.to(self.processor_device)
+            output_latent = row["noisy_latents"].to(self.processor_device)
             result = self.processor.decode_output(output_latent, row)
             result = deep_move_to_device(result, torch.device("cpu"))
         finally:
@@ -645,11 +561,11 @@ class ServingEngine:
         # Build info dict: sampler stats + non-tensor fields from the row
         info: dict[str, Any] = {
             "seed": seed,
-            "steps": self.sampler.steps,
+            "steps": steps_for_display(self.sampler),
             "cfg_scale": cfg_scale_for_display(self.sampler),
             "time": f"{elapsed:.1f}s",
         }
-        for k, v in row.items():
+        for k, v in data(row).items():
             if isinstance(v, torch.Tensor):
                 continue
             if isinstance(v, list) and v and isinstance(v[0], torch.Tensor):

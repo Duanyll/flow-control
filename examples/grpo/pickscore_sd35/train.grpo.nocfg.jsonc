@@ -22,28 +22,17 @@
   "train_epochs": 500,
   "checkpoint_interval": 10,
   "validation_epochs": 10,
+  "validation_variants": ["ema"],
   "max_checkpoints": 10,
 
   "model": {
     "arch": "sd3",
     "type": "base",
     "micro_batch_size": 4,
-    "peft_lora_rank": 32,
-    "peft_lora_config": {
-      "lora_alpha": 64,
-      "init_lora_weights": "gaussian",
-      // Must be explicit: a partial peft_lora_config replaces the SD3Adapter
-      // default (no deep-merge), and PEFT can't infer targets for SD3.
-      "target_modules": [
-        "attn.to_q",
-        "attn.to_k",
-        "attn.to_v",
-        "attn.to_out.0",
-        "attn.add_q_proj",
-        "attn.add_k_proj",
-        "attn.add_v_proj",
-        "attn.to_add_out",
-      ],
+    "variants": {
+      "default": { "type": "lora", "rank": 32, "alpha": 64 },
+      "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
+      "ref": { "type": "alias", "of": "base" },
     },
   },
 
@@ -55,20 +44,14 @@
   "train_predictor": "model",
 
   "rollout_sampler": {
+    "type": "sde_window_grid",
     "steps": 10,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-    "solver": { "type": "cps", "eta": 0.8 },
-    "transforms": [
-      { "type": "sde_window", "size": 3 },
-    ],
+    "size": 3,
+    "eta": 0.8,
+    "shift": 3.0,
+    "transition": { "type": "cps", "eta": 0.0 },
   },
-  // Random 3-step recorded SDE window; omit "range" -> anywhere in (0, steps-1).
-
-  "ema": {
-    "decay": 0.9,
-    "warmup": { "type": "standard" },
-    "interval": 1,
-  },
+  // Random 3-step recorded SDE window; omit "window_range" -> anywhere in (0, steps-1).
 
   "reward": {
     "type": "pickscore",
@@ -95,10 +78,7 @@
     "path": "./data/pickscore_sd35/validation",
   },
 
-  "validation_sampler": {
-    "steps": 40,
-    "shift": { "type": "constant", "shift_value": 3.0 },
-  },
+  "validation_sampler": { "type": "grid", "steps": 40, "shift": 3.0 },
 
   "processor": {
     "task": "t2i",
