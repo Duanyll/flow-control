@@ -53,25 +53,31 @@ Objectives name the variants they read (`old`, `ref`). Setup fails if `model.var
 
 ```jsonc
 {
-  "model": {"type": "ideogram4"}, // the preset adds "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}}
+  "model": {"arch": "ideogram4", "type": "base"}, // the adapter's default variants: "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}}
   "sampler": {
     "type": "grid",
     "steps": 48,
+    "shift": {"type": "logit_normal", "mean": 0.0, "std": 1.5},
     "transition": {
       "type": "euler",
-      "prediction": {"type": "cfg", "scale": 7.0, "negative": {"type": "model", "variant": "uncond"}}
+      "prediction": {
+        "type": "cfg",
+        "scale": [7.0, 7.0, "... 45 x 7.0, then", 3.0, 3.0, 3.0], // one weight per grid step
+        "negative": {"type": "model", "variant": "uncond"},
+        "negative_condition": "positive" // the uncond transformer runs image-only on the row itself: no negative prompt
+      }
     }
   }
 }
 ```
 
-To train both branches, add a LoRA on the second transformer and point the negative branch at it:
+A config's `variants` replaces the adapter's default, so a LoRA config redeclares the second transformer (the adapter fills in its fp8 loader). Training the negative branch too needs LoRA on a full variant, which is not implemented yet:
 
 ```jsonc
 "variants": {
   "default": {"type": "lora", "rank": 64},
-  "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}},
-  "uncond_lora": {"type": "lora", "of": "uncond", "rank": 64}
+  "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer"}},
+  "uncond_lora": {"type": "lora", "of": "uncond", "rank": 64} // TODO: LoRA on a full variant
 }
 ```
 

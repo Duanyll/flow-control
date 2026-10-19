@@ -246,6 +246,16 @@ class VariantsMixin(BaseModel):
     def active_variant(self) -> str:
         return self._active.get()
 
+    def origin(self, name: str) -> str:
+        """The loaded weights under a variant: "base", or a full variant with its own `hf_model`."""
+        name = self.resolve(name)
+        variant = self.variants.get(name)
+        if variant is None or (
+            isinstance(variant, FullVariant) and variant.hf_model is not None
+        ):
+            return name
+        return self.origin(variant.of)
+
     def module(self) -> nn.Module:
         """The full module running the active variant."""
         return self._full.get(self._active.get(), self.transformer)
@@ -311,7 +321,7 @@ class VariantsMixin(BaseModel):
         copies, counts = nn.ModuleDict(), nn.Module()
         for name in order:  # copies first: they must not carry LoRA slots
             if self._kind(name) == "full":
-                copies[name] = self._copy(name, copies)
+                copies[name] = self._copy(name, copies, device)
         for name in order:  # clones before slots: a clone must not contain slots
             variant = self.variants[name]
             if isinstance(variant, LoraVariant):
@@ -361,11 +371,14 @@ class VariantsMixin(BaseModel):
             visit(name)
         return order
 
-    def _copy(self, name: str, copies: nn.ModuleDict) -> nn.Module:
-        """A full-kind variant's own module: a copy of its source (fp32 for an EMA)."""
+    def _copy(
+        self, name: str, copies: nn.ModuleDict, device: torch.device
+    ) -> nn.Module:
+        """A full-kind variant's own module: its own loaded weights, or a copy of its source (fp32 for an EMA)."""
         variant = self.variants[name]
         if isinstance(variant, FullVariant) and variant.hf_model is not None:
-            raise NotImplementedError("FullVariant.hf_model is not implemented.")
+            variant.hf_model.load_model(device=device, frozen=not variant.trainable)
+            return variant.hf_model.model
         source = self.resolve(variant.of)
         if self._kind(source) == "lora":
             raise NotImplementedError(

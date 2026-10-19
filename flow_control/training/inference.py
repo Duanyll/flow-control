@@ -27,6 +27,7 @@ from flow_control.samplers import (
     Executor,
     Row,
     Trajectory,
+    data,
     derive_seed,
     variants,
 )
@@ -177,8 +178,9 @@ class Inference(DataMixin, BaseTrainer, DcpMixin):
                     if self.annotate_output_image
                     else decoded["clean_image"]
                 ).to(cpu)
+            # The runtime keys (call chain, RNG, caches) are not picklable.
             record = deep_move_to_device(
-                row
+                data(row)
                 if self.save_extra
                 else {
                     KEY: row[KEY],

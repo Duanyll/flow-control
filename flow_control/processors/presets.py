@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -10,14 +11,20 @@ from pydantic import BaseModel
 
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.registry import Registry
-from flow_control.utils.resize import ResolutionList, resize_to_multiple_of
+from flow_control.utils.resize import (
+    ResolutionList,
+    resize_to_multiple_of,
+    resize_to_resolution,
+)
 from flow_control.utils.tensor import tensor_to_pil
 
 from .components.encoder import (
     ClipTextEncoder,
     Cosmos3Encoder,
     Encoder,
+    Flux3Encoder,
     HiDreamO1Encoder,
+    Ideogram4Encoder,
     Mistral3Encoder,
     Qwen3Encoder,
     Qwen3VLEncoder,
@@ -33,6 +40,7 @@ from .components.vae import (
     Flux1VAE,
     Flux2VAE,
     IdentityVAE,
+    Ideogram4VAE,
     QwenImage21VAE,
     QwenImageVAE,
 )
@@ -444,6 +452,91 @@ class Flux2Klein4BPreset(Flux2Preset):
     encoder_prompt: PromptStr = ""
 
 
+# ----------------------------- FLUX 3 Image Klein ---------------------------- #
+
+FLUX3_BASE = "black-forest-labs/flux-3-image-klein-base"
+FLUX3_DISTILLED = "black-forest-labs/flux-3-image-klein"
+FLUX3_REFERENCE_PIXELS = 4 * 1024 * 1024
+FLUX3_MULTI_REFERENCE_PIXELS = 1024 * 1024
+FLUX3_MAX_SIDE = 4096
+
+
+def _flux3_encoder(repo: str) -> Flux3Encoder:
+    return Flux3Encoder(
+        pretrained_model_id=repo,
+        tokenizer=HfModelLoader(
+            library="transformers",
+            class_name="Qwen3VLProcessor",
+            pretrained_model_id=repo,
+            subfolder="text_encoder",
+        ),
+    )
+
+
+@preset_registry.register("flux3_klein_base")
+class Flux3KleinBasePreset(BaseModel):
+    """FLUX 3 Image Klein base (undistilled): true CFG 3.5 against the empty prompt.
+
+    Text is the :class:`Flux3Encoder` recipe (8 Qwen3-VL layers, padded to 80, no
+    mask); the VAE is the FLUX.2 autoencoder shipped with the repo, run in fp32 like
+    the official code. Images and references are multiples of 16; a canvas taken
+    from the first reference is capped near 4 MP like the official single-reference
+    canvas (with several references the official code generates at the first
+    reference's <= 1 MP size instead; pass ``image_size`` for that).
+    The model was trained on upsampler captions only: give it long, literal
+    descriptions (prompt upsampling is not wired in).
+    """
+
+    vae: VAE = Flux2VAE(
+        pretrained_model_id=FLUX3_BASE, subfolder="vae", dtype=torch.float32
+    )
+    encoder: Encoder = _flux3_encoder(FLUX3_BASE)
+    pooled_encoder: Encoder | None = None
+
+    latent_channels: int = 32
+
+    default_resolution: tuple[int, int] = (1024, 1024)
+    resize_mode: Literal["multiple_of"] = "multiple_of"
+    multiple_of: int = 16
+    total_pixels: int = FLUX3_REFERENCE_PIXELS
+    no_upscale: bool = True
+    max_reference_images: int = 10
+
+    encoder_prompt: PromptStr = ""
+    default_negative_prompt: PromptStr = ""
+    save_negative: bool = True
+
+    def resize_reference_images(
+        self, reference_images: list[torch.Tensor], image_size: tuple[int, int]
+    ) -> list[torch.Tensor]:
+        """Official sizing: one reference fits under 4 MP, each of several under 1 MP;
+        then a centre crop to the 16-px grid (the official single-reference path
+        reflect-pads instead and crops the output back, which is not reproduced)."""
+        limit = (
+            FLUX3_REFERENCE_PIXELS
+            if len(reference_images) == 1
+            else FLUX3_MULTI_REFERENCE_PIXELS
+        )
+        resized = []
+        for image in reference_images:
+            _, _, h, w = image.shape
+            scale = min(1.0, math.sqrt(limit / (h * w)), FLUX3_MAX_SIDE / max(h, w))
+            size = (int(h * scale) // 16 * 16, int(w * scale) // 16 * 16)
+            resized.append(resize_to_resolution(image, size))
+        return resized
+
+
+@preset_registry.register("flux3_klein_distilled")
+class Flux3KleinDistilledPreset(Flux3KleinBasePreset):
+    """FLUX 3 Image Klein distilled (16-step flow map): guidance-free, no negative."""
+
+    vae: VAE = Flux2VAE(
+        pretrained_model_id=FLUX3_DISTILLED, subfolder="vae", dtype=torch.float32
+    )
+    encoder: Encoder = _flux3_encoder(FLUX3_DISTILLED)
+    save_negative: bool = False
+
+
 # ------------------------ Stable Diffusion 3.5 Medium ----------------------- #
 
 SD35_MEDIUM = "stabilityai/stable-diffusion-3.5-medium"
@@ -714,4 +807,32 @@ class HiDreamO1DevPreset(HiDreamO1FullPreset):
     """HiDream-O1-Dev (28-step distilled): guidance-free, flash re-noise sampler."""
 
     encoder: HiDreamO1Encoder = HiDreamO1Encoder(pretrained_model_id=HIDREAM_O1_DEV)
+    save_negative: bool = False
+
+
+# --------------------------------- Ideogram 4 -------------------------------- #
+
+
+@preset_registry.register("ideogram4")
+class Ideogram4Preset(BaseModel):
+    """Ideogram 4 (9.3B single-stream DiT, Qwen3-VL-8B features, FLUX.2 VAE).
+
+    Prompts are the structured JSON captions the model was trained on (the official
+    ``docs/prompting.md``); plain text is out of distribution and no magic prompt
+    runs here. The unconditional branch is a second transformer run image-only, so
+    there is no negative prompt (``save_negative=False``). Any multiple of 16 from
+    256 to 2048 works; the native quality setting is 2048², the example uses 1024².
+    """
+
+    vae: VAE = Ideogram4VAE()
+    encoder: Ideogram4Encoder = Ideogram4Encoder()
+    pooled_encoder: Encoder | None = None
+
+    latent_channels: int = 32
+    default_resolution: tuple[int, int] = (1024, 1024)
+    resize_mode: Literal["multiple_of"] = "multiple_of"
+    multiple_of: int = 16
+    total_pixels: int = 1024 * 1024
+
+    encoder_prompt: PromptStr = ""
     save_negative: bool = False

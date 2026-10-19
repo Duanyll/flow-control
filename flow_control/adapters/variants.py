@@ -1,6 +1,6 @@
 """Variant configs: the named weight sets of one adapter (docs/model-variants.md)."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -95,7 +95,9 @@ class LoraVariant(BaseVariant):
 @variant_registry.register("full")
 class FullVariant(BaseVariant):
     type: Literal["full"] = "full"
-    hf_model: HfModelLoader[Any] | None = None
+    # Bare on purpose: a parametrized `HfModelLoader[Any]` would re-validate a loader
+    # subclass instance (Ideogram 4's fp8 loader) into a plain HfModelLoader.
+    hf_model: HfModelLoader | None = None
     trainable: bool = False
 
 

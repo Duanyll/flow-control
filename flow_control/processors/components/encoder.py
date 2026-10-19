@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal, cast
 
 import torch
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import QwenImage21Pipeline
+from einops import rearrange
 from PIL import Image
 from transformers import (
     BatchEncoding,
@@ -20,11 +21,13 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLModel,
     Qwen3VLProcessor,
+    Qwen3VLTextModel,
     T5EncoderModel,
     T5Tokenizer,
 )
+from transformers.masking_utils import create_causal_mask
 
-from flow_control.utils.hf_model import HfModelLoader
+from flow_control.utils.hf_model import Fp8WeightOnlyLoader, HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.resize import resize_to_multiple_of, resize_to_resolution
@@ -749,6 +752,81 @@ class Qwen3VLEncoder(BaseEncoder[Qwen3VLModel]):
         return self.encode_seq_mask(prompt)[0]
 
 
+@encoder_registry.register("flux3")
+class Flux3Encoder(BaseEncoder[Qwen3VLForConditionalGeneration]):
+    """FLUX 3 Image Klein text encoder: the official ``text_encoder.py`` recipe.
+
+    Qwen3-VL-4B-Instruct over the plain user-turn chat template; eight hidden
+    layers are concatenated per token into ``(1, L, 20480)`` with ``L`` right-padded
+    to a multiple of 80. The padding is masked inside Qwen3-VL (position id 1, as
+    in the training environment) but kept in the output without a mask: the DiT
+    attends to it.
+    """
+
+    type: Literal["flux3"] = "flux3"
+    library: Literal["diffusers", "transformers"] = "transformers"
+    class_name: str = "Qwen3VLForConditionalGeneration"
+    pretrained_model_id: str = "black-forest-labs/flux-3-image-klein"
+    subfolder: str | None = "text_encoder"
+    dtype: TorchDType = torch.bfloat16
+
+    tokenizer: HfModelLoader[Qwen3VLProcessor] = HfModelLoader(
+        library="transformers",
+        class_name="Qwen3VLProcessor",
+        pretrained_model_id="black-forest-labs/flux-3-image-klein",
+        subfolder="text_encoder",
+    )
+
+    max_sequence_length: int = 4096
+    pad_multiple: int = 80
+    hidden_state_layers: list[int] = [4, 8, 12, 16, 20, 24, 28, 32]
+
+    def load_model(self, device, frozen: bool = True):
+        self.tokenizer.load_model(device)
+        return super().load_model(device, frozen)
+
+    @warn_no_image_support
+    def encode(self, prompt, images=None, system_prompt=None):
+        processor: Any = self.tokenizer.model
+        text = processor.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        tokenizer = processor.tokenizer
+        real = tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_sequence_length,
+        )["input_ids"].shape[1]
+        length = min(
+            math.ceil(real / self.pad_multiple) * self.pad_multiple,
+            self.max_sequence_length,
+        )
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            padding="max_length",
+            padding_side="right",
+            truncation=True,
+            max_length=length,
+        )
+        device = self.model.device
+        mask = inputs["attention_mask"].to(device)
+        positions = (mask.long().cumsum(-1) - 1).masked_fill(mask == 0, 1)
+        output = self.model(
+            input_ids=inputs["input_ids"].to(device),
+            attention_mask=mask,
+            position_ids=positions[None].expand(4, -1, -1),
+            output_hidden_states=True,
+            use_cache=False,
+        )
+        return torch.cat(
+            [output.hidden_states[k] for k in self.hidden_state_layers], dim=-1
+        ).to(self.dtype)
+
+
 @encoder_registry.register("mistral3")
 class Mistral3Encoder(BaseEncoder[Mistral3ForConditionalGeneration], GenerativeEncoder):
     type: Literal["mistral3"] = "mistral3"
@@ -988,6 +1066,91 @@ class HiDreamO1Encoder(BaseEncoder[Qwen3VLProcessor]):
                 "input_ids"
             ]
         return self.encode_ids(prompt, system_prompt)
+
+
+IDEOGRAM4_REPO = "ideogram-ai/ideogram-4-fp8"
+
+
+@encoder_registry.register("ideogram4")
+class Ideogram4Encoder(
+    Fp8WeightOnlyLoader[Qwen3VLTextModel], BaseEncoder[Qwen3VLTextModel]
+):
+    """Ideogram 4 text features: 13 tapped Qwen3-VL-8B decoder layers, ``(hidden, layer)``
+    interleaved into ``[1, L, 13 * 4096]``.
+
+    Replicates the official ``_encode_text``: the bare chat template (no system prompt),
+    the decoder layers driven by hand so layer 35 is tapped before the final norm. The
+    official encoder also sees the packed image slots after the text, masked out; the
+    encoder is causal, so the text features are the same without them. The repo stores
+    the encoder weight-only fp8; only the language model is built (the vision tower is
+    unused).
+    """
+
+    type: Literal["ideogram4"] = "ideogram4"
+    library: Literal["transformers"] = "transformers"
+    class_name: str = "Qwen3VLTextModel"
+    pretrained_model_id: str = IDEOGRAM4_REPO
+    subfolder: str | None = "text_encoder"
+    dtype: TorchDType = torch.bfloat16
+
+    tokenizer: HfModelLoader[Qwen2Tokenizer] = HfModelLoader(
+        library="transformers",
+        class_name="Qwen2Tokenizer",
+        pretrained_model_id=IDEOGRAM4_REPO,
+        subfolder="tokenizer",
+    )
+
+    max_sequence_length: int = 2048
+    select_layers: list[int] = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 35]
+
+    def _convert(self, key: str, tensor: torch.Tensor):
+        if key.startswith("language_model."):
+            yield key.removeprefix("language_model."), tensor
+
+    def load_model(self, device, frozen: bool = True):
+        self.tokenizer.load_model(device)
+        return super().load_model(device, frozen)
+
+    @warn_no_image_support
+    def encode(self, prompt, images=None, system_prompt=None):
+        # apply_chat_template is typed for string contents only.
+        tokenizer: Any = self.tokenizer.model
+        model = self.model
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        text = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
+        )
+        assert isinstance(text, str)
+        ids = tokenizer(text, return_tensors="pt", add_special_tokens=False).input_ids
+        ids = ids.to(model.device)
+        if ids.shape[1] > self.max_sequence_length:
+            raise ValueError(
+                f"The prompt has {ids.shape[1]} tokens, above "
+                f"max_sequence_length={self.max_sequence_length}."
+            )
+        embeds = model.embed_tokens(ids)
+        positions = torch.arange(ids.shape[1], device=ids.device)[None]
+        mask = create_causal_mask(
+            config=model.config,
+            inputs_embeds=embeds,
+            attention_mask=torch.ones_like(ids),
+            past_key_values=None,
+            position_ids=positions,
+        )
+        rope = model.rotary_emb(embeds, positions[None].expand(3, -1, -1))
+        taps = []
+        hidden = embeds
+        for index, layer in enumerate(model.layers):
+            hidden = layer(
+                hidden,
+                attention_mask=mask,
+                position_ids=positions,
+                past_key_values=None,
+                position_embeddings=rope,
+            )
+            if index in self.select_layers:
+                taps.append(hidden)
+        return rearrange(torch.stack(taps, dim=-1), "b l h k -> b l (h k)")
 
 
 Encoder = Annotated[BaseEncoder, RegistryUnion(encoder_registry, "type")]

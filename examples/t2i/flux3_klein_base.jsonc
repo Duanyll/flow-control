@@ -1,0 +1,36 @@
+{
+  "$schema": "../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_flux3_klein_base_t2i",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "model": { "arch": "flux3", "type": "base" },
+  // Rows are preprocessed online (raw inline source); no preprocess config.
+  "dataset": {
+    "type": "inline",
+    "data": [
+      { "key": "church", "prompt": "Full-color indoor large-format photograph in a vertical 4-by-5 composition, showing the interior of a brutalist concrete church from a low, wide-angle viewpoint. Massive raw concrete walls rise around a cavernous nave, their surfaces marked by formwork seams, pinholes, chipped corners, and broad geometric planes. In the upper center, a narrow rectangular opening cuts through the thick wall as one slot of hard daylight falls diagonally into the otherwise dark sanctuary. The bright beam forms a single pale shaft across the center, revealing suspended dust particles against deep grey-brown shadow. One empty wooden pew stands alone within the light, placed off-center in the lower middle of the frame and facing the unseen altar beyond it. Its long plank seat has a dull brown finish, worn edges, visible grain, and two heavy supports; the backrest is bare, with no person or object resting on it. Behind the pew, the concrete architecture expands into angular buttresses and an overhanging ceiling slab that disappears into darkness. On the left, a recessed wall remains nearly black, while the right side contains a massive cantilevered concrete volume with a rough aggregate texture. At the far end, the daylight slot ends at a small altar-like projection of unadorned concrete, but its details remain lost in shadow. The floor consists of broad poured-concrete slabs with hairline joints and scattered grit. The concentrated beam illuminates only the pew and a thin patch of floor beneath it, leaving the surrounding nave in dense shadow.", "image_size": [1248, 832] },
+      { "key": "hiroshige", "prompt": "Traditional Japanese woodblock print in the Hiroshige register, rendered entirely in indigo and sumi ink on warm off-white washi paper with visible fibers and uneven carved edges. A broad wooden bridge crosses a rushing river from the lower left toward the center-right, its dark timber planks and low railings reduced to crisp, rhythmic lines. Sudden rain fills the upper half of the composition as dense, fine parallel indigo lines slanting diagonally across the entire scene. Above the bridge, layered blue-grey storm clouds sweep over distant mountains, their flattened silhouettes breaking into pale mist and deep indigo cloud bands. In the foreground, three small travelers stand close together beneath umbrellas on the bridge: one figure in a dark robe holds a round indigo umbrella, another carries a black umbrella, and a third wears a muted grey cloak beneath a smaller umbrella. Their bodies lean forward against the downpour, with hems and sleeves bending in the wind. Below them, white water surges around the bridge supports in curling sumi waves marked by sparse indigo foam crests. On the left bank, reeds and wet grasses rise beside a cluster of dark rocks; on the right, a windswept pine bends over the riverbank. The restrained composition uses broad areas of untouched paper, flat color separations, irregular hand-printed registration, and no lettering, seals, captions, or decorative inscriptions anywhere.", "image_size": [1248, 832] },
+      { "key": "man_dog", "prompt": "Full-color outdoor photograph, eye-level medium-wide shot in late afternoon sunlight, showing a man walking his dog along a neighborhood sidewalk. The low sun shines from the upper right, casting long shadows across the pavement and lighting the man’s face and clothing with warm side light. Slightly left of center, a white man in his thirties with fair skin, short brown hair, and light stubble walks toward frame-left at an easy pace. He wears a faded olive overshirt over a plain grey T-shirt, dark blue jeans, and worn brown leather shoes. A canvas backpack hangs from one shoulder, and he looks down at the dog while holding a loose black leash in his right hand. Beside him on the right, a medium-sized golden retriever walks close to his leg, its cream-gold coat catching the sunlight. The dog wears a red fabric collar attached to the leash, with its head lowered toward the grass and its tail raised behind it. In the foreground, the concrete sidewalk is scattered with dry leaves and narrow cracks, bordered by a strip of uneven green lawn. Behind them, a row of modest houses, wooden fences, and leafy trees recedes into the background; parked cars form muted shapes beneath the trees. Sunlit foliage glows yellow-green along the right side, while shaded areas remain dull green and brown.", "image_size": [1024, 1024] }
+    ]
+  },
+  // Base = undistilled: 50 Euler steps, true CFG 3.5 against the empty prompt
+  // (the preset saves the negative), constant shift alpha = 6.93. Captions are
+  // the official examples' upsampled prompts.
+  "sampler": {
+    "type": "grid",
+    "steps": 50,
+    "shift": 6.93,
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 3.5 }
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "flux3_klein_base"
+  },
+  "launch": { "type": "inference", "devices": 1 }
+}

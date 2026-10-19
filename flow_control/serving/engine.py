@@ -45,7 +45,9 @@ def first_node[T: BaseModel](tree: BaseModel, kind: type[T]) -> T | None:
 def cfg_scale_for_display(sampler: BaseTrajectory) -> float:
     """The serving UI's ``cfg_scale`` value; 1.0 without a CFG node."""
     cfg = first_node(sampler, Cfg)
-    return cfg.scale if cfg is not None else 1.0
+    if cfg is None:
+        return 1.0
+    return cfg.scale[0] if isinstance(cfg.scale, list) else cfg.scale
 
 
 def steps_for_display(sampler: BaseTrajectory) -> int | None:
@@ -457,7 +459,10 @@ class ServingEngine:
                         logger,
                         "The request's steps is ignored: the sampler has no grid.",
                     )
-            if cfg_scale is not None:
+            # An untouched slider keeps a per-step scale schedule.
+            if cfg_scale is not None and cfg_scale != cfg_scale_for_display(
+                self.sampler
+            ):
                 cfg = first_node(self.sampler, Cfg)
                 if cfg is not None:
                     cfg.scale = cfg_scale

@@ -26,6 +26,9 @@ def follow(sub: Row, row: Row) -> Row:
     sub.update(
         noisy_latents=row["noisy_latents"], sigma=row["sigma"], _frame=row["_frame"]
     )
+    sub.pop("sigma_next", None)
+    if "sigma_next" in row:  # inside a step: the branch shares the flow-map target
+        sub["sigma_next"] = row["sigma_next"]
     return sub
 
 

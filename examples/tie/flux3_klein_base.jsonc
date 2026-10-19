@@ -1,0 +1,37 @@
+{
+  "$schema": "../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_flux3_klein_base_tie",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "model": { "arch": "flux3", "type": "base" },
+  // Rows are preprocessed online (raw inline source); no preprocess config.
+  "dataset": {
+    "type": "inline",
+    "attachment_dir": "./examples/assets",
+    "data": [
+      { "key": "coffee", "prompt": "Create a photograph preserving the first image exactly as the canvas: keep the same close, slightly elevated camera position, the white ceramic mug in the same place on the worn honey-brown wooden tabletop, the window directly behind it, the cream curtain at frame-left, the white-painted window frame with its small chips and weathering, and the blue-green outdoor foliage visible through the glass. Keep the same warm sunlight entering from frame-right, the long diagonal mug shadow across the tabletop, the window reflections, and every existing scratch, seam, and mark in the wood. Fill the mug completely with dark brown coffee, with the liquid surface sitting just below the rim and the existing wisps of steam rising naturally above it. Add one golden-brown croissant beside the mug at frame-right, resting directly on the tabletop near the handle without covering it. Give the croissant its familiar curved, flaky layered form, with a few loose pastry flakes nearby. Match its scale and perspective to the mug, with warm highlights along its upper ridges and a soft contact shadow falling toward frame-left, consistent with the original sunlight.", "reference_images": ["flux3_mug.png"] },
+      { "key": "bandana", "prompt": "Create a photograph preserving the first image exactly as the canvas: keep the same golden retriever seated in the same position on the broad beach, with its body facing forward, front paws planted in the sand, head held near-frontally, and calm direct gaze toward the camera. Preserve the dog’s golden coat, wet fur, floppy ears, dark eyes, black nose, facial markings, and all existing strands of fur without changing its identity or expression. Add a red triangular bandana tied securely around the dog’s neck, with the knot centered beneath its chin and the two pointed ends resting naturally over the wet chest fur. The bandana should be a rich red fabric with subtle woven texture, following the contours of the neck and sitting partly over the golden chest fur, with natural folds, contact shadows, and damp fabric matching the beach conditions. Keep unchanged the pale gray-beige sand, scattered shells and footprints, the dog’s paw impressions, the calm ocean horizon, low waves, distant shoreline, and the expansive layered gray-blue storm clouds. Preserve the same eye-level camera position, square composition, subdued overcast daylight, colors, perspective, and every other background detail exactly as photographed.", "reference_images": ["flux3_dog.png"] },
+      { "key": "mugprint", "prompt": "Create a photograph preserving the first image exactly as the canvas: keep the white ceramic mug filled with dark coffee in the same position on the worn honey-brown wooden tabletop, with its handle pointing toward frame-right, the window directly behind it, the off-white curtain at frame-left, the weathered white window frame, the blue sky and green foliage visible through the glass, and the same low sunlight casting the mug’s long angular shadow across the table. Print the golden retriever from the second image onto the front of the mug as a centered ceramic decal, replacing only the plain white surface of the mug’s body. Depict the dog’s seated, near-frontal portrait from the second image, including its golden coat, wet-looking fur, dark eyes, black nose, floppy ears, and calm expression, but omit the beach, ocean, and cloudy sky from the printed image. Scale the dog to fit naturally within the mug’s visible front face, following the mug’s curved surface with correct perspective and subtle distortion. Integrate the print into the ceramic glaze so it follows the rounded contours, with the existing sunlight and shadow falling naturally across it. Leave every other element unchanged.", "reference_images": ["flux3_mug.png", "flux3_dog.png"] }
+    ]
+  },
+  // Base = undistilled: 50 Euler steps, true CFG 3.5 against the empty prompt
+  // (the preset saves the negative), constant shift alpha = 6.93. Captions are
+  // the official examples' upsampled prompts.
+  "sampler": {
+    "type": "grid",
+    "steps": 50,
+    "shift": 6.93,
+    "transition": {
+      "type": "euler",
+      "prediction": { "type": "cfg", "scale": 3.5 }
+    }
+  },
+  "processor": {
+    "task": "tie",
+    "preset": "flux3_klein_base"
+  },
+  "launch": { "type": "inference", "devices": 1 }
+}

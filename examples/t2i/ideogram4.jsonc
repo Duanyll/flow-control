@@ -1,0 +1,60 @@
+{
+  "$schema": "../../schema/inference.schema.json",
+  "report": {
+    "path": "./demo/inference_ideogram4_t2i",
+    "previews": true,
+    "records": false
+  },
+  "hsdp_shard_dim": 1,
+  "seed": 0,
+  // The adapter loads the conditional transformer as the base weights and the
+  // unconditional one as the full variant "uncond" (both dequantized from the fp8
+  // repo to bf16: 18.6 GB each). Rows are encoded online here, so the text
+  // encoder (16 GB) is resident too: ~56 GB; on a 48 GB card preprocess first
+  // (launch.preprocess_config) so only the two transformers are loaded. A run
+  // that never samples with the unconditional transformer (e.g. training) can
+  // skip loading it with "variants": {}.
+  "model": { "arch": "ideogram4", "type": "base" },
+  // Prompts are the structured JSON captions the model was trained on; these are
+  // the official prompting-guide examples. Native resolution is 2048²; 1024² is
+  // what the official run_inference.py defaults to.
+  "dataset": {
+    "type": "inline",
+    "data": [
+      { "key": "retriever", "prompt": "{\"high_level_description\":\"A golden retriever riding a skateboard down a sunny sidewalk.\",\"style_description\":{\"aesthetics\":\"warm, playful, vibrant\",\"lighting\":\"bright afternoon sunlight, long soft shadows\",\"photo\":\"shallow depth of field, eye-level, 85mm lens\",\"medium\":\"photograph\",\"color_palette\":[\"#F5C542\",\"#87CEEB\",\"#4A4A4A\",\"#FFFFFF\",\"#2E8B57\"]},\"compositional_deconstruction\":{\"background\":\"A sun-drenched suburban sidewalk lined with green hedges and a white picket fence. Dappled light filters through overhead trees.\",\"elements\":[{\"type\":\"obj\",\"bbox\":[200,300,800,900],\"desc\":\"A golden retriever with a fluffy coat, standing on a red skateboard with all four paws. Its tongue is out and ears are flapping in the wind.\"},{\"type\":\"obj\",\"bbox\":[250,750,750,950],\"desc\":\"A worn red skateboard with black wheels rolling along the concrete sidewalk.\"}]}}", "image_size": [1024, 1024] },
+      { "key": "sailboat", "prompt": "{\"high_level_description\":\"A lone sailboat on calm water at sunset.\",\"style_description\":{\"aesthetics\":\"serene, warm, golden hour\",\"lighting\":\"golden hour backlighting, warm atmospheric haze\",\"photo\":\"wide angle, f/8, long exposure\",\"medium\":\"photograph\",\"color_palette\":[\"#FF6B35\",\"#F7C59F\",\"#004E89\",\"#1A659E\",\"#2B2D42\"]},\"compositional_deconstruction\":{\"background\":\"A calm ocean stretching to a low horizon, sky washed in orange and pink with thin wisps of cloud.\",\"elements\":[{\"type\":\"obj\",\"desc\":\"A single sailboat with a white triangular sail, silhouetted against the setting sun.\"}]}}", "image_size": [1024, 1024] },
+      { "key": "business_card", "prompt": "{\"high_level_description\":\"A clean, modern business card layout for a tech company.\",\"style_description\":{\"aesthetics\":\"minimal, professional, geometric\",\"lighting\":\"even, diffuse studio lighting\",\"medium\":\"graphic_design\",\"art_style\":\"flat vector design, generous whitespace, sans-serif typography\",\"color_palette\":[\"#FFFFFF\",\"#F0F0F0\",\"#333333\",\"#0066FF\",\"#00CC88\"]},\"compositional_deconstruction\":{\"background\":\"A solid off-white card surface with subtle paper texture.\",\"elements\":[{\"type\":\"text\",\"text\":\"ACME TECH\",\"desc\":\"Bold dark grey sans-serif company name across the upper third of the card.\"},{\"type\":\"text\",\"text\":\"hello@acme.tech\",\"desc\":\"Small blue sans-serif contact email near the bottom of the card.\"}]}}", "image_size": [1024, 1024] }
+    ]
+  },
+  // The official V4_QUALITY_48 preset: logit-normal grid (mu 0.0, std 1.5, mean
+  // raised with the resolution), Euler, asymmetric CFG 7.0 for 45 steps then 3.0
+  // for the last 3. V4_DEFAULT_20 is steps 20, std 1.75, 18 x 7.0 + 2 x 3.0. The
+  // official loop clamps its first and last sigma to 1 - 1.2e-4 and 5.5e-4; this
+  // grid runs from 1 to 0.
+  "sampler": {
+    "type": "grid",
+    "steps": 48,
+    "shift": { "type": "logit_normal", "mean": 0.0, "std": 1.5 },
+    "transition": {
+      "type": "euler",
+      "prediction": {
+        "type": "cfg",
+        "scale": [
+          7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0,
+          7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0,
+          7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0,
+          3.0, 3.0, 3.0
+        ],
+        // The negative branch is the unconditional transformer on the row's own
+        // conditioning (it ignores the text), so no negative prompt is encoded.
+        "negative": { "type": "model", "variant": "uncond" },
+        "negative_condition": "positive"
+      }
+    }
+  },
+  "processor": {
+    "task": "t2i",
+    "preset": "ideogram4"
+  },
+  "launch": { "type": "inference", "devices": 1 }
+}

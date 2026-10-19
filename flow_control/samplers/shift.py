@@ -147,6 +147,42 @@ class Flux2Shift(BaseShift):
         return math.exp(a * num_steps + m_200 - self.d * a)
 
 
+class LogitNormalCurve:
+    """σ(u) = expit(mean + std·ndtri(u))."""
+
+    def __init__(self, mean: float, std: float) -> None:
+        self.mean, self.std = mean, std
+
+    def __call__(self, u: torch.Tensor) -> torch.Tensor:
+        z = torch.special.ndtri(u.to(torch.float64))
+        return torch.special.expit(self.mean + self.std * z).to(u.dtype)
+
+    def inverse(self, sigma: float) -> float:
+        logit = torch.special.logit(torch.tensor(sigma, dtype=torch.float64))
+        return float(torch.special.ndtr((logit - self.mean) / self.std))
+
+
+@shift_registry.register("logit_normal")
+class LogitNormalShift(BaseShift):
+    """Ideogram 4's grid: a logit-normal quantile of u, its mean raised by ``0.5·ln(pixels / base_pixels)``.
+
+    The base class knobs (``image_seq_len_from``, ``shift_terminal``, ``diffusers_grid``)
+    do not apply. The official loop clamps its grid to a logsnr window, which only
+    moves its two endpoints (to 1 − 1.2e-4 and 5.5e-4); a grid here runs from the
+    row's σ to ``sigma_end`` instead.
+    """
+
+    type: Literal["logit_normal"] = "logit_normal"
+    mean: float = 0.0
+    std: float = 1.5
+    base_pixels: int = 512 * 512
+
+    def curve(self, row: Row, num_steps: int) -> Curve:
+        height, width = row.get("model_image_size", row["image_size"])
+        mean = self.mean + 0.5 * math.log(height * width / self.base_pixels)
+        return LogitNormalCurve(mean, self.std)
+
+
 Shift = Annotated[
     BaseShift,
     # A bare number is a constant shift factor: ``"shift": 3.0``.
@@ -182,4 +218,30 @@ if __name__ == "__main__":
 
     constant = TypeAdapter(Shift).validate_python(3.0)
     assert isinstance(constant, ConstantShift) and constant.shift_value == 3.0
+
+    # Ideogram 4's V4_QUALITY_48 at 1024²: the official LogitNormalSchedule over
+    # linspace(0, 1, 49), t = clamp(1 − expit(mu + std·ndtri(u))), read as σ = 1 − t.
+    steps, mean, std = 48, 0.5 * math.log(4.0), 1.5
+    u = torch.linspace(0.0, 1.0, steps + 1, dtype=torch.float32).double()
+    t = (1 - torch.special.expit(mean + std * torch.special.ndtri(u))).clamp(
+        1 / (1 + math.exp(9.0)), 1 / (1 + math.exp(-7.5))
+    )
+    official = (1 - t.float()).flip(0)
+    row = {"image_size": (1024, 1024), "noisy_latents": torch.zeros(1, 4096, 1)}
+    curve = LogitNormalShift().curve(row, steps)
+    ours = torch.tensor(
+        [
+            1.0,
+            *curve(torch.linspace(curve.inverse(1.0), curve.inverse(0.0), steps + 1))[
+                1:-1
+            ].tolist(),
+            0.0,
+        ]
+    )
+    interior = (ours[1:-1] - official[1:-1]).abs().max().item()
+    assert interior < 1e-6, interior
+    print(
+        f"logit_normal 48 steps @1024²: interior max|Δ| {interior:.1e}; the official "
+        f"endpoints are {official[0]:.6f} and {official[-1]:.6f} (ours 1 and 0)"
+    )
     print("[green]shift checks passed[/green]")

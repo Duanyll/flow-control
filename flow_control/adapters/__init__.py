@@ -13,7 +13,9 @@ from .flux1 import (
 )
 from .flux2 import Flux2Adapter
 from .flux2.kv import Flux2KVAdapter
+from .flux3 import Flux3Adapter
 from .hidream import HiDreamO1Adapter
+from .ideogram4 import Ideogram4Adapter
 from .krea2 import Krea2Adapter
 from .longcat import LongCatAdapter, LongCatEditAdapter
 from .qwen import (
@@ -40,7 +42,9 @@ __all__ = [
     "Flux1NConcatAdapter",
     "Flux2Adapter",
     "Flux2KVAdapter",
+    "Flux3Adapter",
     "HiDreamO1Adapter",
+    "Ideogram4Adapter",
     "Krea2Adapter",
     "LongCatAdapter",
     "LongCatEditAdapter",

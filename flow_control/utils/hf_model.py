@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import glob
 import os
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import Generator, Iterator
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, Literal
 
 import torch
 from accelerate import infer_auto_device_map, init_empty_weights
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel, ConfigDict
+from safetensors import safe_open
 
 from . import device as devutil
 from .logging import get_logger
@@ -140,7 +143,8 @@ class HfModelLoader[T](BaseModel):
     def model(self, value: T):
         self._model = value
 
-    def _load_model_on_meta(self, model_cls) -> T:
+    def _load_model_on_meta(self, model_cls, cast: bool = True) -> T:
+        """Build from the config with parameters on meta; ``cast`` also moves the buffers to ``dtype``."""
         extra = dict(self.extra_from_pretrained_kwargs)
         extra.setdefault("local_files_only", _hf_local_files_only())
         with init_empty_weights():
@@ -162,7 +166,8 @@ class HfModelLoader[T](BaseModel):
                     **extra,
                 )
                 model = model_cls(config)
-            model.to(dtype=self.dtype)
+            if cast:
+                model.to(dtype=self.dtype)
         logger.info(
             f"Initialized model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
             f"on meta device with dtype {self.dtype}"
@@ -315,3 +320,61 @@ class HfModelLoader[T](BaseModel):
 
         self._model_cache[key] = self._model
         return True
+
+
+FP8_SCALE_SUFFIX = ".weight_scale"
+
+
+class Fp8WeightOnlyLoader[T](HfModelLoader[T]):
+    """Loads a weight-only fp8 checkpoint as plain ``dtype`` modules.
+
+    Ideogram 4's layout: an e4m3 ``<name>.weight`` next to a per-row fp32
+    ``<name>.weight_scale``, other tensors in bf16. Each weight is dequantized at
+    load exactly as the official ``Fp8Linear.forward`` does, ``w.to(dtype) *
+    scale.to(dtype)[:, None]``, so the numerics match the official code; the
+    model is built from its config and takes the state dict by assignment.
+    Buffers computed by ``__init__`` (RoPE tables) keep their fp32 values, as
+    ``from_pretrained`` does. The cache, offline and meta paths of
+    ``HfModelLoader`` are unchanged.
+    """
+
+    def _convert(
+        self, key: str, tensor: torch.Tensor
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Checkpoint entry -> model state-dict entries; subclasses map key layouts."""
+        yield key, tensor
+
+    def _load_with_from_pretrained(self, model_cls, device: torch.device) -> T:
+        model: Any = self._load_model_on_meta(model_cls, cast=False)
+        pattern = os.path.join(self.subfolder or "", "*.safetensors")
+        root = snapshot_download(
+            self.pretrained_model_id,
+            revision=self.revision,
+            allow_patterns=[pattern],
+            local_files_only=_hf_local_files_only(),
+        )
+        files = sorted(glob.glob(os.path.join(root, pattern)))
+        state: dict[str, torch.Tensor] = {}
+        with ExitStack() as stack:
+            readers = [
+                stack.enter_context(safe_open(f, "pt", str(device))) for f in files
+            ]
+            # safetensors readers expose keys() but are not iterable.
+            where = {key: reader for reader in readers for key in reader.keys()}  # noqa: SIM118
+            for key, reader in where.items():
+                if key.endswith(FP8_SCALE_SUFFIX):
+                    continue
+                tensor = reader.get_tensor(key)
+                if (scale_key := key + "_scale") in where:
+                    scale = where[scale_key].get_tensor(scale_key)
+                    tensor = tensor.to(self.dtype) * scale.to(self.dtype)[:, None]
+                elif tensor.is_floating_point():
+                    tensor = tensor.to(self.dtype)
+                state.update(self._convert(key, tensor))
+        model.load_state_dict(state, assign=True)
+        model.to(device).eval()
+        logger.info(
+            f"Loaded fp8 weight-only {self.class_name} from {self.pretrained_model_id}/"
+            f"{self.subfolder or ''} dequantized to {self.dtype} on {device}"
+        )
+        return model

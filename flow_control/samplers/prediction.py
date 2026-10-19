@@ -67,7 +67,8 @@ class Cfg(BasePrediction):
     """Classifier-free guidance between the conditional and a negative branch."""
 
     type: Literal["cfg"] = "cfg"
-    scale: float = 1.0
+    scale: float | list[float] = 1.0
+    """Guidance weight; a list holds one weight per step of the enclosing grid."""
     prediction: Prediction = Model()
     negative: Prediction | None = None
     """The negative branch; defaults to `prediction`."""
@@ -80,7 +81,25 @@ class Cfg(BasePrediction):
     """Cap of the per-token renorm factor ``|cond| / |guided|``; ``None`` rescales every token."""
 
     def guided(self) -> bool:
-        return self.scale != 1.0
+        scales = self.scale if isinstance(self.scale, list) else [self.scale]
+        return any(scale != 1.0 for scale in scales)
+
+    def step_scale(self, row: Row) -> float:
+        """The weight at the row's point: a list follows the enclosing grid's step."""
+        if not isinstance(self.scale, list):
+            return self.scale
+        from .trajectory import BaseGrid, GridFrame
+
+        grid = cast(
+            GridFrame,
+            caller(row, BaseGrid, who="cfg: a per-step scale list follows a grid"),
+        )
+        steps = len(grid.sigmas) - 1
+        if len(self.scale) != steps:
+            raise ValueError(
+                f"cfg: {len(self.scale)} scales for a grid of {steps} steps."
+            )
+        return self.scale[grid.index]
 
     def run(self, row: Row, frame: Frame) -> Calls[torch.Tensor]:
         if not self.guided():
@@ -104,7 +123,7 @@ class Cfg(BasePrediction):
         return sub
 
     def guide(self, row: Row, cond: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
-        combined = neg + (cond - neg) * self.scale
+        combined = neg + (cond - neg) * self.step_scale(row)
         if self.renorm:
             cond_norm = torch.norm(cond, dim=2, keepdim=True)
             noise_norm = torch.norm(combined, dim=2, keepdim=True)

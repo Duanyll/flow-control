@@ -98,7 +98,11 @@ class BaseTransition(BaseNode):
         with self.enter(row) as step:
             step.sigma, step.sigma_next = row["sigma"], sigma_next
             step.latents, step.velocity = row["noisy_latents"], None
-            yield from self.run(row, step)
+            row["sigma_next"] = sigma_next  # flow maps read the step's target
+            try:
+                yield from self.run(row, step)
+            finally:
+                row.pop("sigma_next", None)  # only inside a step
             assert row["sigma"] == sigma_next
             step.next_latents = row["noisy_latents"]
 
