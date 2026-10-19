@@ -32,7 +32,7 @@
     "type": "base",
     "micro_batch_size": 4,
     "variants": {
-      "default": { "type": "lora", "rank": 32, "alpha": 64 },
+      "default": { "type": "lora", "rank": 32, "alpha": 64, "init": "gaussian" },
       "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },
       "ref": { "type": "alias", "of": "base" },
     },

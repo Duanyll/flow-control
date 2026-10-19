@@ -499,9 +499,9 @@ class SamplerBatchingTest(unittest.TestCase):
             )
         self.assertEqual(adapter._cache_misses, 2)
         self.assertEqual(adapter._forward_batch_sizes, [1] * 6)
-        self.assertIsNot(row["_uncond"], row)
+        self.assertIsNot(row["_uncond:negative"], row)
         torch.testing.assert_close(
-            row["_uncond"]["clean_latents"], torch.full((1, 4, 2), 1.0)
+            row["_uncond:negative"]["clean_latents"], torch.full((1, 4, 2), 1.0)
         )
 
     def test_cfg_renorm_is_applied_per_sample(self) -> None:

@@ -674,15 +674,17 @@ class SamplerExtensionsTest(unittest.TestCase):
             ),
             full_grid[2::-1],
         )
-        # A custom grid relabels the row at its head (official recipes label the
-        # pure noise below 1) but must still end at sigma_end.
+        # A custom grid relabels the pure noise at its head (official recipes
+        # start just below 1) but must still match a partial start and the end.
+        head = {**reference}
         self.assertEqual(
-            Grid(steps=2, custom_sigmas=[0.995, 0.5, 0.0]).sigmas(mid),
+            Grid(steps=2, custom_sigmas=[0.995, 0.5, 0.0]).sigmas(head),
             [0.995, 0.5, 0.0],
         )
-        self.assertEqual(mid["sigma"], 0.995)
-        with self.assertRaisesRegex(ValueError, "custom_sigmas"):
-            Grid(steps=2, custom_sigmas=[1.0, 0.5, 0.1]).sigmas(mid)
+        self.assertEqual(head["sigma"], 0.995)
+        for table in ([0.995, 0.5, 0.0], [1.0, 0.5, 0.1]):
+            with self.assertRaisesRegex(ValueError, "custom_sigmas"):
+                Grid(steps=2, custom_sigmas=table).sigmas(mid)
 
     def test_trajectory_composition_and_sde_window(self):
         # Time travel as a sequential tree: init_latent re-noises the clean

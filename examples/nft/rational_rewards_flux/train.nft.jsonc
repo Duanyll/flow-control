@@ -47,7 +47,7 @@
     "arch": "flux1",
     "type": "base",
     "variants": {
-      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       // Old-teacher / behaviour-policy EMA. decay=0.5 + linear ramp == FF
       // ema_decay=0.5, ema_decay_schedule=piecewise_linear, ramp_rate=0.001. This
       // is what makes sampling + the old prediction off-policy (FF off_policy=true).

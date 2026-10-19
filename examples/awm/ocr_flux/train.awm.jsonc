@@ -54,7 +54,7 @@
     "arch": "flux1",
     "type": "base",
     "variants": {
-      "default": { "type": "lora", "rank": 64, "alpha": 128 },
+      "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       "ema": { "type": "ema", "of": "default", "decay": 0.99, "warmup": "standard" },
       "old": {
         "type": "ema",

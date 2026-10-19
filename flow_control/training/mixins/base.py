@@ -4,7 +4,7 @@ import random
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -290,21 +290,7 @@ class BaseTrainer(BaseModel):
                     f"Gradient checkpointing is enabled but {model.transformer.__class__.__name__} does not support it."
                 )
 
-        fsdp_layers: list[str] = (
-            model.transformer._no_split_modules or model.transformer._repeated_blocks
-        )
-        if not fsdp_layers:
-            raise ValueError(
-                "Model transformer must specify _no_split_modules or _repeated_blocks for FSDP sharding."
-            )
-        count = 0
-        for _, module in model.transformer.named_modules():
-            module_type = type(module).__name__
-            if module_type in fsdp_layers:
-                fully_shard(module, mesh=self.mesh)
-                count += 1
-        fully_shard(model.transformer, mesh=self.mesh)
-        logger.info(f"Transformer is sharded with {count} FSDP layers.")
+        self._shard(model)
 
         if seed_checkpoint_dir is not None:
             if not os.path.exists(os.path.join(seed_checkpoint_dir, ".metadata")):
@@ -330,6 +316,26 @@ class BaseTrainer(BaseModel):
 
         self.compile_transformer(model)
         return model
+
+    def _shard(self, model: BaseModelAdapter) -> None:
+        """FSDP units: every block, every full variant copy, then the root."""
+        transformer = cast(Any, model.transformer)
+        fsdp_layers: list[str] = (
+            transformer._no_split_modules or transformer._repeated_blocks
+        )
+        if not fsdp_layers:
+            raise ValueError(
+                "Model transformer must specify _no_split_modules or _repeated_blocks for FSDP sharding."
+            )
+        count = 0
+        for _, module in transformer.named_modules():
+            if type(module).__name__ in fsdp_layers:
+                fully_shard(module, mesh=self.mesh)
+                count += 1
+        for copy in transformer.variants.values():
+            fully_shard(copy, mesh=self.mesh)
+        fully_shard(transformer, mesh=self.mesh)
+        logger.info(f"Transformer is sharded with {count} FSDP layers.")
 
     def save_transformer_to_seed(
         self, model: BaseModelAdapter, seed_checkpoint_dir: str

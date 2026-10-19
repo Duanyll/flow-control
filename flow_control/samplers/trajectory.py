@@ -55,22 +55,24 @@ class BaseGrid(BaseTrajectory):
     def sigmas(self, row: Row) -> list[float]:
         start, end = row["sigma"], self.sigma_end
         if self.custom_sigmas is not None:
-            last = self.custom_sigmas[-1]
-            if len(self.custom_sigmas) != self.steps + 1 or not math.isclose(
-                last, end, abs_tol=1e-6
+            first, last = self.custom_sigmas[0], self.custom_sigmas[-1]
+            if (
+                len(self.custom_sigmas) != self.steps + 1
+                or not math.isclose(first, start, abs_tol=1e-2)
+                or not math.isclose(last, end, abs_tol=1e-6)
             ):
                 raise ValueError(
-                    f"custom_sigmas must hold steps + 1 = {self.steps + 1} entries "
-                    f"ending at sigma_end {end}; got {len(self.custom_sigmas)} "
-                    f"entries ending at {last}."
+                    f"custom_sigmas must hold steps + 1 = {self.steps + 1} entries from "
+                    f"the row's sigma {start} to sigma_end {end}; got "
+                    f"{len(self.custom_sigmas)} entries {first} -> {last}."
                 )
-            # Official grids label the pure noise below 1 (HiDream 0.999, Cosmos 0.995).
-            row["sigma"] = self.custom_sigmas[0]
+            # Official grids label the pure noise just below 1 (HiDream 0.999).
+            row["sigma"] = first
             return list(self.custom_sigmas)
-        # The shift's terminal stretch is defined on the full 1 -> 0 grid.
+        # Step-dependent shifts see the full 1 -> 0 step count.
         curve = self.shift.curve(row, num_steps=round(self.steps / abs(start - end)))
         u = torch.linspace(curve.inverse(start), curve.inverse(end), self.steps + 1)
-        return [start, *curve(u[1:-1]).tolist(), end]
+        return [start, *curve(u)[1:-1].tolist(), end]
 
 
 @trajectory_registry.register("grid")

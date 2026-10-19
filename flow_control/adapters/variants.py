@@ -87,6 +87,8 @@ class LoraVariant(BaseVariant):
     """Modules cloned from `of` into this variant; None: the adapter's `lora_extra_trainable`."""
     path: str | None = None
     """Initial values: a native LoRA file (`save_lora`)."""
+    init: Literal["kaiming", "gaussian"] = "kaiming"
+    """A's init: `nn.Linear`'s kaiming-uniform, or N(0, 1/rank) (PEFT's `gaussian`)."""
     trainable: bool = True
 
     @property
@@ -131,6 +133,8 @@ class LoraPair(nn.Module):
         }
         self.A = nn.Linear(linear.in_features, variant.rank, bias=False, **factory)
         self.B = nn.Linear(variant.rank, linear.out_features, variant.bias, **factory)
+        if variant.init == "gaussian":
+            nn.init.normal_(self.A.weight, std=1 / variant.rank)
         for parameter in self.B.parameters():
             nn.init.zeros_(parameter)
 

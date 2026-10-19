@@ -85,7 +85,8 @@ class Cfg(BasePrediction):
     def run(self, row: Row, frame: Frame) -> Calls[torch.Tensor]:
         if not self.guided():
             return (yield from self.prediction(row))
-        uncond = follow(derived(row, "_uncond", lambda: self.uncond_row(row)), row)
+        key = f"_uncond:{self.negative_condition}"
+        uncond = follow(derived(row, key, lambda: self.uncond_row(row)), row)
         cond, neg = yield from gather(
             [self.prediction(row), (self.negative or self.prediction)(uncond)]
         )

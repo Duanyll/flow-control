@@ -12,22 +12,17 @@ from .node import Row
 
 
 class Curve(Protocol):
-    """σ = F(u), invertible on [0, 1]."""
+    """σ = F(u) over a whole u grid, endpoints included; ``inverse`` is f's alone."""
 
     def __call__(self, u: torch.Tensor) -> torch.Tensor: ...
     def inverse(self, sigma: float) -> float: ...
 
 
 class ShiftCurve:
-    """F = stretch ∘ f with f(u) = s·u / (1 + (s − 1)·u); the terminal stretch comes from the full grid."""
+    """f(u) = s·u / (1 + (s − 1)·u); a grid ending at 0 is stretched so its penultimate σ is ``terminal``."""
 
-    def __init__(self, factor: float, num_steps: int, terminal: float | None) -> None:
-        self.factor = factor
-        self.scale = (
-            None
-            if terminal is None
-            else float((1 - self.f(torch.tensor(1 / num_steps))) / (1 - terminal))
-        )
+    def __init__(self, factor: float, terminal: float | None) -> None:
+        self.factor, self.terminal = factor, terminal
 
     def f(self, u: torch.Tensor) -> torch.Tensor:
         s = self.factor
@@ -35,35 +30,31 @@ class ShiftCurve:
 
     def __call__(self, u: torch.Tensor) -> torch.Tensor:
         sigma = self.f(u)
-        if self.scale is None:
+        if self.terminal is None or len(u) < 3 or u[-1] != 0:
             return sigma
-        return torch.where(sigma > 0, 1 - (1 - sigma) / self.scale, sigma)
+        scale = (1 - sigma[-2]) / (1 - self.terminal)
+        return torch.where(sigma > 0, 1 - (1 - sigma) / scale, sigma)
 
     def inverse(self, sigma: float) -> float:
-        if self.scale is not None and sigma > 0:
-            sigma = 1 - (1 - sigma) * self.scale
         return sigma / (sigma + self.factor * (1 - sigma))
 
 
 class DiffusersCurve(ShiftCurve):
-    """diffusers' FlowMatchEulerDiscreteScheduler grid: f over linspace(f(1), f(1/N), n), then 0."""
+    """diffusers' set_timesteps grid: f over linspace(f(1), f(1/N), n), then 0; full 1 -> 0 grids only."""
 
-    def __init__(self, factor: float, num_steps: int, train_steps: int) -> None:
-        super().__init__(factor, num_steps, None)
-        self.n = num_steps
+    def __init__(self, factor: float, train_steps: int) -> None:
+        super().__init__(factor, None)
         self.a = float(self.f(torch.tensor(1 / train_steps)))
 
     def __call__(self, u: torch.Tensor) -> torch.Tensor:
-        n, a = self.n, self.a
+        if u[0] != 1 or u[-1] != 0:
+            raise ValueError(
+                "diffusers_grid is defined on a full 1 -> 0 grid; a partial grid "
+                "needs custom_sigmas."
+            )
+        n, a = len(u) - 1, self.a
         inner = a + (1 - a) * (u * n - 1) / (n - 1)
         return torch.where(u * n >= 1, self.f(inner), torch.zeros_like(u))
-
-    def inverse(self, sigma: float) -> float:
-        if sigma == 0:
-            return 0.0
-        return (
-            1 + (super().inverse(sigma) - self.a) * (self.n - 1) / (1 - self.a)
-        ) / self.n
 
 
 class BaseShift(BaseModel):
@@ -80,8 +71,8 @@ class BaseShift(BaseModel):
     def curve(self, row: Row, num_steps: int) -> Curve:
         factor = self.factor(self._seq_len(row), num_steps)
         if self.diffusers_grid:
-            return DiffusersCurve(factor, num_steps, self.diffusers_grid)
-        return ShiftCurve(factor, num_steps, self.shift_terminal or None)
+            return DiffusersCurve(factor, self.diffusers_grid)
+        return ShiftCurve(factor, self.shift_terminal or None)
 
     def _seq_len(self, row: Row) -> int:
         # The model may see less than the whole image per forward (tiles).
