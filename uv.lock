@@ -731,8 +731,8 @@ wheels = [
 
 [[package]]
 name = "diffusers"
-version = "0.41.0.dev0"
-source = { git = "https://github.com/huggingface/diffusers.git?rev=80c7ed262aeffbeb43ef13ae04baeb9b84515a69#80c7ed262aeffbeb43ef13ae04baeb9b84515a69" }
+version = "0.42.0.dev0"
+source = { git = "https://github.com/huggingface/diffusers.git?rev=e04f0c5f24392fcd34b32d18d0ce03668f9bcd50#e04f0c5f24392fcd34b32d18d0ce03668f9bcd50" }
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },
@@ -908,7 +908,7 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.12.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=0.48.2" },
     { name = "datasets", specifier = ">=4.4.1" },
-    { name = "diffusers", git = "https://github.com/huggingface/diffusers.git?rev=80c7ed262aeffbeb43ef13ae04baeb9b84515a69" },
+    { name = "diffusers", git = "https://github.com/huggingface/diffusers.git?rev=e04f0c5f24392fcd34b32d18d0ce03668f9bcd50" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gradio", specifier = ">=6.10.0" },
     { name = "httpx", specifier = ">=0.28.1" },

@@ -91,7 +91,7 @@ torchvision = [
 xformers = [
   { index = "pytorch", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-diffusers = { git = "https://github.com/huggingface/diffusers.git", rev = "80c7ed262aeffbeb43ef13ae04baeb9b84515a69" }
+diffusers = { git = "https://github.com/huggingface/diffusers.git", rev = "e04f0c5f24392fcd34b32d18d0ce03668f9bcd50" }
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
