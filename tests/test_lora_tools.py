@@ -22,7 +22,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.adapters.variants import lora_pairs
+from flow_control.adapters.weights import lora_pairs
 from flow_control.scripts.lora import (
     _fuse_transformer,
     _load_external_lora,

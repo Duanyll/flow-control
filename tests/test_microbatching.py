@@ -418,11 +418,15 @@ class AdapterBatchingTest(unittest.TestCase):
         first["key"] = "first"
         with (
             torch.no_grad(),
-            patch("flow_control.adapters.base.dist.is_initialized", return_value=True),
-            patch("flow_control.adapters.base.dist.get_world_size", return_value=2),
-            patch("flow_control.adapters.base.dist.get_rank", return_value=0),
-            patch("flow_control.adapters.base.dist.all_reduce"),
-            patch("flow_control.adapters.base.dist.broadcast_object_list") as broadcast,
+            patch(
+                "flow_control.adapters.batching.dist.is_initialized", return_value=True
+            ),
+            patch("flow_control.adapters.batching.dist.get_world_size", return_value=2),
+            patch("flow_control.adapters.batching.dist.get_rank", return_value=0),
+            patch("flow_control.adapters.batching.dist.all_reduce"),
+            patch(
+                "flow_control.adapters.batching.dist.broadcast_object_list"
+            ) as broadcast,
         ):
             adapter.predict_velocity_batched(batches, [torch.zeros(1)] * 2)
             adapter._share_dummy(0)

@@ -31,13 +31,8 @@ from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
 from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
-from flow_control.adapters.variants import (
-    EmaVariant,
-    LoraVariant,
-    VariantModule,
-    lora_metadata,
-    lora_pairs,
-)
+from flow_control.adapters.variants import EmaVariant, LoraVariant
+from flow_control.adapters.weights import VariantModule, lora_metadata, lora_pairs
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 

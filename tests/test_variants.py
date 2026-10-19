@@ -12,12 +12,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.adapters.variants import (
-    LoraLinear,
-    LoraVariant,
-    VariantModule,
-    save_lora,
-)
+from flow_control.adapters.variants import LoraVariant
+from flow_control.adapters.weights import LoraLinear, VariantModule, save_lora
 from flow_control.utils.hf_model import HfModelLoader
 
 
