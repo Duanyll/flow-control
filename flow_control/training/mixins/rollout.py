@@ -119,6 +119,15 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
         """The model variant that samples the rollouts."""
         return "default"
 
+    def _reward_labels(self) -> list[str]:
+        """Labels of the ``row["reward"]`` columns the advantage sees: the
+        program's, plus any column a trainer appends before the advantage."""
+        return self.rollout.labels
+
+    def _reward_weights(self) -> list[float]:
+        """Weights of the :meth:`_reward_labels` columns."""
+        return self.rollout.weights
+
     # ----------------------------- Rollout phase ----------------------------- #
 
     def make_rollout_cursor(self) -> None:
@@ -255,11 +264,12 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
 
         # Stack per-sample [C] rewards into [B_local, C]
         local_rewards = torch.stack([row["reward"] for row in rows], dim=0).to(device)
-        labels = self.rollout.labels
+        labels = self._reward_labels()
         if local_rewards.shape[1] != len(labels):
             raise ValueError(
-                f"The {self.rollout.type!r} program wrote {local_rewards.shape[1]} "
-                f"reward components per row but declares {len(labels)}: {labels}."
+                f"Rows carry {local_rewards.shape[1]} reward components but the "
+                f"advantage expects {len(labels)} (the {self.rollout.type!r} "
+                f"program's, plus any the trainer appends): {labels}."
             )
         local_raw_rewards = torch.stack([row["reward_raw"] for row in rows], dim=0).to(
             device
@@ -292,7 +302,7 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
         )
 
         weights = torch.tensor(
-            self.rollout.weights,
+            self._reward_weights(),
             device=gathered_rewards.device,
             dtype=gathered_rewards.dtype,
         )
