@@ -23,6 +23,24 @@
   "processor": {
     "task": "t2i",
     "preset": "flux3_klein_distilled"
+    // Prompt upsampling with the official pup (black-forest-labs/flux-3-image-klein-pup,
+    // a Qwen3.5-9B fine-tune) served by vLLM:
+    //   vllm serve black-forest-labs/flux-3-image-klein-pup --generation-config vllm \
+    //     --max-model-len 8192 --limit-mm-per-prompt '{"image": 10}'
+    // Then the rows' `prompt` may be short requests. The preset's t2i_enhance_prompt is
+    // the pup's t2i system prompt; the decoding below is the official one (greedy,
+    // presence penalty 1.5 for t2i, no thinking). Greedy captions are not run-to-run
+    // reproducible (near-tied tokens flip with kernels and batching; the official
+    // examples drift the same way), only the prompt tokens are.
+    // "enable_enhance": true,
+    // "llm": {
+    //   "base_url": "http://127.0.0.1:8000/v1",
+    //   "api_key": "EMPTY",
+    //   "temperature": 0,
+    //   "max_tokens": 3584,
+    //   "enable_thinking": false,
+    //   "extra_generate_kwargs": { "presence_penalty": 1.5, "top_p": 0.95, "top_k": 20 }
+    // }
   },
   "launch": { "type": "inference", "devices": 1 }
 }

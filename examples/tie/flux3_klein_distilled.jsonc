@@ -24,6 +24,28 @@
   "processor": {
     "task": "tie",
     "preset": "flux3_klein_distilled"
+    // Prompt upsampling with the official pup (black-forest-labs/flux-3-image-klein-pup,
+    // a Qwen3.5-9B fine-tune) served by vLLM:
+    //   vllm serve black-forest-labs/flux-3-image-klein-pup --generation-config vllm \
+    //     --max-model-len 8192 --limit-mm-per-prompt '{"image": 10}'
+    // Then the rows' `prompt` may be short edit requests: the preset wraps them in the
+    // pup's i2i scaffold and sends the references first, as the official code does.
+    // Official decoding: greedy, presence penalty 0 for edits, no thinking (captions are
+    // not run-to-run reproducible, see the t2i example). The pup sees references at
+    // <= 1 MP on a 32-px grid (official: 1 MP for one reference, 724^2 for two, 512^2 for
+    // more; LANCZOS + JPEG q92 there, bilinear + PNG here): lower image_max_pixels for
+    // several references.
+    // "enable_enhance": true,
+    // "llm": {
+    //   "base_url": "http://127.0.0.1:8000/v1",
+    //   "api_key": "EMPTY",
+    //   "temperature": 0,
+    //   "max_tokens": 3584,
+    //   "enable_thinking": false,
+    //   "image_multiple_of": 32,
+    //   "image_max_pixels": 1048576,
+    //   "extra_generate_kwargs": { "presence_penalty": 0, "top_p": 0.95, "top_k": 20 }
+    // }
   },
   "launch": { "type": "inference", "devices": 1 }
 }

@@ -113,13 +113,18 @@ class TIEProcessor(BaseProcessor[TIEInputRow, TIETrainInputRow, TIEProcessedRow]
             ],
         }
 
+    def enhance_input(self, prompt: str) -> str:
+        """The user message the enhancer gets for ``prompt``; presets wrap it in
+        the scaffold their upsampler was trained on (FLUX 3)."""
+        return prompt
+
     async def enhance_prompt(
         self, prompt: str, reference_images: list[torch.Tensor]
     ) -> str:
         if not self.enable_enhance:
             return prompt
         result = await self.chat_completion(
-            prompt=prompt,
+            prompt=self.enhance_input(prompt),
             system_prompt=self.tie_enhance_prompt,
             images=reference_images,
         )

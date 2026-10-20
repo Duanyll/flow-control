@@ -33,7 +33,7 @@ from .components.encoder import (
     Sd3ClipEncoder,
     T5TextEncoder,
 )
-from .components.prompts import PromptStr, parse_prompt
+from .components.prompts import FLUX3_I2I_SCAFFOLD, PromptStr, parse_prompt
 from .components.vae import (
     VAE,
     Cosmos3VAE,
@@ -484,7 +484,9 @@ class Flux3KleinBasePreset(BaseModel):
     canvas (with several references the official code generates at the first
     reference's <= 1 MP size instead; pass ``image_size`` for that).
     The model was trained on upsampler captions only: give it long, literal
-    descriptions (prompt upsampling is not wired in).
+    descriptions, or set ``enable_enhance`` with an ``llm`` serving the official
+    upsampler (``black-forest-labs/flux-3-image-klein-pup``); the enhance prompts
+    default to its system prompts and edits get its scaffold (see the examples).
     """
 
     vae: VAE = Flux2VAE(
@@ -505,6 +507,13 @@ class Flux3KleinBasePreset(BaseModel):
     encoder_prompt: PromptStr = ""
     default_negative_prompt: PromptStr = ""
     save_negative: bool = True
+
+    t2i_enhance_prompt: PromptStr = parse_prompt("@flux3_t2i_enhance")
+    tie_enhance_prompt: PromptStr = parse_prompt("@flux3_tie_enhance")
+
+    def enhance_input(self, prompt: str) -> str:
+        """The upsampler's i2i scaffold around the edit instruction (official ``pup.py``)."""
+        return FLUX3_I2I_SCAFFOLD.format(instruction=prompt)
 
     def resize_reference_images(
         self, reference_images: list[torch.Tensor], image_size: tuple[int, int]
