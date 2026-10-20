@@ -54,20 +54,27 @@ Objectives name the variants they read (`old`, `ref`). Setup fails if `model.var
 ```jsonc
 {
   "model": {"arch": "ideogram4", "type": "base"}, // the adapter's default variants: "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}}
-  "sampler": {
-    "type": "grid",
-    "steps": 48,
-    "shift": {"type": "logit_normal", "mean": 0.0, "std": 1.5},
-    "transition": {
-      "type": "euler",
-      "prediction": {
-        "type": "cfg",
-        "scale": [7.0, 7.0, "... 45 x 7.0, then", 3.0, 3.0, 3.0], // one weight per grid step
+  // The official 48-step schedule guides at 7.0 for 45 steps, then 3.0: two grids on
+  // the same logit-normal curve, split at the sigma of step 45 (0.1669 at 1024², 0.2860 at 2048²).
+  "sampler": [
+    {
+      "type": "grid", "steps": 45, "sigma_end": 0.1669,
+      "shift": {"type": "logit_normal", "mean": 0.0, "std": 1.5},
+      "transition": {"type": "euler", "prediction": {
+        "type": "cfg", "scale": 7.0,
         "negative": {"type": "model", "variant": "uncond"},
         "negative_condition": "positive" // the uncond transformer runs image-only on the row itself: no negative prompt
-      }
+      }}
+    },
+    {
+      "type": "grid", "steps": 3, "sigma_end": 0.0,
+      "shift": {"type": "logit_normal", "mean": 0.0, "std": 1.5},
+      "transition": {"type": "euler", "prediction": {
+        "type": "cfg", "scale": 3.0,
+        "negative": {"type": "model", "variant": "uncond"}, "negative_condition": "positive"
+      }}
     }
-  }
+  ]
 }
 ```
 
