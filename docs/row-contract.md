@@ -222,8 +222,8 @@ supplied, reusing them across no-grad Executor steps. FLUX.2 caches singleton
 LongCat still constructs ordinary `txt_ids` / `img_ids` on its prepared copy.
 Supplied coordinates must match the call's text, image and reference geometry.
 
-Sources: [encoder implementations](../flow_control/processors/components/encoder.py),
-[presets](../flow_control/processors/presets.py), adapters
+Sources: [encoder implementations](../flow_control/processors/components/encoder/),
+[presets](../flow_control/processors/presets/), adapters
 [FLUX.1](../flow_control/adapters/flux1/base.py) and its `d_concat`/`n_concat`/`fill`/`kontext` variants,
 [FLUX.2](../flow_control/adapters/flux2/base.py), [Z-Image](../flow_control/adapters/zimage/base.py),
 [LongCat](../flow_control/adapters/longcat/base.py), [Qwen Edit](../flow_control/adapters/qwen/edit.py),
