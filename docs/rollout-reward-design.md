@@ -8,7 +8,7 @@ A rollout program (`rollout.type`) turns one prompt into its K scored rollouts: 
 | Slot ↓ / Placement → | `LocalReward` | `RemoteReward` |
 |---|---|---|
 | `Scorer` | `pickscore`, `hpsv2`, `clip_score`, `clip_image_similarity`, `aesthetic`, `image_reward`, `ocr`, `geneval`; contrib `pyiqa` | `rational_rewards_t2i`, `rational_rewards_edit`, `unified_reward`, `remote` |
-| `Judge` | out of tree (a preference network) | out of tree (MLLM pair judges) |
+| `Judge` | out of tree (a preference network) | `unified_reward` |
 
 A program awaits every reward the same way, whatever its placement, as the executor sees every sampler node as a `Calls` generator whatever its layer.
 
@@ -78,11 +78,10 @@ The server owns its scorers' configs; the client names where and which.
 
 ```jsonc
 {
-  "imports": ["my_plugins.judges"], // registers the judge "my_pair_judge"
   "rollout": {
     "type": "round_robin",
     "sampler": {...},
-    "judge": {"type": "my_pair_judge", "llm": {...}},
+    "judge": {"type": "unified_reward", "llm": {"base_url": "http://127.0.0.1:8080/v1", "model": "UnifiedReward", "max_concurrency": 8}}, // "mode": "rank" for the classic checkpoints
     // "swap_orders": true, // ask (a, b) and (b, a): s = (s_ab + 1 - s_ba) / 2
     "opponents": 4, // even d: d opponents per row along a random cycle; null: all K(K-1)/2 pairs
     "weight": 0.5,  // of the win-rate component "round_robin"
@@ -210,10 +209,10 @@ class RationalRewardsT2IScorer(BaseScorer, RemoteReward[Row, Tensor]):
 
     async def run_one(self, row: Row) -> Tensor: ...
 
-# out of tree
-@judge_registry.register("my_pair_judge")
-class MyPairJudge(BaseJudge, RemoteReward[tuple[Row, Row], float]):
+@judge_registry.register("unified_reward")
+class UnifiedRewardJudge(BaseJudge, RemoteReward[tuple[Row, Row], float]):
     llm: LLMClient
+    mode: Literal["score", "rank"] = "score"  # the official pair template
 
     async def run_one(self, pair: tuple[Row, Row]) -> float: ...
 ```

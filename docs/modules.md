@@ -81,7 +81,7 @@ raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directo
 | `Normalize`（`normalize.py`） | `identity` / `affine` / `clamp` / `sigmoid` |
 | `RewardProfile` / `reduce_reward_profiles`（`profile.py`） | 每个远程请求的发出 / 完成时间，汇总为 `profile/reward/*` |
 
-内置 scorer：`LocalReward`——`pickscore`, `hpsv2`, `clip_score`, `clip_image_similarity`, `aesthetic`, `image_reward`, `ocr`, `geneval`，contrib `pyiqa`（`flow_control.contrib.iqa`）；`RemoteReward`——`rational_rewards_t2i`, `rational_rewards_edit`, `unified_reward`, `remote`（`remote.py`：`url` + `scorer` 指向 `reward-server` 上的 scorer，`labels` / `weights` / `fields` 在 `load()` 时取自 `GET /info`，服务端只返回 raw，`weight` / `normalize` 由客户端设）。judge 无内置成员（out of tree）。
+内置 scorer：`LocalReward`——`pickscore`, `hpsv2`, `clip_score`, `clip_image_similarity`, `aesthetic`, `image_reward`, `ocr`, `geneval`，contrib `pyiqa`（`flow_control.contrib.iqa`）；`RemoteReward`——`rational_rewards_t2i`, `rational_rewards_edit`, `unified_reward`, `remote`（`remote.py`：`url` + `scorer` 指向 `reward-server` 上的 scorer，`labels` / `weights` / `fields` 在 `load()` 时取自 `GET /info`，服务端只返回 raw，`weight` / `normalize` 由客户端设）。内置 judge：`RemoteReward`——`unified_reward`（UnifiedReward 官方 pairwise 模板，`mode`：2.0 的 `score` / 经典的 `rank`）。
 
 ---
 

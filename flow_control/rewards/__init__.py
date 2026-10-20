@@ -30,7 +30,7 @@ from .pickscore import PickScoreScorer
 from .profile import RewardProfile, reduce_reward_profiles
 from .rational_rewards import RationalRewardsEditScorer, RationalRewardsT2IScorer
 from .remote import RemoteScorer
-from .unified_reward import UnifiedRewardScorer
+from .unified_reward import UnifiedRewardJudge, UnifiedRewardScorer
 
 __all__ = [
     "AestheticScorer",
@@ -58,6 +58,7 @@ __all__ = [
     "Scorer",
     "Scorers",
     "SigmoidNormalize",
+    "UnifiedRewardJudge",
     "UnifiedRewardScorer",
     "judge_registry",
     "normalize_registry",
