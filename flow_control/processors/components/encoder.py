@@ -27,7 +27,7 @@ from transformers import (
 )
 from transformers.masking_utils import create_causal_mask
 
-from flow_control.utils.hf_model import Fp8WeightOnlyLoader, HfModelLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger, warn_once
 from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.resize import resize_to_multiple_of, resize_to_resolution
@@ -1072,9 +1072,7 @@ IDEOGRAM4_REPO = "ideogram-ai/ideogram-4-fp8"
 
 
 @encoder_registry.register("ideogram4")
-class Ideogram4Encoder(
-    Fp8WeightOnlyLoader[Qwen3VLTextModel], BaseEncoder[Qwen3VLTextModel]
-):
+class Ideogram4Encoder(BaseEncoder[Qwen3VLTextModel]):
     """Ideogram 4 text features: 13 tapped Qwen3-VL-8B decoder layers, ``(hidden, layer)``
     interleaved into ``[1, L, 13 * 4096]``.
 

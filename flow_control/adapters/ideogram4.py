@@ -14,7 +14,7 @@ from diffusers.models.transformers.transformer_ideogram4 import (
 from einops import rearrange
 from pydantic import model_validator
 
-from flow_control.utils.hf_model import Fp8WeightOnlyLoader
+from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.types import TorchDType
 
 from .base import BaseModelAdapter, Batch, adapter_registry
@@ -23,7 +23,7 @@ from .variants import FullVariant, Variant
 IDEOGRAM4_REPO = "ideogram-ai/ideogram-4-fp8"
 
 
-class Ideogram4Loader(Fp8WeightOnlyLoader[Ideogram4Transformer2DModel]):
+class Ideogram4Loader(HfModelLoader[Ideogram4Transformer2DModel]):
     """The fp8 repo keeps the official module names: fused ``attention.qkv`` (and its
     per-row scale) is split into diffusers' ``to_q`` / ``to_k`` / ``to_v``, ``attention.o``
     is ``to_out.0``."""

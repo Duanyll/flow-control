@@ -19,6 +19,8 @@ from .types import TorchDType
 
 logger = get_logger(__name__)
 
+FP8_SCALE_SUFFIX = ".weight_scale"
+
 
 def _hf_local_files_only() -> bool:
     """True when ``HF_HUB_OFFLINE`` is set, so loads resolve purely from the
@@ -92,6 +94,9 @@ class HfModelLoader[T](BaseModel):
     dtype: TorchDType = torch.bfloat16
     device_memory_distribution: list[str] | None = None
     no_split_modules: list[str] | None = None
+    dequantize: bool = True
+    """Load a weight-only fp8 checkpoint (e4m3 ``<name>.weight`` beside a per-row
+    ``<name>.weight_scale``) as plain ``dtype`` modules; False hands it to ``from_pretrained``."""
 
     extra_from_pretrained_kwargs: dict[str, Any] = {}
 
@@ -111,6 +116,7 @@ class HfModelLoader[T](BaseModel):
             self.revision,
             self.subfolder or "",
             str(self.dtype),
+            self.dequantize,
             tuple(self.device_memory_distribution or []),
             tuple(sorted(self.extra_from_pretrained_kwargs.items()))
             if self.extra_from_pretrained_kwargs
@@ -176,6 +182,8 @@ class HfModelLoader[T](BaseModel):
         return model
 
     def _load_with_from_pretrained(self, model_cls, device: torch.device) -> T:
+        if self.dequantize and (files := self._fp8_files()):
+            return self._load_dequantized(model_cls, device, files)
         kwargs = {
             **self.extra_from_pretrained_kwargs,
         }
@@ -201,6 +209,77 @@ class HfModelLoader[T](BaseModel):
             model.to(device)
             logger.info(f"Moved model {self.class_name} to device {device}")
         self._model = model
+        return model
+
+    # ------------------------- weight-only fp8 checkpoints ---------------------- #
+
+    def _fp8_files(self) -> list[str]:
+        """The checkpoint's safetensors files when they hold ``weight_scale`` tensors."""
+        pattern = os.path.join(self.subfolder or "", "*.safetensors")
+        root = self.pretrained_model_id
+        if not os.path.isdir(root):
+            root = snapshot_download(
+                root,
+                revision=self.revision,
+                allow_patterns=[pattern],
+                ignore_patterns=None if self.subfolder else ["*/*"],
+                local_files_only=_hf_local_files_only(),
+            )
+        files = sorted(glob.glob(os.path.join(root, pattern)))
+        for file in files:
+            with safe_open(file, "pt", "cpu") as reader:
+                if any(key.endswith(FP8_SCALE_SUFFIX) for key in reader.keys()):  # noqa: SIM118
+                    return files
+        return []
+
+    def _convert(
+        self, key: str, tensor: torch.Tensor
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Checkpoint entry -> state-dict entries on the dequantizing path; subclasses map key layouts."""
+        yield key, tensor
+
+    def _load_dequantized(self, model_cls, device: torch.device, files: list[str]) -> T:
+        """Build from the config and assign the state dict, dequantizing each fp8 weight.
+
+        ``w.to(dtype) * scale.to(dtype)[:, None]`` is Ideogram 4's official
+        ``Fp8Linear.forward``, so the numerics match it. Every floating tensor is
+        cast to ``dtype`` (no fp32 modules are kept) and buffers computed by
+        ``__init__`` (RoPE tables) stay as built.
+        """
+        model: Any = self._load_model_on_meta(model_cls, cast=False)
+        state: dict[str, torch.Tensor] = {}
+        with ExitStack() as stack:
+            readers = [
+                stack.enter_context(safe_open(f, "pt", str(device))) for f in files
+            ]
+            # safetensors readers expose keys() but are not iterable.
+            where = {key: reader for reader in readers for key in reader.keys()}  # noqa: SIM118
+            for key, reader in where.items():
+                if key.endswith(FP8_SCALE_SUFFIX):
+                    continue
+                tensor = reader.get_tensor(key)
+                if (scale_key := key + "_scale") in where:
+                    scale = where[scale_key].get_tensor(scale_key)
+                    if (
+                        tensor.dtype != torch.float8_e4m3fn
+                        or scale.shape != tensor.shape[:1]
+                    ):
+                        raise ValueError(
+                            f"{self.pretrained_model_id}/{self.subfolder or ''}: {key} is "
+                            f"{tensor.dtype} with a {tuple(scale.shape)} scale; only e4m3 "
+                            "weights with one scale per row are dequantized (dequantize=false "
+                            "hands the checkpoint to from_pretrained)."
+                        )
+                    tensor = tensor.to(self.dtype) * scale.to(self.dtype)[:, None]
+                elif tensor.is_floating_point():
+                    tensor = tensor.to(self.dtype)
+                state.update(self._convert(key, tensor))
+        model.load_state_dict(state, assign=True)
+        model.to(device).eval()
+        logger.info(
+            f"Loaded fp8 weight-only {self.class_name} from {self.pretrained_model_id}/"
+            f"{self.subfolder or ''} dequantized to {self.dtype} on {device}"
+        )
         return model
 
     def _load_with_device_map(self, model_cls, device: torch.device) -> T:
@@ -320,61 +399,3 @@ class HfModelLoader[T](BaseModel):
 
         self._model_cache[key] = self._model
         return True
-
-
-FP8_SCALE_SUFFIX = ".weight_scale"
-
-
-class Fp8WeightOnlyLoader[T](HfModelLoader[T]):
-    """Loads a weight-only fp8 checkpoint as plain ``dtype`` modules.
-
-    Ideogram 4's layout: an e4m3 ``<name>.weight`` next to a per-row fp32
-    ``<name>.weight_scale``, other tensors in bf16. Each weight is dequantized at
-    load exactly as the official ``Fp8Linear.forward`` does, ``w.to(dtype) *
-    scale.to(dtype)[:, None]``, so the numerics match the official code; the
-    model is built from its config and takes the state dict by assignment.
-    Buffers computed by ``__init__`` (RoPE tables) keep their fp32 values, as
-    ``from_pretrained`` does. The cache, offline and meta paths of
-    ``HfModelLoader`` are unchanged.
-    """
-
-    def _convert(
-        self, key: str, tensor: torch.Tensor
-    ) -> Iterator[tuple[str, torch.Tensor]]:
-        """Checkpoint entry -> model state-dict entries; subclasses map key layouts."""
-        yield key, tensor
-
-    def _load_with_from_pretrained(self, model_cls, device: torch.device) -> T:
-        model: Any = self._load_model_on_meta(model_cls, cast=False)
-        pattern = os.path.join(self.subfolder or "", "*.safetensors")
-        root = snapshot_download(
-            self.pretrained_model_id,
-            revision=self.revision,
-            allow_patterns=[pattern],
-            local_files_only=_hf_local_files_only(),
-        )
-        files = sorted(glob.glob(os.path.join(root, pattern)))
-        state: dict[str, torch.Tensor] = {}
-        with ExitStack() as stack:
-            readers = [
-                stack.enter_context(safe_open(f, "pt", str(device))) for f in files
-            ]
-            # safetensors readers expose keys() but are not iterable.
-            where = {key: reader for reader in readers for key in reader.keys()}  # noqa: SIM118
-            for key, reader in where.items():
-                if key.endswith(FP8_SCALE_SUFFIX):
-                    continue
-                tensor = reader.get_tensor(key)
-                if (scale_key := key + "_scale") in where:
-                    scale = where[scale_key].get_tensor(scale_key)
-                    tensor = tensor.to(self.dtype) * scale.to(self.dtype)[:, None]
-                elif tensor.is_floating_point():
-                    tensor = tensor.to(self.dtype)
-                state.update(self._convert(key, tensor))
-        model.load_state_dict(state, assign=True)
-        model.to(device).eval()
-        logger.info(
-            f"Loaded fp8 weight-only {self.class_name} from {self.pretrained_model_id}/"
-            f"{self.subfolder or ''} dequantized to {self.dtype} on {device}"
-        )
-        return model
