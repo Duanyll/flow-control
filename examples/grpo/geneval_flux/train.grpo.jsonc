@@ -37,20 +37,22 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "type": "sde_window_grid",
-    "steps": 6,
-    "size": 3,
-    "window_range": [0, 3],
-    "eta": 0.8,
-    "shift": "linear",
-    "transition": { "type": "cps", "eta": 0.0 },
-  },
-
-  "reward": {
-    "type": "geneval",
-    "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
-    "scoring_mode": "reward_server",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      "type": "sde_window_grid",
+      "steps": 6,
+      "size": 3,
+      "window_range": [0, 3],
+      "eta": 0.8,
+      "shift": "linear",
+      "transition": { "type": "cps", "eta": 0.0 },
+    },
+    "reward": {
+      "type": "geneval",
+      "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
+      "scoring_mode": "reward_server",
+    },
   },
 
   "advantage": {

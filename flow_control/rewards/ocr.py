@@ -21,12 +21,13 @@ from typing import Any, Literal, Protocol
 import torch
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -227,7 +228,7 @@ def _levenshtein(a: str, b: str) -> int:
 
 
 class OcrBackend(Protocol):
-    """Minimal OCR backend interface used by :class:`OcrReward`."""
+    """Minimal OCR backend interface used by :class:`OcrScorer`."""
 
     def recognize(self, image: Image.Image) -> list[str]:
         """Return the list of recognized text strings for ``image``."""
@@ -303,8 +304,8 @@ class RapidOcrBackend:
         return list(txts)
 
 
-@reward_registry.register("ocr")
-class OcrReward(BaseReward):
+@scorer_registry.register("ocr")
+class OcrScorer(BaseScorer, LocalReward[Row, Tensor]):
     """Reward based on OCR alignment with a target string in the prompt.
 
     The target is parsed from the prompt as the substring between the first
@@ -324,19 +325,20 @@ class OcrReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         self._device = device
         self._backend = RapidOcrBackend(device)
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         if self._backend is None:
-            raise RuntimeError(
-                "OcrReward backend is not loaded; call load_model() first."
-            )
+            raise RuntimeError("OcrScorer backend is not loaded; call load() first.")
 
         image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
         prompt: str = row["prompt"]
@@ -383,14 +385,6 @@ class OcrReward(BaseReward):
         reward = 1.0 - dist / len(target_norm)
         return torch.tensor([reward], device=device, dtype=dtype)
 
-    def _unload_model(self) -> None:
-        import gc
-
-        del self._backend
-        self._backend = None
-        self._device = None
-        gc.collect()
-
 
 if __name__ == "__main__":
     from pathlib import Path
@@ -398,6 +392,7 @@ if __name__ == "__main__":
     from PIL import ImageDraw, ImageFont
     from rich import print
 
+    from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
     test_image_path = Path("./data/ocr_test_hello.png")
@@ -434,10 +429,10 @@ if __name__ == "__main__":
 
     image_tensor = pil_to_tensor(canvas)
 
-    reward_module = OcrReward()
+    reward_module = OcrScorer()
     test_device = devutil.default_device()
-    print(f"Loading OcrReward on device: {test_device}")
-    reward_module.load_model(test_device)
+    print(f"Loading OcrScorer on device: {test_device}")
+    reward_module.load(test_device)
     image_tensor = image_tensor.to(test_device)
 
     positive_prompt = (
@@ -445,14 +440,12 @@ if __name__ == "__main__":
     )
     negative_prompt = 'A picture of "Goodbye Mars" on a wall'
 
-    positive_score = reward_module.score(
-        {"clean_image": image_tensor, "prompt": positive_prompt}
-    )
-    negative_score = reward_module.score(
-        {"clean_image": image_tensor, "prompt": negative_prompt}
+    positive_score, negative_score = reward_module.run_batch(
+        [
+            {"clean_image": image_tensor, "prompt": positive_prompt},
+            {"clean_image": image_tensor, "prompt": negative_prompt},
+        ]
     )
 
-    print(f"Positive (target='Hello World'): {positive_score.aggregate().tolist()}")
-    print(f"Negative (target='Goodbye Mars'): {negative_score.aggregate().tolist()}")
-
-    reward_module.unload_model()
+    print(f"Positive (target='Hello World'): {positive_score.tolist()}")
+    print(f"Negative (target='Goodbye Mars'): {negative_score.tolist()}")

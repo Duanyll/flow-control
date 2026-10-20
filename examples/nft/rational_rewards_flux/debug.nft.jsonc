@@ -57,21 +57,23 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": { "type": "grid", "steps": 8, "shift": 3.0 },
-
-  "reward": {
-    "type": "rational_rewards_t2i",
-    "llm": {
-      "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "EMPTY",
-      "model": "RationalRewards-8B-T2I",
-      "temperature": 0.1,
-      "max_tokens": 2048,
-      "timeout": 300,
-      "max_concurrency": 4,
+  "rollout": {
+    "type": "pointwise",
+    "sampler": { "type": "grid", "steps": 8, "shift": 3.0 },
+    "reward": {
+      "type": "rational_rewards_t2i",
+      "llm": {
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key": "EMPTY",
+        "model": "RationalRewards-8B-T2I",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "timeout": 300,
+        "max_concurrency": 4,
+      },
+      "max_retries": 5,
+      "aspects": ["text_faithfulness", "physical_quality", "text_rendering"],
     },
-    "max_retries": 5,
-    "aspects": ["text_faithfulness", "physical_quality", "text_rendering"],
   },
 
   "advantage": {

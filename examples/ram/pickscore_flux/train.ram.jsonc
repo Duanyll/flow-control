@@ -69,16 +69,18 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    // FLUX distilled: no true CFG -> no cfg node (vs RAM's SD3 CFG 2.0).
-    "type": "grid",
-    "steps": 20,
-    "shift": "linear",
-    "transition": { "type": "euler", "eta": 0.0 },
-  },
-
-  "reward": {
-    "type": "pickscore",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      // FLUX distilled: no true CFG -> no cfg node (vs RAM's SD3 CFG 2.0).
+      "type": "grid",
+      "steps": 20,
+      "shift": "linear",
+      "transition": { "type": "euler", "eta": 0.0 },
+    },
+    "reward": {
+      "type": "pickscore",
+    },
   },
 
   "advantage": {

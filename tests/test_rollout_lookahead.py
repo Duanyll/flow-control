@@ -5,7 +5,7 @@ the store stubbed. CPU, world size 1."""
 import asyncio
 import unittest
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import torch
@@ -16,63 +16,40 @@ from test_variants import TinyTransformer
 
 from flow_control.adapters.base import BaseModelAdapter, Batch
 from flow_control.data import KEY, Index, IndexEntry, RowCursor
-from flow_control.rewards import PendingRewards
-from flow_control.rewards.base import BaseReward
-from flow_control.rewards.pairwise import PairwiseReward
-from flow_control.samplers import Grid
-from flow_control.training.mixins import PendingRollouts, Rollout
+from flow_control.rewards.base import BaseJudge, RemoteReward, judge_registry
+from flow_control.samplers import Grid, Row
+from flow_control.training.mixins import PendingRollouts
 from flow_control.training.nft import NftTrainer
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.tensor import deep_apply_tensor_fn
 
-SUBMIT_REWARD = "flow_control.training.mixins.rollout.submit_reward"
 VARIANTS: dict[str, Any] = {
     "default": {"type": "lora", "rank": 2},
     "ema": {"type": "ema", "decay": 0.5},
     "old": {"type": "ema", "decay": 0.9, "every": "epoch"},
     "ref": {"type": "alias", "of": "base"},
 }
+POINTWISE: dict[str, Any] = {
+    "type": "pointwise",
+    "sampler": Grid(steps=4),
+    "reward": {"type": "_test_key"},
+}
 
 
-class _KeyReward(BaseReward):
-    """Remote-like reward: overlaps with sampling, scores ``float(row[KEY])``
-    after a short sleep and records the event loop every request ran on."""
+@judge_registry.register("_test_tie")
+class _TieJudge(BaseJudge, RemoteReward[tuple[Row, Row], float]):
+    """Remote judge that calls every pair a tie after a short sleep, so the
+    batch's requests are still in flight when the next one samples."""
 
-    type: str = "key"
-    _loops: list[asyncio.AbstractEventLoop] = PrivateAttr(default_factory=list)
-
-    @property
-    def _row_fields(self) -> set[str]:
-        return {KEY}
-
-    def _load_model(self, device: torch.device) -> None:
-        pass
-
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
-        return torch.tensor([float(row[KEY])])
-
-    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
-        self._loops.append(asyncio.get_running_loop())
-        await asyncio.sleep(0.005)
-        return self._score(row)
-
-    def supports_rollout_overlap(self) -> bool:
-        return True
-
-
-class _KeyPairwise(PairwiseReward):
-    """Pairwise judge that calls every pair a tie (raw 0.5 for each rollout)
-    and records the event loop each pair request ran on."""
-
-    _loops: list[asyncio.AbstractEventLoop] = PrivateAttr(default_factory=list)
+    type: Literal["_test_tie"] = "_test_tie"
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {KEY}
 
-    async def async_score_pair(self, row_a, row_b) -> float:
+    async def run_one(self, pair: tuple[Row, Row]) -> float:
+        row_a, row_b = pair
         assert row_a[KEY] == row_b[KEY]
-        self._loops.append(asyncio.get_running_loop())
         await asyncio.sleep(0.005)
         return 0.5
 
@@ -118,11 +95,14 @@ class _RowStore:
         self.index = Index(
             [IndexEntry(str(i), 1, "", None, str(i)) for i in range(n)], {}
         )
+        self.gets: list[str] = []
+        """Keys fetched, in order: a batch's prompts as the runner pulls them."""
 
     def __len__(self) -> int:
         return len(self.index)
 
     def get(self, row_id: int) -> dict[str, Any]:
+        self.gets.append(str(row_id))
         return {
             KEY: str(row_id),
             "image_size": (8, 8),
@@ -145,43 +125,44 @@ class _ScheduleProbe(_ProbeOverrides, NftTrainer):
     _emitted: list[tuple[int, dict[str, float]]] = PrivateAttr(default_factory=list)
 
     def _start_rollouts(self, epoch: int) -> PendingRollouts:
+        store = cast(_RowStore, self._store)
+        first = len(store.gets)
         pending = super()._start_rollouts(epoch)
         self._events.append(("start", pending.epoch, pending.policy_version))
-        self._sampled[pending.epoch] = [r.key for r in pending.rollouts]
+        # sampled() returns once every prompt of the batch was pulled.
+        self._sampled[pending.epoch] = [
+            key
+            for key in store.gets[first:]
+            for _ in range(self.num_rollouts_per_prompt)
+        ]
         return pending
 
-    def _finish_rollouts(self, pending: PendingRollouts) -> list[Rollout]:
+    def _finish_rollouts(self, pending: PendingRollouts) -> list[Row]:
         self._events.append(("finish", pending.epoch))
         return super()._finish_rollouts(pending)
 
-    def _compute_advantages(self, rollouts: list[Rollout], step: int) -> torch.Tensor:
+    def _compute_advantages(self, rows: list[Row], step: int) -> torch.Tensor:
         # World size 1 without a process group: the all_gather is the identity.
-        rewards = torch.stack([r.reward for r in rollouts]).float()
+        rewards = torch.stack([row["reward"] for row in rows]).float()
         return (rewards - rewards.mean()).squeeze(-1)
 
-    def _train_on_rollouts(
-        self, rollouts: list[Rollout], advantages: torch.Tensor
-    ) -> None:
+    def _train_on_rollouts(self, rows: list[Row], advantages: torch.Tensor) -> None:
         self._events.append(("train", self._current_epoch))
         self._trained.append(
-            [(r.key, r.reward.item(), list(r.reward_labels)) for r in rollouts]
+            [(row[KEY], row["reward"].item(), self.rollout.labels) for row in rows]
         )
-        super()._train_on_rollouts(rollouts, advantages)
+        super()._train_on_rollouts(rows, advantages)
 
     def _emit_metrics(self, metrics: dict[str, float], step: int) -> None:
         self._emitted.append((step, dict(metrics)))
 
 
 def _make_trainer(
-    cls: type[Any],
-    config: dict[str, Any],
-    store: _RowStore,
-    model: _Adapter,
-    reward: BaseReward | None = None,
+    cls: type[Any], config: dict[str, Any], store: _RowStore, model: _Adapter
 ) -> Any:
-    """``run()``'s setup for a CPU probe: seed, fakes, cursor, real optimizer."""
+    """``run()``'s setup for a CPU probe: seed, fakes, cursor, runner, real optimizer."""
     trainer = cls.model_validate(
-        {"train_predictor": "model", "rollout_sampler": Grid(steps=4), **config}
+        {"train_predictor": "model", "rollout": POINTWISE, **config}
     )
     trainer.set_seed()
     trainer.model = model
@@ -190,7 +171,6 @@ def _make_trainer(
         decode_output=lambda latents, row: {},
         resample=lambda row, generator: row,
     )
-    trainer.reward = reward
     trainer._store = store
     trainer._cursor = RowCursor(
         store,
@@ -198,13 +178,9 @@ def _make_trainer(
         trainer.seed,
         sampling=trainer.prompt_sampling,
     )
+    trainer.make_runner(model)
     trainer.make_optimizer_and_scheduler()
     return trainer
-
-
-def _drain(reward, submitter, loop, profile) -> PendingRewards[int]:
-    list(submitter)
-    return PendingRewards([])
 
 
 def _expected_schedule(lookahead: int, train_epochs: int) -> list[tuple[Any, ...]]:
@@ -246,7 +222,7 @@ class RolloutLookaheadTest(unittest.TestCase):
     def _run_to_end(self, trainer: _ScheduleProbe) -> None:
         while trainer._current_epoch < trainer.train_epochs:
             trainer._run_epoch()
-        trainer.close_reward_loop()
+        trainer.close_runner()
 
     def test_lookahead_schedule_and_resume(self) -> None:
         """The loop must sample batch ``k + N`` before waiting for ``k`` and
@@ -256,13 +232,11 @@ class RolloutLookaheadTest(unittest.TestCase):
         batch identifiable by its keys."""
         for lookahead in (0, 1, 2):
             with self.subTest(lookahead=lookahead):
-                reward = _KeyReward()
                 trainer = _make_trainer(
                     _ScheduleProbe,
                     {**self.SCHEDULE_CONFIG, "rollout_lookahead": lookahead},
                     _RowStore(8),
                     _load(),
-                    reward,
                 )
                 trainer._prime_rollouts()
                 self._run_to_end(trainer)
@@ -276,20 +250,19 @@ class RolloutLookaheadTest(unittest.TestCase):
                     _policy_lags(trainer),
                     [min(lookahead, epoch) for epoch in range(self.EPOCHS)],
                 )
-                waits = [
-                    m["profile/reward/wait_at_train_s"]
-                    for _, m in trainer._emitted
-                    if "profile/reward/wait_at_train_s" in m
-                ]
-                self.assertEqual(len(waits), self.EPOCHS)
-                self.assertEqual(
-                    sum("profile/reward/count" in m for _, m in trainer._emitted),
-                    self.EPOCHS,
-                )
+                # Every batch logs its sampling time when it is sampled and its
+                # reward wait when it trains.
+                for key in (
+                    "profile/rollout/rollout_elapsed_s",
+                    "profile/reward/wait_at_train_s",
+                ):
+                    self.assertEqual(
+                        sum(key in m for _, m in trainer._emitted), self.EPOCHS, key
+                    )
                 # Epoch k trains on the rollouts sampled for k (not the batch
                 # started in the same epoch) and its rewards are already written
-                # (placeholder zeros / ["reward"] would mean training before
-                # finish, or batch k's futures written into another batch).
+                # (a missing reward would mean training before finish, or batch
+                # k's rows scored into another batch).
                 self.assertEqual(
                     len({key for keys in trainer._sampled.values() for key in keys}),
                     2 * self.EPOCHS,
@@ -299,31 +272,27 @@ class RolloutLookaheadTest(unittest.TestCase):
                         seen,
                         [(key, float(key), ["key"]) for key in trainer._sampled[epoch]],
                     )
-                # One event loop for the whole run (a remote client drops its
-                # connection pool when the loop changes, cutting off requests in
-                # flight), closed once the loop is over.
-                loops = reward._loops
-                self.assertEqual(len(loops), 2 * self.EPOCHS)
-                self.assertTrue(all(loop is loops[0] for loop in loops))
-                self.assertTrue(loops[0].is_closed())
-                self.assertIsNone(trainer._reward_loop)
 
-        with self.subTest("pairwise reward sampled one batch ahead"):
+        with self.subTest("pairwise program sampled one batch ahead"):
             # A prompt group's pair requests go out as soon as its K rollouts
             # are in, on the run-long loop, so the batch sampled ahead scores
             # while the next one samples and epoch k still trains on k's
-            # rewards; the profile counts requests: 2 prompts x K(K-1) pairs.
-            reward = _KeyPairwise()
+            # rewards; the profile counts requests: 2 prompts x 1 pair x both
+            # orders.
             trainer = _make_trainer(
                 _ScheduleProbe,
                 {
                     **self.SCHEDULE_CONFIG,
                     "rollout_lookahead": 1,
                     "num_rollouts_per_prompt": 2,
+                    "rollout": {
+                        "type": "round_robin",
+                        "sampler": Grid(steps=4),
+                        "judge": {"type": "_test_tie"},
+                    },
                 },
                 _RowStore(8),
                 _load(),
-                reward,
             )
             trainer._prime_rollouts()
             self._run_to_end(trainer)
@@ -331,7 +300,8 @@ class RolloutLookaheadTest(unittest.TestCase):
             self.assertEqual(_policy_lags(trainer), [0, 1, 1, 1])
             for epoch, seen in enumerate(trainer._trained):
                 self.assertEqual(
-                    seen, [(key, 0.5, ["pairwise"]) for key in trainer._sampled[epoch]]
+                    seen,
+                    [(key, 0.5, ["round_robin"]) for key in trainer._sampled[epoch]],
                 )
             counts = [
                 m["profile/reward/count"]
@@ -339,17 +309,11 @@ class RolloutLookaheadTest(unittest.TestCase):
                 if "profile/reward/count" in m
             ]
             self.assertEqual(counts, [4.0] * self.EPOCHS)
-            loops = reward._loops
-            self.assertEqual(len(loops), 4 * self.EPOCHS)
-            self.assertTrue(all(loop is loops[0] for loop in loops))
-            self.assertTrue(loops[0].is_closed())
 
         with self.subTest("resume with a batch in flight"):
             config = {**self.SCHEDULE_CONFIG, "rollout_lookahead": 1}
             model = _load()
-            trainer = _make_trainer(
-                _ScheduleProbe, config, _RowStore(8), model, _KeyReward()
-            )
+            trainer = _make_trainer(_ScheduleProbe, config, _RowStore(8), model)
             trainer._prime_rollouts()
             for _ in range(2):
                 trainer._run_epoch()
@@ -371,9 +335,7 @@ class RolloutLookaheadTest(unittest.TestCase):
             self.assertNotIn("blocks.0.to_q.weight", weights)
 
             resumed_model = _load(seed=1)
-            resumed = _make_trainer(
-                _ScheduleProbe, config, _RowStore(8), resumed_model, _KeyReward()
-            )
+            resumed = _make_trainer(_ScheduleProbe, config, _RowStore(8), resumed_model)
             resumed.load_state_dict(state)
             self.assertEqual(
                 int(cast(Any, resumed_model.transformer).variant_counts.old), 2
@@ -421,9 +383,8 @@ class RolloutLookaheadTest(unittest.TestCase):
             },
             _RowStore(2),
             model,
-            _KeyReward(),
         )
-        self.addCleanup(trainer.close_reward_loop)
+        self.addCleanup(trainer.close_runner)
         base = cast(Any, model.transformer).embed.weight.detach().clone()
         before = {name: _lora(model, name) for name in ("default", "ema", "old")}
         self.assertTrue(

@@ -38,15 +38,17 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "type": "grid",
-    "steps": 6,
-    "shift": "linear",
-    "transition": { "type": "euler", "eta": 0.7 },
-  },
-
-  "reward": {
-    "type": "ocr",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      "type": "grid",
+      "steps": 6,
+      "shift": "linear",
+      "transition": { "type": "euler", "eta": 0.7 },
+    },
+    "reward": {
+      "type": "ocr",
+    },
   },
 
   "advantage": {
@@ -81,7 +83,7 @@
 
   "launch": {
     "type": "grpo",
-    "devices": 8,
+    "devices": 4,
     "generate_dcp_seed": true,
   },
 }

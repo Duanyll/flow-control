@@ -1,238 +1,393 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any
+"""Reward placement and slots (``docs/rollout-reward-design.md``).
+
+A reward's *placement* says where a call runs: a :class:`LocalReward` on the
+device worker, batched across rows and groups; a :class:`RemoteReward` on the
+reward loop, one request per item, concurrently. Its *slot* says which config
+fields accept it: a :class:`BaseScorer` scores a row as ``[C]`` raw on its
+labels, a :class:`BaseJudge` returns P(a ≻ b) for a pair of rows. Every
+registered reward is one slot class and one placement, checked at registration.
+"""
+
+import asyncio
+from abc import abstractmethod
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Annotated, Any, Self, cast
 
 import torch
-from pydantic import ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetJsonSchemaHandler,
+    PositiveInt,
+    RootModel,
+    model_validator,
+)
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
+from torch import Tensor
 
-from flow_control.utils.registry import Registry
-from flow_control.utils.remote import RemoteOffloadable
+from flow_control.samplers.node import Row
+from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.tensor import deep_move_to_device
 
 from .normalize import IdentityNormalize, Normalize
 
+if TYPE_CHECKING:
+    from flow_control.training.rollouts.runner import RewardContext
 
-@dataclass(frozen=True)
-class RewardResult:
-    """Structured reward output.
 
-    ``raw`` and ``normalized`` are shaped ``[N, C]``.  ``weights`` and
-    ``labels`` describe the component axis.
+class LocalReward[I, O](BaseModel):
+    """Runs on the device worker (main thread), batched across rows and groups.
+
+    ``run_batch`` gets up to ``batch_size`` items. Its inputs are the rows as
+    they are: their tensors may be on CPU storage or on the device, so move what
+    you need to your own device. The worker moves the outputs to CPU.
     """
 
-    raw: torch.Tensor
-    normalized: torch.Tensor
-    weights: torch.Tensor
-    labels: list[str]
+    batch_size: PositiveInt = 32
+    """Items per ``run_batch()``; the worker fills it across groups."""
 
-    def __post_init__(self) -> None:
-        if self.raw.ndim != 2:
-            raise ValueError(f"raw must have shape [N, C], got {tuple(self.raw.shape)}")
-        if self.normalized.shape != self.raw.shape:
-            raise ValueError(
-                "normalized must have the same shape as raw, got "
-                f"{tuple(self.normalized.shape)} vs {tuple(self.raw.shape)}"
-            )
-        if self.weights.ndim != 1:
-            raise ValueError(
-                f"weights must have shape [C], got {tuple(self.weights.shape)}"
-            )
-        if self.weights.shape[0] != self.raw.shape[1]:
-            raise ValueError(
-                f"weights length {self.weights.shape[0]} does not match "
-                f"component count {self.raw.shape[1]}"
-            )
-        if len(self.labels) != self.raw.shape[1]:
-            raise ValueError(
-                f"labels length {len(self.labels)} does not match component count "
-                f"{self.raw.shape[1]}"
-            )
+    def load(self, device: torch.device) -> None:
+        """Load weights onto *device*; called once, before the first ``run_batch()``."""
 
-    def aggregate(self) -> torch.Tensor:
-        """Return the weighted normalized reward as ``[N]``."""
-        weights = self.weights.to(
-            device=self.normalized.device, dtype=self.normalized.dtype
-        )
-        return (self.normalized * weights).sum(dim=-1)
-
-    def aggregate_raw(self) -> torch.Tensor:
-        """Return a weighted raw score as ``[N]``.
-
-        This is only meaningful when the raw components share a compatible
-        scale.  It exists for composite display modes that intentionally hide
-        internal component detail.
-        """
-        weights = self.weights.to(device=self.raw.device, dtype=self.raw.dtype)
-        return (self.raw * weights).sum(dim=-1)
-
-    def row(self, index: int) -> "RewardResult":
-        """Return a single-row view as another ``RewardResult``."""
-        return RewardResult(
-            raw=self.raw[index : index + 1],
-            normalized=self.normalized[index : index + 1],
-            weights=self.weights,
-            labels=self.labels,
+    def run_batch(self, items: list[I], /) -> list[O]:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement run_batch()."
         )
 
 
-class BaseReward(RemoteOffloadable, ABC):
-    """Base class for reward functions.
+class RemoteReward[I, O](BaseModel):
+    """Runs on the reward loop (background thread): one request per item, concurrently.
 
-    The ``score`` method receives a single-sample row dict that contains all
-    information the trainer has about the sample (prompt text, generated image,
-    model embeddings, etc.).  Each reward implementation extracts whatever
-    fields it needs from the dict.
-
-    Subclasses implement ``_load_model``, ``_score``, and optionally
-    ``_unload_model``.  ``_score`` MUST return the raw, model-native score;
-    the optional :attr:`normalize` transform is applied automatically by
-    :meth:`score` / :meth:`async_score`.  The public ``load_model`` /
-    ``score`` / ``unload_model`` methods handle transparent remote offloading
-    when ``endpoint`` is set.
+    The rows inside an item arrive as CPU snapshots filtered to :attr:`fields`,
+    taken on the device worker.
     """
 
-    type: str
-    weight: float = 1.0
-    normalize: Normalize = Field(default_factory=IdentityNormalize)
+    @property
+    @abstractmethod
+    def fields(self) -> set[str]:
+        """Row keys this reward reads."""
+
+    def load(self, device: torch.device) -> None:
+        """Prepare clients; a remote reward never touches *device*."""
+
+    async def run_one(self, item: I, /) -> O:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement run_one()."
+        )
+
+
+type Reward[I, O] = LocalReward[I, O] | RemoteReward[I, O]
+
+
+def run_local_batch[I, O](reward: LocalReward[I, O], items: list[I]) -> list[O]:
+    """``reward.run_batch(items)`` under ``no_grad``: one output per item, moved
+    to CPU (the runner's device worker and the reward server)."""
+    with torch.no_grad():
+        outputs = reward.run_batch(items)
+    if len(outputs) != len(items):
+        raise ValueError(
+            f"{type(reward).__name__}.run_batch() returned {len(outputs)} outputs "
+            f"for {len(items)} items; one per item."
+        )
+    return deep_move_to_device(outputs, torch.device("cpu"))
+
+
+def load_rewards(config: BaseModel, device: torch.device) -> None:
+    """Call ``load(device)`` on every reward found in the pydantic tree of
+    *config*: nested models, ``RootModel`` roots, lists, tuples and dict values,
+    a reward's own fields included (a scorer wrapping a judge, say)."""
+
+    def walk(value: Any) -> None:
+        if isinstance(value, LocalReward | RemoteReward):
+            value.load(device)
+        children: Iterable[Any]
+        if isinstance(value, RootModel):
+            children = [value.root]
+        elif isinstance(value, BaseModel):
+            children = [getattr(value, name) for name in type(value).model_fields]
+        elif isinstance(value, dict):
+            children = value.values()
+        elif isinstance(value, list | tuple):
+            children = value
+        else:
+            return
+        for child in children:
+            walk(child)
+
+    walk(config)
+
+
+class BaseScorer(BaseModel):
+    """The scorer slot: a ``Reward[Row, Tensor]`` returning ``[C]`` raw on :attr:`labels`.
+
+    A scorer returns raw, model-native scores; :meth:`Scorers.normalize` applies
+    :attr:`normalize`, never the scorer itself.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    @property
-    def component_weights(self) -> list[float]:
-        """Internal component weights. Default: single component, unit weight."""
-        return [1.0]
+    type: str
+    name: str | None = None
+    """Prefix of this scorer's labels in logs and metrics; default ``type``."""
+    weight: float = 1.0
+    """Scales every component weight."""
+    normalize: Normalize = Field(default_factory=IdentityNormalize)
+    """Element-wise on the raw score; a class may default it (pickscore: affine 1/26)."""
 
     @property
-    def component_labels(self) -> list[str]:
-        """Human-readable labels for the component axis."""
-        return [self.type]
+    def label(self) -> str:
+        return self.name or self.type
+
+    @property
+    def labels(self) -> list[str]:
+        """Component names; a single component logs as :attr:`label`."""
+        return ["score"]
+
+    @property
+    def weights(self) -> list[float]:
+        """Per-component weights; 0 logs a component without training on it."""
+        return [1.0] * len(self.labels)
 
     @property
     @abstractmethod
-    def _row_fields(self) -> set[str]:
-        """Set of expected row keys for this reward."""
-        ...
+    def fields(self) -> set[str]:
+        """Row keys this scorer reads (what a reward server snapshots for it)."""
 
+    async def score(self, ctx: "RewardContext", rows: list[Row]) -> Tensor:
+        """``[N, C]`` raw float32 on CPU."""
+        # The registries admit only classes with exactly one placement.
+        reward = cast("Reward[Row, Tensor]", self)
+        raw = torch.stack(await ctx.run(reward, rows)).float().cpu()
+        if raw.shape != (len(rows), len(self.labels)):
+            raise ValueError(
+                f"Scorer {self.label!r} returned {list(raw.shape[1:])} per row; "
+                f"expected [{len(self.labels)}], one value per label {self.labels}."
+            )
+        return raw
+
+
+class BaseJudge(BaseModel):
+    """The judge slot: a ``Reward[tuple[Row, Row], float]`` returning P(a ≻ b), 0.5 a tie."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+
+    @property
     @abstractmethod
-    def _load_model(self, device: torch.device) -> None:
-        """Load reward model to specified device. Called once before training."""
-        ...
+    def fields(self) -> set[str]:
+        """Row keys this judge reads from either row of a pair."""
 
-    @abstractmethod
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
-        """Compute reward score for a single sample.
 
-        Args:
-            row: dict containing sample information. Common keys include:
-                - ``clean_image``: [1, C, H, W] tensor in [0, 1] range
-                - ``prompt``: str, the original prompt text
-                Other keys depend on the processor / task.
+def _one_placement(cls: type) -> None:
+    placements = [p.__name__ for p in (LocalReward, RemoteReward) if issubclass(cls, p)]
+    if len(placements) != 1:
+        raise TypeError(
+            f"{cls.__name__} must subclass exactly one of LocalReward (device worker, "
+            "batched) and RemoteReward (reward loop, one request per item); it "
+            f"subclasses {' and '.join(placements) or 'neither'}."
+        )
 
-        Returns:
-            Float tensor of shape ``[C]`` or ``[N, C]`` where
-            C = len(component_weights).  Single-component rewards commonly
-            return ``[1]``.
-        """
-        ...
 
-    def _unload_model(self) -> None:
-        """Optional: unload reward model to free GPU memory."""
+# Members register at their definition sites via ``@scorer_registry.register(tag)``.
+scorer_registry: Registry[BaseScorer] = Registry(
+    "scorer", base=BaseScorer, check=_one_placement
+)
+judge_registry: Registry[BaseJudge] = Registry(
+    "judge", base=BaseJudge, check=_one_placement
+)
 
-    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
-        """Async path for ``_score``.
+Scorer = Annotated[BaseScorer, RegistryUnion(scorer_registry, "type")]
+Judge = Annotated[BaseJudge, RegistryUnion(judge_registry, "type")]
 
-        Default implementation just calls the synchronous ``_score``.
-        Subclasses whose scoring is genuinely async (LLM judges, composite
-        gathering, etc.) override this instead of overriding ``async_score``,
-        so that :attr:`normalize` is still applied by :meth:`async_score`.
-        """
-        return self._score(row)
 
-    # ── Public API (handles remote dispatch transparently) ───────────────
+class Scorers(RootModel):
+    """Scorers run side by side on every row; a single scorer config is shorthand
+    for a one-item list. Components concatenate in list order."""
 
-    def load_model(self, device: torch.device) -> None:
-        """Load reward model. If ``endpoint`` is set, offloads to remote server."""
-        if self.endpoint is not None:
-            self._init_remote(device, dtype=torch.float32)
-        else:
-            self._load_model(device)
+    # Built at first use: the scorers register after this module is imported.
+    model_config = ConfigDict(defer_build=True)
 
-    def _canonicalize_raw_score(self, raw: torch.Tensor) -> torch.Tensor:
-        if raw.ndim == 0:
-            return raw.reshape(1, 1)
-        if raw.ndim == 1:
-            return raw.unsqueeze(0)
-        if raw.ndim == 2:
+    root: list[Scorer]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _single_scorer(cls, value: Any) -> Any:
+        return [value] if isinstance(value, dict | str | BaseScorer) else value
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        # Advertise the single-scorer shorthand next to the list.
+        schema = handler(core_schema)
+        target = handler.resolve_ref_schema(schema)
+        array = dict(target)
+        target.clear()
+        target.update(
+            title=array.get("title", cls.__name__), anyOf=[array["items"], array]
+        )
+        return schema
+
+    @model_validator(mode="after")
+    def _unique_labels(self) -> Self:
+        seen: set[str] = set()
+        for scorer in self.root:
+            if scorer.label in seen:
+                raise ValueError(
+                    f"Two scorers are labelled {scorer.label!r}; give one a distinct "
+                    "`name`."
+                )
+            seen.add(scorer.label)
+        return self
+
+    def __bool__(self) -> bool:
+        return bool(self.root)
+
+    @property
+    def labels(self) -> list[str]:
+        """``<label>`` for a one-component scorer, ``<label>/<component>`` otherwise."""
+        return [
+            scorer.label if len(scorer.labels) == 1 else f"{scorer.label}/{component}"
+            for scorer in self.root
+            for component in scorer.labels
+        ]
+
+    @property
+    def weights(self) -> list[float]:
+        return [scorer.weight * w for scorer in self.root for w in scorer.weights]
+
+    async def score(self, ctx: "RewardContext", rows: list[Row]) -> Tensor:
+        """``[N, C]`` raw float32 on CPU, ``C = len(self.labels)``."""
+        if not self.root:
+            return torch.zeros(len(rows), 0)
+        parts = await asyncio.gather(*(s.score(ctx, rows) for s in self.root))
+        return torch.cat(parts, dim=-1)
+
+    def normalize(self, raw: Tensor) -> Tensor:
+        """Each scorer's :attr:`~BaseScorer.normalize` on its own columns of ``raw``."""
+        if not self.root:
             return raw
-        raise ValueError(
-            f"Reward raw score must have shape [], [C], or [N, C], got {raw.shape}"
+        blocks = raw.split([len(s.labels) for s in self.root], dim=-1)
+        return torch.cat(
+            [s.normalize.apply(b) for s, b in zip(self.root, blocks, strict=True)],
+            dim=-1,
         )
 
-    def _make_result(self, raw: torch.Tensor) -> RewardResult:
-        raw = self._canonicalize_raw_score(raw.float())
-        normalized = self.normalize.apply(raw)
-        weights = torch.tensor(
-            self.component_weights,
-            device=normalized.device,
-            dtype=normalized.dtype,
-        )
-        return RewardResult(
-            raw=raw,
-            normalized=normalized,
-            weights=weights,
-            labels=self.component_labels,
-        )
 
-    def score(self, row: dict[str, Any]) -> RewardResult:
-        """Compute reward score.
+if __name__ == "__main__":
+    from typing import Literal
 
-        If remote, filters row by ``_row_fields`` and sends only the
-        needed keys to save bandwidth.  The remote server applies
-        :attr:`normalize` itself (same pydantic config is sent via
-        ``/load``), so the client just returns the server response.
-        """
-        if self.is_remote:
-            result = self._remote_row_object_call(
-                "/score", row, fields=self._row_fields
-            )
-            assert isinstance(result, RewardResult)
-            return result
-        return self._make_result(self._score(row))
+    from rich import print
 
-    async def async_score(self, row: dict[str, Any]) -> RewardResult:
-        """Async version of ``score`` for use in async RL loops."""
-        if self.is_remote:
-            result = await self._async_remote_row_object_call(
-                "/score", row, fields=self._row_fields
-            )
-            assert isinstance(result, RewardResult)
-            return result
-        raw = await self._async_score(row)
-        return self._make_result(raw)
+    from .normalize import AffineNormalize
 
-    def supports_rollout_overlap(self) -> bool:
-        """Whether this reward can safely overlap with diffusion rollout work.
+    @scorer_registry.register("_test_local")
+    class _Local(BaseScorer, LocalReward[Row, Tensor]):
+        """Two components ``[v, -v]``; doubles by default."""
 
-        Remote rewards are safe by default because they do not execute model
-        compute in the trainer process once the request payload is prepared.
-        Local GPU rewards should keep the default ``False`` so rollout and
-        reward evaluation do not contend for the same device.
-        """
-        return self.is_remote
+        type: Literal["_test_local"] = "_test_local"
+        normalize: Normalize = Field(default_factory=lambda: AffineNormalize(scale=2))
 
-    def prepare_row_for_async(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Create a CPU snapshot of the fields needed by ``async_score``."""
-        filtered_row = {k: v for k, v in row.items() if k in self._row_fields}
-        return deep_move_to_device(filtered_row, torch.device("cpu"))
+        @property
+        def labels(self) -> list[str]:
+            return ["value", "negated"]
 
-    def unload_model(self) -> None:
-        """Unload reward model (local or remote)."""
-        if self.is_remote:
-            self._close_remote()
-        else:
-            self._unload_model()
+        @property
+        def weights(self) -> list[float]:
+            return [1.0, 0.5]
 
+        @property
+        def fields(self) -> set[str]:
+            return {"value"}
 
-# Lives here (not in ``__init__.py``) so member modules can import it without an
-# import cycle through the package ``__init__``. Members register at their
-# definition sites via ``@reward_registry.register("<tag>")``.
-reward_registry: Registry[BaseReward] = Registry("reward", base=BaseReward)
+        def run_batch(self, rows: list[Row]) -> list[Tensor]:
+            return [torch.tensor([row["value"], -row["value"]]) for row in rows]
+
+    @scorer_registry.register("_test_remote")
+    class _Remote(BaseScorer, RemoteReward[Row, Tensor]):
+        type: Literal["_test_remote"] = "_test_remote"
+
+        @property
+        def fields(self) -> set[str]:
+            return {"value"}
+
+        async def run_one(self, row: Row) -> Tensor:
+            await asyncio.sleep(0.01 * (3 - row["value"]))  # finishes out of order
+            return torch.tensor([10.0 * row["value"]], dtype=torch.float64)
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.batches: list[int] = []
+
+        async def run[I, O](self, reward: Reward[I, O], items: list[I]) -> list[O]:
+            if isinstance(reward, LocalReward):
+                self.batches.append(len(items))
+                return reward.run_batch(items)
+            return list(await asyncio.gather(*(reward.run_one(i) for i in items)))
+
+    # A single scorer (a dict or a bare tag) is a one-item list.
+    for single in ({"type": "_test_local"}, "_test_local", _Local()):
+        parsed = Scorers.model_validate(single)
+        assert len(parsed.root) == 1 and isinstance(parsed.root[0], _Local), parsed
+    variants = Scorers.model_json_schema()["anyOf"]  # one scorer, or a list
+    assert len(variants) == 2 and variants[1]["type"] == "array", variants
+
+    scorers = Scorers.model_validate(
+        [
+            {"type": "_test_local", "name": "loc", "weight": 0.5},
+            {"type": "_test_remote", "weight": 2.0},
+        ]
+    )
+    assert scorers.labels == ["loc/value", "loc/negated", "_test_remote"]
+    assert scorers.weights == [0.5, 0.25, 2.0], scorers.weights
+
+    # score: [N, C] float32 on CPU, rows in order; normalize per column block.
+    stub = _Ctx()
+    ctx = cast("RewardContext", stub)
+    rows: list[Row] = [{"value": float(v)} for v in range(3)]
+    raw = asyncio.run(scorers.score(ctx, rows))
+    assert raw.dtype == torch.float32 and raw.device.type == "cpu"
+    expected = torch.tensor([[0.0, 0.0, 0.0], [1.0, -1.0, 10.0], [2.0, -2.0, 20.0]])
+    assert torch.equal(raw, expected), raw
+    assert stub.batches == [3], stub.batches
+    assert torch.equal(scorers.normalize(raw), expected * torch.tensor([2, 2, 1]))
+    custom = Scorers.model_validate(
+        [{"type": "_test_remote", "normalize": {"type": "affine", "offset": 1.0}}]
+    )
+    assert torch.equal(custom.normalize(raw[:, 2:]), raw[:, 2:] + 1)
+
+    class _Flat(_Local):
+        def run_batch(self, rows: list[Row]) -> list[Tensor]:
+            return [torch.zeros(1, 2) for _ in rows]  # the old [1, C] convention
+
+    try:
+        asyncio.run(_Flat(name="flat").score(ctx, rows))
+    except ValueError as exc:
+        assert "'flat' returned [1, 2]" in str(exc), exc
+    else:
+        raise AssertionError("a [1, C] score must be rejected")
+    empty = asyncio.run(Scorers([]).score(ctx, rows))
+    assert empty.shape == (3, 0) and Scorers([]).normalize(empty).shape == (3, 0)
+
+    # load_rewards reaches rewards through nested models, lists and dicts.
+    loaded: list[str] = []
+
+    class _Loading(_Local):
+        def load(self, device: torch.device) -> None:
+            loaded.append(f"{self.name}@{device.type}")
+
+    class _Config(BaseModel):
+        scorers: Scorers
+        nested: dict[str, list[_Loading]]
+
+    config = _Config(
+        scorers=Scorers([_Loading(name="listed")]),
+        nested={"a": [_Loading(name="dicted")]},
+    )
+    load_rewards(config, torch.device("cpu"))
+    assert loaded == ["listed@cpu", "dicted@cpu"], loaded
+
+    print("[green]rewards.base self-test passed[/green]")

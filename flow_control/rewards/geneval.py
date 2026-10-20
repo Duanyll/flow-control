@@ -15,12 +15,13 @@ import torch
 import torch.utils.data
 from PIL import Image, ImageOps
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -63,8 +64,8 @@ class GenEvalMetadata(TypedDict):
     exclude: NotRequired[list[GenevalExcludeSpec]]
 
 
-@reward_registry.register("geneval")
-class GenevalReward(BaseReward):
+@scorer_registry.register("geneval")
+class GenevalScorer(BaseScorer, LocalReward[Row, Tensor]):
     """GenEval reward based on Mask2Former object detection and CLIP color
     classification.
 
@@ -108,10 +109,10 @@ class GenevalReward(BaseReward):
     _color_classifiers: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "tag", "include", "exclude"}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         import open_clip
 
         from flow_control.third_party.mask2former import (
@@ -429,7 +430,10 @@ class GenevalReward(BaseReward):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         image = row["clean_image"]  # [1, C, H, W] in [0, 1]
 
         # Run detection
@@ -450,19 +454,6 @@ class GenevalReward(BaseReward):
         score = max(0.0, min(1.0, score))
 
         return torch.tensor([score], device=image.device, dtype=image.dtype)
-
-    def _unload_model(self) -> None:
-        import gc
-
-        del self._detector, self._clip_model, self._clip_transform
-        del self._clip_tokenizer
-        self._detector = None
-        self._clip_model = None
-        self._clip_transform = None
-        self._clip_tokenizer = None
-        self._color_classifiers = {}
-        gc.collect()
-        devutil.empty_cache()
 
 
 # ======================================================================
@@ -570,6 +561,7 @@ if __name__ == "__main__":
         COCO_THING_CLASSES,
         load_mask2former_swin_s,
     )
+    from flow_control.utils import device as devutil
     from flow_control.utils.draw import draw_bbox_on_image
     from flow_control.utils.tensor import pil_to_tensor, tensor_to_pil
 
@@ -658,7 +650,7 @@ if __name__ == "__main__":
     devutil.empty_cache()
 
     # ==================================================================
-    # Part B: Verify GenevalReward scoring (both modes)
+    # Part B: Verify GenevalScorer scoring (both modes)
     # ==================================================================
 
     # Test cases with different metadata scenarios
@@ -728,18 +720,18 @@ if __name__ == "__main__":
 
     for mode in ("reward_server", "original"):
         rprint(f"\n[bold cyan]===== Part B: scoring_mode={mode!r} =====[/]")
-        reward = GenevalReward(
+        reward = GenevalScorer(
             checkpoint_path=str(ckpt_path),
             scoring_mode=mode,
         )
-        reward.load_model(device)
-        for desc, metadata in test_cases:
-            row: dict[str, Any] = {
-                "clean_image": image_tensor.to(device),
-                **metadata,
-            }
-            score = reward._score(row)
+        reward.load(device)
+        rows: list[Row] = [
+            {"clean_image": image_tensor.to(device), **metadata}
+            for _, metadata in test_cases
+        ]
+        for (desc, _), score in zip(test_cases, reward.run_batch(rows), strict=True):
             rprint(f"  {desc:<32s} → score = {score.item():.4f}")
-        reward.unload_model()
+        del reward
+        devutil.empty_cache()
 
     rprint("\n[bold green]All tests completed.[/]")

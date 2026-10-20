@@ -8,7 +8,6 @@ Whether a dataset is preprocessed online is decided by the store type alone
 """
 
 import asyncio
-from collections.abc import Sequence
 from functools import partial
 from typing import Literal, cast
 
@@ -34,7 +33,7 @@ from flow_control.data import (
 )
 from flow_control.processors import Processor
 from flow_control.processors.base import ProcessedRow
-from flow_control.samplers import Observer, RootFrame, derive_seed
+from flow_control.samplers import derive_seed
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_move_to_device
 
@@ -189,27 +188,6 @@ class DataMixin(BaseTrainer):
             derive_seed(self.seed, f"{epoch}:{row[KEY]}")
         )
         return cast(ProcessedRow, self.processor.resample(row, generator))
-
-    def start_row(
-        self,
-        row: Row,
-        generator: torch.Generator,
-        dtype: torch.dtype,
-        observers: Sequence[tuple[type, Observer]] = (),
-    ) -> Row:
-        """``row`` at σ = 1: fresh fp32 latents drawn in ``dtype``, its RNG and the chain root."""
-        row.update(
-            noisy_latents=self.processor.initialize_latents(
-                cast(ProcessedRow, row),
-                generator=generator,
-                device=self.device,
-                dtype=dtype,
-            ).float(),
-            sigma=1.0,
-            _generator=generator,
-            _frame=RootFrame(self, observers),
-        )
-        return row
 
 
 if __name__ == "__main__":

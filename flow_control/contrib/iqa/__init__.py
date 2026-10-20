@@ -1,9 +1,9 @@
 """pyiqa-backed image quality assessment rewards.
 
 Wraps `pyiqa <https://github.com/chaofengc/IQA-PyTorch>`_ metrics (PSNR, SSIM,
-LPIPS, DISTS, NIQE, MUSIQ, ...) as a single multi-component reward, so IQA
-batteries can be used anywhere the reward framework is accepted (inference
-eval, composite rewards, remote offload).
+LPIPS, DISTS, NIQE, MUSIQ, ...) as a single multi-component scorer, so IQA
+batteries can be used anywhere a scorer is accepted (inference eval, scorer
+lists, the reward server).
 
 Activate from a config via::
 
@@ -12,6 +12,6 @@ Activate from a config via::
 Requires the ``iqa`` dependency group (``pyiqa``).
 """
 
-from .reward import PyIQAMetricSpec, PyIQAReward
+from .reward import PyIQAMetricSpec, PyIQAScorer
 
-__all__ = ["PyIQAMetricSpec", "PyIQAReward"]
+__all__ = ["PyIQAMetricSpec", "PyIQAScorer"]

@@ -3,15 +3,16 @@ from typing import Any, Literal
 import torch
 import torchvision.transforms as T
 from pydantic import ConfigDict, Field, PrivateAttr
+from torch import Tensor
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 from .normalize import AffineNormalize, Normalize
 
 
-@reward_registry.register("clip_score")
-class CLIPScoreReward(BaseReward):
+@scorer_registry.register("clip_score")
+class ClipScoreScorer(BaseScorer, LocalReward[Row, Tensor]):
     """CLIP-based text-image alignment reward."""
 
     type: Literal["clip_score"] = "clip_score"
@@ -28,10 +29,10 @@ class CLIPScoreReward(BaseReward):
     _device: Any = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         from transformers import CLIPModel, CLIPProcessor
 
         self._device = device
@@ -73,7 +74,10 @@ class CLIPScoreReward(BaseReward):
         self._transform = T.Compose(transforms)
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         """Compute CLIP score for a single sample.
 
         Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -91,15 +95,5 @@ class CLIPScoreReward(BaseReward):
         )
         text_inputs = {k: v.to(device=self._device) for k, v in text_inputs.items()}
         outputs = self._model(pixel_values=pixels, **text_inputs)
-        # Return raw CLIP logits; BaseReward applies the configurable normalize.
+        # Raw CLIP logits ``[1]``; the configured normalize is applied later.
         return outputs.logits_per_image.diagonal()
-
-    def _unload_model(self) -> None:
-        import gc
-
-        del self._model, self._processor, self._transform
-        self._model = None
-        self._processor = None
-        self._transform = None
-        gc.collect()
-        devutil.empty_cache()

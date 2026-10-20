@@ -2,17 +2,19 @@ from typing import Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field
+from torch import Tensor
 from transformers import CLIPModel, CLIPProcessor
 
+from flow_control.samplers.node import Row
 from flow_control.utils import device as devutil
 from flow_control.utils.hf_model import HfModelLoader
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 from .normalize import AffineNormalize, Normalize
 
 
-@reward_registry.register("pickscore")
-class PickScoreReward(BaseReward):
+@scorer_registry.register("pickscore")
+class PickScoreScorer(BaseScorer, LocalReward[Row, Tensor]):
     """PickScore-based preference reward."""
 
     model_config = ConfigDict(extra="forbid")
@@ -37,16 +39,19 @@ class PickScoreReward(BaseReward):
     )
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         self._device = device
         self.processor.load_model(device=device)
         self.model.load_model(device=device)
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         """Compute PickScore for a single sample.
 
         Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -88,9 +93,8 @@ class PickScoreReward(BaseReward):
 
         logit_scale = model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
-        scores = scores.diag()
-        # Return raw PickScore logits; BaseReward applies configurable normalize.
-        return scores
+        # Raw PickScore logits ``[1]``; the configured normalize is applied later.
+        return scores.diag()
 
 
 if __name__ == "__main__":
@@ -115,23 +119,20 @@ if __name__ == "__main__":
     rprint(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
 
     # Quick test
-    reward = PickScoreReward()
-    reward.load_model(devutil.default_device())
+    reward = PickScoreScorer()
+    reward.load(devutil.default_device())
 
-    row = {
-        "clean_image": image_tensor,
-        "prompt": "A dog playing with a ball in the park.",
-    }
-    score = reward.score(row)
-    rprint(
-        f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
-    )  # should be low
-
-    row = {
-        "clean_image": image_tensor,
-        "prompt": "Two cats lying on a couch with two tv remotes.",
-    }
-    score = reward.score(row)
-    rprint(
-        f"[bold]PickScore reward:[/] {score.aggregate().item():.4f}"
-    )  # should be higher than the previous one
+    low, high = reward.run_batch(
+        [
+            {
+                "clean_image": image_tensor,
+                "prompt": "A dog playing with a ball in the park.",
+            },
+            {
+                "clean_image": image_tensor,
+                "prompt": "Two cats lying on a couch with two tv remotes.",
+            },
+        ]
+    )
+    rprint(f"[bold]PickScore (raw):[/] dog {low.item():.4f}, cats {high.item():.4f}")
+    assert high.item() > low.item(), (low, high)

@@ -74,15 +74,17 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "type": "grid",
-    "steps": 14,
-    "shift": "linear",
-    "transition": { "type": "euler", "eta": 0.4 },
-  },
-
-  "reward": {
-    "type": "ocr",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      "type": "grid",
+      "steps": 14,
+      "shift": "linear",
+      "transition": { "type": "euler", "eta": 0.4 },
+    },
+    "reward": {
+      "type": "ocr",
+    },
   },
 
   "advantage": {

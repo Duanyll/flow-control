@@ -45,21 +45,23 @@
 
   "train_predictor": {"type": "cfg", "scale": 4.5},
 
-  "rollout_sampler": {
-    "type": "grid",
-    "steps": 10,
-    "shift": 3.0,
-    "transition": {
-      "type": "euler",
-      "eta": 0.7,
-      "prediction": { "type": "cfg", "scale": 4.5 },
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      "type": "grid",
+      "steps": 10,
+      "shift": 3.0,
+      "transition": {
+        "type": "euler",
+        "eta": 0.7,
+        "prediction": { "type": "cfg", "scale": 4.5 },
+      },
     },
-  },
-
-  "reward": {
-    "type": "geneval",
-    "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
-    "scoring_mode": "reward_server",
+    "reward": {
+      "type": "geneval",
+      "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
+      "scoring_mode": "reward_server",
+    },
   },
 
   "advantage": {

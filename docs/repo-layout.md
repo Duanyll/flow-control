@@ -29,26 +29,26 @@ For where a training *run* writes its artifacts (`runs/`, logs, checkpoints), se
 ## Extension points & plugins
 
 Most algorithmic choices are **open registries**, not closed enums: model
-adapters, rewards (and reward normalizers), samplers' `shift`/`solver`, processor
-tasks and presets, encoders, VAEs, timestep/loss weightings, advantage estimators,
-EMA warmups, raw data sources, serving task templates, and trainers. The
-mechanism is `Registry` / `RegistryUnion` / `load_plugins` in
-`flow_control/utils/registry.py`.
+adapters, reward scorers and judges (and score normalizers), rollout programs,
+samplers' `shift`/`solver`, processor tasks and presets, encoders, VAEs,
+timestep/loss weightings, advantage estimators, EMA warmups, raw data sources,
+serving task templates, and trainers. The mechanism is `Registry` /
+`RegistryUnion` / `load_plugins` in `flow_control/utils/registry.py`.
 
 ### Adding a component (in-tree)
 
 Subclass the family base and register it at its definition site:
 
 ```python
-from flow_control.rewards.base import BaseReward, reward_registry
+from flow_control.rewards.base import BaseScorer, LocalReward, scorer_registry
 
-@reward_registry.register("my_reward")
-class MyReward(BaseReward):
-    type: Literal["my_reward"] = "my_reward"
+@scorer_registry.register("my_scorer")
+class MyScorer(BaseScorer, LocalReward[Row, Tensor]):  # one placement, checked at registration
+    type: Literal["my_scorer"] = "my_scorer"
     ...
 ```
 
-The field alias (e.g. `Reward = Annotated[BaseReward, RegistryUnion(reward_registry,
+The field alias (e.g. `Scorer = Annotated[BaseScorer, RegistryUnion(scorer_registry,
 "type")]`) picks it up automatically — validation, discriminated-union dispatch, and
 JSON schema all follow with no other edits. The registry tag must equal the member's
 discriminator value (its `type` field, or `f"{arch}_{type}"` for model adapters).
@@ -92,14 +92,15 @@ The RL trainers share one loop. `RolloutTrainerBase`
 (`flow_control/training/rollout_trainer.py`) owns the optimizer / EMA / checkpoint /
 `run()` skeleton; `GrpoTrainer` subclasses it directly, and `EndpointTrainer`
 (`flow_control/training/endpoint.py`, together with the objective contract) adds the
-endpoint family's two config axes, both registry unions: `objective`
+endpoint family's two config axes to the `rollout` program every RL trainer takes
+(`flow_control/training/rollouts/`), all three registry unions: `objective`
 (`nft` / `ram` / `awm` / `weighted_fm` — the loss math plus which policies it samples
 with and needs; each lives in its method file next to its preset trainer,
 `weighted_fm.py` holds the preset-less one) and `train_timesteps`
 (`flow_control/training/train_timesteps.py`: `grid` / `continuous`). `nft` / `ram` /
 `awm` are presets over `EndpointTrainer` that only set defaults, so a config's
 `objective` / `train_timesteps` blocks (each with an explicit `type`) are what
-distinguish the methods; plugins can register new members of either union.
+distinguish the methods; plugins can register new members of any of the three.
 
 ### Editor schemas with plugins
 

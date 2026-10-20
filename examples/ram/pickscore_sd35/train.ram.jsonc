@@ -69,19 +69,21 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "type": "grid",
-    "steps": 20,
-    "shift": 3.0,
-    "transition": {
-      "type": "euler",
-      "eta": 0.0,
-      "prediction": { "type": "cfg", "scale": 2.0 },
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      "type": "grid",
+      "steps": 20,
+      "shift": 3.0,
+      "transition": {
+        "type": "euler",
+        "eta": 0.0,
+        "prediction": { "type": "cfg", "scale": 2.0 },
+      },
     },
-  },
-
-  "reward": {
-    "type": "pickscore",
+    "reward": {
+      "type": "pickscore",
+    },
   },
 
   "advantage": {

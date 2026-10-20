@@ -4,9 +4,10 @@ from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from torch import Tensor
 
-from flow_control.rewards.base import BaseReward, reward_registry
-from flow_control.utils import device as devutil
+from flow_control.rewards.base import BaseScorer, LocalReward, scorer_registry
+from flow_control.samplers.node import Row
 from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 
 
@@ -17,7 +18,7 @@ def _import_pyiqa(module: str = "pyiqa") -> Any:
     except ModuleNotFoundError as error:
         if error.name == "pyiqa":
             raise ModuleNotFoundError(
-                "PyIQAReward requires the optional iqa dependency group; "
+                "PyIQAScorer requires the optional iqa dependency group; "
                 "install it with `uv sync --group iqa`."
             ) from error
         raise
@@ -37,7 +38,7 @@ def _default_config(name: str) -> dict[str, Any]:
 
 
 class PyIQAMetricSpec(BaseModel):
-    """One pyiqa metric inside a :class:`PyIQAReward` battery."""
+    """One pyiqa metric inside a :class:`PyIQAScorer` battery."""
 
     name: str
     """pyiqa metric id, e.g. ``"psnr"``, ``"lpips"``, ``"musiq"``."""
@@ -46,20 +47,20 @@ class PyIQAMetricSpec(BaseModel):
     the same metric more than once with different parameters."""
     weight: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     """Aggregation weight (magnitude only; direction is handled by
-    :attr:`PyIQAReward.flip_lower_better`)."""
+    :attr:`PyIQAScorer.flip_lower_better`)."""
     params: dict[str, Any] = Field(default_factory=dict)
     """Extra kwargs forwarded to ``pyiqa.create_metric``."""
 
     model_config = ConfigDict(extra="forbid")
 
 
-@reward_registry.register("pyiqa")
-class PyIQAReward(BaseReward):
+@scorer_registry.register("pyiqa")
+class PyIQAScorer(BaseScorer, LocalReward[Row, Tensor]):
     """Multi-component IQA battery backed by pyiqa.
 
-    Each configured metric becomes one component of the :class:`RewardResult`,
-    so a single reward instance can report a full quality table (PSNR, SSIM,
-    LPIPS, MUSIQ, ...) per sample.
+    Each configured metric becomes one component (labelled ``<name>/<metric>``),
+    so a single scorer can report a full quality table (PSNR, SSIM, LPIPS,
+    MUSIQ, ...) per sample.
 
     Row contract: ``clean_image`` is the image under evaluation as
     ``[1, C, H, W]`` in ``[0, 1]``; full-reference (FR) metrics additionally
@@ -71,7 +72,7 @@ class PyIQAReward(BaseReward):
     multi-metric aggregate is only meaningful when the caller deliberately
     chooses compatible normalization and weights. With
     :attr:`flip_lower_better` (default), lower-is-better metrics get negated
-    aggregation weights so ``aggregate()`` is monotonically higher-is-better;
+    weights so the weighted sum is monotonically higher-is-better;
     per-component values are unaffected.
     """
 
@@ -88,12 +89,12 @@ class PyIQAReward(BaseReward):
     _device: Any = PrivateAttr(default=None)
 
     @model_validator(mode="after")
-    def validate_metrics(self) -> "PyIQAReward":
-        labels = [spec.label or spec.name for spec in self.metrics]
+    def validate_metrics(self) -> "PyIQAScorer":
+        labels = self.labels
         duplicates = sorted({label for label in labels if labels.count(label) > 1})
         if duplicates:
             raise ValueError(
-                "PyIQAReward metric labels must be unique; set an explicit label "
+                "PyIQAScorer metric labels must be unique; set an explicit label "
                 f"for repeated metrics: {duplicates}"
             )
         for spec in self.metrics:
@@ -101,7 +102,11 @@ class PyIQAReward(BaseReward):
         return self
 
     @property
-    def component_weights(self) -> list[float]:
+    def labels(self) -> list[str]:
+        return [spec.label or spec.name for spec in self.metrics]
+
+    @property
+    def weights(self) -> list[float]:
         weights = []
         for spec in self.metrics:
             lower_better = _default_config(spec.name).get("lower_better", False)
@@ -110,11 +115,7 @@ class PyIQAReward(BaseReward):
         return weights
 
     @property
-    def component_labels(self) -> list[str]:
-        return [spec.label or spec.name for spec in self.metrics]
-
-    @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         fields = {"clean_image"}
         if any(
             _default_config(spec.name)["metric_mode"] == "FR" for spec in self.metrics
@@ -122,7 +123,7 @@ class PyIQAReward(BaseReward):
             fields.add(ConditionImage.parse(self.reference).image_field)
         return fields
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         pyiqa = _import_pyiqa()
 
         self._device = device
@@ -132,7 +133,10 @@ class PyIQAReward(BaseReward):
         ]
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         image = row["clean_image"].to(device=self._device, dtype=torch.float32)
         reference: torch.Tensor | None = None
 
@@ -154,18 +158,13 @@ class PyIQAReward(BaseReward):
             else:
                 value = model(image)
             scores.append(value.reshape(-1).float())
-        return torch.stack(scores, dim=-1)  # [N, C]
-
-    def _unload_model(self) -> None:
-        import gc
-
-        self._models = None
-        gc.collect()
-        devutil.empty_cache()
+        return torch.cat(scores)  # [C]: one value per metric of the [1, C, H, W] image
 
 
 if __name__ == "__main__":
     from rich import print
+
+    from flow_control.utils import device as devutil
 
     if importlib.util.find_spec("pyiqa") is None:
         print("[yellow]pyiqa is not installed; skipping IQA self-test.[/yellow]")
@@ -181,44 +180,43 @@ if __name__ == "__main__":
         0, 1
     )
 
-    reward = PyIQAReward(
+    reward = PyIQAScorer(
         metrics=[
             PyIQAMetricSpec(name="psnr"),
             PyIQAMetricSpec(name="lpips"),
             PyIQAMetricSpec(name="musiq"),
         ]
     )
-    print(f"[bold]row fields:[/] {reward._row_fields}")
-    print(f"[bold]component weights:[/] {reward.component_weights}")
-    reward.load_model(device)
+    print(f"[bold]fields:[/] {reward.fields}")
+    print(f"[bold]weights:[/] {reward.weights}")
+    reward.load(device)
 
-    good = reward.score({"clean_image": slightly_noisy, "reference_images": [clean]})
-    bad = reward.score({"clean_image": very_noisy, "reference_images": [clean]})
-    for label, result in [("slightly noisy", good), ("very noisy", bad)]:
-        row = {
-            k: f"{v:.4f}"
-            for k, v in zip(result.labels, result.raw[0].tolist(), strict=True)
-        }
-        print(f"[bold]{label}:[/] {row} aggregate={result.aggregate().item():.4f}")
+    good, bad = reward.run_batch(
+        [
+            {"clean_image": slightly_noisy, "reference_images": [clean]},
+            {"clean_image": very_noisy, "reference_images": [clean]},
+        ]
+    )
+    weights = torch.tensor(reward.weights)
+    for label, raw in [("slightly noisy", good), ("very noisy", bad)]:
+        row = {k: f"{v:.4f}" for k, v in zip(reward.labels, raw.tolist(), strict=True)}
+        print(f"[bold]{label}:[/] {row} weighted={(raw.cpu() * weights).sum():.4f}")
 
-    psnr_good, lpips_good = good.raw[0, 0], good.raw[0, 1]
-    psnr_bad, lpips_bad = bad.raw[0, 0], bad.raw[0, 1]
+    psnr_good, lpips_good = good[0], good[1]
+    psnr_bad, lpips_bad = bad[0], bad[1]
     assert psnr_good > psnr_bad, (
         f"PSNR should prefer mild noise: {psnr_good} vs {psnr_bad}"
     )
     assert lpips_good < lpips_bad, (
         f"LPIPS should prefer mild noise: {lpips_good} vs {lpips_bad}"
     )
-    assert good.aggregate().item() > bad.aggregate().item(), (
-        "aggregate() should be higher-is-better with flip_lower_better"
+    assert (good.cpu() * weights).sum() > (bad.cpu() * weights).sum(), (
+        "the weighted sum should be higher-is-better with flip_lower_better"
     )
 
-    nr_only = PyIQAReward(metrics=[PyIQAMetricSpec(name="niqe")])
-    assert nr_only._row_fields == {"clean_image"}
-    nr_only.load_model(device)
-    nr_score = nr_only.score({"clean_image": very_noisy})
-    print(f"[bold]NR-only niqe:[/] {nr_score.raw[0, 0].item():.4f}")
-
-    reward.unload_model()
-    nr_only.unload_model()
+    nr_only = PyIQAScorer(metrics=[PyIQAMetricSpec(name="niqe")])
+    assert nr_only.fields == {"clean_image"}
+    nr_only.load(device)
+    (nr_score,) = nr_only.run_batch([{"clean_image": very_noisy}])
+    print(f"[bold]NR-only niqe:[/] {nr_score.item():.4f}")
     print("[bold green]Self-test passed.[/]")

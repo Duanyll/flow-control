@@ -21,8 +21,9 @@ from rich.progress import Progress
 from torch.profiler import record_function
 
 from flow_control.adapters import ModelAdapter
-from flow_control.rewards import Reward, _has_pairwise_child
-from flow_control.samplers import Trajectory
+from flow_control.rewards.base import load_rewards
+from flow_control.samplers import Row
+from flow_control.training.rollouts import Rollout
 from flow_control.utils import device as devutil
 from flow_control.utils.logging import console, get_logger
 from flow_control.utils.types import (
@@ -34,7 +35,6 @@ from .mixins import (
     CheckpointingMixin,
     MicrobatchTrainMixin,
     PendingRollouts,
-    Rollout,
     RolloutMixin,
     TrainingPredictionMixin,
     ValidationMixin,
@@ -67,8 +67,9 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
     # ---------------------------------- Configs --------------------------------- #
     model: ModelAdapter
-    rollout_sampler: Trajectory
-    reward: Reward
+    rollout: Rollout
+    """The rollout program: the policy sampler, the scorers on every rollout and
+    whatever else turns one prompt into its ``num_rollouts_per_prompt`` rewards."""
 
     seed_checkpoint_dir: str
     resume_from_dir: str | None = None
@@ -111,22 +112,17 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     """Batches sampled but not yet trained on, oldest first."""
 
     @model_validator(mode="after")
-    def check_validation_reward(self) -> Self:
-        """Validation scores one image per prompt, so it cannot use a pairwise
-        reward (also not the training reward it falls back to)."""
+    def check_validation_scorer(self) -> Self:
+        """``validation_scorer`` defaults to the program's scorers, which must
+        then exist."""
         if self.validation_dataset is None or not self.validation_log_rewards:
             return self
-        metric_reward = (
-            None
-            if self.validation_reward is False
-            else self.validation_reward or self.reward
-        )
-        if metric_reward is not None and _has_pairwise_child(metric_reward):
+        if self.validation_scorer is None and not self.rollout.reward:
             raise ValueError(
-                "A pairwise reward compares the rollouts of one prompt and cannot "
-                "score validation samples; set validation_reward to a pointwise "
-                "reward that compares each sample against an anchor (for example "
-                "reference_compare in anchored mode), or validation_reward=false."
+                f"validation_scorer defaults to rollout.reward, but the "
+                f"{self.rollout.type!r} program has no scorers; set "
+                "validation_scorer to a scorer list, or to false to validate "
+                "without rewards."
             )
         return self
 
@@ -138,36 +134,26 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
     # --------------------------------- Hooks ------------------------------------ #
 
-    def _rollout_variant(self) -> str:
-        """The model variant that samples the rollouts."""
-        return "default"
-
     def _required_variants(self) -> frozenset[str]:
         """Auxiliary variants the loss evaluates besides the current policy."""
         return frozenset()
 
     @abstractmethod
-    def _build_train_plan(self, rollouts: list[Rollout]) -> list[list[ItemT]]:
+    def _build_train_plan(self, rows: list[Row]) -> list[list[ItemT]]:
         """One item list per inner epoch; every rank must build equal counts."""
         ...
 
     @abstractmethod
     def _loss_batched(
-        self, items: list[ItemT], rollouts: list[Rollout], advantages: torch.Tensor
+        self, items: list[ItemT], rows: list[Row], advantages: torch.Tensor
     ) -> torch.Tensor:
         """Mean loss of one microbatch, attached to the graph."""
         ...
 
-    def _check_rollouts(self, rollouts: list[Rollout]) -> None:
+    def _check_rollouts(self, rows: list[Row]) -> None:
         """Fail fast on rollouts the trainer cannot train on."""
 
     # ------------------------------- Setup methods ------------------------------ #
-
-    def cleanup(self) -> None:
-        # Runs on every exit of run(), an exception included: batches sampled
-        # ahead keep issuing reward requests until their loop is stopped.
-        self.close_reward_loop()
-        super().cleanup()
 
     def make_optimizer_and_scheduler(self):
         self._optimizer, self._scheduler = make_optimizer(
@@ -215,10 +201,10 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
             self.model, self._optimizer, self._scheduler, self.clip_grad_norm
         )
 
-    def _train_on_rollouts(self, rollouts: list[Rollout], advantages: torch.Tensor):
+    def _train_on_rollouts(self, rows: list[Row], advantages: torch.Tensor):
         """Training phase: update model using collected rollouts and advantages."""
         self.transformer.train()
-        train_plan = self._build_train_plan(rollouts)
+        train_plan = self._build_train_plan(rows)
         total_items = sum(len(items) for items in train_plan)
 
         progress = Progress(
@@ -232,7 +218,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
             for train_items in train_plan:
                 for update in self.iter_micro_updates(train_items):
                     self.transformer.set_requires_gradient_sync(update.is_sync_step)
-                    loss = self._loss_batched(update.items, rollouts, advantages)
+                    loss = self._loss_batched(update.items, rows, advantages)
                     self._check_finite_loss(loss, update.items)
                     (loss * update.loss_scale).backward()
                     progress.advance(train_task, advance=len(update.items))
@@ -247,18 +233,11 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     # -------------------------------- Main loop --------------------------------- #
 
     def _validate(self) -> None:
-        self.validate_variants(
-            self.model,
-            self._current_step,
-            reward=self.reward,
-            reward_loop=self.reward_loop,
-        )
+        self.validate_variants(self.model, self._current_step, self.rollout.reward)
 
     def _launch_rollouts(self, epoch: int) -> None:
-        """Sample batch *epoch* under the rollout variant and queue it behind the
-        batches already in flight."""
-        with self.model.use_variant(self._rollout_variant()):
-            self._pending_rollouts.append(self._start_rollouts(epoch))
+        """Sample batch *epoch* and queue it behind the batches already in flight."""
+        self._pending_rollouts.append(self._start_rollouts(epoch))
 
     def _prime_rollouts(self) -> None:
         """Sample the first ``rollout_lookahead`` batches under the current
@@ -279,12 +258,12 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
                     self._launch_rollouts(epoch + self.rollout_lookahead)
             pending = self._pending_rollouts.popleft()
             with record_function("phase/reward_wait"):
-                rollouts = self._finish_rollouts(pending)
-            self._check_rollouts(rollouts)
-            advantages = self._compute_advantages(rollouts, step=self._current_step)
+                rows = self._finish_rollouts(pending)
+            self._check_rollouts(rows)
+            advantages = self._compute_advantages(rows, step=self._current_step)
 
             logger.debug(f"Epoch {epoch}: starting training phase...")
-            self._train_on_rollouts(rollouts, advantages)
+            self._train_on_rollouts(rows, advantages)
             self.model.update_variants("epoch")
 
         self._current_epoch += 1
@@ -305,10 +284,8 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         self.load_processor()
         self.make_rollout_cursor()
         self.make_validation_dataloader()
-
-        self.reward.load_model(self.device)
-        if self.validation_reward:
-            self.validation_reward.load_model(self.device)
+        self.make_runner(self.model, self.rollout_storage)
+        load_rewards(self, self.device)
 
         os.makedirs(self.checkpoint_root, exist_ok=True)
         self.maybe_auto_resume(self.resume_from_dir)

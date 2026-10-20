@@ -67,10 +67,12 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": { "type": "dpm", "steps": 10, "shift": 3.0, "order": 2 },
-
-  "reward": {
-    "type": "pickscore",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": { "type": "dpm", "steps": 10, "shift": 3.0, "order": 2 },
+    "reward": {
+      "type": "pickscore",
+    },
   },
 
   "advantage": {

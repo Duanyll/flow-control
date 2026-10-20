@@ -102,8 +102,9 @@ Sources: [coercion](../flow_control/data/coercion.py),
 [offline preprocessing](../flow_control/scripts/preprocess.py) (`ProcessorStage.process`),
 [runtime preprocessing](../flow_control/training/mixins/data.py),
 [model leaf](../flow_control/samplers/prediction.py) (`ModelPrediction.bind`),
-[rollout collection](../flow_control/training/mixins/rollout.py) (`_collect_rollouts`),
-[inference](../flow_control/training/inference.py) (`_sample_submitter`, `_write_output`).
+[rollout collection](../flow_control/training/rollouts/runner.py) (`SampleContext.rollouts`, `Runner._decode`),
+[validation sampling](../flow_control/training/mixins/validation.py) (`sample_one`) and
+[inference](../flow_control/training/inference.py) (`_write_output`), both on the `Runner`.
 
 ### Cached posterior distributions
 
@@ -123,7 +124,7 @@ guesses by name. Plugins that cache another posterior field must declare it.
 
 | Key | Meaning / representation | Producer | Consumers |
 | --- | --- | --- | --- |
-| `key` | String source-sample identifier. K rollouts of one prompt share it. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity, `execute_pairwise_reward` grouping. |
+| `key` | String source-sample identifier. K rollouts of one prompt share it. | Dataset readers; offline `reassign_keys` replaces it with the index, and runtime preprocessing copies it from the source item. | Seed derivation, output names, validation/rollout identity. |
 | `padding` | `True` on plan-time padding rows (a short tail group repeats rows of the same block). Consumer memory only, never persisted. | `RowStream.__getitem__`. | `is_padding(row)`: SFT / VAE weigh the row 0, inference and validation forward it but write and log nothing. |
 | `image_size` | Optional requested size on raw input; actual target pixel `(H, W)` after task resizing. Required for model/sampler use. | Dataset/user, then processor. | Latent initialization, adapter geometry/position IDs, decode, tiling and resolution-dependent shift. |
 | `model_image_size` | Optional pixel `(H, W)` seen by one forward, e.g. a tile. Defaults to `image_size`. | `TiledT2IProcessor`. | `BaseShift._get_seq_len`; tiled prediction removes it from leaf conditions. |
@@ -134,8 +135,7 @@ guesses by name. Plugins that cache another posterior field must declare it.
 
 Sources: [row contract](../flow_control/data/rows.py), [plan / stream](../flow_control/data/stream.py)
 (`RowStream`, `RowCursor`), [grouping](../flow_control/data/grouping.py),
-[Start](../flow_control/samplers/sampler.py), [shift](../flow_control/samplers/shift.py),
-[reward execution](../flow_control/rewards/__init__.py).
+[Start](../flow_control/samplers/sampler.py), [shift](../flow_control/samplers/shift.py).
 
 ### Negative conditions
 
@@ -175,7 +175,7 @@ validation, which always merge extras, and into records or caches only with
 | `clean_image` | Training target, or source scene for layer decomposition; inpaint training also encodes it as the inpaint source. After decode/merge it is the generated primary image. For layered tasks the decoded value is a **montage**, not the composited scene. | Dataset/user, processor resizing, then `decode_output`. | Target/condition encoding, image rewards, preview/output sinks and VAE training. It is not an immutable observation slot. |
 | `control_image` | Spatial condition for `t2i_control`; resized before encoding. Inference writes the resized image back; training may retain the original-size input in extras. | Dataset/user; `generate_control_image` raises unless a subclass overrides it. | `T2IControlProcessor` produces `control_latents`. |
 | `inpaint_image` | Inference source image for inpainting; resized before encoding and written back. Training has no such input: the clean target doubles as the source. | Dataset/user, then `InpaintProcessor`. | `InpaintProcessor` produces `inpaint_latents`. |
-| `reference_images` | Ordered list of editing source images, trimmed and resized by `TIEProcessor` (HiDream's preset overrides the resize); only entry 0 is resized to the target size, and a missing inference `image_size` is taken from it. | Dataset/user. | TIE VAE/multimodal conditioning, edit annotations, `RationalRewardsEditReward`; the `reference` role below. |
+| `reference_images` | Ordered list of editing source images, trimmed and resized by `TIEProcessor` (HiDream's preset overrides the resize); only entry 0 is resized to the target size, and a missing inference `image_size` is taken from it. | Dataset/user. | TIE VAE/multimodal conditioning, edit annotations, `RationalRewardsEditScorer`; the `reference` role below. |
 | `inpaint_mask` | Raw mask (file inputs arrive as RGB/RGBA; L/LA only from tensors) becomes pixel-resolution **`[1, H, W]` luminance** after processing. White means editable, black means fixed; alpha is ignored. | Dataset/user, then `InpaintProcessor._prepare_inpaint_mask`. | `Flux1FillAdapter` packs the pixel mask; processor also produces `inpaint_mask_latents` for Differential Diffusion. |
 | `layer_images` | Ordered target layers during training; decoded generated layers afterward. Qwen layers are full-frame. Efficient-layered rewrites the training list into RGBA crops aligned to the rescaled boxes and decodes one RGBA crop per box, so entry 0 is the full-frame background. | Dataset/user, `PrismLayersProSource`, layered decoder. | Layered target encoding, annotations/serving and output sinks. |
 | `base_image` | Decoded first full-frame reconstruction from Qwen Layered. | `QwenImageLayeredProcessor.decode_output`. | Layered annotations, serving and output sinks. Efficient-layered does not emit it; its background is `layer_images[0]`. |
@@ -276,7 +276,7 @@ compares pixel shapes.
 
 Current selectors and defaults: `sampler.start.source` (`noisy_latents`, or
 `clean` once `strength` is set), `DifferentialDiffusion.source` (`inpaint`),
-`CLIPImageSimilarityReward.reference` and `PyIQAReward.reference` (`reference`).
+`ClipImageSimilarityScorer.reference` and `PyIQAScorer.reference` (`reference`).
 `clean` follows the overwrite rules above: after decode its pixel side is the
 generated image, and after RL collection its latent side is the sampled endpoint.
 
@@ -314,23 +314,23 @@ Sources: [tiled processor](../flow_control/processors/tasks/tiled_t2i.py),
 
 | Key / nested key | Meaning / representation | Producer | Consumers |
 | --- | --- | --- | --- |
-| `tag` | GenEval task category string; e.g. counting selects the counting threshold. | Dataset extra. | `GenevalReward`. This is top-level, not inside a `metadata` wrapper. |
-| `include` | Optional list of expected object groups. Each has `class: str`, `count: int`, optional `color: str` and `position: (relation, target_group_index)`. | Dataset extra. | `GenevalReward` object/count/color/position checks. |
+| `tag` | GenEval task category string; e.g. counting selects the counting threshold. | Dataset extra. | `GenevalScorer`. This is top-level, not inside a `metadata` wrapper. |
+| `include` | Optional list of expected object groups. Each has `class: str`, `count: int`, optional `color: str` and `position: (relation, target_group_index)`. | Dataset extra. | `GenevalScorer` object/count/color/position checks. |
 | `exclude` | Optional list of forbidden object-count specs, each with `class: str`, `count: int`. | Dataset extra. | GenEval original scoring mode; reward-server mode does not apply exclude penalties. |
 | `style_category` | Prism source style/category metadata. | `PrismLayersProSource`. | Retained extras/generic sinks; no current algorithm consumer. |
-| `reward` | Aggregate CPU tensor, normally `[1]`, in an inference report record. | `Inference._reward_fields` from `RewardResult.aggregate`. | `ReportWriter` flattens it into `metrics.jsonl`; `records/` rows keep it for downstream filtering. |
-| `reward_raw` | Dictionary of component label to raw CPU tensor `[1]`. Labels come from reward configuration. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_raw.<label>`; downstream analysis. |
-| `reward_normalized` | Same label mapping, with normalized component values before weighted aggregation. | `Inference._reward_fields`. | `metrics.jsonl` as `reward_normalized.<label>`; downstream analysis. |
+| `reward_raw` | `[C]` float32 CPU tensor of raw scores, one per label of the rollout program (`rollout.labels`) or scorer list (`Scorers.labels`). | `write()` (`flow_control/training/rollouts/base.py`), from a rollout program's `score()` on each trained rollout row, and from the validation / inference score functions. | `_compute_advantages` (`rollout/raw/*`); validation and inference reward metrics. |
+| `reward` | `[C]` float32 CPU tensor, the same components after each scorer's `normalize`; a program's own component (the `round_robin` win rate) is equal in both. Unweighted: the weights are `rollout.weights` / `Scorers.weights`. | `write()`, as above. | `_compute_advantages`, which combines the components with `rollout.weights`; train-plan hooks read it as the rollout's reward. |
+| `reward` / `reward_raw` / `reward_normalized` in the inference report | Not the `[C]` row fields above: `reward` is the weighted scalar (`reward` · `Scorers.weights`); `reward_raw` / `reward_normalized` are `{label: 0-dim tensor}` dicts over `Scorers.labels`. In a `save_extra` record they replace the row's `reward` / `reward_raw`. | `Inference._reward_fields`, into each `metrics.jsonl` line and `records/` row. | Report readers; filtering `records/` by reward. |
 | Other dataset/plugin columns | Open-ended names and values, preserved according to `save_extra`. | Dataset or extension. | Only explicitly configured consumers; add any new in-tree contract to this document. |
 
 Image-only rewards read `clean_image`; text-image rewards also read `prompt`.
 Reference-based rewards select their reference by
 [condition-image role](#condition-image-roles) and declare that role's pixel
-field in `_row_fields`. Rewards that overlap with rollout (remote ones, and the
-local `PairwiseReward`, `UnifiedReward` and Rational rewards) and every pairwise
-scoring path receive a CPU copy filtered to their declared `_row_fields`, so
-retaining a dataset column does not by itself make it available to them. Remote
-transport additionally casts float tensors to bf16.
+field in `fields`. A `RemoteReward` (`UnifiedRewardScorer`, the Rational rewards,
+`remote`, a remote judge) receives CPU snapshots of the rows in each item,
+filtered to its `fields` on the device worker (`Runner._snapshot`), so retaining
+a dataset column does not by itself make it available to it. A `LocalReward` gets
+the rows as they are, tensors on CPU storage or on the device.
 
 `sampler.start.source` is a condition-image selector, so it can also name a
 custom tensor field. Its producer must supply the same packed
@@ -342,6 +342,7 @@ Sources: [GenEval](../flow_control/rewards/geneval.py),
 [CLIP image similarity](../flow_control/rewards/clip_image_similarity.py),
 [Rational rewards](../flow_control/rewards/rational_rewards.py),
 [IQA](../flow_control/contrib/iqa/reward.py), [reward base](../flow_control/rewards/base.py),
+[rollout programs](../flow_control/training/rollouts/base.py) (`write`),
 [inference output](../flow_control/training/inference.py).
 
 ## Values that are not row fields
@@ -354,11 +355,9 @@ history belongs to the closure created by each predictor binding. Velocities are
 return values. The executed plan belongs to `SampleRun`, and collector records
 are separate objects.
 
-RL `Rollout` objects own reward results, recorded steps and their own copy of
-the rollout `row`/`negative_row`; advantages are computed separately and
-passed to the per-algorithm train items, and replay plans live on `ReplayItem`.
-None of these are injected into `row`.
-The persisted inference `reward*` fields above are a separate output contract.
+An RL rollout is its row, carrying the `reward_raw` / `reward` fields above;
+advantages are computed separately and passed to the per-algorithm train items,
+and replay plans live on `ReplayItem`. Neither is injected into `row`.
 Likewise, model outputs such as `image_features`, LLM response keys such as
 `bbox_2d`, and raw-directory attachment descriptors (`__type__`, `file`, `shape`,
 `dtype`, `value`) belong to other protocols, not the runtime sample dictionary.

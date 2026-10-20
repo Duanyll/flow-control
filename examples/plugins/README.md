@@ -1,10 +1,11 @@
 # Out-of-tree plugins
 
-`flow_control` extension points (model adapters, processor tasks, rewards,
-shifts, solvers, encoders, VAEs, weightings, ...) are **open** discriminated
-unions backed by a registry (`flow_control/utils/registry.py`). You can add a new
-member to any of them from outside the core package — no edits to the core union
-literal, no `model_rebuild`.
+`flow_control` extension points (model adapters, processor tasks, scorers,
+judges, rollout programs, shifts, solvers, encoders, VAEs, weightings, ...) are
+**open** discriminated unions backed by a registry
+(`flow_control/utils/registry.py`). You can add a new member to any of them from
+outside the core package — no edits to the core union literal, no
+`model_rebuild`.
 
 A *plugin* is just a Python module that, when imported, runs one or more
 `@<registry>.register("<tag>")` decorators. To activate it, list the module in a

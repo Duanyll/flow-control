@@ -11,7 +11,6 @@ from pydantic import WithJsonSchema
 from .grouping import (
     Group,
     PlannedRow,
-    expand_rollouts,
     groups_packed,
     groups_plain,
     groups_shuffled,
@@ -131,7 +130,6 @@ __all__ = [
     "RowStore",
     "RowStream",
     "build_loader",
-    "expand_rollouts",
     "finalize_cache",
     "groups_packed",
     "groups_plain",

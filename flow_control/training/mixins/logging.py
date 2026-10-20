@@ -83,6 +83,17 @@ def _find_resumable_run_id(experiment_dir: Path) -> str | None:
     return candidates[-1]
 
 
+def _timing_metrics(
+    description: str, elapsed_s: float, count: float, prefix: str
+) -> dict[str, float]:
+    """``<prefix>/<slug>_elapsed_s`` and, for a positive duration, ``_items_per_s``."""
+    slug = re.sub(r"\W+", "_", description.strip().lower()).strip("_")
+    metrics = {f"{prefix}/{slug}_elapsed_s": elapsed_s}
+    if elapsed_s > 0:
+        metrics[f"{prefix}/{slug}_items_per_s"] = count / elapsed_s
+    return metrics
+
+
 def _same_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve(strict=False) == right.resolve(strict=False)
@@ -404,19 +415,33 @@ class LoggingMixin(BaseModel):
         """
         metrics: dict[str, float] = {}
         for task in progress.tasks:
-            slug = re.sub(r"\W+", "_", task.description.strip().lower()).strip("_")
             # Rich stores the elapsed time *at completion* in ``finished_time``;
             # ``elapsed`` keeps counting until the Progress exits, so a task that
             # finished early would otherwise be charged for every later task.
             elapsed = task.finished_time
             if elapsed is None:
                 elapsed = task.elapsed
-            elapsed = float(elapsed or 0.0)
-            metrics[f"{prefix}/{slug}_elapsed_s"] = elapsed
-            if elapsed > 0:
-                metrics[f"{prefix}/{slug}_items_per_s"] = task.completed / elapsed
+            metrics.update(
+                _timing_metrics(
+                    task.description, float(elapsed or 0.0), task.completed, prefix
+                )
+            )
         if metrics:
             self.log_metrics(metrics, step=step)
+
+    def log_phase_timing(
+        self,
+        description: str,
+        elapsed_s: float,
+        count: float,
+        step: int,
+        prefix: str = "profile",
+    ) -> None:
+        """:meth:`log_progress_timing`'s metrics for a phase timed by hand
+        (``<prefix>/<slug>_elapsed_s``, ``<prefix>/<slug>_items_per_s``)."""
+        self.log_metrics(
+            _timing_metrics(description, elapsed_s, count, prefix), step=step
+        )
 
     def log_reduced_metrics(
         self,

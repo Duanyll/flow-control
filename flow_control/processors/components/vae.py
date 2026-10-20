@@ -14,7 +14,6 @@ from einops import rearrange
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.registry import Registry, RegistryUnion
-from flow_control.utils.remote import RemoteOffloadable
 from flow_control.utils.types import TorchDType
 
 logger = get_logger(__name__)
@@ -34,7 +33,7 @@ trained differently and has significant variance, implements all three modes.
 """
 
 
-class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
+class BaseVAE[T: ModelMixin](HfModelLoader[T]):
     """Base class for VAE encode / decode.
 
     Subclasses override ``_encode`` to apply model-specific normalization.
@@ -43,18 +42,11 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     (suitable for VAEs with negligible variance).
     """
 
-    endpoint: str | None = None
-
     @property
     def in_channels(self) -> int:
         return self.model.config["in_channels"]
 
     def load_model(self, device: torch.device, frozen: bool = True) -> bool:
-        if self.endpoint is not None:
-            logger.info(f"Using remote VAE endpoint: {self.endpoint}")
-            self._init_remote(device)
-            self._model = None
-            return False
         fresh = super().load_model(device, frozen)
         logger.info(
             f"{self.__class__.__name__} requires {self.in_channels} input channels"
@@ -73,29 +65,9 @@ class BaseVAE[T: ModelMixin](RemoteOffloadable, HfModelLoader[T]):
     def encode(
         self, images: torch.Tensor, posterior: PosteriorMode = "sample"
     ) -> torch.Tensor:
-        if self.is_remote:
-            return self._remote_tensor_call(f"/encode?posterior={posterior}", images)
         return self._encode(images, posterior=posterior)
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        if self.is_remote:
-            return self._remote_tensor_call("/decode", latents)
-        return self._decode(latents)
-
-    async def async_encode(
-        self, images: torch.Tensor, posterior: PosteriorMode = "sample"
-    ) -> torch.Tensor:
-        """Async version of ``encode`` for use in async pipelines."""
-        if self.is_remote:
-            return await self._async_remote_tensor_call(
-                f"/encode?posterior={posterior}", images
-            )
-        return self._encode(images, posterior=posterior)
-
-    async def async_decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """Async version of ``decode`` for use in async pipelines."""
-        if self.is_remote:
-            return await self._async_remote_tensor_call("/decode", latents)
         return self._decode(latents)
 
 

@@ -1,4 +1,4 @@
-"""Shuffle and grouping plans (design §6) and the RL rollout split (§9.3).
+"""Shuffle and grouping plans (design §6).
 
 Pure functions over an ``Index``. A plan is a list of groups; every group holds
 exactly ``n`` planned rows with similar ``cost`` so that the ranks, which consume
@@ -127,31 +127,6 @@ def rank_rows(groups: list[Group], rank: int, world_size: int) -> list[PlannedRo
     return [row for g in groups for row in g[rank::world_size]]
 
 
-def expand_rollouts(
-    prompt_ids: list[int],
-    K: int,
-    rank: int,
-    world_size: int,
-    *,
-    whole_prompts: bool,
-) -> list[tuple[int, int]]:
-    """Expand ``M`` prompts into ``(prompt_id, k)`` pairs and take this rank's
-    **strided** share.
-
-    Strided, not contiguous: the ``i``-th rollout of every rank then maps to
-    prompts adjacent in the group sequence, so at any moment all ranks forward
-    similar costs (needs ``group_size % world_size == 0``, §6.1). A contiguous
-    split cannot guarantee that once a rank's share is smaller than one group.
-
-    ``whole_prompts`` (pairwise rewards): rotate at prompt level so all ``K``
-    rollouts of a prompt land on the same rank.
-    """
-    if whole_prompts:
-        return [(p, k) for p in prompt_ids[rank::world_size] for k in range(K)]
-    flat = [(p, k) for p in prompt_ids for k in range(K)]
-    return flat[rank::world_size]
-
-
 if __name__ == "__main__":
     from rich import print
 
@@ -186,11 +161,3 @@ if __name__ == "__main__":
         [(2, False), (3, False)],
         [(4, False), (4, True)],
     ]
-
-    rollouts = expand_rollouts(
-        [10, 11, 12], K=2, rank=1, world_size=2, whole_prompts=False
-    )
-    print(rollouts)
-    assert rollouts == [(10, 1), (11, 1), (12, 1)]
-    whole = expand_rollouts([10, 11, 12], K=2, rank=1, world_size=2, whole_prompts=True)
-    assert whole == [(11, 0), (11, 1)]

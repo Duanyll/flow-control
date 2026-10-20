@@ -2,8 +2,8 @@
   "$schema": "../../../schema/nft.schema.json",
 
   // Port of Flow-Factory examples/nft/lora/flux1/rational_rewards_t2i.yaml.
-  // Requires a vLLM judge serving RationalRewards-8B-T2I (see api_base_url in
-  // the reward block). Adjust dataset paths to your local cache.
+  // Requires a vLLM judge serving RationalRewards-8B-T2I (see llm.base_url in
+  // rollout.reward). Adjust dataset paths to your local cache.
 
   "checkpoint_root": "$auto",
   "auto_resume": true,
@@ -70,21 +70,23 @@
   "train_predictor": "model",
 
   // FF num_inference_steps 20, time_shift 3.0; FF guidance_scale = 1.0 -> no cfg node.
-  "rollout_sampler": { "type": "grid", "steps": 20, "shift": 3.0 },
-
-  "reward": {
-    "type": "rational_rewards_t2i",
-    "llm": {
-      "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "EMPTY",
-      "model": "RationalRewards-8B-T2I",
-      "temperature": 0.1,
-      "max_tokens": 2048,
-      "timeout": 300,
-      "max_concurrency": 8,
+  "rollout": {
+    "type": "pointwise",
+    "sampler": { "type": "grid", "steps": 20, "shift": 3.0 },
+    "reward": {
+      "type": "rational_rewards_t2i",
+      "llm": {
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key": "EMPTY",
+        "model": "RationalRewards-8B-T2I",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "timeout": 300,
+        "max_concurrency": 8,
+      },
+      "max_retries": 5,
+      "aspects": ["text_faithfulness", "physical_quality", "text_rendering"],
     },
-    "max_retries": 5,
-    "aspects": ["text_faithfulness", "physical_quality", "text_rendering"],
   },
 
   // Single reward component, so FF's gdpo degenerates to per-group normalize

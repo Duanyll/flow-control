@@ -9,25 +9,21 @@ from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 from unittest.mock import patch
 
 import numpy as np
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 from einops import rearrange
+from pydantic import TypeAdapter
 
 from flow_control.contrib.momentum_guidance import Momentum
-from flow_control.data import (
-    Index,
-    IndexEntry,
-    RowCursor,
-    expand_rollouts,
-    groups_shuffled,
-)
+from flow_control.data import Index, IndexEntry, RowCursor, groups_shuffled
 from flow_control.processors import get_processor_input_typeddict, parse_processor
 from flow_control.processors.tasks.tiled_t2i import TiledT2IProcessor
-from flow_control.rewards import PairwiseReward, execute_pairwise_reward
+from flow_control.rewards.base import BaseJudge, RemoteReward, judge_registry
 from flow_control.samplers import (
     BaseGrid,
     BaseTransition,
@@ -48,13 +44,13 @@ from flow_control.samplers import (
     SdeWindowGrid,
     Sequential,
     Tiled,
-    data,
     gather,
     select_sde_window,
 )
 from flow_control.samplers.prediction import kappa
 from flow_control.samplers.shift import ConstantShift, LinearShift
 from flow_control.samplers.transition import ddim_moments, euler_moments
+from flow_control.training.rollouts import Rollout, Runner, SampleContext
 from flow_control.utils.tiling import TileLayout, extract_tiles, stitch_tiles
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -100,6 +96,54 @@ class _TileLeaf:
             2 * batch["noisy_latents"] + batch.get("prompt_embeds", 0)
             for batch in batches
         ]
+
+
+class _RunnerLeaf(_TileLeaf):
+    """``_TileLeaf`` with the variant table the ``Runner`` reads: base weights only."""
+
+    variants: dict[str, object] = {}
+
+
+def _two_rows(steps_of: dict[str, tuple[int, int]]):
+    """The S2 ``sample``: two rows per prompt, row ``2 * prompt_id + i`` with
+    ``clean_image`` ``i`` and ``steps_of[prompt][i]`` grid steps, each decoded
+    as soon as it finishes."""
+
+    async def sample(ctx: SampleContext) -> list[Row]:
+        steps = steps_of[ctx.prompt["prompt"]]
+        rows = [
+            await ctx.start(ctx.seed("row", ctx.prompt_id, i))
+            for i in range(len(steps))
+        ]
+
+        async def run(i: int, row: Row) -> None:
+            row.update(
+                index=2 * ctx.prompt_id + i,
+                clean_image=torch.full((1, 3, 1, 1), float(i)),
+            )
+            await ctx.admit(Grid(steps=steps[i])(row))
+            await ctx.decode(row)
+
+        await asyncio.gather(*(run(i, row) for i, row in enumerate(rows)))
+        return rows
+
+    return sample
+
+
+@judge_registry.register("_test_same_prompt")
+class _SamePromptJudge(BaseJudge, RemoteReward[tuple[Row, Row], float]):
+    """Prefers the brighter ``clean_image``; both rows must share the prompt."""
+
+    type: Literal["_test_same_prompt"] = "_test_same_prompt"
+
+    @property
+    def fields(self) -> set[str]:
+        return {"prompt", "clean_image"}
+
+    async def run_one(self, pair: tuple[Row, Row]) -> float:
+        row_a, row_b = pair
+        assert row_a["prompt"] == row_b["prompt"]
+        return float(row_a["clean_image"].mean() > row_b["clean_image"].mean())
 
 
 # A 6x6 image with 4-pixel tiles overlapping by 2 (stride 1): four tiles at
@@ -552,44 +596,48 @@ class SamplerExtensionsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "two model calls"):
             Executor(leaf).evaluate([gather([Model()(row), Model()(row)])])
 
-        # S2 streamed completions interleave prompt groups. The reward layer
-        # must group by key BEFORE prepare_row_for_async drops metadata.
-        class SamePromptReward(PairwiseReward):
-            async def async_score_pair(self, row_a, row_b) -> float:
-                assert row_a["prompt"] == row_b["prompt"]
-                return float(row_a["clean_image"].mean() > row_b["clean_image"].mean())
+        # S2 streamed completions interleave prompt groups: two prompts' rows
+        # share the runner's executor and finish out of prompt order, yet the
+        # round-robin program judges each prompt's own pair with its full rows.
+        # The runner starts the groups in turn, so B's rows join the executor
+        # a round or so after A's; the step counts leave that lag a margin of
+        # nine rounds, so they alone decide the finish order.
+        sample = _two_rows({"A": (10, 12), "B": (1, 15)})
+        completions: list[int] = []
 
-        pair_runs = []
-        for index, steps in enumerate((3, 4, 1, 5)):
-            key = "A" if index < 2 else "B"
-            batch: Any = make_sampler_batch(0.2)
-            batch.update(
-                key=key,
-                prompt=key,
-                clean_image=torch.full((1, 3, 1, 1), float(index % 2)),
-            )
-            row = sampling_row(batch)
-            pair_runs.append((row, Grid(steps=steps)(row)))
-        completions = []
+        def decode_output(latents: torch.Tensor, row: Row) -> dict[str, Any]:
+            completions.append(row["index"])
+            return {}
 
-        def submitter():
-            for row in Executor(_TileLeaf()).stream(pair_runs):
-                index = next(
-                    i for i, (candidate, _) in enumerate(pair_runs) if candidate is row
-                )
-                completions.append(index)
-                yield data(row), index
-
-        scored = dict(
-            execute_pairwise_reward(
-                SamePromptReward(),
-                submitter(),
-                lambda index, result: (index, result.raw.item()),
-                num_rollouts_per_prompt=2,
-            )
+        program = TypeAdapter(Rollout).validate_python(
+            {
+                "type": "round_robin",
+                "sampler": {"type": "grid", "steps": 1},
+                "judge": {"type": "_test_same_prompt"},
+                "swap_orders": False,
+            }
         )
+        processor: Any = SimpleNamespace(
+            initialize_latents=lambda row, **kwargs: row["noisy_latents"],
+            decode_output=decode_output,
+        )
+        runner = Runner(_RunnerLeaf(), processor, torch.device("cpu"), seed=0)
+        self.addCleanup(runner.close)
+        items = [
+            (index, {**make_sampler_batch(0.2), "key": key, "prompt": key})
+            for index, key in enumerate("AB")
+        ]
+        groups = runner.submit(
+            items, sample, program.score, prepare=dict, k=2, epoch=0, variant=None
+        ).wait()
         self.assertEqual(completions, [2, 0, 1, 3])
+        # opponents=None, swap_orders=False with K = 2: one game per prompt,
+        # rate = (0.5 + s) / 2 with s the judge's verdict for the row.
+        scored = {row["index"]: row["reward"].item() for rows in groups for row in rows}
         self.assertEqual(scored, {0: 0.25, 1: 0.75, 2: 0.25, 3: 0.75})
+        self.assertEqual(
+            [row["prompt"] for rows in groups for row in rows], list("AABB")
+        )
 
     def test_shift_grid_matches_reference_schedules(self):
         # Resolution-dependent shift follows the size the model actually sees:
@@ -770,11 +818,11 @@ class SamplerExtensionsTest(unittest.TestCase):
     def test_cursor_rollouts_counts_and_resume(self):
         # R5 fixed resolution divergence between equal-position distributed
         # samples and the iterator cursor repeating the last yielded item on
-        # resume. The data rework moved both guarantees to RowCursor +
-        # expand_rollouts: every rank's i-th rollout comes from one plan group
-        # (cost-adjacent rows), an epoch's M prompts each get exactly K rollouts
-        # (all on one rank under a pairwise reward), and a restored cursor
-        # continues exactly where the saved one stopped.
+        # resume. The data rework moved both guarantees to RowCursor + the
+        # whole-prompt rank split ``ids[rank::world_size]``: every rank's i-th
+        # prompt comes from one plan group (cost-adjacent rows), an epoch's M
+        # prompts land on exactly one rank each, and a restored cursor continues
+        # exactly where the saved one stopped.
         class Store:
             costs = [5] * 5 + [7] * 7
             index = Index(
@@ -795,46 +843,30 @@ class SamplerExtensionsTest(unittest.TestCase):
         n, world_size, prompts = 4, 4, 8
         planner = partial(groups_shuffled, store.index, n, 3, 17)
         walk = [{row for row, _ in g} for p in (0, 1) for g in planner(p)]
-        for whole_prompts, repeats in ((False, 2), (True, 3)):
-            cursor = RowCursor(store, planner, seed=17)
-            epochs = [cursor.take(prompts, epoch=epoch) for epoch in range(2)]
-            self.assertEqual(set(epochs[0]) | set(epochs[1][:4]), set(range(12)))
-            self.assertEqual(cursor.state_dict(), {"pass": 1, "position": 8})
-            for epoch, prompt_ids in enumerate(epochs):
-                self.assertEqual(len(set(prompt_ids)), prompts)
-                per_rank = [
-                    expand_rollouts(
-                        prompt_ids,
-                        repeats,
-                        rank,
-                        world_size,
-                        whole_prompts=whole_prompts,
-                    )
-                    for rank in range(world_size)
-                ]
-                local_count = prompts * repeats // world_size
-                self.assertEqual({len(share) for share in per_rank}, {local_count})
-                # Epoch 1 straddles two passes and de-duplicates across them
-                # (§15 14.3), which breaks group contiguity; within a pass the
-                # i-th rollout of every rank comes from one group.
-                for position in range(local_count if epoch == 0 else 0):
-                    block = {share[position][0] for share in per_rank}
-                    self.assertTrue(any(block <= group for group in walk))
-                counts = Counter(p for share in per_rank for p, _ in share)
-                self.assertEqual(set(counts), set(prompt_ids))
-                self.assertEqual(set(counts.values()), {repeats})
-                if whole_prompts:
-                    for p in prompt_ids:
-                        self.assertEqual(
-                            sum(p in {q for q, _ in share} for share in per_rank), 1
-                        )
-            state = cursor.state_dict()
-            remaining = [cursor.take(prompts, epoch=epoch) for epoch in (2, 3)]
-            restored = RowCursor(store, planner, seed=17)
-            restored.load_state_dict(state)
-            self.assertEqual(
-                [restored.take(prompts, epoch=epoch) for epoch in (2, 3)], remaining
-            )
+        cursor = RowCursor(store, planner, seed=17)
+        epochs = [cursor.take(prompts, epoch=epoch) for epoch in range(2)]
+        self.assertEqual(set(epochs[0]) | set(epochs[1][:4]), set(range(12)))
+        self.assertEqual(cursor.state_dict(), {"pass": 1, "position": 8})
+        for epoch, prompt_ids in enumerate(epochs):
+            self.assertEqual(len(set(prompt_ids)), prompts)
+            per_rank = [prompt_ids[rank::world_size] for rank in range(world_size)]
+            local_count = prompts // world_size
+            # Epoch 1 straddles two passes and de-duplicates across them
+            # (§15 14.3), which breaks group contiguity; within a pass the
+            # i-th prompt of every rank comes from one group.
+            for position in range(local_count if epoch == 0 else 0):
+                block = {share[position] for share in per_rank}
+                self.assertTrue(any(block <= group for group in walk))
+            counts = Counter(p for share in per_rank for p in share)
+            self.assertEqual(set(counts), set(prompt_ids))
+            self.assertEqual(set(counts.values()), {1})
+        state = cursor.state_dict()
+        remaining = [cursor.take(prompts, epoch=epoch) for epoch in (2, 3)]
+        restored = RowCursor(store, planner, seed=17)
+        restored.load_state_dict(state)
+        self.assertEqual(
+            [restored.take(prompts, epoch=epoch) for epoch in (2, 3)], remaining
+        )
         with self.assertRaisesRegex(ValueError, "distinct prompts"):
             RowCursor(store, planner, seed=17).take(13, epoch=0)
 

@@ -69,24 +69,26 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    // RAM samples endpoints WITH true CFG (train_guidance_scale 2.0); the loss
-    // itself is computed on plain conditional velocities (no CFG).
-    // Deterministic ODE (FlowMatchEuler) rollout.
-    "type": "grid",
-    "steps": 20,
-    "shift": 3.0,
-    "transition": {
-      "type": "euler",
-      "eta": 0.0,
-      "prediction": { "type": "cfg", "scale": 2.0 },
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      // RAM samples endpoints WITH true CFG (train_guidance_scale 2.0); the loss
+      // itself is computed on plain conditional velocities (no CFG).
+      // Deterministic ODE (FlowMatchEuler) rollout.
+      "type": "grid",
+      "steps": 20,
+      "shift": 3.0,
+      "transition": {
+        "type": "euler",
+        "eta": 0.0,
+        "prediction": { "type": "cfg", "scale": 2.0 },
+      },
     },
-  },
-
-  "reward": {
-    "type": "geneval",
-    "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
-    "scoring_mode": "reward_server",
+    "reward": {
+      "type": "geneval",
+      "checkpoint_path": "./data/mask2former_swin-s-p4-w7-224_coco.pth",
+      "scoring_mode": "reward_server",
+    },
   },
 
   "advantage": {

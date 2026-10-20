@@ -66,6 +66,17 @@ class Frame:
                 setattr(clone, key, None)
         return clone
 
+    def rerooted(self, root: RootFrame) -> Frame:
+        """A copy of the chain under *root*: a recorded chain replayed by another
+        engine, whose leaves then run under that root's variant (None: the
+        active one) rather than the variant that sampled the row."""
+        if self.parent is None:
+            return root
+        clone = copy.copy(self)
+        clone.parent = self.parent.rerooted(root)
+        clone.root = root
+        return clone
+
 
 class RootFrame(Frame):
     """The chain root the engine places on a row."""
@@ -75,10 +86,13 @@ class RootFrame(Frame):
         engine: object,
         observers: Sequence[tuple[type, Observer]] = (),
         on_call: Callable[[Row], None] | None = None,
+        variant: str | None = None,
     ) -> None:
         super().__init__(engine, None)
         self.root = self
         self.observers, self.on_call = list(observers), on_call
+        self.variant = variant
+        """The variant this row's ``Model(variant=None)`` leaves run under; None is the adapter's active one."""
 
 
 def _frames(frame: Frame | None) -> Iterator[Frame]:

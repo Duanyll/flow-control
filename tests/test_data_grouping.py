@@ -19,11 +19,6 @@ stay duplicate-free when one take straddles two passes (§15, 14.3), and resume
 identically from ``state_dict``; independent takes are deterministic per
 ``(seed, epoch)``, repeat-free within an epoch, and rejected on a packed store;
 ``count > N`` raises.
-
-``test_expand_rollouts``: the strided split gives every rank the same number of
-``(prompt, k)`` pairs whose union is the full product, keeps all ``K`` rollouts of
-a prompt on one rank under ``whole_prompts``, and lands the ``i``-th element of
-every rank in the same group of the sequence the cursor walked.
 """
 
 import os
@@ -47,7 +42,6 @@ from flow_control.data import (
     RowCursor,
     RowStream,
     build_loader,
-    expand_rollouts,
     finalize_cache,
     groups_packed,
     groups_plain,
@@ -280,37 +274,6 @@ class DataGroupingTest(unittest.TestCase):
                     seed=0,
                     sampling="independent",
                 )
-
-    def test_expand_rollouts(self):
-        n, k, n_rows, M, K = 4, 2, 12, 8, 3
-        with tempfile.TemporaryDirectory() as tmp:
-            store = write_store(os.path.join(tmp, "cache"), n_rows)
-            planner = partial(groups_shuffled, store.index, n, k, 2)
-            groups = planner(0)
-            group_of = {row_id: gi for gi, g in enumerate(groups) for row_id, _ in g}
-            prompt_ids = RowCursor(store, planner, seed=0).take(M, epoch=0)
-        all_pairs = {(p, kk) for p in prompt_ids for kk in range(K)}
-        for world_size in (2, 4):
-            for whole in (False, True):
-                with self.subTest(world_size=world_size, whole_prompts=whole):
-                    shares = [
-                        expand_rollouts(
-                            prompt_ids, K, r, world_size, whole_prompts=whole
-                        )
-                        for r in range(world_size)
-                    ]
-                    self.assertEqual({len(s) for s in shares}, {M * K // world_size})
-                    self.assertEqual(
-                        sorted(pair for s in shares for pair in s), sorted(all_pairs)
-                    )
-                    for i in range(M * K // world_size):
-                        self.assertEqual(len({group_of[s[i][0]] for s in shares}), 1)
-                    if whole:
-                        for share in shares:
-                            for p in {p for p, _ in share}:
-                                self.assertEqual(
-                                    [kk for q, kk in share if q == p], list(range(K))
-                                )
 
 
 if __name__ == "__main__":

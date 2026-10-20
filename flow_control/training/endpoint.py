@@ -12,7 +12,6 @@ from flow_control.samplers import BaseGrid, GridFrame, Observer, Row
 from flow_control.utils.registry import Registry, RegistryUnion
 from flow_control.utils.tensor import deep_move_to_device
 
-from .mixins import Rollout
 from .rollout_trainer import RolloutTrainerBase
 from .train_timesteps import TrainTimesteps
 
@@ -87,18 +86,14 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
     def _rollout_observers(self) -> list[tuple[type, Observer]]:
         return [(BaseGrid, keep_sigmas)]
 
-    def _build_train_plan(
-        self, rollouts: list[Rollout]
-    ) -> list[list[EndpointTrainItem]]:
+    def _build_train_plan(self, rows: list[Row]) -> list[list[EndpointTrainItem]]:
         train_plan: list[list[EndpointTrainItem]] = []
         for _ in range(self.num_inner_epochs):
             items: list[EndpointTrainItem] = []
-            for rollout_idx in torch.randperm(len(rollouts)).tolist():
+            for rollout_idx in torch.randperm(len(rows)).tolist():
                 items.extend(
                     EndpointTrainItem(rollout_idx, sigma)
-                    for sigma in self.train_timesteps.draw(
-                        rollouts[rollout_idx].row["sigmas"]
-                    )
+                    for sigma in self.train_timesteps.draw(rows[rollout_idx]["sigmas"])
                 )
             train_plan.append(items)
         return train_plan
@@ -106,12 +101,12 @@ class EndpointTrainer(RolloutTrainerBase[EndpointTrainItem]):
     def _loss_batched(
         self,
         items: list[EndpointTrainItem],
-        rollouts: list[Rollout],
+        rows: list[Row],
         advantages: torch.Tensor,
     ) -> torch.Tensor:
         points: list[Row] = []
         for item in items:
-            row = deep_move_to_device(rollouts[item.rollout_idx].row, self.device)
+            row = deep_move_to_device(rows[item.rollout_idx], self.device)
             point = self.noised_point(
                 row, item.sigma, torch.randn_like(row["clean_latents"].float())
             )

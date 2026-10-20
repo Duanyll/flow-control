@@ -128,8 +128,8 @@ transition, step index/count and optional Flash noise ramp snapshot. `GrpoCollec
 records stochastic latents and log probabilities immediately, dropping velocities;
 `take(run)` consumes a completed trajectory. The denominator stays the actual
 rollout score even when the stateless training tree differs from the behavior
-tree; stateful rollouts are supported. NFT stores the executed plan on
-`Rollout`, keeping branch schedule, successor sigma and transformed eta.
+tree; stateful rollouts are supported. NFT stores the executed plan on the
+rollout row, keeping branch schedule, successor sigma and transformed eta.
 
 ## Window RNG (plan transforms)
 

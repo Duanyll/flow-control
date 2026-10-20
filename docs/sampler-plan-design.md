@@ -307,6 +307,11 @@ type Calls[T] = Generator[list[ModelCall], list[Tensor], T]
 executor = Executor(model, variants=variants(sampler))
 for row in executor.stream((row, sampler(row)) for row in rows):  # rows in completion order
     ...
+# stream / evaluate loop over the round API:
+executor.admit(key, gen)  # primed when it joins: at a round with active calls < micro_batch_size
+executor.round()  # collective, every rank calls it equally often; [(key, result)] it finished
+executor.backlog  # active calls + waiting generators; admit lazily while < micro_batch_size
+# A call runs under call.variant or its row's RootFrame.variant (None: the adapter's active one).
 # Asserted every round: a row object appears in at most one call.
 ```
 
@@ -328,6 +333,7 @@ class RootFrame(Frame):  # placed on the row by the engine
         engine: object,
         observers: Sequence[tuple[type, Observer]] = (),
         on_call: Callable[[Row], None] | None = None,  # progress; see Progress
+        variant: str | None = None,  # what Model(variant=None) leaves of this row run
     ): ...
 
 class BaseNode(BaseModel):
@@ -654,7 +660,7 @@ if step.node.eta:
 target_timestep = step.sigma_next
 
 # Epoch-dependent reward: the engine wrote row["epoch"] when the rollout was produced.
-# Reward components read it from the row; remote rewards get it via _row_fields.
+# Scorers read it from the row; a remote scorer lists it in `fields` so the snapshot carries it.
 
 # GRPO: observers = [(Euler, record)] on the rollout RootFrame
 def record(row: Row, step: StepFrame) -> None:

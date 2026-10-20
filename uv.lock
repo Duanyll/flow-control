@@ -852,12 +852,12 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "aiohttp" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "datasets" },
     { name = "diffusers" },
     { name = "einops" },
     { name = "gradio" },
-    { name = "httpx" },
     { name = "json5" },
     { name = "jsonpath-ng" },
     { name = "lmdb" },
@@ -906,12 +906,12 @@ ocr = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.12.0" },
+    { name = "aiohttp", specifier = ">=3.14.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=0.48.2" },
     { name = "datasets", specifier = ">=4.4.1" },
     { name = "diffusers", git = "https://github.com/huggingface/diffusers.git?rev=e04f0c5f24392fcd34b32d18d0ce03668f9bcd50" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gradio", specifier = ">=6.10.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "json5", specifier = ">=0.12.1" },
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
     { name = "lmdb", specifier = ">=1.7.5" },

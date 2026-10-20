@@ -8,16 +8,16 @@ scores are parsed out, averaged (``N/A``-aware), and mapped to ``[0, 1]``.
 
 Two variants are provided:
 
-- :class:`RationalRewardsT2IReward` (``rational_rewards_t2i``) judges a generated
+- :class:`RationalRewardsT2IScorer` (``rational_rewards_t2i``) judges a generated
   image against the prompt over three aspects.
-- :class:`RationalRewardsEditReward` (``rational_rewards_edit``) judges an *edited*
+- :class:`RationalRewardsEditScorer` (``rational_rewards_edit``) judges an *edited*
   image against the source image (``reference_images[0]``) and the edit
   instruction over four aspects (adds *Image Faithfulness*).
 
-For both, the aggregated score is the primary reward component (drives the
+For both, the aggregated score is the primary component ``overall`` (drives the
 advantage); the individual aspect sub-scores are exposed as additional
-*zero-weight* components so they show up in ``rollout/raw/<aspect>_*`` /
-``rollout/normalized/<aspect>_*`` metrics without affecting optimization.
+*zero-weight* components so they show up in the ``<name>/<aspect>`` metrics
+without affecting optimization.
 """
 
 import asyncio
@@ -26,15 +26,17 @@ from typing import Any, ClassVar, Literal
 
 import torch
 from pydantic import ConfigDict
+from torch import Tensor
 
 from flow_control.processors.components.llm import (
     ImageContent,
     LLMClient,
     TextContent,
 )
+from flow_control.samplers.node import Row
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, RemoteReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -125,7 +127,7 @@ Output your evaluation in the following format:
 
 # Verbatim edit rubric from Flow-Factory ``rational_rewards_edit`` (its
 # ``COMMON_TASK_GUIDELINE``).  The "Give your analysis..." preamble is prepended
-# in :meth:`RationalRewardsEditReward._build_user_content`, matching Flow-Factory.
+# in :meth:`RationalRewardsEditScorer._build_user_content`, matching Flow-Factory.
 EDIT_SCORING_PROMPT_SUFFIX = """To do this, you must first assess the image on four critical aspects, provide justifications and absolute scores in 1-4 scale.
 
 ### Critical Aspects & Scoring Rubric
@@ -266,13 +268,13 @@ def parse_scores_from_detailed_judgement(
     return {key: _extract_score_from_block(lines) for key, lines in blocks.items()}
 
 
-class _RationalRewardsReward(BaseReward):
+class _RationalRewardsScorer(BaseScorer, RemoteReward[Row, Tensor]):
     """Shared logic for the RationalRewards VLM-judge rewards.
 
-    Async-only: the synchronous ``_score`` raises ``NotImplementedError``.  The
-    primary component is the ``N/A``-aware mean of the configured ``aspects``
-    mapped to ``[0, 1]``; per-aspect sub-scores are exposed as zero-weight
-    components for logging when :attr:`expose_aspects` is set.
+    One judge request per row.  The primary component ``overall`` is the
+    ``N/A``-aware mean of the configured ``aspects`` mapped to ``[0, 1]``;
+    per-aspect sub-scores are exposed as zero-weight components for logging
+    when :attr:`expose_aspects` is set.
 
     Subclasses provide the supported-aspect table, the judge system prompt, the
     consumed row fields, and the interleaved user content (which images to
@@ -305,32 +307,18 @@ class _RationalRewardsReward(BaseReward):
             raise ValueError(f"{self.type} requires at least one aspect.")
 
     @property
-    def component_weights(self) -> list[float]:
-        if self.expose_aspects:
-            return [1.0, *([0.0] * len(self.aspects))]
-        return [1.0]
+    def labels(self) -> list[str]:
+        return ["overall", *self.aspects] if self.expose_aspects else ["overall"]
 
     @property
-    def component_labels(self) -> list[str]:
-        if self.expose_aspects:
-            return [self.type, *self.aspects]
-        return [self.type]
+    def weights(self) -> list[float]:
+        return [1.0] + [0.0] * (len(self.labels) - 1)
 
-    def _load_model(self, device: torch.device) -> None:
-        pass
-
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
-        raise NotImplementedError(
-            f"{type(self).__name__} is async-only. Use async_score() instead."
-        )
-
-    def _build_user_content(
-        self, row: dict[str, Any]
-    ) -> list[TextContent | ImageContent] | None:
+    def _build_user_content(self, row: Row) -> list[TextContent | ImageContent] | None:
         """Build the interleaved judge user content for one sample.
 
         Returns ``None`` when the sample lacks a required input (e.g. a missing
-        source image for editing), signalling :meth:`_async_score` to fall back
+        source image for editing), signalling :meth:`run_one` to fall back
         to a zero score.
         """
         raise NotImplementedError
@@ -342,10 +330,10 @@ class _RationalRewardsReward(BaseReward):
         score = max(1.0, min(4.0, float(value)))
         return (score - 1.0) / 3.0
 
-    def _zero_scores(self) -> torch.Tensor:
-        return torch.zeros(len(self.component_weights), dtype=torch.float32)
+    def _zero_scores(self) -> Tensor:
+        return torch.zeros(len(self.labels), dtype=torch.float32)
 
-    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
+    async def run_one(self, row: Row) -> Tensor:
         user_content = self._build_user_content(row)
         if user_content is None:
             return self._zero_scores()
@@ -396,12 +384,9 @@ class _RationalRewardsReward(BaseReward):
             values.extend(s if s is not None else 0.0 for s in unit_scores.values())
         return torch.tensor(values, dtype=torch.float32)
 
-    def supports_rollout_overlap(self) -> bool:
-        return True
 
-
-@reward_registry.register("rational_rewards_t2i")
-class RationalRewardsT2IReward(_RationalRewardsReward):
+@scorer_registry.register("rational_rewards_t2i")
+class RationalRewardsT2IScorer(_RationalRewardsScorer):
     """VLM-judge reward for text-to-image generation (``rational_rewards_t2i``).
 
     Scores a generated image against the prompt over three aspects
@@ -420,12 +405,10 @@ class RationalRewardsT2IReward(_RationalRewardsReward):
     _system_prompt: ClassVar[str] = RATIONAL_T2I_SYSTEM_PROMPT
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
-    def _build_user_content(
-        self, row: dict[str, Any]
-    ) -> list[TextContent | ImageContent]:
+    def _build_user_content(self, row: Row) -> list[TextContent | ImageContent]:
         # Match Flow-Factory exactly: the image is sandwiched between the
         # ``text_before`` preamble and the rubric suffix.
         prompt: str = row["prompt"]
@@ -442,8 +425,8 @@ class RationalRewardsT2IReward(_RationalRewardsReward):
         ]
 
 
-@reward_registry.register("rational_rewards_edit")
-class RationalRewardsEditReward(_RationalRewardsReward):
+@scorer_registry.register("rational_rewards_edit")
+class RationalRewardsEditScorer(_RationalRewardsScorer):
     """VLM-judge reward for instruction-guided image editing (``rational_rewards_edit``).
 
     Scores an *edited* image (``clean_image``) against the source image
@@ -465,18 +448,16 @@ class RationalRewardsEditReward(_RationalRewardsReward):
     _system_prompt: ClassVar[str] = RATIONAL_EDIT_SYSTEM_PROMPT
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt", "reference_images"}
 
-    def _source_image(self, row: dict[str, Any]) -> torch.Tensor | None:
+    def _source_image(self, row: Row) -> Tensor | None:
         references = row.get("reference_images")
         if not references:
             return None
         return references[0]
 
-    def _build_user_content(
-        self, row: dict[str, Any]
-    ) -> list[TextContent | ImageContent] | None:
+    def _build_user_content(self, row: Row) -> list[TextContent | ImageContent] | None:
         source = self._source_image(row)
         if source is None:
             logger.warning(
@@ -531,9 +512,8 @@ The user wants a red cube on a wooden table.
     assert parsed["physical_quality"] == 4.0, parsed
     assert parsed["text_rendering"] == "N/A", parsed
 
-    reward = RationalRewardsT2IReward(llm=LLMClient())
-    print("t2i component_labels:", reward.component_labels)
-    print("t2i component_weights:", reward.component_weights)
+    reward = RationalRewardsT2IScorer(llm=LLMClient())
+    print("t2i labels:", reward.labels, "weights:", reward.weights)
     # N/A-aware mean of (3.5, 4.0) -> 3.75 -> (3.75-1)/3 = 0.9167
     units = {a: reward._aspect_unit_score(parsed.get(a)) for a in reward.aspects}
     print("t2i unit scores:", units)
@@ -573,9 +553,8 @@ Make the sky blue.
     assert edit_parsed["physical_quality"] == 3.5, edit_parsed
     assert edit_parsed["text_rendering"] == "N/A", edit_parsed
 
-    edit_reward = RationalRewardsEditReward(llm=LLMClient())
-    print("edit component_labels:", edit_reward.component_labels)
-    print("edit component_weights:", edit_reward.component_weights)
+    edit_reward = RationalRewardsEditScorer(llm=LLMClient())
+    print("edit labels:", edit_reward.labels, "weights:", edit_reward.weights)
     edit_units = {
         a: edit_reward._aspect_unit_score(edit_parsed.get(a))
         for a in edit_reward.aspects
@@ -585,7 +564,9 @@ Make the sky blue.
     # N/A-aware mean of (4.0, 3.0, 3.5) -> 3.5 -> (3.5-1)/3.
     assert abs(sum(edit_usable) / len(edit_usable) - ((3.5 - 1.0) / 3.0)) < 1e-6
     assert edit_units["text_rendering"] is None
-    # Missing source image -> no content -> zero scores.
+    # Missing source image -> no content -> zero scores, without a judge call.
     assert edit_reward._build_user_content({"prompt": "x", "clean_image": None}) is None
+    zero = asyncio.run(edit_reward.run_one({"prompt": "x", "clean_image": None}))
+    assert torch.equal(zero, torch.zeros(5)), zero
 
     print("[green]rational_rewards self-test passed[/green]")

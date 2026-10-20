@@ -37,7 +37,7 @@ raw source → `preprocess`（random cache）→ `pack`（packed cache）→ 分
 | `pack(PackConfig)` | random cache → tar shard 的 packed cache（shard 内按 `(cost, sig)` 排序），`flow-control pack` |
 | `groups_shuffled` / `groups_sorted` / `groups_packed` / `groups_plain` / `rank_rows` | 纯函数分组 plan：n 个 cost 相近的行成一组，组内按 rank 跨步切片，尾组用同块行补齐并标 `padding` |
 | `RowStream` + `build_loader()` | SFT / inference / validation 的 map-style Dataset（每 epoch `set_epoch`），恒等 collate，`StatefulDataLoader` 可恢复 |
-| `RowCursor` + `expand_rollouts()` | RL：每 epoch 取 `num_prompts_per_epoch` 条不重复 prompt（`chunked` / `independent`），K 份 rollout 按 rank 跨步展开 |
+| `RowCursor` | RL：每 epoch 取 `num_prompts_per_epoch` 条不重复 prompt（`chunked` / `independent`）；trainer 按 rank 跨步分整条 prompt，K 份 rollout 留在同一 rank |
 | `ReportWriter` / `ReportConfig` | inference 输出：`metrics.jsonl`、`previews/`、可选 `records/`（本身是 `{"type": "cache"}` 数据集） |
 
 raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directory`, `raw_directory`, `huggingface`, `concat`；`prism_layers_pro` 随 `flow_control.contrib.efficient_layered` 一起注册（`imports` 引入）。旧的 `pickle_directory` / `bucket_directory` / `lmdb` cache 不兼容，重新 `preprocess` 后用 `"type": "cache"`。
@@ -69,16 +69,19 @@ raw source 类型：`csv`, `jsonl`, `lines`, `parquet`, `inline`, `plain_directo
 
 ## rewards — 奖励函数
 
-为 RL 训练（GRPO 等）提供奖励打分。
+为 RL 训练与推理评测提供奖励。每个注册的奖励 = 一个 slot（配置字段的契约）× 一个 placement（在哪执行），注册时校验。设计见 [rollout 程序与奖励](rollout-reward-design.md)。
 
 | 接口 | 说明 |
 |------|------|
-| `BaseReward` | 奖励函数基类，定义 `score()`, `async_score()` 等方法，支持远程卸载 |
-| `parse_reward(conf)` | 工厂函数 |
-| `execute_reward()` | 执行奖励计算（支持异步批处理） |
-| `execute_pairwise_reward()` | 按原始 `key` 汇聚乱序完成的 K 个 rollout 后成对评分 |
+| `LocalReward[I, O]` | placement：device worker 上同步批处理，`load(device)` + `run_batch(items)`，`batch_size` 跨组凑批 |
+| `RemoteReward[I, O]` | placement：reward loop 上每个 item 一个并发请求，`run_one(item)`；`fields` 是要读的 row 键，item 内的 row 先在 device worker 上快照到 CPU |
+| `BaseScorer` / `scorer_registry` / `Scorer` | slot：row → `[C]` raw，`labels` / `weights`（0 = 只记录）/ `fields`；字段 `name`（label 前缀，默认 `type`）、`weight`、`normalize`（逐元素作用于 raw）。`rollout.reward`、`validation_scorer`、推理 `reward` 只收 scorer |
+| `Scorers` | scorer 列表（单个 scorer 即一项列表）：`labels`（单分量 `<name>`，多分量 `<name>/<label>`，重名报错）、`weights`、`score(ctx, rows)` → `[N, C]` raw（CPU）、`normalize(raw)` 各按自己的列 |
+| `BaseJudge` / `judge_registry` / `Judge` | slot：`(a, b)` → P(a ≻ b)，0.5 为平局；`round_robin.judge` 只收 judge |
+| `Normalize`（`normalize.py`） | `identity` / `affine` / `clamp` / `sigmoid` |
+| `RewardProfile` / `reduce_reward_profiles`（`profile.py`） | 每个远程请求的发出 / 完成时间，汇总为 `profile/reward/*` |
 
-内置奖励类型：`clip_score`, `pickscore`, `geneval`, `unified_reward`, `composite`（加权组合）, `pairwise`（成对比较）
+内置 scorer：`LocalReward`——`pickscore`, `hpsv2`, `clip_score`, `clip_image_similarity`, `aesthetic`, `image_reward`, `ocr`, `geneval`，contrib `pyiqa`（`flow_control.contrib.iqa`）；`RemoteReward`——`rational_rewards_t2i`, `rational_rewards_edit`, `unified_reward`, `remote`（`remote.py`：`url` + `scorer` 指向 `reward-server` 上的 scorer，`labels` / `weights` / `fields` 在 `load()` 时取自 `GET /info`，服务端只返回 raw，`weight` / `normalize` 由客户端设）。judge 无内置成员（out of tree）。
 
 ---
 
@@ -129,11 +132,24 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 
 ### RL trainer 分层（`rollout_trainer.py` / `endpoint.py` / `train_timesteps.py`）
 
-- `RolloutTrainerBase[ItemT]`：四个 RL trainer 共用的唯一循环——字段块、optimizer/scheduler、验证 EMA、`InitBackupOptimizer`（仅当 `_needs_reference()` 且 `peft_lora_rank == 0`；EndpointTrainer 看 objective 是否需要 `ref`，GRPO 看 `kl_beta > 0`）、`state_dict`/`load_state_dict`、`_train_on_rollouts`、`run()`（含 `validation_non_ema`；`validation_at_start: false` 跳过首次训练前的那次验证，`SftTrainer` 同）。`rollout_lookahead: N`（默认 0 = 同步循环）让 epoch `k` 先采样批次 `k+N` 再等批次 `k` 的 reward：`_start_rollouts` 提交 reward 后立即返回 `PendingRollouts`，`_finish_rollouts` 在训练前收齐并打 `rollout/policy_lag`、`profile/reward/wait_at_train_s`；reward 事件循环由 trainer 常驻（`reward_loop`，验证共用，`cleanup()` 关闭）；checkpoint 的 cursor 回退到最老在途批次之前，resume 丢弃在途批次重新 prime。子类实现 `_build_train_plan(rollouts)` 与 `_loss_batched(items, rollouts, advantages)`，可选 `_precompute` 与 `_on_rollouts_started(pending)`（采样刚结束、仍在 `_rollout_scope` 内）。
+- `RolloutTrainerBase[ItemT]`：四个 RL trainer 共用的唯一循环——字段块、optimizer/scheduler、验证 EMA、`InitBackupOptimizer`（仅当 `_needs_reference()` 且 `peft_lora_rank == 0`；EndpointTrainer 看 objective 是否需要 `ref`，GRPO 看 `kl_beta > 0`）、`state_dict`/`load_state_dict`、`_train_on_rollouts`、`run()`（含 `validation_non_ema`；`validation_at_start: false` 跳过首次训练前的那次验证，`SftTrainer` 同）。`rollout`（rollout 程序，见 rollouts 节）产出带 reward 的 rows；`validation_scorer` 默认 `rollout.reward`（此时须非空），`false` 关闭验证打分。`rollout_lookahead: N`（默认 0 = 同步循环）让 epoch `k` 先采样批次 `k+N` 再训练批次 `k`：`_start_rollouts` 把本 rank 的整条 prompt（`num_prompts_per_epoch` 须被 `world_size` 整除）交给 `Runner.submit(rollout.sample, rollout.score)`，`Pending.sampled()` 后（全部模型调用已在当前权重下跑完）返回 `PendingRollouts`；`_finish_rollouts` 在训练前 `wait()` 收齐并打 `rollout/policy_lag`、`profile/reward/wait_at_train_s`；`Runner` 由 trainer 常驻，验证共用；checkpoint 的 cursor 回退到最老在途批次之前，resume 丢弃在途批次重新 prime。子类实现 `_build_train_plan` 与 `_loss_batched`（rollout 就是 row，reward 读 `row["reward"]`），可选 `_precompute` 与 `_on_rollouts_started(pending)`（采样刚结束、仍在 `_rollout_scope` 内）。
 - `EndpointTrainer(RolloutTrainerBase)`（`endpoint.py`，与 objective 契约同文件）：在 rollout 终点上训练的族，字段 `objective`、`train_timesteps`、`ema_old`。前向规则：`grid_index` 非 `None` 的 item 走 `SampleRun.guided_velocity(x_t, grid_index)`（rollout 的实际 plan + `train_predictor`），连续 timestep 走 `train_predictor.velocity`；old/ref 速度按 `objective.required_policies()` 缓存在 `item.cache`（`precompute_aux_model_outputs`）或 `no_grad` 现算。`lookahead_teacher`（仅 `rollout_lookahead > 0` 有意义）：`latest` = 训练时的 old EMA 当 teacher（比采样策略新一步）；`behavior` = 采样时就在 `_on_rollouts_started` 里建 plan、抽 noise、缓存 old/ref 速度（要求 `precompute_aux_model_outputs`，缓存放 `rollout_storage_device`），teacher 即行为策略。
 - `Objective`（registry union，`"type": nft | ram | awm | weighted_fm`）：纯数学，`compute(TrainPoint, PolicyVelocities) -> LossOutput`，加 `rollout_policy()`（`current`/`old`，谁采样）与 `required_policies()`（`old`/`ref`）。方法超参（`beta`、`kl_beta`、`reward_multiplier`、`off_policy`……）都在这一块。契约（`BaseObjective`/`TrainPoint`/`PolicyVelocities`/`LossOutput`/registry）在 `endpoint.py`，每个成员和它的 preset 同文件（`nft.py`/`ram.py`/`awm.py`；`weighted_fm.py` 只有 objective、没有 preset）。
 - `TrainTimesteps`（registry union）：`grid`——按下标在 rollout 网格上取最噪的 `window` 比例，`count`/`fraction`、`exclude_first`、`random`/`stratified`；`continuous`——`count` × `TimestepWeighting`。窗是下标比例，所有 rank 的 item 数只依赖步数。
 - preset（`nft.py`/`ram.py`/`awm.py`，各自的 objective 在同一文件）：只设 `training_type`、`objective`、`train_timesteps`、`ema_old`、`clip_grad_norm` 的默认值，`launch.type` 不变。配置中的 `"objective"`/`"train_timesteps"` 块必须带 `"type"`（或写裸字符串取全默认）。
+
+### rollouts — rollout 程序（`training/rollouts/`）
+
+`rollout.type` 决定一个 prompt 如何变成 K 条带 reward 的 rollout。设计见 [rollout 程序与奖励](rollout-reward-design.md)。
+
+| 接口 | 说明 |
+|------|------|
+| `BaseRollout[G]` / `rollout_registry` / `Rollout`（`base.py`） | 字段 `sampler`（策略采样器）、`reward`（`Scorers`，每条 rollout 都打）；`labels` / `weights` 是 advantage 与日志看到的分量（`pointwise` 要求 `reward` 非空）。`sample(ctx)` 发起本组全部模型调用，`score(ctx, group)` 只调 reward、返回要训练的 rows，由 `write()` 写 `row["reward_raw"]` / `row["reward"]`（`[C]`，CPU） |
+| `PointwiseRollout`（`"pointwise"`） | 每条 rollout 由 `reward` 单独打分 |
+| `RoundRobinRollout`（`"round_robin"`，`round_robin.py`） | Pref-GRPO：`judge` 两两比较同 prompt 的 rollout，胜率是分量 `round_robin`（权重 `weight`），排在 `reward` 各分量之前；`swap_orders` 正反各问一次抵消位置偏置，`opponents`（偶数）沿随机环取对手，`null` 为全部 K(K-1)/2 对 |
+| `schedule` / `preferences` / `win_rates`（`pairwise.py`） | 成对辅助，out-of-tree 程序共用：对局下标、P(a ≻ b)（`swap_orders` 时 `(s_ab + 1 - s_ba) / 2`）、胜率 `(0.5 + wins) / (played + 1)` |
+| `Runner` / `Pending`（`runner.py`） | device worker（主线程：executor 前向、start / decode、本地 reward 凑批、远程 reward 的 CPU 快照）+ reward loop（后台线程：程序协程与远程请求）；trainer 全程持有，推理自开。`submit()` 返回 `Pending`，其 `sampled()` / `wait()` / `as_completed()` 都是 collective |
+| `RewardContext` / `SampleContext`（`runner.py`） | `score()` / `sample()` 拿到的上下文：`prompt` / `prompt_id` / `k` / `epoch`、`run(reward, items)`（调用任何 reward 的唯一入口）、`seed()`；`SampleContext` 另有 `start` / `admit` / `decode` / `rollouts`，`sample()` 返回后失效 |
 
 ### Mixin
 
@@ -144,7 +160,8 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `LoggingMixin` | 训练日志 |
 | `DataMixin` | 数据接入：打开 store、选分组 plan（`make_planner`）、`prepare_row`（上设备 → 无 cache 时在线 processor → `resample`） |
 | `EpochLoopMixin` | 按步计数的 epoch 循环（SFT / VAE）：`make_train_loader` 让每个 epoch 恰好整数个 optimizer update（`RowStream(multiple_of=)` 丢弃不足一次 update 的尾部），`epoch_microbatches()` 逐 microbatch 产出 `(epoch, items, is_sync_step)`，`StatefulDataLoader` 计数是唯一数据游标 |
-| `RolloutMixin` | RL 训练的 rollout 生成：`RowCursor` 每 epoch 取 `num_prompts_per_epoch` 条 prompt，`expand_rollouts` 按 rank 跨步切片 |
+| `RunnerMixin` | 整个 run 共用的 `Runner`（设备 worker + reward loop）：`make_runner` 在模型与 processor 加载后打开，rollout、验证、推理都向它提交，`cleanup` 时关闭 |
+| `RolloutMixin` | RL 训练的 prompt 游标：`RowCursor` 每 epoch 取 `num_prompts_per_epoch` 条 prompt，按 rank 跨步分整条 prompt |
 | `ValidationMixin` | 验证循环 |
 | `LaunchConfig` | 分布式启动配置 |
 | `distributed_main()` | 分布式训练入口 |
@@ -176,7 +193,7 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `condition_image` | 条件图像选择器 `ConditionImage`/`ConditionImageSpec`：`reference[i]`/`control`/`inpaint`/`clean` 或字面键，同时给出像素键与 latent 键；Start、DifferentialDiffusion、CLIP/IQA reward 共用（契约见 docs/row-contract.md） |
 | `upcasting` | 混合精度：`apply_layerwise_upcasting()`, `cast_trainable_parameters()` |
 | `lora` | LoRA 适配器工具 |
-| `remote` | 远程模型卸载 `RemoteOffloadable` |
+| `aiohttp_session` | `AiohttpSession`：`LLMClient` 与 `remote` scorer 共用的 HTTP 层（按事件循环重建会话、`max_concurrency`、重试、网关容量等待） |
 | `pipeline` | 数据处理管线框架：`Pipeline`, `PipelineStage`, `DataSource`, `DataSink` |
 | `tiling` | 重叠 tile 布局与融合：`plan_tiles()`（均匀铺排、边缘贴齐）、`extract_tiles()`、`stitch_tiles()`（邻边 Hann ramp、归一化）、`TileLayout`（`row["tiling"]` 契约）；processors 与 samplers 共用 |
 
@@ -192,8 +209,7 @@ GRPO 的 `training/grpo_sampling.py` 提供 `GrpoCollector` 与 `replay_steps(mo
 | `pack` | random cache → packed cache（tar shard） |
 | `seed` | 初始化种子检查点 |
 | `launch` | 启动分布式训练（SFT / GRPO / NFT / AWM / RAM / VAE / Inference） |
-| `vae-server` | 独立 VAE 编码服务 |
-| `reward-server` | 独立奖励计算服务 |
+| `reward-server` | 托管本地 scorer（配置 `scorers: {name: scorer}`）：`GET /info` + `POST /score/{name}`，客户端是 `remote` scorer |
 | `serve` | Gradio 推理 Web UI |
 | `export` | 将 DCP 检查点导出为 HuggingFace 格式 |
 | `lora` | 在独立 CPU 进程中转换 DCP/Diffusers LoRA 或将 LoRA 融合进底模 |

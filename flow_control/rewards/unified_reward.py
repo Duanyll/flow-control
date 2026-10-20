@@ -1,13 +1,15 @@
 import re
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field
+from torch import Tensor
 
 from flow_control.processors.components.llm import LLMClient
+from flow_control.samplers.node import Row
 from flow_control.utils.logging import get_logger
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, RemoteReward, scorer_registry
 from .normalize import AffineNormalize, Normalize
 
 logger = get_logger(__name__)
@@ -37,14 +39,10 @@ class ScoreTag(BaseModel):
     weight: float = 1.0
 
 
-@reward_registry.register("unified_reward")
-class UnifiedReward(BaseReward):
-    """LLM-based reward that uses a vision-language model to judge images.
-
-    This reward is **async-only**: the synchronous ``_score`` raises
-    ``NotImplementedError``.  Use ``async_score`` (or the async GRPO
-    rollout path) instead.
-    """
+@scorer_registry.register("unified_reward")
+class UnifiedRewardScorer(BaseScorer, RemoteReward[Row, Tensor]):
+    """LLM-based reward that uses a vision-language model to judge images,
+    one request per row; one component per score tag."""
 
     type: Literal["unified_reward"] = "unified_reward"
     llm: LLMClient
@@ -62,24 +60,16 @@ class UnifiedReward(BaseReward):
     model_config = ConfigDict(extra="forbid")
 
     @property
-    def component_weights(self) -> list[float]:
-        return [tag.weight for tag in self.score_tags]
-
-    @property
-    def component_labels(self) -> list[str]:
+    def labels(self) -> list[str]:
         return [tag.name.lower().replace(" ", "_") for tag in self.score_tags]
 
     @property
-    def _row_fields(self) -> set[str]:
+    def weights(self) -> list[float]:
+        return [tag.weight for tag in self.score_tags]
+
+    @property
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
-
-    def _load_model(self, device: torch.device) -> None:
-        pass
-
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
-        raise NotImplementedError(
-            "UnifiedReward is async-only. Use async_score() instead."
-        )
 
     def _parse_scores(self, output: str) -> dict[str, float]:
         """Extract score values from LLM output text."""
@@ -98,14 +88,12 @@ class UnifiedReward(BaseReward):
                 scores[tag.name] = 0.0
         return scores
 
-    async def _async_score(self, row: dict[str, Any]) -> torch.Tensor:
+    async def run_one(self, row: Row) -> Tensor:
         """Score an image using the LLM judge.
 
         Returns:
-            Tensor of shape ``[C]`` with raw per-tag scores in ``[1, 5]``.
-            The base class applies :attr:`normalize` on top.  Configure
-            ``normalize`` with e.g. ``{"type": "affine", "scale": 0.2}`` to
-            land back in ``[0.2, 1.0]`` as before.
+            Tensor of shape ``[C]`` with raw per-tag scores in ``[1, 5]``;
+            :attr:`normalize` (default affine 0.2) maps them to ``[0.2, 1.0]``.
         """
         prompt_text: str = row["prompt"]
         image: torch.Tensor = row["clean_image"]
@@ -117,6 +105,3 @@ class UnifiedReward(BaseReward):
 
         per_tag = [scores[tag.name] for tag in self.score_tags]
         return torch.tensor(per_tag, dtype=torch.float32)
-
-    def supports_rollout_overlap(self) -> bool:
-        return True

@@ -15,7 +15,7 @@ Algorithm:
    checkpoint) maps the embedding to a scalar score.
 4. Typical raw scores fall in roughly ``[3, 8]``; users that want
    ``~[0, 1]`` should configure ``normalize=AffineNormalize(scale=0.1)`` on
-   their reward config.
+   their scorer config.
 """
 
 from __future__ import annotations
@@ -26,14 +26,15 @@ import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 from transformers import CLIPModel, CLIPProcessor
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -65,12 +66,12 @@ class _AestheticMLP(nn.Module):
         return self.layers(embed)
 
 
-@reward_registry.register("aesthetic")
-class AestheticReward(BaseReward):
+@scorer_registry.register("aesthetic")
+class AestheticScorer(BaseScorer, LocalReward[Row, Tensor]):
     """LAION improved aesthetic predictor reward.
 
     Returns the raw aesthetic score (typical range ``~[3, 8]``).  Configure
-    ``normalize`` on the parent reward config to rescale into ``[0, 1]``.
+    ``normalize`` to rescale into ``[0, 1]``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,7 +103,7 @@ class AestheticReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image"}
 
     def _resolve_checkpoint_path(self) -> str:
@@ -117,7 +118,7 @@ class AestheticReward(BaseReward):
             filename="sac+logos+ava1-l14-linearMSE.pth",
         )
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         self._device = device
 
         self.clip_model.load_model(device=device)
@@ -130,19 +131,22 @@ class AestheticReward(BaseReward):
         mlp.eval()
         mlp.to(device)
         self._mlp = mlp
-        logger.info(f"Loaded AestheticReward MLP head from {ckpt_path} on {device}")
+        logger.info(f"Loaded AestheticScorer MLP head from {ckpt_path} on {device}")
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         """Compute raw aesthetic score for a single sample.
 
         Expects ``row["clean_image"]`` of shape ``[1, C, H, W]`` in ``[0, 1]``.
         Returns a ``[1]`` tensor with the raw scalar score (NOT normalised --
-        ``BaseReward.score`` applies the configured normalize transform).
+        the configured normalize transform is applied later).
         """
         if self._mlp is None or self._device is None:
             raise RuntimeError(
-                "AestheticReward is not loaded; call load_model(device) first."
+                "AestheticScorer is not loaded; call load(device) first."
             )
 
         image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
@@ -162,18 +166,6 @@ class AestheticReward(BaseReward):
         score = self._mlp(embed).squeeze(-1)  # [1]
         return score
 
-    def _unload_model(self) -> None:
-        import gc
-
-        if self._mlp is not None:
-            del self._mlp
-            self._mlp = None
-        self.clip_model.unload_model()
-        self.processor.unload_model()
-        self._device = None
-        gc.collect()
-        devutil.empty_cache()
-
 
 if __name__ == "__main__":
     import urllib.request
@@ -183,6 +175,7 @@ if __name__ == "__main__":
     from PIL import Image
     from rich import print as rprint
 
+    from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
     data_dir = Path("data")
@@ -209,19 +202,21 @@ if __name__ == "__main__":
         f"[bold]Noise image size:[/] {noise_pil.size}, tensor shape: {noise_tensor.shape}"
     )
 
-    reward = AestheticReward()
-    reward.load_model(devutil.default_device())
+    reward = AestheticScorer()
+    reward.load(devutil.default_device())
 
-    coco_score = reward.score({"clean_image": image_tensor})
-    noise_score = reward.score({"clean_image": noise_tensor})
+    coco_score, noise_score = (
+        score.item()
+        for score in reward.run_batch(
+            [{"clean_image": image_tensor}, {"clean_image": noise_tensor}]
+        )
+    )
 
-    rprint(f"[bold]COCO aesthetic score:[/]  {coco_score.aggregate().item():.4f}")
-    rprint(f"[bold]Noise aesthetic score:[/] {noise_score.aggregate().item():.4f}")
+    rprint(f"[bold]COCO aesthetic score:[/]  {coco_score:.4f}")
+    rprint(f"[bold]Noise aesthetic score:[/] {noise_score:.4f}")
 
-    assert coco_score.aggregate().item() > noise_score.aggregate().item(), (
+    assert coco_score > noise_score, (
         f"Expected COCO image to score higher than random noise: "
-        f"coco={coco_score.aggregate().item():.4f} noise={noise_score.aggregate().item():.4f}"
+        f"coco={coco_score:.4f} noise={noise_score:.4f}"
     )
     rprint("[bold green]COCO image scored higher than noise, as expected.[/]")
-
-    reward.unload_model()

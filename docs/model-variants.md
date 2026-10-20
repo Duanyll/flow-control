@@ -230,8 +230,8 @@ def checkpoint(fn, *args):  # wraps _gradient_checkpointing_func once, at load
 for name in {objective.rollout_variant, *objective.required_variants, *self.validation_variants}:
     model.resolve(name)  # at setup
 
-with model.use_variant(objective.rollout_variant):  # "default"; NFT / RAM / SIFR: "old"
-    rollouts = self.sample(...)
+# The runner carries the variant on each row: Runner.submit(..., variant=) sets its RootFrame.variant.
+rows = self.runner.submit(..., variant=objective.rollout_variant)  # "default"; NFT / RAM / SIFR: "old"
 
 for name in objective.required_variants:  # e.g. {"old", "ref"}: computed inline, no precompute
     with torch.no_grad(), model.use_variant(name):
@@ -245,8 +245,7 @@ model.update_variants("step")
 model.update_variants("epoch")  # at epoch end
 
 for name in self.validation_variants:
-    with model.use_variant(name):
-        self.validate(...)
+    self.runner.submit(..., variant=name)  # validation rows carry their variant the same way
 ```
 
 `use_variant` is entered in straight-line engine code, never inside a node generator.
@@ -256,8 +255,8 @@ for name in self.validation_variants:
 ```python
 Model(variant=None)     # the engine's current variant
 Model(variant="guide")  # an explicit name wins
-# Executor groups calls by model.resolve(call.variant or active); aliases share a forward.
-# variants(sampler) walks the config tree and resolves names; the order is the same on every rank.
+# Executor groups calls by call.variant or root.variant, the name passed to use_variant as given (None: active).
+# variants(sampler) walks the config tree for names; the order is the same on every rank.
 ```
 
 ### Removed

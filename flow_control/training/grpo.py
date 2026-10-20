@@ -16,6 +16,7 @@ import torch
 from flow_control.samplers import (
     BaseTransition,
     Observer,
+    RootFrame,
     Row,
     StepFrame,
     StepLogProb,
@@ -24,7 +25,7 @@ from flow_control.samplers import (
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_move_to_device
 
-from .mixins import Rollout, trainer_registry
+from .mixins import trainer_registry
 from .rollout_trainer import RolloutTrainerBase
 
 logger = get_logger(__name__)
@@ -68,24 +69,24 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
     def _rollout_observers(self) -> list[tuple[type, Observer]]:
         return [(BaseTransition, record)]
 
-    def _check_rollouts(self, rollouts: list[Rollout]) -> None:
-        for rollout in rollouts:
-            if not rollout.row.get("trajectory"):
+    def _check_rollouts(self, rows: list[Row]) -> None:
+        for row in rows:
+            if not row.get("trajectory"):
                 raise RuntimeError(
                     "GRPO replays stochastic steps but the rollout recorded none; "
-                    "give rollout_sampler's transition eta > 0 (or an sde_window_grid "
+                    "give rollout.sampler's transition eta > 0 (or an sde_window_grid "
                     "with a nonempty window)."
                 )
 
-    def _build_train_plan(self, rollouts: list[Rollout]) -> list[list[GrpoTrainItem]]:
+    def _build_train_plan(self, rows: list[Row]) -> list[list[GrpoTrainItem]]:
         """Every inner epoch shuffles the rollout order while keeping each
         rollout's recorded steps contiguous and in trajectory order."""
         item_groups = [
             [
                 GrpoTrainItem(rollout_idx, timestep_idx)
-                for timestep_idx in range(len(rollout.row["trajectory"]))
+                for timestep_idx in range(len(row["trajectory"]))
             ]
-            for rollout_idx, rollout in enumerate(rollouts)
+            for rollout_idx, row in enumerate(rows)
         ]
         train_plan: list[list[GrpoTrainItem]] = []
         for _ in range(self.num_inner_epochs):
@@ -146,12 +147,15 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
         self.log_aggregated_metrics(metrics)
         return loss
 
-    def _point(self, rollout: Rollout, timestep_idx: int) -> Row:
-        """The recorded step as a row of its own, on the device."""
-        row = {key: value for key, value in rollout.row.items() if key != "trajectory"}
-        return deep_move_to_device(
-            {**row, **rollout.row["trajectory"][timestep_idx]}, self.device
-        )
+    def _point(self, row: Row, timestep_idx: int) -> Row:
+        """The recorded step as a row of its own, on the device, its chain
+        re-rooted at the trainer: the rollout's root names the variant that
+        sampled it, while the replay runs under the active one (``default``,
+        or ``ref`` for the KL term)."""
+        sample = {key: value for key, value in row.items() if key != "trajectory"}
+        point = {**sample, **row["trajectory"][timestep_idx]}
+        point["_frame"] = point["_frame"].rerooted(RootFrame(self))
+        return deep_move_to_device(point, self.device)
 
     def _replay(self, points: list[Row]) -> list[StepLogProb]:
         """Each recorded step's likelihood under ``train_predictor``'s velocity."""
@@ -165,11 +169,11 @@ class GrpoTrainer(RolloutTrainerBase[GrpoTrainItem]):
     def _loss_batched(
         self,
         items: list[GrpoTrainItem],
-        rollouts: list[Rollout],
+        rows: list[Row],
         advantages: torch.Tensor,
     ) -> torch.Tensor:
         points = [
-            self._point(rollouts[item.rollout_idx], item.timestep_idx) for item in items
+            self._point(rows[item.rollout_idx], item.timestep_idx) for item in items
         ]
         outputs = self._replay(points)
         ref_means: list[torch.Tensor | None] = [None] * len(points)

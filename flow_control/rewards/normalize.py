@@ -1,11 +1,11 @@
 """Configurable score normalization for rewards.
 
-Each ``BaseReward._score`` returns the raw, model-native score.  The
-``BaseReward.normalize`` field (a discriminated union defined here) then
-post-processes that raw score before it is exposed to trainers / loggers.
+Every scorer returns the raw, model-native score.  The ``BaseScorer.normalize``
+field (a discriminated union defined here) then post-processes that raw score
+(``Scorers.normalize``) before it is exposed to trainers / loggers.
 
 The transforms are deliberately element-wise so they compose cleanly with
-multi-component rewards (``[C]``-shaped tensors).
+multi-component scorers (``[C]``-shaped tensors).
 """
 
 from __future__ import annotations

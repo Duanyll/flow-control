@@ -25,14 +25,15 @@ from typing import Any, Literal
 import torch
 import torch.nn as nn
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Normalize
 from torchvision.transforms import functional as TF
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 from flow_control.utils.logging import get_logger
 from flow_control.utils.types import TorchDType
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -152,8 +153,8 @@ def image_transform_tensor(
     return Compose(transforms)
 
 
-@reward_registry.register("hpsv2")
-class HPSv2Reward(BaseReward):
+@scorer_registry.register("hpsv2")
+class HPSv2Scorer(BaseScorer, LocalReward[Row, Tensor]):
     """Human Preference Score v2.1 reward.
 
     Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -180,7 +181,7 @@ class HPSv2Reward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
     def _resolve_checkpoint_path(self) -> str:
@@ -190,7 +191,7 @@ class HPSv2Reward(BaseReward):
 
         return hf_hub_download(repo_id=HPSV2_HF_REPO, filename=HPSV2_CKPT_FILENAME)
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         import open_clip
 
         self._device = device
@@ -241,8 +242,11 @@ class HPSv2Reward(BaseReward):
         logger.info("HPSv2.1 reward loaded.")
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
-        assert self._model is not None, "HPSv2Reward not loaded; call load_model first."
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
+        assert self._model is not None, "HPSv2Scorer not loaded; call load() first."
         assert self._device is not None
 
         image: torch.Tensor = row["clean_image"]  # [1, C, H, W] in [0, 1]
@@ -264,17 +268,6 @@ class HPSv2Reward(BaseReward):
         # Return [1] raw tensor; downstream normalize handles rescaling.
         return hps_score.float().view(1)
 
-    def _unload_model(self) -> None:
-        import gc
-
-        del self._model, self._tokenizer, self._transform
-        self._model = None
-        self._tokenizer = None
-        self._transform = None
-        self._device = None
-        gc.collect()
-        devutil.empty_cache()
-
 
 if __name__ == "__main__":
     import urllib.request
@@ -283,6 +276,7 @@ if __name__ == "__main__":
     from PIL import Image
     from rich import print
 
+    from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
     data_dir = Path("./data")
@@ -305,36 +299,32 @@ if __name__ == "__main__":
     device = devutil.default_device()
     print(f"[bold]Device:[/] {device}")
 
-    reward = HPSv2Reward()
-    reward.load_model(device)
+    reward = HPSv2Scorer()
+    reward.load(device)
 
     matching_prompt = "Two cats lying on a couch with two tv remotes"
     mismatching_prompt = "A picture of a red sports car on a race track"
 
-    batch_match: dict[str, Any] = {
-        "clean_image": image_tensor,
-        "prompt": matching_prompt,
-    }
-    score_match = reward.score(batch_match)
+    score_match, score_mismatch = (
+        score.item()
+        for score in reward.run_batch(
+            [
+                {"clean_image": image_tensor, "prompt": matching_prompt},
+                {"clean_image": image_tensor, "prompt": mismatching_prompt},
+            ]
+        )
+    )
     print(
         f"[bold]HPSv2.1[/] (matching prompt: {matching_prompt!r}) "
-        f"= [green]{score_match.aggregate().item():.4f}[/]"
+        f"= [green]{score_match:.4f}[/]"
     )
-
-    batch_mismatch: dict[str, Any] = {
-        "clean_image": image_tensor,
-        "prompt": mismatching_prompt,
-    }
-    score_mismatch = reward.score(batch_mismatch)
     print(
         f"[bold]HPSv2.1[/] (mismatching prompt: {mismatching_prompt!r}) "
-        f"= [red]{score_mismatch.aggregate().item():.4f}[/]"
+        f"= [red]{score_mismatch:.4f}[/]"
     )
 
-    assert score_match.aggregate().item() > score_mismatch.aggregate().item(), (
-        f"Expected matching prompt score ({score_match.aggregate().item():.4f}) > "
-        f"mismatching prompt score ({score_mismatch.aggregate().item():.4f})"
+    assert score_match > score_mismatch, (
+        f"Expected matching prompt score ({score_match:.4f}) > "
+        f"mismatching prompt score ({score_mismatch:.4f})"
     )
     print("[bold green]OK — matching prompt scores higher than mismatching prompt.[/]")
-
-    reward.unload_model()

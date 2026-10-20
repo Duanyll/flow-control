@@ -3,24 +3,24 @@ from typing import Any, Literal
 import torch
 import torchvision.transforms as T
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 
-from flow_control.utils import device as devutil
+from flow_control.samplers.node import Row
 from flow_control.utils.condition_image import ConditionImage, ConditionImageSpec
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 
-@reward_registry.register("clip_image_similarity")
-class CLIPImageSimilarityReward(BaseReward):
+@scorer_registry.register("clip_image_similarity")
+class ClipImageSimilarityScorer(BaseScorer, LocalReward[Row, Tensor]):
     """CLIP-based image-to-image cosine similarity reward.
 
     Encodes ``row["clean_image"]`` and the :attr:`reference` condition image
     with a CLIP image encoder, L2-normalizes the embeddings, and returns their cosine
     similarity in ``[-1, 1]`` (typically in ``[0, 1]`` for natural images).
 
-    The raw cosine similarity is returned as-is; configure the optional
-    :attr:`normalize` transform on the base class if you want to remap the
-    range (e.g. clamp to ``[0, 1]``).
+    The raw cosine similarity is returned as-is; configure :attr:`normalize`
+    to remap the range (e.g. clamp to ``[0, 1]``).
     """
 
     type: Literal["clip_image_similarity"] = "clip_image_similarity"
@@ -36,10 +36,10 @@ class CLIPImageSimilarityReward(BaseReward):
     _device: Any = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", ConditionImage.parse(self.reference).image_field}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         from transformers import CLIPModel, CLIPProcessor
 
         self._device = device
@@ -96,7 +96,10 @@ class CLIPImageSimilarityReward(BaseReward):
         return embeds
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         """Compute CLIP image-similarity score for a single sample.
 
         Expects ``row["clean_image"]`` and the :attr:`reference` image, both
@@ -112,16 +115,6 @@ class CLIPImageSimilarityReward(BaseReward):
         sim = (clean_embeds * reference_embeds).sum(dim=-1)  # [1]
         return sim
 
-    def _unload_model(self) -> None:
-        import gc
-
-        del self._model, self._processor, self._transform
-        self._model = None
-        self._processor = None
-        self._transform = None
-        gc.collect()
-        devutil.empty_cache()
-
 
 if __name__ == "__main__":
     import urllib.request
@@ -130,6 +123,7 @@ if __name__ == "__main__":
     from PIL import Image, ImageOps
     from rich import print
 
+    from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
     data_dir = Path("data")
@@ -147,31 +141,21 @@ if __name__ == "__main__":
     inverted_tensor = pil_to_tensor(inverted_pil)
     print(f"[bold]Image size:[/] {image_pil.size}, tensor shape: {image_tensor.shape}")
 
-    reward = CLIPImageSimilarityReward()
-    reward.load_model(devutil.default_device())
+    reward = ClipImageSimilarityScorer()
+    reward.load(devutil.default_device())
 
-    same_batch = {
-        "clean_image": image_tensor,
-        "reference_images": [image_tensor],
-    }
-    same_score = reward.score(same_batch)
-    print(f"[bold]Identical image similarity:[/] {same_score.aggregate().item():.4f}")
-    assert same_score.aggregate().item() >= 0.99, (
-        f"Expected identical similarity >= 0.99, got {same_score.aggregate().item()}"
+    same, inverted = (
+        score.item()
+        for score in reward.run_batch(
+            [
+                {"clean_image": image_tensor, "reference_images": [image_tensor]},
+                {"clean_image": image_tensor, "reference_images": [inverted_tensor]},
+            ]
+        )
     )
-
-    inverted_batch = {
-        "clean_image": image_tensor,
-        "reference_images": [inverted_tensor],
-    }
-    inverted_score = reward.score(inverted_batch)
-    print(
-        f"[bold]Inverted image similarity:[/] {inverted_score.aggregate().item():.4f}"
+    print(f"[bold]Image similarity:[/] identical {same:.4f}, inverted {inverted:.4f}")
+    assert same >= 0.99, f"Expected identical similarity >= 0.99, got {same}"
+    assert inverted < same, (
+        f"Expected inverted similarity < identical similarity, got {inverted} vs {same}"
     )
-    assert inverted_score.aggregate().item() < same_score.aggregate().item(), (
-        f"Expected inverted similarity < identical similarity, got "
-        f"{inverted_score.aggregate().item()} vs {same_score.aggregate().item()}"
-    )
-
-    reward.unload_model()
     print("[bold green]Self-test passed.[/]")

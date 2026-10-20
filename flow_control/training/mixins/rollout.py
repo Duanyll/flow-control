@@ -3,75 +3,34 @@
 Extracted from GrpoTrainer so that NFT and other RL trainers can reuse the
 rollout / reward / advantage pipeline. Prompts come from a ``RowCursor`` over
 the trainer's store (design §7.3): every RL epoch takes ``num_prompts_per_epoch``
-distinct prompts, identical on every rank, and ``expand_rollouts`` (§9.3)
-stripes their ``num_rollouts_per_prompt`` rollouts across the ranks.
+distinct prompts, identical on every rank, and each rank keeps every ``K``-th
+prompt whole; the rollout program (``docs/rollout-reward-design.md``) turns a
+prompt into its ``num_rollouts_per_prompt`` scored rows through the ``Runner``.
 """
 
 import json
 import time
-from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
-from itertools import groupby
-from operator import itemgetter
 from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
 from pydantic import BaseModel
-from rich.progress import Progress
 
 from flow_control.adapters import ModelAdapter
-from flow_control.data import (
-    KEY,
-    OnlineStore,
-    PromptSampling,
-    RowCursor,
-    expand_rollouts,
-)
-from flow_control.rewards import (
-    PendingRewards,
-    Reward,
-    RewardLoopThread,
-    RewardProfile,
-    _has_pairwise_child,
-    reduce_reward_profiles,
-    submit_pairwise_reward,
-    submit_reward,
-)
-from flow_control.rewards.base import RewardResult
-from flow_control.samplers import (
-    Calls,
-    Executor,
-    Observer,
-    Row,
-    Trajectory,
-    data,
-    derive_seed,
-    variants,
-)
-from flow_control.utils.logging import console, get_logger
-from flow_control.utils.tensor import (
-    deep_cast_float_dtype,
-    deep_move_to_device,
-)
+from flow_control.data import KEY, OnlineStore, PromptSampling, RowCursor
+from flow_control.rewards import reduce_reward_profiles
+from flow_control.samplers import Observer, Row
+from flow_control.training.rollouts import Pending, Rollout
+from flow_control.utils.logging import get_logger
+from flow_control.utils.tensor import deep_cast_float_dtype
 
 from ..advantage import Advantage, PerPromptAdvantage
 from .base import BaseTrainer
-from .data import DataMixin
 from .logging import LoggingMixin
+from .runner import RunnerMixin
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class Rollout:
-    reward: torch.Tensor
-    raw_reward: torch.Tensor
-    reward_weights: torch.Tensor
-    reward_labels: list[str]
-    key: str
-    row: Row
-    """The finished sample: ``clean_latents`` plus whatever the observers wrote."""
 
 
 @dataclass
@@ -83,37 +42,22 @@ class PendingRollouts:
     policy_version: int
     """``_current_epoch`` when sampled; ``rollout/policy_lag`` is the gap to the
     epoch that trains on it (0 without ``rollout_lookahead``)."""
-    rollouts: list[Rollout]
-    rewards: PendingRewards[int]
-    """Reward futures tagged by index into ``rollouts``."""
-    profile: RewardProfile
+    groups: Pending
+    """The batch's prompt groups on the runner; ``wait()`` returns their rows."""
     cursor_state_before: dict[str, int]
     """``RowCursor`` state before this batch took its prompts; the checkpoint
     saves the oldest in-flight batch's so a resume re-takes the same prompts."""
 
 
-def _reward_writer(rollouts: list[Rollout]) -> Callable[[int, RewardResult], None]:
-    def write(idx: int, result: RewardResult) -> None:
-        # Result is [1, C] for the single rollout sample.
-        rollout = rollouts[idx]
-        rollout.reward = result.normalized.squeeze(0).detach().cpu()
-        rollout.raw_reward = result.raw.squeeze(0).detach().cpu()
-        rollout.reward_weights = result.weights.detach().cpu()
-        rollout.reward_labels = result.labels
-
-    return write
-
-
-class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
+class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
     """Mixin providing rollout collection and advantage computation."""
 
     # ---------------------------------- Configs --------------------------------- #
     num_prompts_per_epoch: int
     """
     Distinct prompts drawn per epoch (``M``). Each gets ``num_rollouts_per_prompt``
-    rollouts, so an epoch collects ``M * K`` rollouts globally and ``M * K /
-    world_size`` per rank; ``M * K`` must be divisible by ``world_size`` (``M``
-    itself when the reward is pairwise, which keeps a prompt's rollouts on one rank).
+    rollouts, so an epoch collects ``M * K`` rollouts globally. A prompt's
+    rollouts stay on one rank, so ``M`` must be divisible by ``world_size``.
     """
     num_rollouts_per_prompt: int
     """
@@ -141,33 +85,23 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
 
     model: ModelAdapter
-    reward: Reward
-    rollout_sampler: Trajectory
+    rollout: Rollout
 
     _cursor: RowCursor
-    _reward_loop: RewardLoopThread | None = None
 
     # -------------------------------- Properties -------------------------------- #
 
     @property
     def rollouts_per_rank(self) -> int:
-        """``M * K / world_size`` after checking that the rollouts tile the ranks."""
+        """``M * K / world_size`` after checking that the prompts tile the ranks."""
         prompts, per_prompt = self.num_prompts_per_epoch, self.num_rollouts_per_prompt
-        total = prompts * per_prompt
-        if _has_pairwise_child(self.reward):
-            if prompts % self.world_size != 0:
-                raise ValueError(
-                    f"A pairwise reward keeps all {per_prompt} rollouts of a prompt on "
-                    f"one rank, so num_prompts_per_epoch ({prompts}) must be divisible "
-                    f"by world_size ({self.world_size})."
-                )
-        elif total % self.world_size != 0:
+        if prompts % self.world_size != 0:
             raise ValueError(
-                f"num_prompts_per_epoch * num_rollouts_per_prompt ({total}) must be "
-                f"divisible by world_size ({self.world_size}) so every rank collects "
-                "the same number of rollouts."
+                f"A prompt's {per_prompt} rollouts stay on one rank, so "
+                f"num_prompts_per_epoch ({prompts}) must be divisible by world_size "
+                f"({self.world_size})."
             )
-        return total // self.world_size
+        return prompts // self.world_size * per_prompt
 
     @property
     def rollout_storage(self) -> torch.device:
@@ -177,27 +111,13 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             return self.device
         return torch.device("cpu")
 
-    @property
-    def reward_loop(self) -> RewardLoopThread:
-        """The run-long reward event loop, opened on first use.
-
-        Every reward request of the run (rollouts and validation) goes through
-        this one loop: a remote reward client drops its connection pool whenever
-        the loop changes, which would cut off requests still in flight for a
-        batch sampled ahead. :meth:`close_reward_loop` ends it.
-        """
-        if self._reward_loop is None:
-            self._reward_loop = RewardLoopThread()
-        return self._reward_loop
-
-    def close_reward_loop(self) -> None:
-        if self._reward_loop is not None:
-            self._reward_loop.close()
-            self._reward_loop = None
-
     def _rollout_observers(self) -> list[tuple[type, Observer]]:
         """Observers on every rollout's chain root (what the trainer records)."""
         return []
+
+    def _rollout_variant(self) -> str:
+        """The model variant that samples the rollouts."""
+        return "default"
 
     # ----------------------------- Rollout phase ----------------------------- #
 
@@ -223,142 +143,82 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             self.prompt_sampling == "chunked"
             and not isinstance(store, OnlineStore)
             and short % self.world_size != 0
-            and (
-                _has_pairwise_child(self.reward)
-                or self.num_rollouts_per_prompt % self.world_size != 0
-            )
         ):
             # See the RowCursor alignment caveat: throughput only.
             logger.warning(
                 f"{len(store)} rows leave a plan group of {short} real rows "
                 f"(group_size {self.group_size}), not a multiple of world_size "
                 f"({self.world_size}): once a pass walks past it, one block of "
-                "rollouts per group straddles two cost groups. Set dataset.limit "
+                "prompts per group straddles two cost groups. Set dataset.limit "
                 "to a multiple of group_size to keep every rank on one group."
             )
 
-    def _collect_rollouts(self, epoch: int) -> list[Rollout]:
-        """Rollout phase: sample, decode, then score rewards as each sample finishes."""
+    def _collect_rollouts(self, epoch: int) -> list[Row]:
+        """Rollout phase: sample and score batch *epoch* synchronously."""
         return self._finish_rollouts(self._start_rollouts(epoch))
 
     def _start_rollouts(self, epoch: int) -> PendingRollouts:
-        """Sample and decode batch *epoch*, submit its rewards and return without
-        waiting for them; ``Rollout.reward`` holds a placeholder until
-        :meth:`_finish_rollouts`. A pairwise reward is submitted per prompt group
-        as each group's rollouts complete."""
-        rollouts: list[Rollout] = []
+        """Submit batch *epoch*'s prompt groups to the runner and return once
+        every group has left ``sample()``, so every model call of the batch ran
+        under the current weights; its rewards may still be in flight until
+        :meth:`_finish_rollouts`."""
         model = self.model
-        processor = self.processor
-        sampler = self.rollout_sampler
-        observers = self._rollout_observers()
-        device = self.device
-        rollout_storage = self.rollout_storage
         store = self._store
         assert store is not None, "make_rollout_cursor() runs before the first epoch"
-
         model.transformer.eval()
 
-        # Same seed and cursor state everywhere -> every rank draws the same ids.
+        # Same seed and cursor state everywhere -> every rank draws the same ids,
+        # and keeps every world_size-th prompt whole.
         cursor_state_before = self._cursor.state_dict()
-        prompt_ids = self._cursor.take(self.num_prompts_per_epoch, epoch=epoch)
-        mine = expand_rollouts(
-            prompt_ids,
-            self.num_rollouts_per_prompt,
-            self.rank,
-            self.world_size,
-            whole_prompts=_has_pairwise_child(self.reward),
-        )
+        ids = self._cursor.take(self.num_prompts_per_epoch, epoch=epoch)
+        mine = ids[self.rank :: self.world_size]
 
-        progress = Progress(
-            *self.get_progress_columns(),
-            console=console,
-            transient=True,
-        )
-        rollout_task = progress.add_task("Rollout", total=len(mine))
-
-        def runs() -> Iterator[tuple[Row, Calls[None]]]:
-            """Prepare lazily; a prompt's rollouts share its row, each with its own latents."""
-            for prompt_id, group in groupby(mine, key=itemgetter(0)):
-                row = deep_cast_float_dtype(
-                    self.prepare_row(
-                        store.get(prompt_id), mode="inference", epoch=epoch
-                    ),
-                    model.dtype,
-                )
-                for _, k in group:
-                    generator = torch.Generator(device=device).manual_seed(
-                        derive_seed(self.seed, f"rollout:{epoch}:{prompt_id}:{k}")
-                    )
-                    rollout = self.start_row(
-                        data(row), generator, model.dtype, observers
-                    )
-                    yield rollout, sampler(rollout)
-
-        def rollout_submitter() -> Generator[tuple[Row, int]]:
-            executor = Executor(model, variants(sampler))
-            with progress, torch.no_grad():
-                for row in executor.stream(runs()):
-                    row["clean_latents"] = row["noisy_latents"]
-                    row.update(processor.decode_output(row["noisy_latents"], row))
-                    rollouts.append(
-                        Rollout(
-                            reward=torch.zeros(1),  # placeholder
-                            raw_reward=torch.zeros(1),  # placeholder
-                            reward_weights=torch.ones(1),  # placeholder
-                            reward_labels=["reward"],  # placeholder
-                            key=row[KEY],
-                            row=deep_move_to_device(
-                                data(row), rollout_storage, preserve_aliases=True
-                            ),
-                        )
-                    )
-                    progress.advance(rollout_task)
-                    yield row, len(rollouts) - 1
-
-        reward_profile = RewardProfile()
-        pending_rewards: PendingRewards[int]
-        if _has_pairwise_child(self.reward):
-            pending_rewards = submit_pairwise_reward(
-                self.reward,
-                rollout_submitter(),
-                loop=self.reward_loop,
-                num_rollouts_per_prompt=self.num_rollouts_per_prompt,
-                profile=reward_profile,
-            )
-        else:
-            pending_rewards = submit_reward(
-                self.reward,
-                rollout_submitter(),
-                profile=reward_profile,
-                loop=self.reward_loop,
+        def prepare(item: Row) -> Row:
+            return deep_cast_float_dtype(
+                self.prepare_row(item, mode="inference", epoch=epoch), model.dtype
             )
 
-        # Drain the (now-finished) Rollout progress bar -> GPU production timing.
+        started = time.perf_counter()
+        groups = self.runner.submit(
+            ((i, store.get(i)) for i in mine),
+            self.rollout.sample,
+            self.rollout.score,
+            prepare=prepare,
+            k=self.num_rollouts_per_prompt,
+            epoch=epoch,
+            variant=self._rollout_variant(),
+            sampler=self.rollout.sampler,
+            observers=self._rollout_observers(),
+        )
+        groups.sampled()
         step = getattr(self, "_current_step", 0)
-        self.log_progress_timing(progress, step, prefix="profile/rollout")
-
+        self.log_phase_timing(
+            "Rollout",
+            time.perf_counter() - started,
+            len(mine) * self.num_rollouts_per_prompt,
+            step,
+            prefix="profile/rollout",
+        )
         return PendingRollouts(
             epoch=epoch,
             policy_version=getattr(self, "_current_epoch", epoch),
-            rollouts=rollouts,
-            rewards=pending_rewards,
-            profile=reward_profile,
+            groups=groups,
             cursor_state_before=cursor_state_before,
         )
 
-    def _finish_rollouts(self, pending: PendingRollouts) -> list[Rollout]:
-        """Wait for the batch's rewards, write them into its rollouts and log the
-        reward profile (the part the progress bar cannot see) plus how long the
-        wait actually blocked and how many epochs the batch's policy is behind.
-        All of it lands on the training epoch's step; the same batch's
-        ``profile/rollout/*`` went out at the step it was sampled."""
+    def _finish_rollouts(self, pending: PendingRollouts) -> list[Row]:
+        """Wait for the batch's rewards and log the reward profile (the part the
+        rollout timing cannot see) plus how long the wait actually blocked and
+        how many epochs the batch's policy is behind. All of it lands on the
+        training epoch's step; the same batch's ``profile/rollout/*`` went out
+        at the step it was sampled."""
         started = time.perf_counter()
-        pending.rewards.wait(_reward_writer(pending.rollouts))
+        rows = [row for rows in pending.groups.wait() for row in rows]
         wait_s = time.perf_counter() - started
 
         step = getattr(self, "_current_step", 0)
         self.log_reduced_metrics(
-            pending.profile.local_payload(), reduce_reward_profiles, step
+            pending.groups.profile.local_payload(), reduce_reward_profiles, step
         )
         current_epoch: int = getattr(self, "_current_epoch", pending.epoch)
         self.log_metrics(
@@ -378,15 +238,15 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
                         "policy_version": pending.policy_version,
                         "step": step,
                         "wait_at_train_s": wait_s,
-                        **pending.profile.timestamps(),
+                        **pending.groups.profile.timestamps(),
                     }
                 )
             )
-        return pending.rollouts
+        return rows
 
     # ----------------------------- Advantages -------------------------------- #
 
-    def _compute_advantages(self, rollouts: list[Rollout], step: int) -> torch.Tensor:
+    def _compute_advantages(self, rows: list[Row], step: int) -> torch.Tensor:
         """Compute advantages using gathered rewards across all GPUs."""
         device = self.device
         rank: int = self.rank
@@ -394,8 +254,14 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         log_metrics = self.log_metrics
 
         # Stack per-sample [C] rewards into [B_local, C]
-        local_rewards = torch.stack([s.reward for s in rollouts], dim=0).to(device)
-        local_raw_rewards = torch.stack([s.raw_reward for s in rollouts], dim=0).to(
+        local_rewards = torch.stack([row["reward"] for row in rows], dim=0).to(device)
+        labels = self.rollout.labels
+        if local_rewards.shape[1] != len(labels):
+            raise ValueError(
+                f"The {self.rollout.type!r} program wrote {local_rewards.shape[1]} "
+                f"reward components per row but declares {len(labels)}: {labels}."
+            )
+        local_raw_rewards = torch.stack([row["reward_raw"] for row in rows], dim=0).to(
             device
         )
 
@@ -411,7 +277,7 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         dist.all_gather(gathered_raw_rewards_list, local_raw_rewards)
         gathered_raw_rewards = torch.cat(gathered_raw_rewards_list, dim=0)
 
-        local_keys = [s.key for s in rollouts]
+        local_keys = [row[KEY] for row in rows]
         all_keys_nested: list[Any] = [None] * world_size
         dist.all_gather_object(all_keys_nested, local_keys)
         all_keys: list[str] = []
@@ -425,14 +291,12 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             device=gathered_rewards.device,
         )
 
-        component_weights = rollouts[0].reward_weights.to(
+        weights = torch.tensor(
+            self.rollout.weights,
             device=gathered_rewards.device,
             dtype=gathered_rewards.dtype,
         )
-        component_labels = rollouts[0].reward_labels
-        advantages = self.advantage.compute(
-            gathered_rewards, prompt_ids, component_weights
-        )
+        advantages = self.advantage.compute(gathered_rewards, prompt_ids, weights)
 
         # Log aggregate reward plus per-component raw/normalized stats. The
         # ``group_std`` entries are the mean over prompts of the within-group
@@ -444,14 +308,14 @@ class RolloutMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             stds = [values[prompt_ids == g].std(correction=0) for g in group_ids]
             return torch.stack(stds).mean().item()
 
-        combined = (gathered_rewards * component_weights).sum(dim=-1)
+        combined = (gathered_rewards * weights).sum(dim=-1)
         metrics: dict[str, float] = {
             "rollout/reward_mean": combined.mean().item(),
             "rollout/reward_std": combined.std(correction=0).item(),
             "rollout/reward_group_std": group_std(combined),
             "rollout/adv_abs_mean": advantages.abs().mean().item(),
         }
-        for i, label in enumerate(component_labels):
+        for i, label in enumerate(labels):
             metrics[f"rollout/raw/{label}_mean"] = (
                 gathered_raw_rewards[:, i].mean().item()
             )

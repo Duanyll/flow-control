@@ -5,7 +5,7 @@ processor and reward faked around the real trainer code."""
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -15,18 +15,32 @@ from test_microbatching import FakeSamplerModel
 from flow_control.contrib.momentum_guidance import Momentum
 from flow_control.data import KEY, Index, IndexEntry, RowCursor
 from flow_control.processors import parse_processor
-from flow_control.rewards import PendingRewards
-from flow_control.samplers import Cfg, CfgPlusPlus, Grid, Trajectory
+from flow_control.rewards.base import BaseScorer, LocalReward, Scorers, scorer_registry
+from flow_control.samplers import Cfg, CfgPlusPlus, Grid, Row, Trajectory
 from flow_control.training.awm import AwmTrainer
 from flow_control.training.endpoint import EndpointTrainItem
 from flow_control.training.grpo import GrpoTrainer
-from flow_control.training.mixins import Rollout
 from flow_control.training.nft import NftObjective, NftTrainer
 from flow_control.training.ram import RamTrainer
+from flow_control.training.rollouts import PointwiseRollout, Rollout
 from flow_control.training.sft import SftTrainer
 from flow_control.training.weighting import LogitNormalTimestepWeighting
 
-SUBMIT_REWARD = "flow_control.training.mixins.rollout.submit_reward"
+
+@scorer_registry.register("_test_key")
+class _KeyScorer(BaseScorer, LocalReward[Row, torch.Tensor]):
+    """Local scorer ``float(row[KEY])``: a rollout's reward names its prompt, so
+    the probes can tell which batch a reward came from."""
+
+    type: Literal["_test_key"] = "_test_key"
+    name: str | None = "key"
+
+    @property
+    def fields(self) -> set[str]:
+        return {KEY}
+
+    def run_batch(self, rows: list[Row]) -> list[torch.Tensor]:
+        return [torch.tensor([float(row[KEY])]) for row in rows]
 
 
 class _ProbeOverrides(BaseModel):
@@ -34,7 +48,6 @@ class _ProbeOverrides(BaseModel):
 
     model: Any = None
     processor: Any = None
-    reward: Any = None
     dataset: Any = None
     launch: Any = None
     checkpoint_root: str = ""
@@ -42,7 +55,11 @@ class _ProbeOverrides(BaseModel):
     seed_checkpoint_dir: str = ""
     num_prompts_per_epoch: int = 1
     num_rollouts_per_prompt: int = 1
-    rollout_sampler: Trajectory = Field(default_factory=Grid)
+    rollout: Rollout = Field(
+        default_factory=lambda: PointwiseRollout(
+            sampler=Grid(), reward=Scorers([_KeyScorer()])
+        )
+    )
     validation_sampler: Trajectory = Field(default_factory=Grid)
 
     @property
@@ -71,7 +88,8 @@ class _RamProbe(_ProbeOverrides, RamTrainer):
 
 
 class _VariantModel(FakeSamplerModel):
-    """``gain[variant] * (prompt_embeds + 0.1 * x)``; journals the variant of every forward."""
+    """``gain[variant] * (prompt_embeds + 0.1 * x)``; journals the variant of every
+    non-empty forward (the runner's executor forwards every variant each round)."""
 
     def __init__(self, **gains: float) -> None:
         super().__init__()
@@ -79,6 +97,7 @@ class _VariantModel(FakeSamplerModel):
         self.gains = {"default": self.gain} | {
             name: torch.tensor(value) for name, value in gains.items()
         }
+        self.variants: dict[str, object] = dict.fromkeys(self.gains)
         self.active = "default"
         self.forwards: list[tuple[str, int]] = []
         self.transformer = torch.nn.Identity()
@@ -92,6 +111,8 @@ class _VariantModel(FakeSamplerModel):
             self.active = previous
 
     def predict_velocity_batched(self, batches, timesteps, *, dummy_outputs=None):
+        if not batches:
+            return []
         self.forward_batch_sizes.append(len(batches))
         self.forwards.append((self.active, len(batches)))
         return [
@@ -101,16 +122,16 @@ class _VariantModel(FakeSamplerModel):
 
 
 class _Store:
-    """One prompt row; ``prompt_embeds`` 3 with negative 1."""
+    """One prompt row keyed ``"0"``; ``prompt_embeds`` 3 with negative 1."""
 
-    index = Index([IndexEntry("p", 1, "", None, "p")], {})
+    index = Index([IndexEntry("0", 1, "", None, "0")], {})
 
     def __len__(self) -> int:
         return 1
 
     def get(self, row_id: int) -> dict[str, Any]:
         return {
-            KEY: "p",
+            KEY: "0",
             "image_size": (32, 32),
             "clean_latents": torch.zeros(1, 1, 1),
             "noisy_latents": torch.full((1, 1, 1), 0.9),
@@ -119,13 +140,8 @@ class _Store:
         }
 
 
-def _drain(reward, submitter, loop, profile) -> PendingRewards[int]:
-    list(submitter)
-    return PendingRewards([])
-
-
-def _collect(case: unittest.TestCase, trainer: Any, model: Any) -> Rollout:
-    """One real ``_collect_rollouts`` of the single prompt with rewards drained."""
+def _collect(case: unittest.TestCase, trainer: Any, model: Any) -> Row:
+    """One real ``_collect_rollouts`` of the single prompt through the runner."""
     trainer.set_seed()
     trainer.model = model
     trainer.processor = SimpleNamespace(
@@ -138,14 +154,10 @@ def _collect(case: unittest.TestCase, trainer: Any, model: Any) -> Rollout:
     trainer._cursor = RowCursor(
         store, trainer.make_planner(store, shuffle=True), trainer.seed
     )
-    case.addCleanup(trainer.close_reward_loop)
-    with (
-        patch(SUBMIT_REWARD, side_effect=_drain),
-        patch.object(type(trainer), "log_progress_timing"),
-        patch.object(type(trainer), "log_reduced_metrics"),
-    ):
-        (rollout,) = trainer._collect_rollouts(0)
-    return rollout
+    trainer.make_runner(model)
+    case.addCleanup(trainer.close_runner)
+    (row,) = trainer._collect_rollouts(0)
+    return row
 
 
 def _point(batch: dict[str, Any], trainer: Any) -> dict[str, Any]:
@@ -166,29 +178,33 @@ class TrainerRolloutTest(unittest.TestCase):
             trainer = _GrpoProbe.model_validate(
                 {
                     "train_predictor": {"type": "cfg", "scale": train_scale},
-                    "rollout_sampler": {
-                        "type": "sde_window_grid",
-                        "steps": 4,
-                        "size": 2,
-                        "window_range": [1, 3],
-                        "eta": 0.7,
-                        "transition": {
-                            "type": "euler",
-                            "prediction": Momentum(
-                                alpha=0.5,
-                                beta=0.25,
-                                prediction=Cfg(scale=rollout_scale),
-                            ),
+                    "rollout": {
+                        "type": "pointwise",
+                        "sampler": {
+                            "type": "sde_window_grid",
+                            "steps": 4,
+                            "size": 2,
+                            "window_range": [1, 3],
+                            "eta": 0.7,
+                            "transition": {
+                                "type": "euler",
+                                "prediction": Momentum(
+                                    alpha=0.5,
+                                    beta=0.25,
+                                    prediction=Cfg(scale=rollout_scale),
+                                ),
+                            },
                         },
+                        "reward": {"type": "_test_key"},
                     },
                     "kl_beta": 0.1,
                 }
             )
             rollout = _collect(self, trainer, model)
-            trajectory = rollout.row["trajectory"]
+            trajectory = rollout["trajectory"]
             self.assertEqual([p["_frame"].parent.index for p in trajectory], [1, 2])
             self.assertEqual(model.forwards, [("default", branches[rollout_scale])] * 4)
-            self.assertNotIn("_frame", rollout.row)
+            self.assertNotIn("_frame", rollout)
             # Recorded = the momentum-guided velocity at step 1 under the
             # rollout's eta 0.7 (history from step 0 at the initial latents).
             first = trainer._point(rollout, 0)
@@ -223,11 +239,9 @@ class TrainerRolloutTest(unittest.TestCase):
             self.assertTrue(torch.isfinite(loss))
             self.assertIsNotNone(torch.autograd.grad(loss, model.gain)[0])
 
-        deterministic = _GrpoProbe.model_validate(
-            {"train_predictor": "model", "rollout_sampler": Grid(steps=4)}
-        )
+        deterministic = _GrpoProbe.model_validate({"train_predictor": "model"})
         rollout = _collect(self, deterministic, _VariantModel())
-        self.assertNotIn("trajectory", rollout.row)
+        self.assertNotIn("trajectory", rollout)
         with self.assertRaisesRegex(RuntimeError, "stochastic"):
             deterministic._check_rollouts([rollout])
 
@@ -241,18 +255,20 @@ class TrainerRolloutTest(unittest.TestCase):
             {
                 "num_inner_epochs": 2,
                 "train_predictor": "model",
-                "rollout_sampler": [
-                    {"type": "grid", "steps": 2, "sigma_end": 0.5},
-                    {"type": "grid", "steps": 2},
-                ],
+                "rollout": {
+                    "type": "pointwise",
+                    "sampler": [
+                        {"type": "grid", "steps": 2, "sigma_end": 0.5},
+                        {"type": "grid", "steps": 2},
+                    ],
+                    "reward": {"type": "_test_key"},
+                },
             }
         )
         model = _VariantModel(old=0.8, ref=0.5)
         rollout = _collect(self, trainer, model)
-        self.assertEqual(rollout.row["sigmas"], [1.0, 0.75, 0.5, 0.25, 0.0])
-        torch.testing.assert_close(
-            rollout.row["clean_latents"], rollout.row["noisy_latents"]
-        )
+        self.assertEqual(rollout["sigmas"], [1.0, 0.75, 0.5, 0.25, 0.0])
+        torch.testing.assert_close(rollout["clean_latents"], rollout["noisy_latents"])
         plan = trainer._build_train_plan([rollout])
         self.assertEqual(len(plan), 2)
         for items in plan:

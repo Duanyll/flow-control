@@ -43,18 +43,20 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    "type": "sde_window_grid",
-    "steps": 10,
-    "size": 3,
-    "eta": 0.8,
-    "shift": 3.0,
-    "transition": { "type": "cps", "eta": 0.0 },
-  },
-  // Random 3-step recorded SDE window; omit "window_range" -> anywhere in (0, steps-1).
-
-  "reward": {
-    "type": "pickscore",
+  "rollout": {
+    "type": "pointwise",
+    // Random 3-step recorded SDE window; omit "window_range" -> anywhere in (0, steps-1).
+    "sampler": {
+      "type": "sde_window_grid",
+      "steps": 10,
+      "size": 3,
+      "eta": 0.8,
+      "shift": 3.0,
+      "transition": { "type": "cps", "eta": 0.0 },
+    },
+    "reward": {
+      "type": "pickscore",
+    },
   },
 
   "advantage": {

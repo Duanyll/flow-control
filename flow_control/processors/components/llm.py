@@ -1,18 +1,14 @@
-import asyncio
 import base64
-import contextlib
 import io
 import json
-import random
 import re
-import time
 from typing import Any, Literal, TypedDict
 
-import aiohttp
 import json5
 import torch
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
+from flow_control.utils.aiohttp_session import AiohttpSession
 from flow_control.utils.logging import get_logger
 from flow_control.utils.resize import resize_to_multiple_of
 from flow_control.utils.tensor import (
@@ -22,9 +18,6 @@ from flow_control.utils.tensor import (
 )
 
 logger = get_logger(__name__)
-
-
-RETRY_STATUS = frozenset({408, 409, 425, 429})
 
 
 Role = Literal["system", "user", "assistant"]
@@ -49,27 +42,6 @@ class Message(TypedDict):
     content: str | list[TextContent | ImageContent]
 
 
-def _gateway_retry_after(
-    status: int, retry_after: str | None, body: str
-) -> float | None:
-    if status not in (429, 503) or retry_after is None:
-        return None
-    try:
-        error = json.loads(body).get("error") or {}
-    except (AttributeError, json.JSONDecodeError):
-        return None
-    if error.get("type") != "capacity" or error.get("code") != "capacity_unavailable":
-        return None
-    try:
-        return max(0.5, float(retry_after))
-    except ValueError:
-        return 5.0
-
-
-def _retryable_status(status: int) -> bool:
-    return status in RETRY_STATUS or 500 <= status < 600
-
-
 class LLMClient(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,80 +61,23 @@ class LLMClient(BaseModel):
     image_multiple_of: int = 16
     image_max_pixels: int = 1024 * 1024
 
-    _session: aiohttp.ClientSession | None = PrivateAttr(default=None)
-    _semaphore: asyncio.Semaphore | None = PrivateAttr(default=None)
-    _model_lock: asyncio.Lock | None = PrivateAttr(default=None)
-    _bound_loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
+    # One aiohttp session per event loop (a client outlives the loops it is used
+    # on), the max_concurrency slots and the retries; built at first use.
+    _http: AiohttpSession | None = PrivateAttr(default=None)
 
-    def _reset_loop_bound_state_if_needed(self) -> None:
-        """Drop session/semaphore/lock when the running event loop changed.
-
-        A trainer scores rollouts and validation on one run-long
-        ``RewardLoopThread``, but ``execute_reward`` without ``loop=``
-        (inference), ``execute_pairwise_reward`` and the ``asyncio.run``
-        fallback each open a short-lived loop and close it, while this client
-        is long-lived and caches its aiohttp session and asyncio primitives.
-        Those bind to the loop they were created on, so reusing them from a
-        later loop raises "Event loop is closed". Recreate them whenever the
-        running loop differs from the one the cached state belongs to; that
-        must never happen while another loop still has this client's requests
-        in flight.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if self._bound_loop is loop:
-            return
-        if self._session is not None:
-            # The old loop is already closed, so a clean async close is not
-            # possible; force_close=True on the connector means no live sockets
-            # linger. Best-effort sync cleanup to quiet "Unclosed client
-            # session" warnings, then abandon the reference.
-            connector = self._session.connector
-            if connector is not None:
-                with contextlib.suppress(Exception):
-                    connector.close()
-            with contextlib.suppress(Exception):
-                self._session._connector = None  # noqa: SLF001
-        self._session = None
-        self._semaphore = None
-        self._model_lock = None
-        self._bound_loop = loop
-
-    def _get_session(self) -> aiohttp.ClientSession:
-        self._reset_loop_bound_state_if_needed()
-        if self._session is None:
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            connector = aiohttp.TCPConnector(
-                # There has to be some limit to tcp connections or we might run out of file descriptors
-                limit=self.max_concurrency if self.max_concurrency > 0 else 64,
-                force_close=True,
+    def _http_session(self) -> AiohttpSession:
+        if self._http is None:
+            self._http = AiohttpSession(
+                timeout=self.timeout,
+                retries=self.retries,
+                max_concurrency=self.max_concurrency,
+                capacity_wait_timeout=self.capacity_wait_timeout,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
             )
-
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            # 将 connector 传递给 session
-            self._session = aiohttp.ClientSession(
-                timeout=timeout, headers=headers, connector=connector
-            )
-        return self._session
-
-    def _get_semaphore(self) -> asyncio.Semaphore | None:
-        if self.max_concurrency <= 0:
-            return None
-        self._reset_loop_bound_state_if_needed()
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrency)
-        return self._semaphore
-
-    def _get_model_lock(self) -> asyncio.Lock:
-        self._reset_loop_bound_state_if_needed()
-        if self._model_lock is None:
-            self._model_lock = asyncio.Lock()
-        return self._model_lock
+        return self._http
 
     async def get_model_name(self) -> str:
         # Fast path: if model is already set, return immediately
@@ -170,14 +85,13 @@ class LLMClient(BaseModel):
             return self.model
 
         # Slow path: need to fetch model from API with lock protection
-        lock = self._get_model_lock()
-        async with lock:
+        http = self._http_session()
+        async with http.lock():
             # Double-check: another coroutine might have fetched it while we waited
             if self.model != "auto":
                 return self.model
 
-            session = self._get_session()
-            async with session.get(f"{self.base_url}/models") as resp:
+            async with http.session().get(f"{self.base_url}/models") as resp:
                 resp.raise_for_status()
                 data = await resp.json()
                 models = data.get("data", [])
@@ -247,63 +161,6 @@ class LLMClient(BaseModel):
 
         return payload
 
-    async def _post_completion(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        errors = 0
-        failure_delay = 1.0
-        capacity_deadline = time.monotonic() + self.capacity_wait_timeout
-
-        while True:
-            capacity_delay: float | None = None
-            try:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        capacity_delay = _gateway_retry_after(
-                            resp.status,
-                            resp.headers.get("Retry-After"),
-                            body,
-                        )
-                        if capacity_delay is None:
-                            resp.raise_for_status()
-                    else:
-                        return await resp.json()
-            except aiohttp.ClientResponseError as exc:
-                if not _retryable_status(exc.status):
-                    raise
-                errors += 1
-                if errors > self.retries:
-                    raise
-                await asyncio.sleep(failure_delay * (0.5 + random.random()))
-                failure_delay = min(30.0, failure_delay * 2)
-                continue
-            except (
-                aiohttp.ClientConnectionError,
-                aiohttp.ClientPayloadError,
-                TimeoutError,
-            ):
-                errors += 1
-                if errors > self.retries:
-                    raise
-                await asyncio.sleep(failure_delay * (0.5 + random.random()))
-                failure_delay = min(30.0, failure_delay * 2)
-                continue
-
-            assert capacity_delay is not None
-            remaining = capacity_deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    "LLM gateway still had no capacity after "
-                    f"{self.capacity_wait_timeout:.0f}s"
-                )
-            wait = min(capacity_delay * (0.5 + random.random()), remaining)
-            logger.info(f"LLM gateway has no capacity; retrying in {wait:.1f}s")
-            await asyncio.sleep(wait)
-
     async def generate(
         self,
         user_prompt: str | list[TextContent | ImageContent],
@@ -319,10 +176,9 @@ class LLMClient(BaseModel):
         in which case it is used verbatim as the user message content and
         ``images`` is ignored. Build image parts with :meth:`encode_image`.
         """
-        semaphore = self._get_semaphore()
+        http = self._http_session()
 
-        async def _generate_impl():
-            session = self._get_session()
+        async with http.slot():
             model_name = await self.get_model_name()
             url = f"{self.base_url}/chat/completions"
 
@@ -352,7 +208,9 @@ class LLMClient(BaseModel):
                 messages.append({"role": "user", "content": user_prompt})
 
             payload = self._build_payload(model_name, messages)
-            data = await self._post_completion(session, url, payload)
+            data = await http.request(
+                "POST", url, json=payload, read=lambda resp: resp.json()
+            )
             choices = data.get("choices", [])
             if not choices:
                 raise ValueError("No choices returned from LLM API")
@@ -364,20 +222,6 @@ class LLMClient(BaseModel):
 
             messages.append({"role": "assistant", "content": content})
             return content, messages
-
-        if semaphore is not None:
-            async with semaphore:
-                return await _generate_impl()
-        else:
-            return await _generate_impl()
-
-    def __del__(self):
-        if self._session is None:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._session.close())
-        except RuntimeError:
-            asyncio.run(self._session.close())
 
 
 def is_chinese_text(text: str) -> bool:

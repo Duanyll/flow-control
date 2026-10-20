@@ -52,10 +52,12 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": { "type": "grid", "steps": 8, "shift": "linear" },
-
-  "reward": {
-    "type": "pickscore"
+  "rollout": {
+    "type": "pointwise",
+    "sampler": { "type": "grid", "steps": 8, "shift": "linear" },
+    "reward": {
+      "type": "pickscore"
+    },
   },
 
   "advantage": {

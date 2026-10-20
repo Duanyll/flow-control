@@ -1,17 +1,9 @@
-from collections.abc import Generator, Iterator
-from typing import Any, Literal
+import time
+from collections.abc import Awaitable, Callable
+from typing import Literal, cast
 
 import torch
 from pydantic import BaseModel
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from flow_control.adapters import ModelAdapter
@@ -24,27 +16,52 @@ from flow_control.data import (
     build_loader,
     is_padding,
 )
-from flow_control.rewards import Reward, RewardLoopThread, execute_reward
-from flow_control.rewards.base import BaseReward, RewardResult
-from flow_control.samplers import (
-    Calls,
-    Executor,
-    Row,
-    Trajectory,
-    derive_seed,
-    variants,
-)
-from flow_control.utils.logging import console, get_logger
+from flow_control.processors.base import DecodedRow
+from flow_control.rewards import Scorers
+from flow_control.samplers import Row, Trajectory, derive_seed
+from flow_control.training.rollouts import RewardContext, SampleContext, write
+from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import deep_cast_float_dtype
 
 from .base import BaseTrainer
-from .data import DataMixin
 from .logging import LoggingMixin
+from .runner import RunnerMixin
 
 logger = get_logger(__name__)
 
 
-class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
+def sample_one(
+    sampler: Trajectory, base_seed: int
+) -> Callable[[SampleContext], Awaitable[list[Row]]]:
+    """The ``sample`` of a validation / inference group: one row per item,
+    seeded by ``derive_seed(base_seed, key)``, sampled with *sampler* and decoded."""
+
+    async def sample(ctx: SampleContext) -> list[Row]:
+        row = await ctx.start(derive_seed(base_seed, ctx.prompt[KEY]))
+        await ctx.admit(sampler(row))
+        await ctx.decode(row)
+        return [row]
+
+    return sample
+
+
+def score_one(
+    scorer: Scorers | None,
+) -> Callable[[RewardContext, list[Row]], Awaitable[list[Row]]]:
+    """The matching ``score``: *scorer* on the row unless it is padding; the
+    rows come back either way, since the main thread's image logging and the
+    report are collective over every item."""
+
+    async def score(ctx: RewardContext, rows: list[Row]) -> list[Row]:
+        if scorer is not None and not is_padding(rows[0]):
+            raw = await scorer.score(ctx, rows)
+            write(rows, raw, scorer.normalize(raw))
+        return rows
+
+    return score
+
+
+class ValidationMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
     """
     Mixin that provides validation: sampling images and optionally scoring rewards.
     """
@@ -59,7 +76,9 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
     merged with labels) instead of the bare generated image. No-op for tasks whose
     ``annotate_output`` returns ``clean_image`` unchanged (plain T2I)."""
     validation_log_rewards: bool = True
-    validation_reward: Reward | Literal[False] | None = None
+    validation_scorer: Scorers | Literal[False] | None = None
+    """Scorers of the validation metrics. ``null``: the RL trainer's
+    ``rollout.reward`` (SFT scores nothing); ``false``: no scoring."""
     validation_at_start: bool = True
     """Validate before the first training step (the seed weights, or the resumed
     checkpoint's). ``false`` skips that pass, e.g. when relaunching a run whose
@@ -82,7 +101,7 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             raise ValueError("Validation dataloader not created yet.")
         return self._validation_dataloader
 
-    # ---------------------------------- Methods --------------------------------- #
+    # ---------------------------------- Methods ---------------------------------- #
 
     def make_validation_dataloader(
         self,
@@ -107,45 +126,23 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
             f"({len(self._validation_stream)} per rank)."
         )
 
-    def _validation_runs(
-        self, model: ModelAdapter, step: int
-    ) -> Iterator[tuple[Row, Calls[None]]]:
-        base_seed = self.seed if self.validation_same_seed else self.seed + step
-        epoch = 0 if self.validation_same_seed else step
-        online = isinstance(self._validation_store, OnlineStore)
-        for items in self.validation_dataloader:
-            for item in items:
-                row = self.prepare_row(
-                    item, mode="inference", epoch=epoch, online=online
-                )
-                row = deep_cast_float_dtype(row, model.dtype)
-                generator = torch.Generator(device=self.device).manual_seed(
-                    derive_seed(base_seed, row[KEY])
-                )
-                row = self.start_row(row, generator, model.dtype)
-                yield row, self.validation_sampler(row)
-
     @staticmethod
     def _reward_metrics(
-        reward_values: list[RewardResult], metric_prefix: str
+        rows: list[Row], scorer: Scorers, metric_prefix: str
     ) -> dict[str, float]:
         """Per-rank reward statistics; empty when this rank scored nothing (all
         its rows were padding), so ``log_metrics`` still runs as a collective."""
-        if not reward_values:
+        if not rows:
             return {}
-        normalized = torch.cat([r.normalized for r in reward_values], dim=0)
-        raw = torch.cat([r.raw for r in reward_values], dim=0)
-        weights = reward_values[0].weights.to(
-            device=normalized.device,
-            dtype=normalized.dtype,
-        )
-        labels = reward_values[0].labels
+        normalized = torch.stack([row["reward"] for row in rows], dim=0)
+        raw = torch.stack([row["reward_raw"] for row in rows], dim=0)
+        weights = torch.tensor(scorer.weights, dtype=normalized.dtype)
         aggregate = (normalized * weights).sum(dim=-1)
         metrics: dict[str, float] = {
             f"{metric_prefix}/reward_mean": aggregate.mean().item(),
             f"{metric_prefix}/reward_std": aggregate.std(correction=0).item(),
         }
-        for i, label in enumerate(labels):
+        for i, label in enumerate(scorer.labels):
             metrics[f"{metric_prefix}/raw/{label}_mean"] = raw[:, i].mean().item()
             metrics[f"{metric_prefix}/raw/{label}_std"] = (
                 raw[:, i].std(correction=0).item()
@@ -159,45 +156,47 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
         return metrics
 
     def validate_variants(
-        self,
-        model: ModelAdapter,
-        step: int,
-        reward: BaseReward | None = None,
-        reward_loop: RewardLoopThread | None = None,
+        self, model: ModelAdapter, step: int, default: Scorers | None
     ) -> None:
-        """Validate once per ``validation_variants`` entry."""
+        """Validate once per ``validation_variants`` entry, scored by
+        ``validation_scorer`` (``false``: none; ``null``: *default*)."""
+        scorer = (
+            None
+            if self.validation_scorer is False
+            else (self.validation_scorer or default)
+        )
         for index, name in enumerate(self.validation_variants):
             suffix = f"/{name}" if index else ""
-            with model.use_variant(name):
-                self.validate_and_log(
-                    model,
-                    step,
-                    reward=reward,
-                    metric_prefix=f"val{suffix}",
-                    image_name=f"validation{suffix}",
-                    profile_prefix=f"profile/validation{suffix}",
-                    reward_loop=reward_loop,
-                )
+            self.validate_and_log(
+                model,
+                step,
+                scorer,
+                variant=name,
+                metric_prefix=f"val{suffix}",
+                image_name=f"validation{suffix}",
+                profile_prefix=f"profile/validation{suffix}",
+            )
 
     @torch.no_grad()
     def validate_and_log(
         self,
         model: ModelAdapter,
         step: int,
-        reward: BaseReward | None = None,
+        scorer: Scorers | None,
+        *,
+        variant: str,
         metric_prefix: str = "val",
         image_name: str = "validation",
         profile_prefix: str = "profile/validation",
-        reward_loop: RewardLoopThread | None = None,
     ) -> None:
         """Run validation: sample images and optionally compute reward scores.
 
         Args:
             model: The model adapter (with transformer) to sample from.
             step: Current training step, used for logging.
-            reward: If provided, score each sample and log mean reward.
-            reward_loop: Caller-owned reward loop to score on (left open); by
-                default ``execute_reward`` opens and closes its own.
+            scorer: Scores each sample (with ``validation_log_rewards``) and
+                logs the reward statistics.
+            variant: The model variant the samples run under.
 
         Padding rows are sampled like every other row (the ranks' collectives
         stay balanced) but are neither logged nor scored.
@@ -207,78 +206,68 @@ class ValidationMixin(DataMixin, LoggingMixin, BaseTrainer, BaseModel):
 
         logger.info(f"Validating at step {step}...")
         model.transformer.eval()
+        if not self.validation_log_rewards:
+            scorer = None
 
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description:<20}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-            transient=True,
-            disable=len(self._validation_stream) <= 1,
-        )
-        task = progress.add_task("Validating", total=len(self._validation_stream))
+        base_seed = self.seed if self.validation_same_seed else self.seed + step
+        epoch = 0 if self.validation_same_seed else step
+        online = isinstance(self._validation_store, OnlineStore)
 
-        def sample_submitter() -> Generator[tuple[dict[str, Any], str]]:
-            image_count = 0
-            executor = Executor(model, variants(self.validation_sampler))
-            with progress:
-                for row in executor.stream(self._validation_runs(model, step)):
-                    key = row[KEY]
-                    padding = is_padding(row)
-                    decoded = self.processor.decode_output(row["noisy_latents"], row)
-                    row.update(decoded)
-
-                    if (
-                        self.validation_log_images is True
-                        or image_count < self.validation_log_images
-                    ):
-                        prompt = row.get("prompt")
-                        image = (
-                            None
-                            if padding
-                            else self.processor.annotate_output(decoded, row)
-                            if self.validation_annotate_images
-                            else row["clean_image"]
-                        )
-                        # Collective on every rank; None skips the emit.
-                        self.log_image(
-                            image,
-                            key,
-                            step=step,
-                            name=image_name,
-                            caption=prompt if isinstance(prompt, str) else None,
-                        )
-                        image_count += self.world_size
-
-                    progress.advance(task)
-                    if not padding:
-                        yield row, key
-
-        metric_reward = (
-            None
-            if self.validation_reward is False
-            else self.validation_reward or reward
-        )
-        if metric_reward is not None and self.validation_log_rewards:
-            # Use execute_reward to score all samples (with async overlap if supported)
-            reward_values = execute_reward(
-                metric_reward,
-                sample_submitter(),
-                lambda _tag, r: r,
-                loop=reward_loop,
+        def prepare(item: Row) -> Row:
+            return deep_cast_float_dtype(
+                self.prepare_row(item, mode="inference", epoch=epoch, online=online),
+                model.dtype,
             )
+
+        items = enumerate(
+            item for batch in self.validation_dataloader for item in batch
+        )
+        started = time.perf_counter()
+        groups = self.runner.submit(
+            items,
+            sample_one(self.validation_sampler, base_seed),
+            score_one(scorer),
+            prepare=prepare,
+            k=1,
+            epoch=epoch,
+            variant=variant,
+        ).wait()
+        elapsed = time.perf_counter() - started
+
+        image_count = 0
+        scored: list[Row] = []
+        for (row,) in groups:
+            padding = is_padding(row)
+            if (
+                self.validation_log_images is True
+                or image_count < self.validation_log_images
+            ):
+                prompt = row.get("prompt")
+                image = (
+                    None
+                    if padding
+                    else self.processor.annotate_output(cast(DecodedRow, row), row)
+                    if self.validation_annotate_images
+                    else row["clean_image"]
+                )
+                # Collective on every rank; None skips the emit.
+                self.log_image(
+                    image,
+                    row[KEY],
+                    step=step,
+                    name=image_name,
+                    caption=prompt if isinstance(prompt, str) else None,
+                )
+                image_count += self.world_size
+            if not padding:
+                scored.append(row)
+        if scorer is not None:
             self.log_metrics(
-                self._reward_metrics(reward_values, metric_prefix), step=step
+                self._reward_metrics(scored, scorer, metric_prefix), step=step
             )
-        else:
-            # Just iterate to generate and log images, no reward scoring
-            for _ in sample_submitter():
-                pass
-
-        self.log_progress_timing(progress, step, prefix=profile_prefix)
+        self.log_phase_timing(
+            "Validating", elapsed, len(groups), step, prefix=profile_prefix
+        )
 
         model.transformer.train()
         logger.info(f"Completed validation at step {step}.")

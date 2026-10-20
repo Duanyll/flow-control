@@ -10,19 +10,19 @@ Usage at a family's definition site::
 
     from flow_control.utils.registry import Registry, RegistryUnion
 
-    reward_registry: Registry[BaseReward] = Registry("reward", base=BaseReward)
+    shift_registry: Registry[BaseShift] = Registry("shift", base=BaseShift)
 
-    @reward_registry.register("clip_score")
-    class CLIPScoreReward(BaseReward): ...
+    @shift_registry.register("constant")
+    class ConstantShift(BaseShift): ...
 
-    # Statically ``Annotated[BaseReward, <metadata>]`` is just ``BaseReward`` to
+    # Statically ``Annotated[BaseShift, <metadata>]`` is just ``BaseShift`` to
     # pyright -- a plain type, no union-of-N in annotation position, no
     # ``if TYPE_CHECKING`` guards. The open union is assembled at runtime inside
     # ``RegistryUnion.__get_pydantic_core_schema__``.
-    Reward = Annotated[BaseReward, RegistryUnion(reward_registry, "type")]
+    Shift = Annotated[BaseShift, RegistryUnion(shift_registry, "type")]
 
 Out-of-tree plugins register the same way by importing the registry and applying
-``@reward_registry.register(...)``; ``load_plugins`` imports those modules.
+``@shift_registry.register(...)``; ``load_plugins`` imports those modules.
 
 Runtime vs schema: runtime validation reads the registry *lazily at validation
 time* (a member registered after the config class was built still validates, no
@@ -60,12 +60,21 @@ class Registry[T]:
     plugins register at import of their (out-of-tree) module.
     """
 
-    def __init__(self, name: str, *, base: type[T] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        base: type[T] | None = None,
+        check: Callable[[type], None] | None = None,
+    ) -> None:
         self.name = name
         # The static base used only for an optional runtime ``issubclass`` guard.
         # Pass ``base=None`` for duck-typed / Protocol families (datasets, sinks,
         # serving task templates) where a nominal subclass check is wrong.
         self._base = base
+        # A family-specific guard run on every member at registration; it raises
+        # (``TypeError``) on a class the family cannot use.
+        self._check = check
         # Widened to ``type[Any]`` so the identity-preserving ``register`` below
         # can stash an arbitrary concrete ``type[C]`` without a cast.
         self._members: dict[str, type[Any]] = {}
@@ -87,6 +96,8 @@ class Registry[T]:
                     f"{cls.__name__} is not a subclass of {self._base.__name__} "
                     f"(registry {self.name!r}, tag {tag!r})."
                 )
+            if self._check is not None:
+                self._check(cls)
             existing = self._members.get(tag)
             if existing is not None and existing is not cls:
                 # Running a member module via ``python -m`` imports it twice (as
@@ -207,10 +218,10 @@ class RegistryUnion:
     def _build_annotated_union(self) -> Any:
         members = self._registry.members()
         if not members:
-            raise ValueError(
-                f"Registry {self._registry.name!r} is empty; import a member "
-                "module (or a plugin) before building this union's schema."
-            )
+            # A registry whose members all live out of tree (judges) is empty when
+            # the config classes are built: advertise a tagged object and leave
+            # the dispatch to ``_validate``, which looks the tag up lazily.
+            return dict[str, Any]
         # The union is built at runtime, so `cls` is a variable here rather
         # than the static type Annotated[] wants.
         tagged = [
@@ -228,7 +239,7 @@ class RegistryUnion:
         # context (shared, deduplicated, recursion-safe).
         union_schema = handler.generate_schema(self._build_annotated_union())
         schema: CoreSchema = union_schema
-        if self._accepts_shorthand():
+        if self._accepts_shorthand() and self._registry.members():
             # The shorthands never reach this schema at runtime (``_validate``
             # rewrites them into dicts first); the extra branches exist so the
             # JSON schema advertises them -- anyOf[union, enum-of-tags(, array)

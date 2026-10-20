@@ -26,8 +26,7 @@ class AdvantageEstimator(BaseModel, ABC):
                 across all GPUs).
             prompt_ids: ``[B]`` integer IDs identifying which prompt each
                 sample belongs to.
-            weights: ``[C]`` component weights (from
-                ``reward.component_weights``).
+            weights: ``[C]`` component weights (``rollout.weights``).
 
         Returns:
             Tensor of shape ``[B]`` with per-sample advantages.
@@ -102,7 +101,8 @@ class GdpoAdvantage(AdvantageEstimator):
     then combine with weights and batch-normalize.
 
     This prevents a dominant component from overwhelming others when using
-    multi-component rewards (CompositeReward, UnifiedReward).
+    multi-component rewards (several scorers, or one with several components
+    such as UnifiedRewardScorer).
     """
 
     type: Literal["gdpo"] = "gdpo"

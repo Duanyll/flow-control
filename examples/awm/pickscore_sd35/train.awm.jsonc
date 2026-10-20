@@ -86,16 +86,18 @@
 
   "train_predictor": "model",
 
-  "rollout_sampler": {
-    // eta 0.0 -> deterministic ODE rollout for PickScore.
-    "type": "grid",
-    "steps": 14,
-    "shift": 3.0,
-    "transition": { "type": "euler", "eta": 0.0 },
-  },
-
-  "reward": {
-    "type": "pickscore",
+  "rollout": {
+    "type": "pointwise",
+    "sampler": {
+      // eta 0.0 -> deterministic ODE rollout for PickScore.
+      "type": "grid",
+      "steps": 14,
+      "shift": 3.0,
+      "transition": { "type": "euler", "eta": 0.0 },
+    },
+    "reward": {
+      "type": "pickscore",
+    },
   },
 
   "advantage": {

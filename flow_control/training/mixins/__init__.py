@@ -14,8 +14,9 @@ from .epochs import EpochLoopMixin
 from .logging import LoggingMixin
 from .microbatch import MicrobatchTrainMixin, MicroUpdate
 from .prediction import TrainingPredictionMixin
-from .rollout import PendingRollouts, Rollout, RolloutMixin
-from .validation import ValidationMixin
+from .rollout import PendingRollouts, RolloutMixin
+from .runner import RunnerMixin
+from .validation import ValidationMixin, sample_one, score_one
 
 __all__ = [
     "CheckpointingMixin",
@@ -30,12 +31,14 @@ __all__ = [
     "MicrobatchTrainMixin",
     "MicroUpdate",
     "PendingRollouts",
-    "Rollout",
     "RolloutMixin",
+    "RunnerMixin",
     "ValidationMixin",
     "TrainingPredictionMixin",
     "distributed_main",
     "main_process_first",
     "main_process_only",
+    "sample_one",
+    "score_one",
     "trainer_registry",
 ]

@@ -13,7 +13,6 @@ CONFIG_COMMAND_MODULES = {
     "preprocess": "flow_control.scripts.preprocess",
     "pack": "flow_control.scripts.pack",
     "seed": "flow_control.scripts.seed",
-    "vae-server": "flow_control.scripts.vae_server",
     "reward-server": "flow_control.scripts.reward_server",
     "serve": "flow_control.scripts.serve",
 }

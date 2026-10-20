@@ -109,7 +109,8 @@ class RowCursor:
     (new plan) starts when one is exhausted, and a ``take`` that straddles two
     passes concatenates them, de-duplicating by ``row_id`` within the take.
     Prompts taken together are adjacent in the group sequence, hence similar in
-    cost; ``expand_rollouts`` keeps that adjacency across ranks.
+    cost; each rank keeps every ``world_size``-th prompt, so the ranks sample
+    adjacent prompts at any moment.
 
     ``independent``: every ``take`` is ``randperm(N)[:count]`` seeded by
     ``derive_seed(seed, f"prompts:{epoch}")`` -- no repeats inside an epoch,
@@ -118,16 +119,14 @@ class RowCursor:
 
     State is ``(pass, position)``; it goes into the trainer checkpoint.
 
-    Alignment caveat (chunked): ``expand_rollouts`` cuts the taken prompts into
-    blocks of ``world_size`` (per prompt under ``whole_prompts``, per rollout
-    otherwise), and a block lies inside one plan group only while the walk has
-    consumed whole groups. Skipping a padded group's padding (``N mod
-    group_size`` real rows) or a duplicate at a pass boundary shifts every later
-    block by that many rows, so from then on one block per group straddles two
-    groups of possibly different cost. This costs throughput (a rank waits on
-    the collective), never correctness; it is exact when ``(N mod group_size) %
-    world_size == 0`` and irrelevant when ``K % world_size == 0`` without
-    pairwise rewards (each block is then inside one prompt).
+    Alignment caveat (chunked): the rank split cuts the taken prompts into
+    blocks of ``world_size``, and a block lies inside one plan group only while
+    the walk has consumed whole groups. Skipping a padded group's padding (``N
+    mod group_size`` real rows) or a duplicate at a pass boundary shifts every
+    later block by that many rows, so from then on one block per group
+    straddles two groups of possibly different cost. This costs throughput (a
+    rank waits on the collective), never correctness; it is exact when ``(N mod
+    group_size) % world_size == 0``.
     """
 
     def __init__(

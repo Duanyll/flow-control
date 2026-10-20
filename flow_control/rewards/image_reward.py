@@ -1,27 +1,28 @@
 """ImageReward (THUDM) reward wrapper.
 
 Wraps the vendored inference-only ImageReward implementation in
-``flow_control.third_party.imagereward`` as a :class:`BaseReward`.
+``flow_control.third_party.imagereward`` as a local scorer.
 
 The underlying model returns a score that is already mean/std-normalized by
 the original training pipeline (``mean=0.16717``, ``std=1.0333``), typically
-in roughly ``[-2, 2]``.  ``_score`` returns this raw value as a ``[1]``
-tensor; downstream :attr:`BaseReward.normalize` (e.g. ``SigmoidNormalize``)
-can squash it into a bounded range when desired.
+in roughly ``[-2, 2]``.  ``run_batch`` returns this raw value as a ``[1]``
+tensor per row; the scorer's ``normalize`` (e.g. ``SigmoidNormalize``) can
+squash it into a bounded range when desired.
 """
 
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 from huggingface_hub import hf_hub_download
 from pydantic import ConfigDict, PrivateAttr
+from torch import Tensor
 
+from flow_control.samplers.node import Row
 from flow_control.third_party.imagereward import ImageReward as _VendoredImageReward
-from flow_control.utils import device as devutil
 from flow_control.utils.logging import get_logger
 from flow_control.utils.tensor import tensor_to_pil
 
-from .base import BaseReward, reward_registry
+from .base import BaseScorer, LocalReward, scorer_registry
 
 logger = get_logger(__name__)
 
@@ -30,8 +31,8 @@ _IMAGEREWARD_CHECKPOINT = "ImageReward.pt"
 _IMAGEREWARD_MED_CONFIG = "med_config.json"
 
 
-@reward_registry.register("image_reward")
-class ImageRewardReward(BaseReward):
+@scorer_registry.register("image_reward")
+class ImageRewardScorer(BaseScorer, LocalReward[Row, Tensor]):
     """ImageReward-based reward (THUDM / Jiazheng Xu et al.)."""
 
     model_config = ConfigDict(extra="forbid")
@@ -48,10 +49,10 @@ class ImageRewardReward(BaseReward):
     _device: torch.device | None = PrivateAttr(default=None)
 
     @property
-    def _row_fields(self) -> set[str]:
+    def fields(self) -> set[str]:
         return {"clean_image", "prompt"}
 
-    def _load_model(self, device: torch.device) -> None:
+    def load(self, device: torch.device) -> None:
         self._device = device
 
         med_config_path = self.med_config_path or hf_hub_download(
@@ -88,7 +89,10 @@ class ImageRewardReward(BaseReward):
         self._model = model
 
     @torch.no_grad()
-    def _score(self, row: dict[str, Any]) -> torch.Tensor:
+    def run_batch(self, rows: list[Row]) -> list[Tensor]:
+        return [self._score_row(row) for row in rows]
+
+    def _score_row(self, row: Row) -> Tensor:
         """Compute ImageReward score for a single sample.
 
         Expects ``row["clean_image"]`` ([1, C, H, W] in [0, 1]) and
@@ -96,7 +100,7 @@ class ImageRewardReward(BaseReward):
         tensor on the image's device.
         """
         if self._model is None:
-            raise RuntimeError("ImageRewardReward._load_model has not been called.")
+            raise RuntimeError("ImageRewardScorer.load() has not been called.")
 
         image = row["clean_image"]
         prompt = row["prompt"]
@@ -110,28 +114,24 @@ class ImageRewardReward(BaseReward):
         # value is a Python float (single-image path).
         return torch.tensor([float(value)], dtype=torch.float32, device=image.device)
 
-    def _unload_model(self) -> None:
-        self._model = None
-        self._device = None
-        devutil.empty_cache()
-
 
 if __name__ == "__main__":
     from PIL import Image
     from rich import print as rprint
 
+    from flow_control.utils import device as devutil
     from flow_control.utils.tensor import pil_to_tensor
 
     image = Image.open("examples/assets/image1.png").convert("RGB")
     image_tensor = pil_to_tensor(image)  # [1, C, H, W] in [0, 1]
 
-    reward = ImageRewardReward()
+    reward = ImageRewardScorer()
     device = devutil.default_device()
-    reward.load_model(device)
+    reward.load(device)
 
     def score(prompt: str) -> float:
         row = {"clean_image": image_tensor.to(device), "prompt": prompt}
-        return reward.score(row).raw.item()
+        return reward.run_batch([row])[0].item()
 
     dinner = "Roast dinner with potatoes, brussels sprouts and carrots, red wine"
     car = "A picture of a sports car on a race track"

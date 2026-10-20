@@ -9,6 +9,7 @@ from rich.progress import Progress
 
 from flow_control.adapters import ModelAdapter
 from flow_control.data import is_padding
+from flow_control.rewards.base import load_rewards
 from flow_control.samplers import Row
 from flow_control.utils.logging import (
     console,
@@ -201,7 +202,10 @@ class SftTrainer(
         )
 
         if self._current_step % self.validation_steps == 0:
-            self.validate_variants(self.model, self._current_step)
+            self._validate()
+
+    def _validate(self) -> None:
+        self.validate_variants(self.model, self._current_step, None)
 
     def check_loss(self, loss: torch.Tensor):
         if not torch.isfinite(loss):
@@ -228,12 +232,14 @@ class SftTrainer(
         self.load_processor()
         self.make_train_dataloader()
         self.make_validation_dataloader()
+        self.make_runner(self.model)
+        load_rewards(self, self.device)
         os.makedirs(self.checkpoint_root, exist_ok=True)
 
         self.maybe_auto_resume(self.resume_from_dir)
 
         if self.validation_at_start:
-            self.validate_variants(self.model, self._current_step)
+            self._validate()
 
         progress = Progress(
             *self.get_progress_columns(),
