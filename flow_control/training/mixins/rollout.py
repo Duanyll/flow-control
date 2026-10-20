@@ -83,6 +83,13 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
     JSON per (epoch, rank) under ``<run_dir>/reward_profiles`` for offline
     in-flight plots; ``profile/reward/*`` only logs the reduced summary.
     """
+    rollout_dump: bool = False
+    """
+    Also write every epoch's per-rollout rewards (key, raw and normalized
+    components, combined reward, advantage) as JSON lines to
+    ``<run_dir>/rollout_rows/step_XXXXXXX.jsonl`` on rank 0, for offline
+    per-row analysis; ``rollout/*`` only logs aggregates.
+    """
 
     model: ModelAdapter
     rollout: Rollout
@@ -342,6 +349,22 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
                 gathered_rewards[:, i].std(correction=0).item()
             )
         log_metrics(metrics, step=step)
+        if self.rollout_dump and rank == 0:
+            out_dir = self.run_dir / "rollout_rows"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            raw, norm = gathered_raw_rewards.tolist(), gathered_rewards.tolist()
+            with open(out_dir / f"step_{step:07d}.jsonl", "w") as f:
+                for i, key in enumerate(all_keys):
+                    record = {
+                        "step": step,
+                        "key": key,
+                        "raw": dict(zip(labels, raw[i], strict=True)),
+                        "normalized": dict(zip(labels, norm[i], strict=True)),
+                        "weights": weights.tolist(),
+                        "combined": combined[i].item(),
+                        "advantage": advantages[i].item(),
+                    }
+                    f.write(json.dumps(record) + "\n")
 
         local_b = local_rewards.shape[0]
         start = rank * local_b
