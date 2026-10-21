@@ -1,4 +1,4 @@
-"""Reward placement and slots (``docs/rollout-reward-design.md``).
+"""Reward placement and slots (``docs/rewards/rewards.md``).
 
 A reward's *placement* says where a call runs: a :class:`LocalReward` on the
 device worker, batched across rows and groups; a :class:`RemoteReward` on the

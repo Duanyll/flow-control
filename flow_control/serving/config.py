@@ -30,4 +30,4 @@ class ServeConfig(BaseModel):
     checkpoint_dir: str | None = None
     checkpoint_root: str | None = None
     variant: str | None = None
-    """The model variant that serves requests naming none (docs/model-variants.md)."""
+    """The model variant that serves requests naming none (docs/adapters/variants.md)."""

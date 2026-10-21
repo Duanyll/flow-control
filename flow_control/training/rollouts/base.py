@@ -1,4 +1,4 @@
-"""Rollout programs (``docs/rollout-reward-design.md``).
+"""Rollout programs (``docs/training/rollouts.md``).
 
 A rollout program (``rollout.type``) turns one prompt into its K scored
 rollouts. :meth:`BaseRollout.sample` makes every model call of the group and

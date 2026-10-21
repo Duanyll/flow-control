@@ -1,4 +1,4 @@
-"""Variant configs: the named weight sets of one adapter (docs/model-variants.md)."""
+"""Variant configs: the named weight sets of one adapter (docs/adapters/variants.md)."""
 
 from typing import Annotated, Literal
 

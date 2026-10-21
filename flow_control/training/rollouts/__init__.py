@@ -1,6 +1,6 @@
 """Rollout programs: how one prompt becomes its K scored rollouts.
 
-``docs/rollout-reward-design.md`` is the spec. The in-tree programs are
+``docs/training/rollouts.md`` is the spec. The in-tree programs are
 ``pointwise`` and ``round_robin``; out-of-tree programs register in
 ``rollout_registry`` from a config's ``imports``.
 """

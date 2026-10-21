@@ -1,4 +1,4 @@
-"""The device worker and the reward loop behind rollout programs (``docs/rollout-reward-design.md``).
+"""The device worker and the reward loop behind rollout programs (``docs/training/rollouts.md``).
 
 A :class:`Runner` owns two threads for the whole run. The main thread is the
 *device worker*: it runs the model forwards through one :class:`Executor`,

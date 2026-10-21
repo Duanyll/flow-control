@@ -61,7 +61,7 @@ We prefer to: **Pass data through function arguments, and store configuration in
 ## Output layout
 
 Only `examples/` is tracked; `local/` (machine-specific launchers + in-progress
-experiment configs), `data/`, `demo/`, `draft/` are gitignored. Read docs/repo-layout.md
+experiment configs), `data/`, `demo/`, `draft/` are gitignored. Read docs/README.md and docs/overview/repo-layout.md
 for details.
 
 ## Workflow

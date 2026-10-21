@@ -40,7 +40,7 @@ Prediction = SerializeAsAny[
 class Model(BasePrediction):
     type: Literal["model"] = "model"
     variant: str | None = None
-    """A model variant (model-variants.md); None is the engine's."""
+    """A model variant (docs/adapters/variants.md); None is the engine's."""
 
     def run(self, row: Row, frame: Frame) -> Calls[torch.Tensor]:
         if "tiling" in row:

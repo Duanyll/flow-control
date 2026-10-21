@@ -57,7 +57,7 @@ class Inference(RunnerMixin, BaseTrainer, DcpMixin):
     seed_checkpoint_dir: str | None = None
     checkpoint_dir: str | None = None
     variant: str | None = None
-    """Model variant for the sampler's model leaves that name none (``docs/model-variants.md``)."""
+    """Model variant for the sampler's model leaves that name none (``docs/adapters/variants.md``)."""
     save_extra: bool = False
     """``records/`` rows hold the whole working row (source fields, conditions,
     decoded outputs) instead of only the decoded outputs plus key / cost /

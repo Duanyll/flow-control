@@ -189,7 +189,7 @@ class VariantsMixin(BaseModel):
     trainable: bool = False
     """Train the base weights themselves (full fine-tuning)."""
     variants: dict[str, Variant] = {}
-    """Named weight sets (docs/model-variants.md); "base" is built in."""
+    """Named weight sets (docs/adapters/variants.md); "base" is built in."""
     lora_target_modules: ClassVar[tuple[str, ...] | Literal["all-linear"]] = (
         "all-linear"
     )
