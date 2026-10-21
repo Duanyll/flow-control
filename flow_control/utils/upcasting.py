@@ -5,6 +5,7 @@ handles trainable parameters.
 """
 
 import re
+from collections.abc import Collection
 from enum import StrEnum
 from typing import Any, cast
 
@@ -137,10 +138,12 @@ class LayerwiseUpcastingHook(ModelHook):
         storage_dtype: torch.dtype,
         compute_dtype: torch.dtype,
         ignore_trainable=True,
+        recurse=True,
     ) -> None:
         self.storage_dtype = storage_dtype
         self.compute_dtype = compute_dtype
         self.ignore_trainable = ignore_trainable
+        self.recurse = recurse
 
     def _cast_storage(self, x: torch.Tensor, is_grad: bool = False) -> torch.Tensor:
         if (self.ignore_trainable and x.requires_grad) or is_grad:
@@ -157,18 +160,18 @@ class LayerwiseUpcastingHook(ModelHook):
         return x
 
     def init_hook(self, module: torch.nn.Module):
-        _module_apply_advanced(module, self._cast_storage)
+        _module_apply_advanced(module, self._cast_storage, self.recurse)
         return module
 
     def pre_forward(self, module: torch.nn.Module, *args, **kwargs):
-        _module_apply_advanced(module, self._cast_compute)
+        _module_apply_advanced(module, self._cast_compute, self.recurse)
         # How do we account for LongTensor, BoolTensor, etc.?
         # args = tuple(align_maybe_tensor_dtype(arg, self.compute_dtype) for arg in args)
         # kwargs = {k: align_maybe_tensor_dtype(v, self.compute_dtype) for k, v in kwargs.items()}
         return args, kwargs
 
     def post_forward(self, module: torch.nn.Module, output):
-        _module_apply_advanced(module, self._cast_storage)
+        _module_apply_advanced(module, self._cast_storage, self.recurse)
         return output
 
 
@@ -229,11 +232,21 @@ _SUPPORTED_PYTORCH_LAYERS = [
     torch.nn.Linear,
 ]
 
-_DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN = ["pos_embed", "patch_embed", "norm"]
+# diffusers' DEFAULT_SKIP_MODULES_PATTERN
+_DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN = [
+    "pos_embed",
+    "patch_embed",
+    "norm",
+    "^proj_in$",
+    "^proj_out$",
+]
 
 
 def apply_layerwise_upcasting_hook(
-    module: torch.nn.Module, storage_dtype: torch.dtype, compute_dtype: torch.dtype
+    module: torch.nn.Module,
+    storage_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
+    recurse: bool = True,
 ) -> torch.nn.Module:
     r"""
     Applies a `LayerwiseUpcastingHook` to a given module.
@@ -244,11 +257,13 @@ def apply_layerwise_upcasting_hook(
             The dtype to cast the module to before the forward pass.
         compute_dtype (`torch.dtype`):
             The dtype to cast the module to during the forward pass.
+        recurse (`bool`):
+            Whether to also cast the parameters of the module's children.
     Returns:
         `torch.nn.Module`:
             The same module, with the hook attached (the module is modified in place, so the result can be discarded).
     """
-    hook = LayerwiseUpcastingHook(storage_dtype, compute_dtype)
+    hook = LayerwiseUpcastingHook(storage_dtype, compute_dtype, recurse=recurse)
     return add_hook_to_module(module, hook, append=True)
 
 
@@ -259,11 +274,25 @@ def apply_layerwise_upcasting(
     granularity: LayerwiseUpcastingGranularity = LayerwiseUpcastingGranularity.PYTORCH_LAYER,
     skip_modules_pattern: list[str] | None = None,
     skip_modules_classes: list[type[torch.nn.Module]] | None = None,
+    skip_modules: Collection[torch.nn.Module] = (),
 ) -> torch.nn.Module:
+    """Hook the layers of `module` to keep their frozen weights in `storage_dtype`.
+
+    Layers matching `skip_modules_pattern` or `skip_modules_classes` keep their
+    dtype, and at `PYTORCH_LAYER` granularity so do `skip_modules` and their
+    submodules. The default patterns are diffusers' (embeddings, norms, the
+    input / output projections) plus what the model declares in
+    `_skip_layerwise_casting_patterns` and `_keep_in_fp32_modules`.
+    """
     if skip_modules_classes is None:
         skip_modules_classes = []
     if skip_modules_pattern is None:
-        skip_modules_pattern = []
+        skip_modules_pattern = [
+            *_DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
+            *(getattr(module, "_skip_layerwise_casting_patterns", None) or ()),
+            *(getattr(module, "_keep_in_fp32_modules", None) or ()),
+        ]
+    skip_modules = {m for skipped in skip_modules for m in skipped.modules()}
     if torch.__version__ >= "2.8.0":
         warn_once(
             logger,
@@ -291,6 +320,7 @@ def apply_layerwise_upcasting(
             compute_dtype,
             skip_modules_pattern,
             skip_modules_classes,
+            skip_modules,
         )
 
 
@@ -340,13 +370,15 @@ def _apply_layerwise_upcasting_pytorch_layer(
     compute_dtype: torch.dtype,
     skip_modules_pattern: list[str] = _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN,
     skip_modules_classes: list[type[torch.nn.Module]] | None = None,
+    skip_modules: Collection[torch.nn.Module] = (),
 ) -> torch.nn.Module:
     if skip_modules_classes is None:
         skip_modules_classes = []
     count = 0
     for name, submodule in module.named_modules():
         if (
-            any(re.search(pattern, name) for pattern in skip_modules_pattern)
+            submodule in skip_modules
+            or any(re.search(pattern, name) for pattern in skip_modules_pattern)
             or any(
                 isinstance(submodule, module_class)
                 for module_class in skip_modules_classes
@@ -356,7 +388,10 @@ def _apply_layerwise_upcasting_pytorch_layer(
             # print(f'Skipping layerwise upcasting for layer "{name}"')
             continue
         # print(f'Applying layerwise upcasting to layer "{name}"')
-        apply_layerwise_upcasting_hook(submodule, storage_dtype, compute_dtype)
+        # Only the layer's own weights: a LoraLinear's children are variant slots
+        apply_layerwise_upcasting_hook(
+            submodule, storage_dtype, compute_dtype, recurse=False
+        )
         count += 1
     logger.info(f"Applied layerwise upcasting to {count} layers")
     return module

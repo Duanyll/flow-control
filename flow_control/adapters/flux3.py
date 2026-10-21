@@ -102,14 +102,15 @@ class Flux3Adapter[TBatch: Flux3Batch](
                 update={"pretrained_model_id": repo}
             )
 
-    def _install_modules(self) -> None:
+    def _install_modules(self, transformer: Flux3Transformer2DModel) -> None:
         # The post-load hook: nothing to install, but the checkpoint kind must match.
-        flow_map = bool(self.transformer.config["flow_map"])
+        flow_map = bool(transformer.config["flow_map"])
         if flow_map != (self.type == "distilled"):
             raise ValueError(
                 f"flux3 type {self.type!r} expects a "
                 f"{'flow-map' if self.type == 'distilled' else 'CFG'} checkpoint, "
-                f"but {self.hf_model.pretrained_model_id} has flow_map={flow_map}."
+                "but a loaded transformer (the base, or a full variant's hf_model) "
+                f"has flow_map={flow_map}."
             )
 
     def _image_ids(self, size: tuple[int, int], l_coord: int = 0) -> torch.Tensor:

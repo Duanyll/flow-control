@@ -1,6 +1,7 @@
 from typing import Literal
 
 import torch
+from diffusers import FluxTransformer2DModel
 
 from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
@@ -34,8 +35,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
         "norm_added_k",
     )
 
-    def _install_modules(self):
-        transformer = self.transformer
+    def _install_modules(self, transformer: FluxTransformer2DModel) -> None:
         # Change shape of x_embedder layer before loading LoRA
         with torch.no_grad():
             # diffusers' FrozenDict config exposes fields as attributes.
@@ -55,7 +55,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
                 new_linear.bias.copy_(transformer.x_embedder.bias)
             transformer.x_embedder = new_linear
 
-        super()._install_modules()
+        super()._install_modules(transformer)
 
     def _predict_velocity(
         self, batch: Flux1DConcatBatch, timestep: torch.Tensor

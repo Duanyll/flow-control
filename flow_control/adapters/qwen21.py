@@ -67,15 +67,15 @@ class QwenImage21Adapter(
     )
     lora_target_modules = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0")
 
-    def _install_modules(self) -> None:
+    def _install_modules(self, transformer: QwenImage21Transformer2DModel) -> None:
         # RoPE's ordinary tensor list survives to_empty, but must be created
         # outside the trainer's meta context. Keep it complex64: registering
         # these tables as buffers would let model.to(bf16) discard their phase.
         with torch.device("cpu"):
-            rope = self.transformer.pos_embed
-            self.transformer.pos_embed = QwenImage21Rope(rope.theta, rope.axes_dim)
-        time_proj = self.transformer.time_text_embed.time_proj
-        self.transformer.time_text_embed.time_proj = TemporalTimesteps(
+            rope = transformer.pos_embed
+            transformer.pos_embed = QwenImage21Rope(rope.theta, rope.axes_dim)
+        time_proj = transformer.time_text_embed.time_proj
+        transformer.time_text_embed.time_proj = TemporalTimesteps(
             time_proj.timestep_dim, time_proj.time_factor
         )
 

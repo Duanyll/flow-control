@@ -36,6 +36,16 @@ def _hf_local_files_only() -> bool:
     return os.getenv("HF_HUB_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _keep_in_fp32(model: Any) -> None:
+    """Return a diffusers model's ``_keep_in_fp32_modules`` to fp32 after a cast,
+    as its ``from_pretrained`` loads them: every tensor whose dotted name has one
+    of those names as a component."""
+    names = set(model._keep_in_fp32_modules or ())
+    for name, tensor in [*model.named_parameters(), *model.named_buffers()]:
+        if names & set(name.split(".")):
+            tensor.data = tensor.data.float()
+
+
 class LoadingScope:
     """Tracks ``config_key``s loaded during a model reload cycle.
 
@@ -174,6 +184,8 @@ class HfModelLoader[T](BaseModel):
                 model = model_cls(config)
             if cast:
                 model.to(dtype=self.dtype)
+                if self.library == "diffusers":
+                    _keep_in_fp32(model)
         logger.info(
             f"Initialized model {self.class_name} from {self.pretrained_model_id}/{self.subfolder or ''} "
             f"on meta device with dtype {self.dtype}"

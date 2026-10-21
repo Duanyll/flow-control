@@ -10,9 +10,10 @@ from typing import Any, Literal, NotRequired
 import torch
 import torch.nn as nn
 import torch.nn.attention.flex_attention as flex_attention
+from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 
-from flow_control.adapters.base import BaseModelAdapter, adapter_registry
+from flow_control.adapters.base import adapter_registry
 from flow_control.adapters.qwen.base import QwenImageAdapter, QwenImageBatch
 from flow_control.utils.tensor import ensure_compiled_flex_attention
 
@@ -209,14 +210,13 @@ class EfficientLayeredQwenImageAdapter(
     attn_block_size: int = 128
     base_image_index: Literal[0, -1] = 0
 
-    def load_transformer(self, device: torch.device) -> None:
-        BaseModelAdapter.load_transformer(self, device=device)
+    def _install_modules(self, transformer: QwenImageTransformer2DModel) -> None:
         # Must use flex attention backend for block masks
         ensure_compiled_flex_attention()
-        self.transformer.set_attention_backend("flex")
-        orig_module = self.transformer.pos_embed
+        transformer.set_attention_backend("flex")
+        orig_module = transformer.pos_embed
         # Swapping in a drop-in replacement module, hence the type mismatch.
-        self.transformer.pos_embed = EfficientLayeredQwenEmbedRope(  # ty: ignore[invalid-assignment]
+        transformer.pos_embed = EfficientLayeredQwenEmbedRope(  # ty: ignore[invalid-assignment]
             theta=orig_module.theta,
             axes_dim=orig_module.axes_dim,
             scale_rope=orig_module.scale_rope,

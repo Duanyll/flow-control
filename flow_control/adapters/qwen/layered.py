@@ -8,7 +8,7 @@ from einops import rearrange, repeat
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from ..base import BaseModelAdapter, adapter_registry
+from ..base import adapter_registry
 from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
@@ -148,12 +148,11 @@ class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
         dtype=torch.bfloat16,
     )
 
-    def load_transformer(self, device: torch.device) -> None:
-        BaseModelAdapter.load_transformer(self, device=device)
-        # Replace self.transformer.pos_embed with the above impl
-        orig_module = self.transformer.pos_embed
+    def _install_modules(self, transformer: QwenImageTransformer2DModel) -> None:
+        # Replace transformer.pos_embed with the above impl
+        orig_module = transformer.pos_embed
         # Swapping in a drop-in replacement module, hence the type mismatch.
-        self.transformer.pos_embed = PatchedQwenEmbedLayer3DRope(  # ty: ignore[invalid-assignment]
+        transformer.pos_embed = PatchedQwenEmbedLayer3DRope(  # ty: ignore[invalid-assignment]
             theta=orig_module.theta,
             axes_dim=orig_module.axes_dim,
             scale_rope=orig_module.scale_rope,

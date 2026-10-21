@@ -34,13 +34,13 @@ class Flux2KVAdapter(Flux2Adapter[Flux2KVBatch]):
         dtype=torch.bfloat16,
     )
 
-    def _install_modules(self) -> None:
+    def _install_modules(self, transformer: Flux2Transformer2DModel) -> None:
         # Diffusers' AttentionProcessor union omits its own Flux2 KV processors.
-        for block in self.transformer.transformer_blocks:
+        for block in transformer.transformer_blocks:
             cast(Flux2TransformerBlock, block).attn.set_processor(
                 Flux2KVAttnProcessor()  # ty: ignore[invalid-argument-type]
             )
-        for block in self.transformer.single_transformer_blocks:
+        for block in transformer.single_transformer_blocks:
             cast(Flux2SingleTransformerBlock, block).attn.set_processor(
                 Flux2KVParallelSelfAttnProcessor()  # ty: ignore[invalid-argument-type]
             )

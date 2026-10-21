@@ -210,6 +210,9 @@ class VariantsMixin(BaseModel):
     def transformer(self) -> nn.Module:
         raise NotImplementedError
 
+    def _install_modules(self, transformer: Any) -> None:
+        raise NotImplementedError
+
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
         default = self.resolve("default")
@@ -281,6 +284,19 @@ class VariantsMixin(BaseModel):
         for name in self.variants:
             owners.update(_slots(self.transformer, name))
         return owners
+
+    def upcasting_exempt_modules(self) -> list[nn.Module]:
+        """Variant weights layerwise upcasting leaves in their dtype: every LoRA
+        slot and clone (small), and the fp32 EMA copies."""
+        slots = [
+            slot for name in self.variants for slot in _slots(self.transformer, name)
+        ]
+        emas = [
+            module
+            for name, module in self._full.items()
+            if isinstance(self.variants[name], EmaVariant)
+        ]
+        return [*slots, *emas]
 
     @torch.no_grad()
     def update_variants(self, every: Literal["step", "epoch"]) -> None:
@@ -377,8 +393,10 @@ class VariantsMixin(BaseModel):
         """A full-kind variant's own module: its own loaded weights, or a copy of its source (fp32 for an EMA)."""
         variant = self.variants[name]
         if isinstance(variant, FullVariant) and variant.hf_model is not None:
-            variant.hf_model.load_model(device=device, frozen=not variant.trainable)
-            return variant.hf_model.model
+            loader = variant.hf_model
+            if loader.load_model(device=device, frozen=not variant.trainable):
+                self._install_modules(loader.model)
+            return loader.model.requires_grad_(variant.trainable)
         source = self.resolve(variant.of)
         if self._kind(source) == "lora":
             raise NotImplementedError(

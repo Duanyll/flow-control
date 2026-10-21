@@ -301,7 +301,7 @@ class AdapterBatchingTest(unittest.TestCase):
                 kv = adapter_type(micro_batch_size=2)
                 kv.hf_model.dtype = torch.float32
                 kv.transformer = transformer
-                kv._install_modules()
+                kv._install_modules(transformer)
                 channels = kv.latent_channels * kv.patch_size**2
                 rows: list[Any] = []
                 for refs in (0, 1):
@@ -378,7 +378,7 @@ class AdapterBatchingTest(unittest.TestCase):
                                 transformer.config
                             )
                         )
-                    restored._install_modules()
+                    restored._install_modules(restored.transformer)
                     restored.transformer.to_empty(device="cpu")
                     restored.transformer.load_state_dict(transformer.state_dict())
                     with torch.no_grad():

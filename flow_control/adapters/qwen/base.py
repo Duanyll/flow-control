@@ -151,11 +151,11 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
     # The last block's text stream is discarded, so its projections get no gradient.
     lora_exclude_modules = ("59.txt_mlp.net.2", "59.attn.to_add_out")
 
-    def _install_modules(self) -> None:
-        # Replace self.transformer.pos_embed with the above impl
-        orig_module = self.transformer.pos_embed
+    def _install_modules(self, transformer: QwenImageTransformer2DModel) -> None:
+        # Replace transformer.pos_embed with the above impl
+        orig_module = transformer.pos_embed
         # Swapping in a drop-in replacement module, hence the type mismatch.
-        self.transformer.pos_embed = PatchedQwenEmbedRope(  # ty: ignore[invalid-assignment]
+        transformer.pos_embed = PatchedQwenEmbedRope(  # ty: ignore[invalid-assignment]
             theta=orig_module.theta,
             axes_dim=orig_module.axes_dim,
             scale_rope=orig_module.scale_rope,

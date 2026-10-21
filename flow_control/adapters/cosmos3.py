@@ -269,18 +269,14 @@ class Cosmos3Adapter[TBatch: Cosmos3Batch](
         "mlp_moe_gen.down_proj",
     )
 
-    def _install_modules(self) -> None:
-        # Swap in the meta-safe rotary table and restore the fp32 timestep MLP.
-        # Upstream relies on `from_pretrained` honouring `_keep_in_fp32_modules`,
-        # which the trainer's meta-init -> `to_empty` -> `dcp.load` path never
-        # runs, so `time_embedder` would come back in bf16.
-        config = self.transformer.config
-        self.transformer.rotary_emb = Cosmos3RotaryEmbedding(
+    def _install_modules(self, transformer: Cosmos3OmniTransformer) -> None:
+        # Swap in the meta-safe rotary table.
+        config = transformer.config
+        transformer.rotary_emb = Cosmos3RotaryEmbedding(
             head_dim=config["head_dim"],
             rope_theta=config["rope_theta"],
             rope_axes_dim=config["rope_axes_dim"],
         )
-        self.transformer.time_embedder.float()
 
     def _prepare_timestep(self, timestep: torch.Tensor) -> torch.Tensor:
         # Cosmos3's sigma grid steps by ~7e-4 near sigma=1, well under bf16
@@ -394,11 +390,11 @@ class Cosmos3KVAdapter[TBatch: Cosmos3KVBatch](Cosmos3Adapter[TBatch]):
 
     _kv_state: Cosmos3KVState = PrivateAttr(default_factory=Cosmos3KVState)
 
-    def _install_modules(self) -> None:
-        super()._install_modules()
-        self._bind_processors()
+    def _install_modules(self, transformer: Cosmos3OmniTransformer) -> None:
+        super()._install_modules(transformer)
+        self._bind_processors(transformer)
 
-    def _bind_processors(self) -> None:
+    def _bind_processors(self, transformer: Cosmos3OmniTransformer) -> None:
         """Point every layer's processor at *this* adapter's state.
 
         ``_install_modules`` only runs on a fresh load, but ``HfModelLoader``
@@ -407,7 +403,7 @@ class Cosmos3KVAdapter[TBatch: Cosmos3KVBatch](Cosmos3Adapter[TBatch]):
         silently never fill a cache.
         """
         state = self._kv_state
-        for index, block in enumerate(self.transformer.layers):
+        for index, block in enumerate(transformer.layers):
             attn = cast(Cosmos3PackedMoTAttention, cast(Any, block).self_attn)
             processor = attn.get_processor()
             if (
@@ -421,7 +417,7 @@ class Cosmos3KVAdapter[TBatch: Cosmos3KVBatch](Cosmos3Adapter[TBatch]):
             )
 
     def _begin_forward(self, batch: TBatch) -> bool:
-        self._bind_processors()
+        self._bind_processors(cast(Cosmos3OmniTransformer, self.module()))
         reuse = self.use_cache and not torch.is_grad_enabled()
         if not reuse:
             self._kv_state.mode = None

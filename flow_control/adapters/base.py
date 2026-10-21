@@ -76,7 +76,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     type: str
     hf_model: HfModelLoader[TModel]
     storage_dtype: TorchDType | None = None
-    """Specify a storage dtype (e.g. float8_e4m3fn) to apply layerwise upcasting. """
+    """Specify a storage dtype (e.g. float8_e4m3fn) to apply layerwise upcasting to the frozen weights."""
     trainable_dtype: TorchDType = torch.bfloat16
     """The dtype to cast trainable parameters to."""
     # TODO: Add standard PyTorch AMP (torch.autocast) support (bf16 activation + fp32 trainable params)
@@ -115,7 +115,8 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
         if not self.hf_model.load_model(device=device, frozen=not self.trainable):
             self._attach()  # another adapter already realized the cached transformer
             return
-        self._install_modules()
+        self._install_modules(self.transformer)
+        self.transformer.requires_grad_(self.trainable)  # the hook's new modules too
         self._realize(device)
         cast_trainable_parameters(self.transformer, self.trainable_dtype)
         if (
@@ -127,6 +128,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
                 self.transformer,
                 storage_dtype=self.storage_dtype,
                 compute_dtype=self.hf_model.dtype,
+                skip_modules=self.upcasting_exempt_modules(),
             )
             logger.info(
                 f"Applied layerwise casting with storage dtype {self.storage_dtype} and compute dtype {self.hf_model.dtype}"
@@ -134,8 +136,9 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     # -------------------------- what a family implements ----------------------- #
 
-    def _install_modules(self):
-        """Create extra modules on the freshly loaded base model, before the variants."""
+    def _install_modules(self, transformer: TModel) -> None:
+        """Change a freshly loaded transformer: the base, before the variants copy
+        it, and every full variant loaded from its own checkpoint."""
         pass
 
     @abstractmethod
