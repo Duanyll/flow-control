@@ -1,6 +1,6 @@
 # Trainers
 
-A trainer is the config model that `launch.type` selects from `trainer_registry`, and its `run()` is the whole job on every rank. Trainers are composed from mixins. Each mixin owns one concern (mesh, data, logging, sampling, batching, checkpoints). The method-specific part is small: `SftTrainer` regresses dataset rows, and the RL trainers turn scored rollouts into train items and losses. Which collectives each part may issue is in [distributed.md](distributed.md).
+A trainer is the config model that `launch.type` selects from `trainer_registry`, and its `run()` is the whole job on every rank. Trainers are composed from mixins. Each mixin owns one concern (mesh, data, logging, sampling, batching, checkpoints). The method-specific part is small: `SftTrainer` regresses dataset rows, and the RL trainers turn scored rollouts into train items and losses. Which collectives each part may issue is in [distributed.md](distributed.md); every loss and advantage formula is in [math/objectives.md](../math/objectives.md).
 
 ## Config examples
 

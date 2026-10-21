@@ -30,6 +30,10 @@
 | [distributed](training/distributed.md) | Where a collective may sit, collective-free zones, equal-count invariants |
 | [rollouts](training/rollouts.md) | Rollout programs, the Runner's two threads, n-step-off |
 | [outputs](training/outputs.md) | Run directory, metrics, checkpoints, resume |
+| **Math** | |
+| [notation](math/notation.md) | Symbol table and conventions shared by every formula |
+| [sampling](math/sampling.md) | Shifts, grids, transitions, multistep solvers, guidance: each node's formula |
+| [objectives](math/objectives.md) | SFT, advantages, GRPO, NFT / AWM / RAM, EMA warmups, gradient accumulation |
 | **Scripts** | |
 | [cli](scripts/cli.md) | Every command; launch; seed checkpoint; preprocess pipeline |
 | [serving](scripts/serving.md) | Outdated, needs an interface refactor: stateless engine, shared model cache, task templates |

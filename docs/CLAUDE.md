@@ -41,6 +41,10 @@ In this order:
 
 Use mermaid for anything whose flow is not top-down: concurrency (threads, async, generators), collectives across ranks, multi-stage pipelines, lifecycles. `flowchart` for how data moves, `sequenceDiagram` for who waits on whom. Label nodes with real symbol names; one diagram per question, small enough to read at a glance.
 
+### Math
+
+Formulas live in `math/`, in the notation of `math/notation.md`; add a symbol to its table before using it. Other chapters link the formula instead of restating it. Write LaTeX for GitHub (`$...$` inline, `$$...$$` display), match the code exactly (clamps, epsilons, which σ), and name the code symbol that computes each formula.
+
 ### Extension points and core contracts
 
 This section tells an agent where it may build freely and where it must stop and ask.

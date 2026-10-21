@@ -1,6 +1,6 @@
 # Sampler nodes
 
-A sampler is a config tree of nodes. Each node is a `BaseNode` whose call returns a `Calls` generator, driven by the Executor ([runtime.md](runtime.md)). Core's nodes come in three layers:
+A sampler is a config tree of nodes. Each node is a `BaseNode` whose call returns a `Calls` generator, driven by the Executor ([runtime.md](runtime.md)). Every node's formula is in [math/sampling.md](../math/sampling.md). Core's nodes come in three layers:
 
 - A **trajectory** moves the row from its σ to wherever the node ends: a time grid, a renoise, a sequence of trajectories.
 - A **transition** takes one step from the row's σ to `sigma_next`.
@@ -589,5 +589,5 @@ Rows on one rank may take different numbers of steps; the executor batches whate
 - `StepFrame` and `GridFrame` fields. GRPO's `record` and replay, the endpoint trainers' `keep_sigmas`, `cfg_pp`, `flash` and `differential_diffusion` read them.
 - `BaseTransition.is_stochastic` and `log_prob` are GRPO's interface to a step.
 - `row["sigma_next"]` exists exactly inside a transition. Flow-map adapters depend on it.
-- A partial grid follows the full 1 → 0 grid's curve, and step-dependent shifts receive the full grid's step count `round(steps / |σ − sigma_end|)`. `shift_terminal` stretches only a grid ending at 0, from that grid's own last positive σ, and `diffusers_grid` raises on a partial grid.
+- A partial grid spaces its steps uniformly in u between F⁻¹(σ) and F⁻¹(`sigma_end`) on the curve of a full 1 → 0 grid of `round(steps / |σ − sigma_end|)` steps; a step-dependent shift (`flux2`) builds that curve from this step count, by design ([math](../math/sampling.md)). `shift_terminal` stretches only a grid ending at 0, from that grid's own last positive σ, and `diffusers_grid` raises on a partial grid.
 - The union shorthands: a bare tag, a list as `sequential`, a number as `cfg` scale or `constant` shift.
