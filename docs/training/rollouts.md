@@ -41,6 +41,7 @@ Scorers, judges and their placement are in [rewards](../rewards/rewards.md). Whi
 ```jsonc
 {
   "rollout_lookahead": 1, // N batches sampled ahead of training; 0 (default): sample, wait for rewards, train
+  // "checkpoint_rollouts": false, // true: a checkpoint keeps the batches sampled ahead (and waits for their rewards)
   "rollout": {
     "type": "pointwise",
     "sampler": {...},
@@ -341,14 +342,15 @@ def _start_rollouts(self, epoch: int) -> PendingRollouts:  # RolloutMixin
     return PendingRollouts(epoch, self._current_epoch, groups, cursor_state_before)
 
 def _finish_rollouts(self, pending: PendingRollouts) -> list[Row]:
-    rows = [row for rows in pending.groups.wait() for row in rows]  # submission order, K rows per prompt
+    rows = pending.wait()  # submission order, K rows per prompt; a batch restored from a checkpoint is already scored
     ...  # profile/reward/*, profile/reward/wait_at_train_s, rollout/policy_lag; profile_dump
     return rows
 
 # RolloutTrainerBase
 def _prime_rollouts(self) -> None:  # before the first epoch, fresh or resumed
-    first = self._current_epoch
-    for epoch in range(first, min(first + self.rollout_lookahead, self.train_epochs)):
+    first = self._current_epoch + len(self._pending_rollouts)  # batches restored from the checkpoint
+    last = min(self._current_epoch + self.rollout_lookahead, self.train_epochs)
+    for epoch in range(first, last):
         self._launch_rollouts(epoch)  # appends to self._pending_rollouts
 
 def _run_epoch(self) -> None:
@@ -389,7 +391,7 @@ sequenceDiagram
 - Endpoint objectives that sample with `old` (NFT, RAM, AWM with `off_policy`) draw the batch from the `old` of its launch epoch, while the loss reads the velocity of the current `old` ([variants](../adapters/variants.md)).
 - GRPO's ratio divides by the log-prob recorded during sampling, so it compares against the policy that actually sampled the batch, `N` epochs back; `clip_range` bounds the update as usual.
 
-Resume. In-flight batches are not checkpointed. The checkpoint's `cursor` is the oldest in-flight batch's `cursor_state_before` and `current_epoch` is the next epoch to train, so `_prime_rollouts` re-samples those batches with the same prompts and seeds under the checkpoint's weights. Their lag is below `N` until the lookahead refills ([outputs](outputs.md#checkpoints)).
+Resume. By default in-flight batches are dropped: the checkpoint's `cursor` is the oldest in-flight batch's `cursor_state_before` and `current_epoch` is the next epoch to train, so `_prime_rollouts` re-samples those batches with the same prompts and seeds under the checkpoint's weights, and their lag is below `N` until the lookahead refills. With `checkpoint_rollouts: true`, `state_dict` waits (collectively) for the in-flight batches' rewards and saves them scored, one blob per rank, with the cursor as it stands; a resume restores them as scored `PendingRollouts` (`groups=None`) and samples only the epochs after them, so it trains on the same rollouts an uninterrupted run would. Such a checkpoint resumes only on the same world size and with `rollout_lookahead` at least the number of batches it holds ([outputs](outputs.md#checkpoints)).
 
 ### Validation and Inference
 
@@ -439,4 +441,4 @@ The report layout is in [formats](../data/formats.md#inference-report). A valida
 - The threading rules of [The Runner](#the-runner): no CUDA or collectives in programs, one thread per row at a time, `Pending` methods as collectives, a failed group failing every rank. The round protocol is shared with [distributed](distributed.md).
 - In RL, `score` returns exactly `k` rows per group, each with `reward_raw` / `reward` as `[C]` on `labels` ([distributed](distributed.md#invariants)).
 - `_start_rollouts` returns only after `sampled()`: weights change only in training, and a batch never mixes weight versions.
-- The checkpoint saves the cursor from before the oldest in-flight batch; resume re-samples in-flight batches rather than restoring them.
+- Without `checkpoint_rollouts`, the checkpoint saves the cursor from before the oldest in-flight batch and a resume re-samples those batches; with it, the batches are saved scored and the cursor as it stands.

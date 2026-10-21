@@ -172,18 +172,20 @@ dcp.load({"app": trainer}, checkpoint_id=path, planner=DefaultLoadPlanner(allow_
 |---|---|---|---|---|
 | `transformer` | ✓ | ✓ | ✓ (load only) | `model_state_dict`: every trainable parameter, plus every module of `variant_modules()`: each variant's LoRA slots, full variant copies, the EMA step counters `variant_counts` |
 | `optimizer` | ✓ | ✓ | | `get_optimizer_state_dict` over the trainable parameters |
-| `cursor` | ✓ | | | `RowCursor` `{"pass", "position"}` from before the oldest in-flight batch took its prompts ([rollouts](rollouts.md#n-step-off)) |
+| `cursor` | ✓ | | | `RowCursor` `{"pass", "position"}`; without `checkpoint_rollouts`, from before the oldest in-flight batch took its prompts ([rollouts](rollouts.md#n-step-off)) |
+| `rollouts` | ✓ | | | `{"world_size", "count", "<rank>": bytes}`: with `checkpoint_rollouts`, each rank's scored in-flight batches as one `torch.save` blob of `(epoch, policy_version, cursor_state_before, profile, rows)` per batch; `count` 0 otherwise |
 | `dataloader` | | ✓ | | `StatefulDataLoader` state |
 | `scheduler` | ✓ | ✓ | | LR scheduler state |
 | `current_step` | ✓ | ✓ | | optimizer steps taken |
 | `current_epoch` | ✓ | | | next RL epoch to train |
-| `rng` | ✓ | ✓ | | each rank's global RNG state: torch, numpy, `random`, accelerator |
+| `rng` | ✓ | ✓ | | `{"<rank>": bytes}`: each rank's pickled global RNG state (torch, numpy, `random`, accelerator) under its own key (`rng_state_dict`) |
 
 The contrib `VaeTrainer` defines its own keys.
 
 - Frozen weights outside the variant modules, the base transformer under LoRA, are not saved. Resume and inference with `checkpoint_dir` first load the base weights (`load_transformer_from_seed`, from `seed_checkpoint_dir` or pretrained), then the checkpoint over them.
 - Loading is partial: a key missing from the checkpoint keeps its loaded value; a missing `cursor` restarts the prompt plan with a warning; a missing `rng` is skipped.
-- RL batches sampled ahead (`rollout_lookahead`) are not saved; resume samples them again ([rollouts](rollouts.md#n-step-off)).
+- RL batches sampled ahead (`rollout_lookahead`) are saved only with `checkpoint_rollouts`; otherwise a resume samples them again ([rollouts](rollouts.md#n-step-off)).
+- Per-rank state needs a key per rank: DCP keeps one copy of each non-tensor entry, so an entry shared by every rank would restore one rank's value on all of them. A rank missing from the checkpoint keeps its own `rng` entry.
 
 ### Tiers
 

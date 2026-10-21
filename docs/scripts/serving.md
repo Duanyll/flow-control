@@ -163,7 +163,7 @@ class LoadingScope:
 if not self.hf_model.load_model(device=device, frozen=not self.trainable):
     self._attach()  # rebind every LoraLinear / VariantModule selector to self._active; take transformer.variants
     return
-self._install_modules()
+self._install_modules(self.transformer)
 self._realize(device)  # ... the fresh-load path (adapter.md)
 ```
 

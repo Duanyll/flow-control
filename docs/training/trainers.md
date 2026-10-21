@@ -155,7 +155,7 @@ flowchart LR
 
 | Mixin | Owns | Config fields |
 |---|---|---|
-| `BaseTrainer` | process group and the `("replicate", "shard")` mesh (`init_device_mesh`); `set_seed` (`seed + rank`); `load_transformer_from_seed` (gradient checkpointing, `_shard`, seed load, `compile_transformer`); `profile_scope`; RNG state for checkpoints (`get_rng_state_bytes`); lifecycle hooks `run` / `seed_checkpoint` / `export_checkpoint` | `launch`, `imports`, `seed`, `hsdp_shard_dim`, `gradient_checkpointing`, `torch_compile`, `profile` |
+| `BaseTrainer` | process group and the `("replicate", "shard")` mesh (`init_device_mesh`); `set_seed` (`seed + rank`); `load_transformer_from_seed` (gradient checkpointing, `_shard`, seed load, `compile_transformer`); `profile_scope`; per-rank RNG state for checkpoints (`rng_state_dict`); lifecycle hooks `run` / `seed_checkpoint` / `export_checkpoint` | `launch`, `imports`, `seed`, `hsdp_shard_dim`, `gradient_checkpointing`, `torch_compile`, `profile` |
 | `DataMixin` | stores, `make_planner`, `prepare_row` ([data](../data/data.md)) | `processor`, `dataset`, `group_size`, `megabatch_groups`, `shuffle_mode`, `num_dataloader_workers` |
 | `TrainingPredictionMixin` | `noised_point`, `predict_training` (an `Executor` over `train_predictor`) | `model`, `train_predictor` |
 | `RunnerMixin` | the run-long `Runner`, closed in `cleanup` ([rollouts](rollouts.md)) | |
@@ -339,7 +339,7 @@ A prompt's rollouts and a validation sample are the same whatever the world size
 
 - **Variants.** `optimizer_step` moves `every: "step"` EMAs after each optimizer step. The RL loop moves `every: "epoch"` EMAs after each epoch's training phase, and SFT never does. Gradient checkpointing recomputes under the variant active in the forward, because `enable_gradient_checkpointing` pins it ([variants](../adapters/variants.md)).
 - **Validation.** It runs once per `validation_variants` entry, with `validation_sampler` on the run-long Runner. SFT validates every `validation_steps` optimizer steps; RL validates every `validation_epochs` epochs, after the checkpoint. Both validate at start unless `validation_at_start: false`. `validation_scorer: null` means the RL trainer's `rollout.reward` (SFT: no scoring), and `false` disables scoring.
-- **Checkpoints.** RL `checkpoint_interval` counts epochs, SFT counts steps. A resumed RL run re-samples the batches that were in flight, because the cursor saved is the one from before the oldest pending batch ([outputs](outputs.md), [rollouts](rollouts.md)).
+- **Checkpoints.** RL `checkpoint_interval` counts epochs, SFT counts steps. A resumed RL run re-samples the batches that were in flight, because the cursor saved is the one from before the oldest pending batch, unless `checkpoint_rollouts` saved them ([outputs](outputs.md), [rollouts](rollouts.md)).
 - **Profiling.** `profile` traces the RL outer epoch `profile.epoch` (with `record_function` ranges `phase/rollout`, `phase/reward_wait`, `phase/train`) and the whole inference loop. SFT takes no trace.
 - **GRPO replay.** The ratio compares the log-prob recorded at rollout time with the replay under `train_predictor`, so `train_predictor` repeats the rollout transition's prediction.
 

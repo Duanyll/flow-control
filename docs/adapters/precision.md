@@ -47,12 +47,12 @@ This configuration fits LoRA training of the 12B FLUX.1 on a 24 GB card.
 |---|---|---|
 | Transformer weights | `hf_model.dtype` (default bf16), which is also `adapter.dtype`, the compute dtype | `HfModelLoader.load_model` |
 | Weight-only fp8 checkpoint | dequantized to `hf_model.dtype` (`hf_model.dequantize`, default true) | `HfModelLoader._load_dequantized` |
-| Frozen `nn.Linear` / `nn.Conv*` weights between forwards | `storage_dtype`, when set and different from `hf_model.dtype` | `apply_layerwise_upcasting` |
+| Frozen base `nn.Linear` / `nn.Conv*` weights between forwards, and frozen non-EMA full copies | `storage_dtype`, when set and different from `hf_model.dtype` | `apply_layerwise_upcasting` |
 | Trainable parameters: LoRA slots, a `trainable` base, `extra_trainable` clones | `trainable_dtype` (default bf16) | `cast_trainable_parameters` |
 | EMA of a LoRA variant (slot copies) | fp32 | `VariantsMixin._copy_slots` |
 | EMA of full weights (module copy) | fp32, run under `torch.autocast(device, adapter.dtype)` | `VariantsMixin._copy`, `fp32_copy_active` |
 | A full variant with its own `hf_model` | that loader's `dtype` | `VariantsMixin._copy` |
-| `_keep_in_fp32_modules` | fp32 only if the family restores them in `_install_modules` | [adapter.md](adapter.md#meta-init-and-the-seed-checkpoint) |
+| `_keep_in_fp32_modules` of a diffusers model | fp32, also on the meta path; not on the fp8 path | `HfModelLoader` ([adapter.md](adapter.md#meta-init-and-the-seed-checkpoint)) |
 | Row inputs (every floating tensor among the data fields) | `adapter.dtype` | `MicrobatchMixin._prepared_batches` |
 | `timestep` | `adapter.dtype`, unless `_prepare_timestep` keeps fp32 | `_prepare_timestep` |
 | Returned velocity | fp32 | `MicrobatchMixin._checked_velocity` |
@@ -80,8 +80,10 @@ apply_layerwise_upcasting(
     storage_dtype=self.storage_dtype,
     compute_dtype=self.hf_model.dtype,
     # granularity=PYTORCH_LAYER: one hook per nn.Linear / nn.Conv{1,2,3}d / nn.ConvTranspose{1,2,3}d
-    # skip_modules_pattern: re.search on the module FQN; default
-    #   _DEFAULT_PYTORCH_LAYER_SKIP_MODULES_PATTERN = ["pos_embed", "patch_embed", "norm"]
+    skip_modules=self.upcasting_exempt_modules(),  # every LoRA slot and clone, and the fp32 EMA full copies
+    # skip_modules_pattern: re.search on the module FQN; default = diffusers' list
+    #   ["pos_embed", "patch_embed", "norm", "^proj_in$", "^proj_out$"]
+    #   + the model's _skip_layerwise_casting_patterns and _keep_in_fp32_modules
 )
 
 class LayerwiseUpcastingHook(ModelHook):
@@ -93,8 +95,8 @@ class LayerwiseUpcastingHook(ModelHook):
 
 - Weights are stored in a low dtype such as fp8 and cast to the compute dtype one layer at a time, for that layer's forward only. The cost is one cast per layer per forward, repeated during gradient-checkpoint recompute.
 - diffusers' own layerwise casting is not used because it also casts trainable parameters and their gradients. `utils/upcasting.py` skips both.
-- Modules whose name matches a skip pattern keep `hf_model.dtype`. With the default patterns these are the positional and patch embeddings and every layer whose name contains `norm`, which includes the AdaLN modulation linears (`norm1.linear`).
-- A hook casts the parameters of its whole subtree. Hooks are installed after `_realize`, so they also cover full variant copies and the frozen LoRA slots inside a `LoraLinear`. Only parameters that require grad are exempt.
+- Modules whose name matches a skip pattern keep `hf_model.dtype`. With the default patterns these are the positional and patch embeddings, the input and output projections, and every layer whose name contains `norm`, which includes the AdaLN modulation linears (`norm1.linear`).
+- A hook casts only its own layer's weights, not its children's: a `LoraLinear`'s children are variant slots. Variant weights are exempt (`VariantsMixin.upcasting_exempt_modules`): LoRA slots and clones are small, and EMA copies must stay fp32 for `update_variants`. A frozen non-EMA full copy (an autoguidance or uncond transformer) is stored in `storage_dtype` like the base.
 - `apply_layerwise_upcasting` warns that fp8 hooks under DDP hit pytorch#162057 on PyTorch 2.8+.
 
 ## Extension points and core contracts

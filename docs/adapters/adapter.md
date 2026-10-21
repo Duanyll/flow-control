@@ -51,7 +51,7 @@
 flowchart TB
     subgraph LT["load_transformer(device)"]
         direction LR
-        L1["hf_model.load_model"] --> L2["_install_modules"] --> L3["_realize (variants)"] --> L4["cast_trainable_parameters"] --> L5["apply_layerwise_upcasting"]
+        L1["hf_model.load_model"] --> L2["_install_modules(transformer)"] --> L3["_realize (variants)"] --> L4["cast_trainable_parameters"] --> L5["apply_layerwise_upcasting"]
     end
     S1["flow-control seed"] -->|"device=cpu"| LT
     LT -->|"seed"| S2["dcp.save → seed_checkpoint_dir"]
@@ -94,7 +94,7 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     def load_transformer(self, device: torch.device) -> None: ...
 
     # what a family implements
-    def _install_modules(self) -> None: ...          # optional
+    def _install_modules(self, transformer: TModel) -> None: ...  # optional; changes the argument
     def _prepare_timestep(self, timestep: Tensor) -> Tensor:  # optional
         return timestep.to(device=self.device, dtype=self.dtype)
     @abstractmethod
@@ -159,8 +159,8 @@ class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatc
     # lora_exclude_modules = (...)              # linears with no gradient path
     # lora_extra_trainable = (...)              # modules a LoRA variant clones and trains whole
 
-    def _install_modules(self) -> None:         # meta-safe replacements, fp32 restores
-        ...
+    def _install_modules(self, transformer) -> None:  # meta-safe replacements; change `transformer`, never self.transformer
+        ...                                     # e.g. transformer.pos_embed = PatchedQwenEmbedRope(...)
 
     def _predict_velocity(self, batch: TBatch, timestep: torch.Tensor) -> torch.Tensor:
         if "_img_ids" not in batch:
@@ -175,7 +175,7 @@ class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatc
 ```
 
 - One class may serve several checkpoints: register it under each tag, widen `type` (`Literal["base", "turbo"]`), and pick `hf_model.pretrained_model_id` in `model_post_init` (`Krea2Adapter`, `Flux3Adapter`, `HiDreamO1Adapter`).
-- `_install_modules` runs once per fresh load: inside the meta context when training from a seed, on CPU when building the seed, and on the device otherwise. It runs before the variants are realized, so full copies and LoRA targeting see the replaced modules. Module surgery belongs there, not in a `load_transformer` override (`Flux1DConcatAdapter` widens `x_embedder`; `Flux2KVAdapter` sets attention processors).
+- `_install_modules(transformer)` changes the transformer it is given, never `self.transformer`. It runs on the base before the variants are realized, so full copies and LoRA targeting see the replaced modules, and on every `FullVariant` that loads its own `hf_model` (`VariantsMixin._copy`). It runs once per fresh load: inside the meta context when training from a seed, on CPU when building the seed, and on the device otherwise. The base is frozen again after it (`requires_grad_(self.trainable)`), so modules it adds train only with a trainable base. Module surgery belongs there, not in a `load_transformer` override (`Flux1DConcatAdapter` widens `x_embedder`; `Flux2KVAdapter` sets attention processors; the layered Qwen adapters swap `pos_embed`).
 - `library: "custom"` loads vendored transformers-style modeling code by dotted path (`HiDreamO1Transformer`).
 - A family must not override `load_transformer`, `_realize` / `_attach`, `use_variant`, or replace `hf_model.model` after load. It overrides `predict_velocity_batched` only to change the physical batch layout ([microbatching.md](microbatching.md)).
 
@@ -223,7 +223,7 @@ The seed is `load_transformer(cpu)` saved with `dcp.save` (`flow-control seed`, 
    - derive it on every call (`Cosmos3RotaryEmbedding.inv_freq`, the qwen21 `TemporalTimesteps`; Krea 2's and FLUX.3's RoPE already compute in `forward`);
    - build it as a plain tensor attribute outside the meta context (`QwenImage21Adapter` builds `QwenImage21Rope` under `torch.device("cpu")` and keeps it complex64, because a buffer would be cast by `model.to(dtype)`);
    - recompute it after `to_empty` (`HiDreamO1Transformer.to_empty`).
-2. **`_keep_in_fp32_modules`.** diffusers' `from_pretrained` keeps those modules in fp32. The meta path builds the model from its config and casts everything to `hf_model.dtype`, and `dcp.load` copies into the existing dtype, so those modules end up in bf16. A family that needs fp32 modules restores them in `_install_modules`, which runs on both the seed path and the meta path (`Cosmos3Adapter`: `self.transformer.time_embedder.float()`). The fp8 path (`_load_dequantized`) keeps no fp32 modules either, and the same fix applies.
+2. **`_keep_in_fp32_modules`.** diffusers' `from_pretrained` keeps those modules in fp32. The meta path builds the model from its config and casts it to `hf_model.dtype`, so `HfModelLoader` gives a diffusers model's `_keep_in_fp32_modules` back fp32 by the same tensor-name rule (`_keep_in_fp32` in `utils/hf_model.py`), and `dcp.load` copies into fp32 (FLUX.3 `norm_q` / `norm_k`, Krea 2 norms, Cosmos3 `time_embedder`). `library: "custom"` models and the fp8 path (`_load_dequantized`, which casts every tensor) keep no fp32 modules; a family that needs one there restores it in `_install_modules`.
 
 ## Extension points and core contracts
 
