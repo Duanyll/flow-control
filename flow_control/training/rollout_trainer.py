@@ -10,6 +10,7 @@ steps, :class:`~flow_control.training.endpoint.EndpointTrainer` re-noises the
 rollout endpoints.
 """
 
+import io
 import os
 from abc import ABC, abstractmethod
 from collections import deque
@@ -87,6 +88,11 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     scores one batch while the accelerator produces the next; the price is that
     every batch trains under a policy ``N`` epochs newer than the one that
     sampled it (``rollout/policy_lag``)."""
+    checkpoint_rollouts: bool = False
+    """Keep the batches sampled ahead in the checkpoint, so a resume trains on
+    the rollouts the uninterrupted run would have; each save then waits for
+    their rewards. Off: a resume samples them again (same prompts and noise)
+    under the restored weights."""
 
     clip_grad_norm: float = 1.0
     """Gradient-norm clip before each optimizer step; ``0.0`` disables it."""
@@ -163,21 +169,72 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     # ------------------------------- Checkpointing ------------------------------ #
 
     def state_dict(self):
+        kept = list(self._pending_rollouts) if self.checkpoint_rollouts else []
         return {
             "transformer": model_state_dict(self.model),
             "optimizer": optimizer_state_dict(self.model, self._optimizer),
-            # In-flight batches are dropped on resume and sampled again, so the
-            # cursor must rewind to before the oldest of them took its prompts.
+            # Dropped in-flight batches are sampled again on resume, so the
+            # cursor rewinds to before the oldest of them took its prompts.
             "cursor": (
                 self._pending_rollouts[0].cursor_state_before
-                if self._pending_rollouts
+                if self._pending_rollouts and not kept
                 else self._cursor.state_dict()
             ),
+            "rollouts": self._rollouts_state(kept),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
             "current_epoch": self._current_epoch,
-            "rng": self.get_rng_state_bytes(),
+            "rng": self.rng_state_dict(),
         }
+
+    def _rollouts_state(self, batches: list[PendingRollouts]) -> dict[str, Any]:
+        """The kept batches, scored, as one blob per rank: each rank holds its
+        own prompts. Waiting is collective; every rank's ``dcp.save`` calls
+        :meth:`state_dict` at the same point."""
+        buffer = io.BytesIO()
+        torch.save(
+            [
+                (b.epoch, b.policy_version, b.cursor_state_before, b.profile, b.wait())
+                for b in batches
+            ],
+            buffer,
+        )
+        return {
+            "world_size": self.world_size,
+            "count": len(batches),
+            str(self.rank): buffer.getvalue(),
+        }
+
+    def _load_rollouts(self, state: dict[str, Any]) -> None:
+        """Restore the kept batches as scored ones (none from a checkpoint saved
+        without ``checkpoint_rollouts``)."""
+        if state["count"] and state["world_size"] != self.world_size:
+            raise ValueError(
+                f"The checkpoint holds {state['count']} in-flight rollout batches "
+                f"split over {state['world_size']} ranks; resume them on "
+                f"{state['world_size']} ranks, not {self.world_size}."
+            )
+        if state["count"] > self.rollout_lookahead:
+            raise ValueError(
+                f"The checkpoint holds {state['count']} in-flight rollout batches, "
+                f"more than rollout_lookahead ({self.rollout_lookahead}) keeps."
+            )
+        batches = torch.load(
+            io.BytesIO(state[str(self.rank)]),
+            map_location=self.rollout_storage,
+            weights_only=False,  # rows hold arbitrary values
+        )
+        self._pending_rollouts = deque(
+            PendingRollouts(
+                epoch=epoch,
+                policy_version=version,
+                groups=None,
+                cursor_state_before=cursor,
+                profile=profile,
+                rows=rows,
+            )
+            for epoch, version, cursor, profile, rows in batches
+        )
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         load_model_state_dict(self.model, state_dict["transformer"])
@@ -192,7 +249,8 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
         self._current_epoch = state_dict.get("current_epoch", 0)
-        self.load_rng_state_bytes(state_dict.get("rng"))
+        self._load_rollouts(state_dict["rollouts"])
+        self.load_rng_state_dict(state_dict["rng"])
 
     # ----------------------------- Training phase ------------------------------- #
 
@@ -241,9 +299,11 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
 
     def _prime_rollouts(self) -> None:
         """Sample the first ``rollout_lookahead`` batches under the current
-        weights. A resume starts here too, re-sampling whatever was in flight."""
-        first, ahead = self._current_epoch, self.rollout_lookahead
-        for epoch in range(first, min(first + ahead, self.train_epochs)):
+        weights. A resume starts here too, re-sampling whatever was in flight
+        and not restored from the checkpoint."""
+        first = self._current_epoch + len(self._pending_rollouts)
+        last = min(self._current_epoch + self.rollout_lookahead, self.train_epochs)
+        for epoch in range(first, last):
             self._launch_rollouts(epoch)
 
     def _run_epoch(self) -> None:

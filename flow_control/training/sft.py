@@ -134,7 +134,7 @@ class SftTrainer(
             "dataloader": self._dataloader.state_dict(),
             "scheduler": self._scheduler.state_dict(),
             "current_step": self._current_step,
-            "rng": self.get_rng_state_bytes(),
+            "rng": self.rng_state_dict(),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]):
@@ -143,7 +143,7 @@ class SftTrainer(
         self._dataloader.load_state_dict(state_dict["dataloader"])
         self._scheduler.load_state_dict(state_dict["scheduler"])
         self._current_step = state_dict["current_step"]
-        self.load_rng_state_bytes(state_dict.get("rng"))
+        self.load_rng_state_dict(state_dict["rng"])
 
     # ------------------------------- Training ----------------------------------- #
 

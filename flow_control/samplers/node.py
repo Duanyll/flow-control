@@ -94,6 +94,12 @@ class RootFrame(Frame):
         self.variant = variant
         """The variant this row's ``Model(variant=None)`` leaves run under; None is the adapter's active one."""
 
+    def __reduce__(self) -> tuple[type[RootFrame], tuple[Any, ...]]:
+        """Pickled (a checkpointed rollout's recorded chain) the root keeps its
+        variant; the engine, observers and progress hook belong to the live run.
+        A copy is the same bare root, so chains share or replace a root, never copy it."""
+        return RootFrame, (None, (), None, self.variant)
+
 
 def _frames(frame: Frame | None) -> Iterator[Frame]:
     while frame is not None:

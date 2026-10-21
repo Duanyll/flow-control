@@ -438,7 +438,7 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
             "scheduler_gen": self._scheduler_gen.state_dict(),
             "dataloader": self._dataloader.state_dict(),
             "current_step": self._current_step,
-            "rng": self.get_rng_state_bytes(),
+            "rng": self.rng_state_dict(),
         }
         if self._optimizer_disc is not None:
             state["discriminator"] = get_model_state_dict(
@@ -477,7 +477,7 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
             )
             self._scheduler_disc.load_state_dict(state_dict["scheduler_disc"])
 
-        self.load_rng_state_bytes(state_dict.get("rng"))
+        self.load_rng_state_dict(state_dict["rng"])
 
     # ------------------------------ Training -------------------------------- #
 

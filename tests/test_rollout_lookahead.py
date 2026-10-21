@@ -365,6 +365,40 @@ class RolloutLookaheadTest(unittest.TestCase):
                 resumed._sampled, {epoch: trainer._sampled[epoch] for epoch in (2, 3)}
             )
 
+        with self.subTest("resume with the in-flight batch kept"):
+            # checkpoint_rollouts saves batch 2 scored: the resume trains on the
+            # rows the uninterrupted run trained on, at its lag, without
+            # sampling them again; the cursor stays past batch 2's prompts.
+            config = {
+                **self.SCHEDULE_CONFIG,
+                "rollout_lookahead": 1,
+                "checkpoint_rollouts": True,
+            }
+            trainer = _make_trainer(_ScheduleProbe, config, _RowStore(8), _load())
+            trainer._prime_rollouts()
+            for _ in range(2):
+                trainer._run_epoch()
+            state = deep_apply_tensor_fn(trainer.state_dict(), lambda t: t.clone())
+            self.assertEqual(state["cursor"], trainer._cursor.state_dict())
+
+            resumed = _make_trainer(_ScheduleProbe, config, _RowStore(8), _load(1))
+            resumed.load_state_dict(state)
+            resumed._prime_rollouts()
+            self._run_to_end(trainer)
+            self._run_to_end(resumed)
+            self.assertEqual(
+                resumed._events,
+                [
+                    ("start", 3, 2),
+                    ("finish", 2),
+                    ("train", 2),
+                    ("finish", 3),
+                    ("train", 3),
+                ],
+            )
+            self.assertEqual(_policy_lags(resumed), [1, 1])
+            self.assertEqual(resumed._trained, trainer._trained[2:])
+
     def test_nft_epoch_runs_under_the_declared_variants(self) -> None:
         """One NFT epoch through the real loop: rollouts sample under ``old``,
         each microbatch reads ``old`` and ``ref`` (the base) under no_grad

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from flow_control.adapters import ModelAdapter
 from flow_control.data import KEY, OnlineStore, PromptSampling, RowCursor
-from flow_control.rewards import reduce_reward_profiles
+from flow_control.rewards import RewardProfile, reduce_reward_profiles
 from flow_control.samplers import Observer, Row
 from flow_control.training.rollouts import Pending, Rollout
 from flow_control.utils.logging import get_logger
@@ -42,11 +42,23 @@ class PendingRollouts:
     policy_version: int
     """``_current_epoch`` when sampled; ``rollout/policy_lag`` is the gap to the
     epoch that trains on it (0 without ``rollout_lookahead``)."""
-    groups: Pending
-    """The batch's prompt groups on the runner; ``wait()`` returns their rows."""
+    groups: Pending | None
+    """The batch's prompt groups on the runner; None for a batch restored from
+    a checkpoint, which arrives scored."""
     cursor_state_before: dict[str, int]
     """``RowCursor`` state before this batch took its prompts; the checkpoint
     saves the oldest in-flight batch's so a resume re-takes the same prompts."""
+    profile: RewardProfile
+    """The batch's remote reward requests."""
+    rows: list[Row] | None = None
+    """The scored rows, once waited for."""
+
+    def wait(self) -> list[Row]:
+        """The scored rows in submission order; collective until they are in."""
+        if self.rows is None:
+            assert self.groups is not None
+            self.rows = [row for rows in self.groups.wait() for row in rows]
+        return self.rows
 
 
 class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
@@ -220,6 +232,7 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
             policy_version=getattr(self, "_current_epoch", epoch),
             groups=groups,
             cursor_state_before=cursor_state_before,
+            profile=groups.profile,
         )
 
     def _finish_rollouts(self, pending: PendingRollouts) -> list[Row]:
@@ -229,12 +242,12 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
         training epoch's step; the same batch's ``profile/rollout/*`` went out
         at the step it was sampled."""
         started = time.perf_counter()
-        rows = [row for rows in pending.groups.wait() for row in rows]
+        rows = pending.wait()
         wait_s = time.perf_counter() - started
 
         step = getattr(self, "_current_step", 0)
         self.log_reduced_metrics(
-            pending.groups.profile.local_payload(), reduce_reward_profiles, step
+            pending.profile.local_payload(), reduce_reward_profiles, step
         )
         current_epoch: int = getattr(self, "_current_epoch", pending.epoch)
         self.log_metrics(
@@ -254,7 +267,7 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
                         "policy_version": pending.policy_version,
                         "step": step,
                         "wait_at_train_s": wait_s,
-                        **pending.groups.profile.timestamps(),
+                        **pending.profile.timestamps(),
                     }
                 )
             )

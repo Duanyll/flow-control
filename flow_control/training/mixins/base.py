@@ -201,11 +201,11 @@ class BaseTrainer(BaseModel):
         devutil.manual_seed_all(seed)
         logger.info(f"Random seed set to {seed} for rank {self.rank}.")
 
-    def get_rng_state_bytes(self) -> bytes:
-        """Serialize this rank's global RNG state (torch/accelerator/numpy/random).
+    def rng_state_dict(self) -> dict[str, bytes]:
+        """This rank's global RNG state (torch/accelerator/numpy/random), keyed by rank.
 
-        Packed as a single pickled blob so DCP treats it as a per-rank bytes
-        object (each rank saves/loads its own copy, not a broadcast of rank 0).
+        DCP keeps one copy of each non-tensor key, so a key shared by all ranks
+        would restore one rank's state on every rank.
         """
         state: dict[str, object] = {
             "torch": torch.get_rng_state(),
@@ -215,19 +215,17 @@ class BaseTrainer(BaseModel):
         acc_state = devutil.get_rng_state(self.device)
         if acc_state is not None:
             state[devutil.current_device_type()] = acc_state
-        return pickle.dumps(state)
+        return {str(self.rank): pickle.dumps(state)}
 
-    def load_rng_state_bytes(self, data: bytes | None) -> None:
-        if not data:
-            return
-        state = pickle.loads(data)
+    def load_rng_state_dict(self, states: dict[str, bytes]) -> None:
+        """Restore this rank's entry; a rank the checkpoint lacks loads back its own template."""
+        state = pickle.loads(states[str(self.rank)])
         torch.set_rng_state(state["torch"])
         np.random.set_state(state["numpy"])
         random.setstate(state["python"])
         acc_state = state.get(devutil.current_device_type())
         if acc_state is not None:
             devutil.set_rng_state(acc_state, self.device)
-        logger.info("Restored RNG state from checkpoint.")
 
     def compile_transformer(self, model: BaseModelAdapter) -> None:
         if self.torch_compile is not None:
@@ -296,7 +294,7 @@ class BaseTrainer(BaseModel):
             if not os.path.exists(os.path.join(seed_checkpoint_dir, ".metadata")):
                 raise ValueError(
                     f"Seed checkpoint directory {seed_checkpoint_dir} does not exist or "
-                    "is not a valid DCP checkpoint. Set launch.generate_seed = true or "
+                    "is not a valid DCP checkpoint. Set launch.generate_dcp_seed = true or "
                     "manually generate the seed checkpoint with `flow-control seed` command."
                 )
             model.transformer.to_empty(device=self.device)
