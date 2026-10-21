@@ -1,7 +1,7 @@
-"""``DataMixin``: the consumer side of the data stack (design §9.1).
+"""``DataMixin``: the consumer side of the data stack (``docs/data/data.md``).
 
 Opens the row store behind a ``DatasetConfig``, picks the grouping plan for it
-(§6.3) and turns a fetched row into a model-ready row: move to device, run the
+and turns a fetched row into a model-ready row: move to device, run the
 processor online when the dataset is a raw source, then ``processor.resample``.
 Whether a dataset is preprocessed online is decided by the store type alone
 (``OnlineStore``); there is no separate switch for it.
@@ -51,7 +51,7 @@ class DataMixin(BaseTrainer):
     processor: Processor
     dataset: DatasetConfig
     group_size: int = 16
-    """Rows per plan group (§6.1) of shuffled plans (training, rollout prompts):
+    """Rows per plan group of shuffled plans (training, rollout prompts):
     ``world_size`` must divide it and, for trainers with microbatches,
     ``train_micro_batch_size`` must divide ``group_size / world_size`` so one
     microbatch never straddles two groups. Unshuffled plans (inference,
@@ -104,7 +104,7 @@ class DataMixin(BaseTrainer):
     def make_planner(
         self, store: RowStore, *, shuffle: bool, micro_batch_size: int = 1
     ) -> Planner:
-        """Pick the ``groups_*`` plan for ``store`` (§6.3). Shuffled plans group
+        """Pick the ``groups_*`` plan for ``store``. Shuffled plans group
         ``group_size`` rows after checking that the ranks and microbatches tile it
         (``micro_batch_size`` is passed by trainers that own
         ``train_micro_batch_size``). Unshuffled plans keep the whole set in cost

@@ -1,4 +1,4 @@
-"""Consumer-side row access (design §7.2, §7.3).
+"""Consumer-side row access (``docs/data/data.md``).
 
 ``RowStream`` is the map-style dataset behind SFT / inference / validation: the
 rows of one rank for one epoch, resolved through a planner. ``RowCursor`` is the

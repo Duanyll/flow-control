@@ -70,7 +70,9 @@ def main():
         action.add_argument("--output-dir", required=True)
 
     lora_export = lora_actions.add_parser(
-        "export", help="Export one LoRA variant of a DCP checkpoint to Diffusers LoRA."
+        "export",
+        help="Export one LoRA variant of a DCP checkpoint to Diffusers LoRA, or "
+        "with --native to a native file.",
     )
     add_lora_config(lora_export)
     lora_export.add_argument("--checkpoint-dir", required=True)
@@ -82,6 +84,14 @@ def main():
     lora_export.add_argument("--output-dir", required=True)
     lora_export.add_argument(
         "--weight-name", default="pytorch_lora_weights.safetensors"
+    )
+    lora_export.add_argument(
+        "--native",
+        action="store_true",
+        help=(
+            "Write <output-dir>/<variant>.safetensors, usable as a lora variant's "
+            '"path", instead of a Diffusers LoRA.'
+        ),
     )
 
     lora_import = lora_actions.add_parser(
@@ -185,6 +195,7 @@ def _dispatch_lora(args: argparse.Namespace) -> None:
             output_dir=args.output_dir,
             variant=args.variant,
             weight_name=args.weight_name,
+            native=args.native,
         )
     elif args.lora_action == "import":
         lora.import_lora(

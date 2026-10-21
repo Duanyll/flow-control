@@ -128,7 +128,8 @@ class DiffusersLoraTest(unittest.TestCase):
 
     def test_export_writes_the_checkpoint_slots_of_one_variant(self) -> None:
         """``lora export --variant`` reads ``app.transformer.*`` slots (an EMA's too)
-        into a fresh skeleton and writes exactly them as PEFT tensors; a checkpoint
+        into a fresh skeleton and writes exactly them as PEFT tensors, or with
+        ``--native`` as the file a lora variant's ``path`` loads; a checkpoint
         missing the variant's slots and a variant with clones are refused."""
         variants = {
             "default": {"type": "lora", "rank": 2, "alpha": 4},
@@ -174,6 +175,13 @@ class DiffusersLoraTest(unittest.TestCase):
                     output_dir=str(root / "out"),
                     variant="ema",
                 )
+                export_dcp(
+                    {},
+                    checkpoint_dir=str(root / "ckpt"),
+                    output_dir=str(root / "native"),
+                    variant="ema",
+                    native=True,
+                )
                 with self.assertRaisesRegex(ValueError, "lacks 2 tensors"):
                     export_dcp(
                         {},
@@ -191,6 +199,18 @@ class DiffusersLoraTest(unittest.TestCase):
             with safe_open(root / "out/pytorch_lora_weights.safetensors", "pt") as f:
                 tensors = {key: f.get_tensor(key) for key in list(f.keys())}
                 metadata = json.loads((f.metadata() or {})[LORA_ADAPTER_METADATA_KEY])
+            # --native: the same slots as a file a lora variant's ``path`` loads.
+            native = tiny_adapter(
+                {
+                    "default": {
+                        "type": "lora",
+                        "rank": 2,
+                        "alpha": 4,
+                        "path": str(root / "native/ema.safetensors"),
+                    }
+                },
+                seed=8,
+            )
 
         self.assertEqual(
             set(tensors),
@@ -206,6 +226,9 @@ class DiffusersLoraTest(unittest.TestCase):
         self.assertEqual(
             (metadata["transformer.r"], metadata["transformer.lora_alpha"]), (2, 4)
         )
+        loaded = lora_pairs(native.transformer, "default")["proj"]
+        torch.testing.assert_close(loaded.A.weight, pair.A.weight)
+        torch.testing.assert_close(loaded.B.weight, pair.B.weight)
 
     def test_import_writes_a_native_file_a_lora_variant_loads(self) -> None:
         """``lora import`` turns a Diffusers LoRA into the native file a

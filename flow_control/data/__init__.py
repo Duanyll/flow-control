@@ -1,7 +1,7 @@
 """Data stack: raw sources -> preprocess -> [random cache] -> pack -> [packed cache].
 
 Public entry points: ``DatasetConfig`` (the ``{"type": ...}`` dict every trainer /
-preprocess config carries) and ``open_store`` (design §7.1).
+preprocess config carries) and ``open_store`` (``docs/data/data.md``).
 """
 
 from typing import Annotated, Any, Literal

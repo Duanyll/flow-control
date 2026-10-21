@@ -26,8 +26,8 @@ class Sd35MediumPreset(BaseModel):
 
     We reuse the base ``encoder`` slot for T5 (the long-context sequence encoder, as
     FLUX does) and add CLIP-L / CLIP-G as extra fields, then override
-    :meth:`encode_prompt` to build the fused tensors and :meth:`load_models` so all
-    three text encoders are loaded (the default only loads the ``encoder`` /
+    :meth:`encode_prompt` to build the fused tensors, and list all three text
+    encoders in ``_encoding_components`` (the default loads only the ``encoder`` /
     ``pooled_encoder`` slots).
     """
 

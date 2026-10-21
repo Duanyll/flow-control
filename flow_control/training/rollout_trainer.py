@@ -100,6 +100,7 @@ class RolloutTrainerBase[ItemT: RolloutIndexedItem](
     # Optimization / training loop
     train_epochs: int = 100
     validation_epochs: int = 20
+    """Validation cadence in epochs; ``0`` disables periodic validation."""
 
     # --------------------------------- Status bar ------------------------------- #
     _status_fields: dict[str, str] = {

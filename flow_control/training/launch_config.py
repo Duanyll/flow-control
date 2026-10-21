@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 class LaunchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Open: any tag registered in ``trainer_registry`` (see training/registry.py),
+    # Open: any tag registered in ``trainer_registry`` (see training/mixins/base.py),
     # whether built-in or a plugin trainer named in the config's ``imports``.
     # Validated against the registry at dispatch time (launch._run_child), not
     # here, so a new trainer needs no edit to this file.

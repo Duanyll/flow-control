@@ -364,18 +364,19 @@ class BaseTrainer(BaseModel):
 
 def model_state_dict(model: BaseModelAdapter) -> dict[str, Any]:
     """The trainable weights plus every variant's, so frozen EMA / full copies survive a resume."""
-    state = get_model_state_dict(
-        model.transformer,
-        options=StateDictOptions(strict=False, ignore_frozen_params=True),
+    transformer = model.transformer
+    owners = model.variant_modules()
+    variant_prefixes = tuple(
+        f"{name}." for name, module in transformer.named_modules() if module in owners
     )
-    state.update(
-        get_model_state_dict(
-            model.transformer,
-            submodules=model.variant_modules(),
-            options=StateDictOptions(strict=False),
-        )
-    )
-    return state
+    # Module names are the state-dict FQNs: compile and gradient checkpointing wrap nothing.
+    frozen = {
+        name
+        for name, param in transformer.named_parameters(remove_duplicate=False)
+        if not param.requires_grad and not name.startswith(variant_prefixes)
+    }
+    state = get_model_state_dict(transformer, options=StateDictOptions(strict=False))
+    return {key: value for key, value in state.items() if key not in frozen}
 
 
 def load_model_state_dict(model: BaseModelAdapter, state: dict[str, Any]) -> None:

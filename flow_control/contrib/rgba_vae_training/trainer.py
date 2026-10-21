@@ -104,6 +104,7 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
     checkpoint_interval: int = 5000
     """Archival checkpoint cadence in optimizer steps."""
     validation_steps: int = 5000
+    """Validation cadence in optimizer steps; ``0`` disables periodic validation."""
     resume_from_dir: str | None = None
     seed_checkpoint_dir: str | None = None
 
@@ -390,7 +391,7 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
 
     def _planner(self, store: RowStore, *, shuffle: bool) -> Planner:
         # Cost-blind plan (VAE rows carry no cost): a group is one row per rank
-        # and ``groups_plain`` pads the tail group per §6.4.
+        # and ``groups_plain`` pads the tail group.
         return partial(
             groups_plain, len(store), self.world_size, self.seed, shuffle=shuffle
         )
@@ -686,7 +687,10 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
             force_archival=self._current_step == self.train_steps,
         )
 
-        if self._current_step % self.validation_steps == 0:
+        if (
+            self.validation_steps > 0
+            and self._current_step % self.validation_steps == 0
+        ):
             self.validate_vae(self._current_step)
 
     def check_loss(self, loss: torch.Tensor) -> None:
@@ -774,7 +778,7 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
                     row = self.prepare_row(row, epoch=epoch)
                     target = row[TARGET_IMAGE]
                     # Padding rows run forward and backward like any other
-                    # (FSDP collectives) but contribute nothing (§6.4).
+                    # (FSDP collectives) but contribute nothing.
                     loss_weight = 0.0 if is_padding(row) else 1.0
 
                     # Generator forward + backward

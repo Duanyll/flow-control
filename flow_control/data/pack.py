@@ -1,4 +1,4 @@
-"""``pack``: random cache -> packed cache of tar shards (design §5).
+"""``pack``: random cache -> packed cache of tar shards (``docs/data/formats.md``).
 
 Layout::
 

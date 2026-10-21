@@ -32,7 +32,12 @@ from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from flow_control.adapters import parse_model_adapter
 from flow_control.adapters.base import BaseModelAdapter
 from flow_control.adapters.variants import EmaVariant, LoraVariant
-from flow_control.adapters.weights import VariantModule, lora_metadata, lora_pairs
+from flow_control.adapters.weights import (
+    VariantModule,
+    lora_metadata,
+    lora_pairs,
+    save_lora,
+)
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
@@ -387,14 +392,23 @@ def export_dcp(
     output_dir: str,
     variant: str = "default",
     weight_name: str = LORA_WEIGHT_NAME_SAFE,
+    native: bool = False,
 ) -> None:
-    """Export one LoRA variant of a DCP training checkpoint as a Diffusers LoRA."""
-    _require_new_output(output_dir)
+    """Export one LoRA variant of a DCP training checkpoint as a Diffusers LoRA, or
+    with ``native`` as ``<output_dir>/<variant>.safetensors`` for a lora variant's ``path``."""
+    output = _require_new_output(output_dir)
     _validate_output_weight_name(weight_name)
     checkpoint = _require_dcp_checkpoint(checkpoint_dir)
     adapter = _make_model_adapter(config, variants=True)
     name, lora = _lora_slots(adapter, variant)
     _load_dcp_slots(adapter.transformer, checkpoint, name)
+    if native:
+        output.mkdir(parents=True)
+        save_lora(
+            adapter.transformer, name, lora, str(output / f"{variant}.safetensors")
+        )
+        logger.info("Saved native LoRA to %s", output / f"{variant}.safetensors")
+        return
     # The PEFT host only carries the LoRA tensors: a fresh meta copy, not the cached one.
     HfModelLoader.invalidate_cache(adapter.hf_model.config_key)
     target = _make_model_adapter(config, variants=False, device="meta").transformer

@@ -1,4 +1,4 @@
-"""Shuffle and grouping plans (design §6).
+"""Shuffle and grouping plans (``docs/data/data.md``).
 
 Pure functions over an ``Index``. A plan is a list of groups; every group holds
 exactly ``n`` planned rows with similar ``cost`` so that the ranks, which consume

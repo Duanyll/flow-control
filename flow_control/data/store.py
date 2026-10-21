@@ -1,4 +1,4 @@
-"""``RowStore``: random access to rows by ``row_id`` (design §7.1).
+"""``RowStore``: random access to rows by ``row_id`` (``docs/data/data.md``).
 
 Every store is picklable into DataLoader workers: file / LMDB handles are dropped
 on pickle and reopened lazily in the receiving process. ``get`` always returns a

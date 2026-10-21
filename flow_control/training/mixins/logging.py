@@ -113,7 +113,7 @@ class LoggingMixin(BaseModel):
     runs_root: str = "./runs"
     """Root directory for append-only jsonl run logs."""
     run_id: str | None = None
-    """Stable run identifier. Auto-generated at ``init_tracker()`` if None.
+    """Stable run identifier. Chosen by ``resolve_run_context()`` if None.
 
     Setting this explicitly lets a preempted job reuse the same on-disk run dir
     (and the same trackio run via ``resume='allow'``).

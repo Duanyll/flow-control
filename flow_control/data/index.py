@@ -1,4 +1,4 @@
-"""``index.jsonl`` + ``meta.json``: the row catalogue every cache format shares (design §4.1)."""
+"""``index.jsonl`` + ``meta.json``: the row catalogue every cache format shares (``docs/data/formats.md``)."""
 
 import json
 import os

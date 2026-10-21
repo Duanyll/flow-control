@@ -77,11 +77,7 @@ class SigmoidNormalize(_NormalizeBase):
 
 @normalize_registry.register("clamp")
 class ClampNormalize(_NormalizeBase):
-    """``x.clamp(low, high)``.
-
-    Useful as a safety net after an affine transform to keep rewards in a
-    well-defined range.
-    """
+    """``x.clamp(low, high)``: keeps a scorer's raw values in a known range."""
 
     type: Literal["clamp"] = "clamp"
     low: float = 0.0

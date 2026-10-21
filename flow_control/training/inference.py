@@ -47,7 +47,7 @@ class Inference(RunnerMixin, BaseTrainer, DcpMixin):
     model: ModelAdapter
     sampler: Trajectory
     report: ReportConfig
-    """Where the outputs go (design §10): ``metrics.jsonl`` with one line per
+    """Where the outputs go (``docs/data/formats.md``): ``metrics.jsonl`` with one line per
     sample, ``previews/<key>.png`` and optionally ``records/`` (a random cache of
     the full result rows)."""
     reward: Scorers | None = None

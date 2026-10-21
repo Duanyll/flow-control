@@ -57,7 +57,7 @@ class TorchDatasetLoaderStage(PipelineStage):
         self.worker_id = worker_id
         self.logger = get_logger(f"TorchDatasetLoaderStage-{worker_id}")
 
-        # Coercion to the processor's input TypedDict is always on (design §3).
+        # Coercion to the processor's input TypedDict is always on.
         task_name = (processor_args or {})["task"]
         processor_class = task_registry.get(task_name)
         if processor_class is None:

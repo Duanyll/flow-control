@@ -78,6 +78,7 @@ class SftTrainer(
     checkpoint_interval: int = 500
     """Archival checkpoint cadence in optimizer steps."""
     validation_steps: int = 1000
+    """Validation cadence in optimizer steps; ``0`` disables periodic validation."""
 
     timestep_weighting: TimestepWeighting = LogitNormalTimestepWeighting()
     loss_weighting: LossWeighting = UniformLossWeighting()
@@ -201,7 +202,10 @@ class SftTrainer(
             force_archival=self._current_step == self.train_steps,
         )
 
-        if self._current_step % self.validation_steps == 0:
+        if (
+            self.validation_steps > 0
+            and self._current_step % self.validation_steps == 0
+        ):
             self._validate()
 
     def _validate(self) -> None:

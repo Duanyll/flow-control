@@ -2,9 +2,9 @@
 
 Extracted from GrpoTrainer so that NFT and other RL trainers can reuse the
 rollout / reward / advantage pipeline. Prompts come from a ``RowCursor`` over
-the trainer's store (design §7.3): every RL epoch takes ``num_prompts_per_epoch``
-distinct prompts, identical on every rank, and each rank keeps every ``K``-th
-prompt whole; the rollout program (``docs/rollout-reward-design.md``) turns a
+the trainer's store (``docs/data/data.md``): every RL epoch takes ``num_prompts_per_epoch``
+distinct prompts, identical on every rank, and each rank keeps every
+``world_size``-th prompt whole; the rollout program (``docs/training/rollouts.md``) turns a
 prompt into its ``num_rollouts_per_prompt`` scored rows through the ``Runner``.
 """
 
@@ -180,10 +180,6 @@ class RolloutMixin(RunnerMixin, LoggingMixin, BaseTrainer, BaseModel):
                 "prompts per group straddles two cost groups. Set dataset.limit "
                 "to a multiple of group_size to keep every rank on one group."
             )
-
-    def _collect_rollouts(self, epoch: int) -> list[Row]:
-        """Rollout phase: sample and score batch *epoch* synchronously."""
-        return self._finish_rollouts(self._start_rollouts(epoch))
 
     def _start_rollouts(self, epoch: int) -> PendingRollouts:
         """Submit batch *epoch*'s prompt groups to the runner and return once

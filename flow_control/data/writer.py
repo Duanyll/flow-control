@@ -1,4 +1,4 @@
-"""Random cache writer (the preprocess sink) and ``finalize_cache`` (design §4).
+"""Random cache writer (the preprocess sink) and ``finalize_cache`` (``docs/data/formats.md``).
 
 Layout::
 

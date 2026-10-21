@@ -1,4 +1,4 @@
-"""Raw sources: map-style readers that yield one ``Row`` per index (design §3).
+"""Raw sources: map-style readers that yield one ``Row`` per index.
 
 Members register on ``source_registry`` under their ``"type"`` tag; ``open_source``
 instantiates them from a dict config and applies the ``limit`` / ``attachment_dir``

@@ -141,7 +141,7 @@ class _Store:
 
 
 def _collect(case: unittest.TestCase, trainer: Any, model: Any) -> Row:
-    """One real ``_collect_rollouts`` of the single prompt through the runner."""
+    """One real synchronous rollout batch of the single prompt through the runner."""
     trainer.set_seed()
     trainer.model = model
     trainer.processor = SimpleNamespace(
@@ -156,7 +156,7 @@ def _collect(case: unittest.TestCase, trainer: Any, model: Any) -> Row:
     )
     trainer.make_runner(model)
     case.addCleanup(trainer.close_runner)
-    (row,) = trainer._collect_rollouts(0)
+    (row,) = trainer._finish_rollouts(trainer._start_rollouts(0))
     return row
 
 

@@ -72,7 +72,7 @@ def sample_posterior(latents: torch.Tensor, generator: torch.Generator) -> torch
 
     The draw is made and kept in fp32 on purpose: caches hold the posterior in the
     VAE dtype (bf16), where ``std * eps`` is below the resolution of ``mean`` for
-    every VAE except Qwen-Image's, so a bf16 draw (or an fp32 draw cast back to
+    every VAE except FLUX.2's, so a bf16 draw (or an fp32 draw cast back to
     bf16) collapses to the mean. Consumers promote targets to fp32 anyway.
     """
     if latents.shape[0] != 2:
@@ -223,7 +223,7 @@ class BaseProcessor[
     ``reference_latents``)."""
 
     def resample(self, row: Row, generator: torch.Generator) -> Row:
-        """Per-fetch randomization of ``row`` (design §8); modifies and returns it.
+        """Per-fetch randomization of ``row``; modifies and returns it.
 
         Every ``posterior_fields`` tensor whose first dim is 2 is replaced by one
         fp32 draw ``mean + std * eps`` of shape ``[1, ...]`` (see
@@ -362,7 +362,10 @@ class BaseProcessor[
         elif isinstance(self.encoder, GenerativeEncoder):
             return self.encoder.generate(prompt, images, system_prompt)
         else:
-            raise NotImplementedError("Cannot generate chat completion. Use a ")
+            raise NotImplementedError(
+                "Cannot generate chat completion: set processor.llm, or use a "
+                "GenerativeEncoder as the processor's encoder."
+            )
 
     class _EncodePromptReturn(TypedDict):
         prompt_embeds: torch.Tensor

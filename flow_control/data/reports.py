@@ -1,4 +1,4 @@
-"""Inference / evaluation reports (design §10).
+"""Inference / evaluation reports (``docs/data/formats.md``).
 
 Layout::
 

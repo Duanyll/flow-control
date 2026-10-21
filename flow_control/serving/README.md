@@ -1,5 +1,7 @@
 # flow_control.serving
 
+> Outdated: the interfaces lag the current adapter, variant and sampler APIs and need a refactor. See `docs/scripts/serving.md`.
+
 flow_control.serving 模块通过 Gradio 提供了一个简单的 Web 界面，方便快速测试和展示 DiT 模型训练的效果。
 
 flow_control.serving 模块实现：

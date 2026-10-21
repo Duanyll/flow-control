@@ -1,4 +1,4 @@
-"""Target preparation for the RGBA VAE trainer: its resample stage (design §9.5).
+"""Target preparation for the RGBA VAE trainer: its resample stage.
 
 The VAE has no processor, so ``VaeTargetResample`` stands in for
 ``processor.resample``: random crop, random background blend and the

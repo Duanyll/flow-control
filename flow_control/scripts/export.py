@@ -2,15 +2,41 @@
 
 import os
 import re
+from pathlib import Path
 
 from flow_control.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
+def _checkpoint_root(trainer) -> str:
+    """The trainer's checkpoint root, with ``$auto`` resolved to its run's directory:
+    the configured ``run_id``, else the experiment's newest run with a checkpoint."""
+    from flow_control.training.mixins.logging import (
+        AUTO_CHECKPOINT_ROOT_SENTINEL,
+        _find_resumable_run_id,
+    )
+
+    checkpoint_root = getattr(trainer, "checkpoint_root", None)
+    if not checkpoint_root:
+        raise ValueError(
+            "No --checkpoint-dir provided and no checkpoint_root in config."
+        )
+    if checkpoint_root != AUTO_CHECKPOINT_ROOT_SENTINEL:
+        return checkpoint_root
+    experiment_dir = Path(trainer.runs_root) / trainer.experiment_name
+    run_id = trainer.run_id or _find_resumable_run_id(experiment_dir)
+    if run_id is None:
+        raise FileNotFoundError(
+            f"checkpoint_root='$auto': no run with a checkpoint under {experiment_dir}. "
+            "Set run_id or pass --checkpoint-dir."
+        )
+    return str(experiment_dir / run_id / "checkpoints")
+
+
 def _find_latest_checkpoint(checkpoint_root: str) -> str:
-    """Find the latest step_XXXXXXX directory in checkpoint_root."""
-    pattern = re.compile(r"^step_(\d+)(_final)?$")
+    """The newest archival, rolling or final checkpoint directory in checkpoint_root."""
+    pattern = re.compile(r"^(?:rolling_)?step_(\d+)(_final)?$")
     best_step = -1
     best_name = ""
     for name in os.listdir(checkpoint_root):
@@ -23,7 +49,7 @@ def _find_latest_checkpoint(checkpoint_root: str) -> str:
     if best_step < 0:
         raise FileNotFoundError(
             f"No valid DCP checkpoint found in {checkpoint_root}. "
-            "Expected directories named step_XXXXXXX with a .metadata file."
+            "Expected [rolling_]step_XXXXXXX directories with a .metadata file."
         )
     return os.path.join(checkpoint_root, best_name)
 
@@ -55,12 +81,7 @@ def run(
     trainer = trainer_cls(**config)
 
     if checkpoint_dir is None:
-        checkpoint_root = config.get("checkpoint_root")
-        if not checkpoint_root:
-            raise ValueError(
-                "No --checkpoint-dir provided and no checkpoint_root in config."
-            )
-        checkpoint_dir = _find_latest_checkpoint(checkpoint_root)
+        checkpoint_dir = _find_latest_checkpoint(_checkpoint_root(trainer))
         logger.info(f"Auto-selected latest checkpoint: {checkpoint_dir}")
 
     if not os.path.isfile(os.path.join(checkpoint_dir, ".metadata")):

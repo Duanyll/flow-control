@@ -1,6 +1,6 @@
 """Row contract shared by every stage of the data stack.
 
-A row is a plain ``dict``; the keys below are reserved (design §1). ``padding``
+A row is a plain ``dict``; the keys below are reserved (``docs/overview/row.md``). ``padding``
 only ever exists in consumer memory (plan-time padding) and is never persisted.
 """
 

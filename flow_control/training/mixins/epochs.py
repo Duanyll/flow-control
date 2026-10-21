@@ -2,7 +2,7 @@
 
 An epoch is one pass over the rank's planned rows, cut into optimizer updates of
 ``grad_acc_steps`` microbatches. The stream drops the tail short of one update at
-plan level (design §7.2: ``len(loader)`` is known, the epoch arithmetic follows),
+plan level (``len(loader)`` is known, the epoch arithmetic follows),
 so the update boundary depends on the position inside the epoch alone and the only
 data cursor is the ``StatefulDataLoader``'s yielded count, which the trainer
 checkpoints. Checkpoints are taken after a sync step only, so a resumed iterator

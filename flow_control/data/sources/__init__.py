@@ -1,4 +1,4 @@
-"""Raw sources (design §3). Importing the package registers every built-in reader."""
+"""Raw sources. Importing the package registers every built-in reader."""
 
 from . import (  # noqa: F401  (registration side effects)
     csv,
