@@ -1,6 +1,7 @@
 from typing import Any, Literal, NotRequired, cast
 
 import torch
+from torch import nn
 
 from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
 from flow_control.third_party.hidream_o1 import get_rope_index_fix_point
@@ -99,6 +100,17 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
     def _prepare_timestep(self, timestep: torch.Tensor) -> torch.Tensor:
         # Near sigma=1 the model time 1-sigma underflows bf16 resolution.
         return timestep.to(device=self.device, dtype=torch.float32)
+
+    def _checkpoint(self, block: nn.Module) -> None:
+        if not self.use_flash_attn:
+            super()._checkpoint(block)
+        elif self.gradient_checkpointing != "none" and not (
+            self.transformer.is_gradient_checkpointing  # once, not per block
+        ):
+            # The flash path swaps each decoder layer's attention only around the
+            # layer call; a recompute outside it would run the dense attention. The
+            # vendored checkpoint wraps the swap. It recomputes whole and unpinned.
+            self.transformer.gradient_checkpointing_enable()
 
     def _build_sequence(
         self, batch: TBatch, txt_len: int, grid: tuple[int, int]

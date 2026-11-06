@@ -10,7 +10,6 @@
   "validation_variants": ["ema"],
   "checkpoint_interval": 20,
 
-  "gradient_checkpointing": true,
   "train_batch_size": 16,
   "train_steps": 200,
 

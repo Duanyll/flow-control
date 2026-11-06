@@ -12,7 +12,6 @@
 
   "train_micro_batch_size": 4,
 
-  "gradient_checkpointing": false,
   "rollout_storage_device": "device",
 
   "num_prompts_per_epoch": 48,
@@ -45,6 +44,7 @@
   "model": {
     "arch": "sd3",
     "type": "base",
+    "gradient_checkpointing": "none",
     "micro_batch_size": 4,
     "variants": {
       "default": { "type": "lora", "rank": 32, "alpha": 64, "init": "gaussian" },

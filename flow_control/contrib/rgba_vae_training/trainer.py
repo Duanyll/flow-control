@@ -86,6 +86,8 @@ class VaeTrainer(LoggingMixin, EpochLoopMixin, BaseTrainer, CheckpointingMixin):
     vae: VAE
     ref_vae: VAE | None = None
     do_convert_to_rgba: bool = True
+    gradient_checkpointing: bool = True
+    """diffusers' own checkpointing of the VAE encoder / decoder."""
 
     # -------------------------------- Dataset -------------------------------- #
     dataset: DatasetConfig

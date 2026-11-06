@@ -1,6 +1,6 @@
 # FSDP2 and DCP
 
-The trainers shard the transformer with FSDP2 (`torch.distributed.fsdp.fully_shard`) and load and save it with DCP (`torch.distributed.checkpoint`). This guide covers the parts of both that the repo depends on and where it uses them. It is checked against torch 2.12, the version in `uv.lock`. For everything else, see the official docs: [`fully_shard`](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html), the [FSDP2 tutorial](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), [DeviceMesh](https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html), the [DCP API](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html) and the [DCP recipe](https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html).
+The trainers shard the transformer with FSDP2 (`torch.distributed.fsdp.fully_shard`) and load and save it with DCP (`torch.distributed.checkpoint`). This guide covers the parts of both that the repo depends on and where it uses them. It is checked against torch 2.15, the version in `uv.lock`. For everything else, see the official docs: [`fully_shard`](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html), the [FSDP2 tutorial](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html), [DeviceMesh](https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html), the [DCP API](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html) and the [DCP recipe](https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html).
 
 Related chapters:
 
@@ -15,7 +15,6 @@ Related chapters:
   "launch": {"type": "sft", "generate_dcp_seed": true}, // flow-control seed before torchrun (cli.md)
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",  // DCP, written once by a single process
   "hsdp_shard_dim": 4,         // mesh (W / 4, 4) named ("replicate", "shard"); 1: replicate only
-  // "gradient_checkpointing": true,
   "checkpoint_root": "$auto",  // training checkpoints: DCP directories step_* and rolling_step_*
   "auto_resume": true
 }
@@ -29,9 +28,9 @@ flowchart TB
     S1["load_transformer(cpu)"] --> S2["get_state_dict(transformer, [])"] --> S3["dcp.save(no_dist=True)"]
   end
   subgraph run["every rank: BaseTrainer.load_transformer_from_seed, then the trainer"]
-    R1["load_transformer(meta)"] --> R2["enable_gradient_checkpointing"] --> R3["_shard: fully_shard blocks, full copies, root"]
-    R3 --> R4["to_empty(device)"] --> R5["dcp.load(seed, allow_partial_load)"] --> R6["compile_transformer"]
-    R6 --> R7["make optimizer; maybe_auto_resume: dcp.load({'app': trainer})"]
+    R1["load_transformer(meta)"] --> R2["parallelize: checkpoint, compile, then _shard: fully_shard blocks, full copies, root"]
+    R2 --> R4["to_empty(device)"] --> R5["dcp.load(seed, allow_partial_load)"]
+    R5 --> R7["make optimizer; maybe_auto_resume: dcp.load({'app': trainer})"]
     R7 --> R8["loop: set_requires_gradient_sync, forward / backward, optimizer_step"]
     R8 --> R9["save_maybe: dcp.save({'app': trainer})"]
     R9 --> R8
@@ -54,17 +53,17 @@ On a 2D mesh `fully_shard` runs HSDP: parameters are placed `(Replicate(), Shard
 ### Sharding Units
 
 ```python
-# BaseTrainer._shard
-for _, module in transformer.named_modules():  # also walks the blocks of full variant copies (transformer.variants)
-    if type(module).__name__ in fsdp_layers:   # transformer._no_split_modules or _repeated_blocks
-        fully_shard(module, mesh=self.mesh)
+# ParallelizeMixin._shard, the last step of model.parallelize
+for block in blocks:                           # _blocks(): outermost block_classes modules (else _no_split_modules /
+    fully_shard(block, mesh=mesh)              #   _repeated_blocks), the blocks of full variant copies included
 for copy in transformer.variants.values():     # the rest of each full variant copy
-    fully_shard(copy, mesh=self.mesh)
-fully_shard(transformer, mesh=self.mesh)       # the root: embedders, norms, output layers
+    fully_shard(copy, mesh=mesh)
+fully_shard(transformer, mesh=mesh)            # the root: embedders, norms, output layers
 ```
 
 - Each `fully_shard` call groups the parameters under its module that no earlier call took. A group is all-gathered in one collective before its module's forward and reduce-scattered in one after its backward. Calls therefore go bottom-up, blocks first and the root last. A module called outside its parent unit's `forward` needs a unit of its own (contrib `rgba_vae_training` shards `quant_conv` / `post_quant_conv`, which `encode()` / `decode()` call directly).
 - `fully_shard` turns parameters into DTensors in place and adds `FSDPModule` methods to the module's class.
+- Blocks are compiled through their `forward` before `fully_shard` ([parallelize](../adapters/parallelize.md)). FSDP2's hooks run eagerly in `_call_impl`, around the compiled frame. The pre-forward hook passes inputs that require grad through `RegisterPostBackwardFunction`, which returns new tensors, so dynamic-dim marks are set after it.
 - `reshard_after_forward` keeps its default: blocks free their gathered parameters after forward and gather them again in backward, and the root keeps its own. No-grad sampling forwards gather every block on every call.
 - `fully_shard` broadcasts nothing. Every rank must hold equal values before sharding, which loading the seed guarantees ([cli](../scripts/cli.md#seed-checkpoint)).
 - The trainable parameters of one unit must share one dtype; FSDP2 raises otherwise. `cast_trainable_parameters` casts them all to `trainable_dtype` before `_shard`. Frozen parameters may differ: fp32 EMA slots, fp8 `storage_dtype` weights.
@@ -147,7 +146,7 @@ The repo's offline readers load only the keys they need with `no_dist=True` (`sc
 
 ## Rules in This Repo
 
-- The transformer is built on meta, sharded, given storage with `to_empty`, then loaded with `dcp.load`, so each rank allocates only its own shard. Without a seed and with `hsdp_shard_dim > 1`, each rank first loads the whole model on CPU.
+- The transformer is built on meta, parallelized (ending in `fully_shard`), given storage with `to_empty`, then loaded with `dcp.load`, so each rank allocates only its own shard. Without a seed and with `hsdp_shard_dim > 1`, each rank first loads the whole model on CPU.
 - `to_empty` leaves uninitialized whatever the seed does not hold: non-persistent buffers and tables built in `__init__` ([adapter](../adapters/adapter.md#meta-init-and-the-seed-checkpoint)).
 - `allow_partial_load` together with `strict=False` skips mismatched keys without an error. A renamed module, or a `model.variants` that realizes different slots, loads nothing for those keys. A loader that needs every key checks them against `.metadata` itself, as `scripts/lora.py` does.
 - `dcp.save`, `dcp.load` and `set_requires_gradient_sync` follow the collective rules in [distributed](../training/distributed.md).
@@ -155,8 +154,8 @@ The repo's offline readers load only the keys they need with `no_dist=True` (`sc
 | Where | What |
 |---|---|
 | `BaseTrainer.init_device_mesh` | Process group and the `("replicate", "shard")` mesh |
-| `BaseTrainer._shard` | `fully_shard` units |
-| `BaseTrainer.load_transformer_from_seed` | Meta build, shard, `to_empty`, seed `dcp.load` |
+| `ParallelizeMixin._shard` | `fully_shard` units |
+| `BaseTrainer.load_transformer_from_seed` | Meta build, `model.parallelize`, `to_empty`, seed `dcp.load` |
 | `BaseTrainer.save_transformer_to_seed` | Seed `dcp.save(no_dist=True)` |
 | `model_state_dict`, `optimizer_state_dict` and their loaders (`training/mixins/base.py`) | `StateDictOptions` of training checkpoints |
 | `DcpMixin`, `CheckpointingMixin` (`training/mixins/dcp.py`) | `{"app": trainer}` save, load, rotation, resume |

@@ -4,7 +4,7 @@ import random
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torch.distributed.fsdp import fully_shard
 from torch.profiler import ProfilerActivity
 from torch.profiler import profile as torch_profiler
 
@@ -37,24 +36,6 @@ from flow_control.utils.types import (
 from ..launch_config import LaunchConfig
 
 logger = get_logger(__name__)
-
-
-class TorchCompileConfig(BaseModel):
-    """Options passed to :meth:`torch.nn.Module.compile`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    backend: str = "inductor"
-    mode: str | None = None
-    fullgraph: bool = False
-    dynamic: bool | None = False
-    options: dict[str, str | int | bool] | None = None
-    recompile_limit: int | None = None
-
-    def apply(self, module: torch.nn.Module) -> None:
-        kwargs = self.model_dump(exclude_none=True)
-        logger.info(f"Compiling {type(module).__name__} with torch.compile: {kwargs}")
-        module.compile(**kwargs)
 
 
 class ProfileConfig(BaseModel):
@@ -92,9 +73,6 @@ class BaseTrainer(BaseModel):
     means no sharding and equivalent to DDP. Usually you don't want to shard across 
     NUMA nodes or NVLink domain because of the communication overhead.
     """
-    gradient_checkpointing: bool = True
-    torch_compile: TorchCompileConfig | None = None
-    """Compile the transformer after FSDP wrapping and checkpoint restoration."""
     profile: ProfileConfig | None = None
     """Capture a ``torch.profiler`` trace of one region of the run per rank."""
 
@@ -227,10 +205,6 @@ class BaseTrainer(BaseModel):
         if acc_state is not None:
             devutil.set_rng_state(acc_state, self.device)
 
-    def compile_transformer(self, model: BaseModelAdapter) -> None:
-        if self.torch_compile is not None:
-            self.torch_compile.apply(model.transformer)
-
     @contextmanager
     def profile_scope(self, tag: str, epoch: int | None = None) -> Iterator[None]:
         """Trace the block under ``profile`` when it is configured (and, given
@@ -280,15 +254,7 @@ class BaseTrainer(BaseModel):
             )
             model.load_transformer(device=load_device)
 
-        if self.gradient_checkpointing:
-            if getattr(model.transformer, "_supports_gradient_checkpointing", False):
-                model.enable_gradient_checkpointing()
-            else:
-                logger.warning(
-                    f"Gradient checkpointing is enabled but {model.transformer.__class__.__name__} does not support it."
-                )
-
-        self._shard(model)
+        model.parallelize(self.mesh)  # checkpointing, compile, fully_shard
 
         if seed_checkpoint_dir is not None:
             if not os.path.exists(os.path.join(seed_checkpoint_dir, ".metadata")):
@@ -312,28 +278,7 @@ class BaseTrainer(BaseModel):
             )
             logger.info("Seed checkpoint loaded into transformer.")
 
-        self.compile_transformer(model)
         return model
-
-    def _shard(self, model: BaseModelAdapter) -> None:
-        """FSDP units: every block, every full variant copy, then the root."""
-        transformer = cast(Any, model.transformer)
-        fsdp_layers: list[str] = (
-            transformer._no_split_modules or transformer._repeated_blocks
-        )
-        if not fsdp_layers:
-            raise ValueError(
-                "Model transformer must specify _no_split_modules or _repeated_blocks for FSDP sharding."
-            )
-        count = 0
-        for _, module in transformer.named_modules():
-            if type(module).__name__ in fsdp_layers:
-                fully_shard(module, mesh=self.mesh)
-                count += 1
-        for copy in transformer.variants.values():
-            fully_shard(copy, mesh=self.mesh)
-        fully_shard(transformer, mesh=self.mesh)
-        logger.info(f"Transformer is sharded with {count} FSDP layers.")
 
     def save_transformer_to_seed(
         self, model: BaseModelAdapter, seed_checkpoint_dir: str

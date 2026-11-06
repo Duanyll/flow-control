@@ -12,7 +12,6 @@
 
   "train_micro_batch_size": 4,
 
-  "gradient_checkpointing": false,
   "rollout_storage_device": "device",
 
   // On-policy: 1 batch of 48 unique prompts x 24 rollouts = 1152 rollouts, 1 optimizer step.
@@ -47,6 +46,7 @@
   "model": {
     "arch": "sd3",
     "type": "base",
+    "gradient_checkpointing": "none",
     "micro_batch_size": 4,
     "variants": {
       "default": { "type": "lora", "rank": 32, "alpha": 64, "init": "gaussian" },

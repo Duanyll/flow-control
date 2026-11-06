@@ -98,6 +98,7 @@ class LayerwiseUpcastingHook(ModelHook):
 - Modules whose name matches a skip pattern keep `hf_model.dtype`. With the default patterns these are the positional and patch embeddings, the input and output projections, and every layer whose name contains `norm`, which includes the AdaLN modulation linears (`norm1.linear`).
 - A hook casts only its own layer's weights, not its children's: a `LoraLinear`'s children are variant slots. Variant weights are exempt (`VariantsMixin.upcasting_exempt_modules`): LoRA slots and clones are small, and EMA copies must stay fp32 for `update_variants`. A frozen non-EMA full copy (an autoguidance or uncond transformer) is stored in `storage_dtype` like the base.
 - `apply_layerwise_upcasting` warns that fp8 hooks under DDP hit pytorch#162057 on PyTorch 2.8+.
+- `storage_dtype` with `torch_compile` fails validation: the hooks swap each layer's parameters inside the compiled block, which Dynamo cannot trace ([parallelize.md](parallelize.md)).
 
 ## Extension points and core contracts
 

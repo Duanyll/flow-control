@@ -119,6 +119,11 @@ flowchart LR
 
 Such an adapter builds position ids per logical segment, prevents cross-sample attention (block-diagonal masks or varlen metadata), and treats the text, target and reference streams of one sample as a single model-specific topology. Each stream is not packed separately. It keeps the collective rules below by reusing `_sync_max`, `_forward_dummy` and `_share_dummy`.
 
+- Varying length alone needs none of this: under compile the sequence dims are dynamic ([parallelize.md](parallelize.md#variable-sequence-length)). Padding and packing exist to put samples of different lengths into one physical forward.
+- A key-padding mask takes SDPA off its flash kernel. A varlen layout that makes each sample's padding its own segment (`cu_seqlens = [0, S₀, L, L + S₁, 2L]` for two samples padded to `L`) keeps a flash kernel (`flash_attn_varlen_func`, `torch.nn.attention.varlen.varlen_attn`). Pad tokens then attend only to each other, so no row is fully masked and their gradient is exactly zero.
+- Under compile, FA2's varlen call needs distinct `cu_seqlens_q` and `cu_seqlens_k` tensors: Dynamo rejects one tensor passed twice to its autograd function.
+- A FlexAttention mask that closes over a length as a Python int recompiles for every length; pass lengths as tensors.
+
 ## Extension points and core contracts
 
 **Extension points**

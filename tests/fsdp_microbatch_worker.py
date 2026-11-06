@@ -51,21 +51,14 @@ class TinyBlock(nn.Module):
 
 class TinyTransformer(ModelMixin):
     _no_split_modules = ["TinyBlock"]
-    _supports_gradient_checkpointing = True
 
     def __init__(self, width: int = 8) -> None:
         super().__init__()
         self.block = TinyBlock(width)
         self.output = nn.Linear(width, width)
-        self.gradient_checkpointing = False
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        hidden = (
-            self._gradient_checkpointing_func(self.block, inputs)
-            if torch.is_grad_enabled() and self.gradient_checkpointing
-            else self.block(inputs)
-        )
-        return self.output(hidden)
+        return self.output(self.block(inputs))
 
 
 class TinyAdapter(BaseModelAdapter[ModelMixin, Batch]):
@@ -163,15 +156,14 @@ def make_lora_pair(
     fallback: bool = False,
     train_base: bool = False,
 ) -> tuple[TinyAdapter, TinyAdapter]:
-    """Two identically seeded adapters; the first is sharded with checkpointing."""
+    """Two identically seeded adapters; the first is parallelized: block
+    checkpointing, then sharded."""
     adapter_class = FallbackTinyAdapter if fallback else TinyAdapter
     sharded = make_adapter(
         adapter_class, device, variants=LORA, trainable=train_base, micro_batch_size=2
     )
     control = make_adapter(adapter_class, device, variants=LORA, trainable=train_base)
-    sharded.enable_gradient_checkpointing()
-    fully_shard(cast(Any, sharded.transformer).block, mesh=mesh)
-    fully_shard(sharded.transformer, mesh=mesh)
+    sharded.parallelize(mesh)
     return sharded, control
 
 

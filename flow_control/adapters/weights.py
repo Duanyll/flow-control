@@ -40,6 +40,40 @@ class LoraPair(nn.Module):
         hidden = F.linear(x, self.A.weight.to(x.dtype))
         return F.linear(hidden, self.B.weight.to(x.dtype), bias) * self.scaling
 
+    def fused(self, x: torch.Tensor, linear: nn.Linear) -> torch.Tensor:
+        """`linear(x) + self(x)` as one GEMM over `[x | s·xAᵀ]` and `[W | B]`."""
+        down = F.linear(x, self.A.weight.to(x.dtype)) * self.scaling
+        return _CatLinear.apply(
+            x, down, linear.weight, self.B.weight.to(x.dtype), linear.bias
+        )
+
+
+class _CatLinear(torch.autograd.Function):
+    """`[x | xa] @ [W | B]ᵀ + bias` in one GEMM; gradients for `x`, `xa` and `B`
+    (`W` and `bias` are frozen)."""
+
+    @staticmethod
+    def forward(x, xa, weight, b, bias):
+        return F.linear(torch.cat([x, xa], -1), torch.cat([weight, b], 1), bias)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, xa, weight, b, _ = inputs
+        # detach: layerwise upcasting swaps `weight.data` back to storage after forward
+        ctx.save_for_backward(xa, weight.detach(), b)
+        ctx.in_features = x.shape[-1]
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        (dy,) = grad_outputs
+        xa, weight, b = ctx.saved_tensors
+        dx = dy @ torch.cat([weight, b], 1)
+        db = None
+        if ctx.needs_input_grad[3]:
+            db = dy.flatten(0, -2).t() @ xa.flatten(0, -2)
+        k = ctx.in_features
+        return dx[..., :k], dx[..., k:], None, db, None
+
 
 class LoraLinear(nn.Linear):
     """`nn.Linear` plus per-variant LoRA slots; the active variant's slot, if any, is added."""
@@ -56,11 +90,19 @@ class LoraLinear(nn.Linear):
         return module
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = super().forward(input)
-        name = self.active.get()
-        if name in self.lora:
-            return output + self.lora[name](input)
-        return output
+        name = self.active.get()  # under compile: a guard, one graph per variant
+        if name not in self.lora:
+            return super().forward(input)
+        pair = cast(LoraPair, self.lora[name])
+        # Wider than its input: one GEMM saves a pass over the output that costs
+        # more than copying x. Only a frozen base and a bias-free B fuse.
+        if (
+            self.out_features > self.in_features
+            and pair.B.bias is None
+            and not self.weight.requires_grad
+        ):
+            return pair.fused(input, self)
+        return super().forward(input) + pair(input)
 
 
 class VariantModule(nn.Module):
@@ -82,7 +124,7 @@ class VariantModule(nn.Module):
 def pinned_checkpoint(
     original: Callable[..., Any], active: ContextVar[str]
 ) -> Callable[..., Any]:
-    """Wrap a `_gradient_checkpointing_func` so recompute runs under the forward's variant."""
+    """Wrap a checkpoint function so recompute runs under the forward's variant."""
 
     def checkpoint(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         name = active.get()
@@ -318,15 +360,10 @@ class VariantsMixin(BaseModel):
                 torch._foreach_lerp_(ema, [t.float() for t in source], 1 - decay)
             count += 1
 
-    def enable_gradient_checkpointing(self) -> None:
-        """Enable checkpointing with recompute pinned to the forward's variant."""
-        cast(Any, self.transformer).enable_gradient_checkpointing()
-        for module in self.transformer.modules():
-            original = getattr(module, "_gradient_checkpointing_func", None)
-            if callable(original):
-                cast(Any, module)._gradient_checkpointing_func = pinned_checkpoint(
-                    original, self._active
-                )
+    def pin_variant(self, checkpoint: Callable[..., Any]) -> Callable[..., Any]:
+        """`checkpoint` whose recompute runs under the forward's variant, for blocks
+        outside a compiled region (`ParallelizeMixin._checkpoint`)."""
+        return pinned_checkpoint(checkpoint, self._active)
 
     # ------------------------------- realization ------------------------------- #
 

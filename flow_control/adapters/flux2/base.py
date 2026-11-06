@@ -41,6 +41,10 @@ class Flux2Adapter[TBatch: Flux2Batch](
         "txt_ids",
         "img_ids",
     )
+    dynamic_dims = {  # sequence dims under compile; the text stays padded to a fixed length
+        "Flux2TransformerBlock": {"hidden_states": 1, "image_rotary_emb": 0},
+        "Flux2SingleTransformerBlock": {"hidden_states": 1, "image_rotary_emb": 0},
+    }
     arch: Literal["flux2"] = "flux2"
     type: Literal["base"] = "base"
 

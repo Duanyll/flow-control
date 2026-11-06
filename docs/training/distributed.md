@@ -23,7 +23,7 @@ Every rank runs the same `run()`. A collective blocks until every rank issues it
 # BaseTrainer.init_device_mesh, first thing in distributed_main; needs torchrun (flow-control launch)
 dist.init_process_group(backend=devutil.dist_backend(dev), device_id=dev)
 mesh = init_device_mesh(device_type, (W // hsdp_shard_dim, hsdp_shard_dim), mesh_dim_names=("replicate", "shard"))
-# BaseTrainer._shard: fully_shard each _no_split_modules / _repeated_blocks module, each full variant copy, then the root
+# ParallelizeMixin._shard (model.parallelize): fully_shard each block, each full variant copy, then the root
 ```
 
 ## One RL Epoch on Two Ranks

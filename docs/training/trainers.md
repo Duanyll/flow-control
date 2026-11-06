@@ -118,13 +118,12 @@ A trainer is the config model that `launch.type` selects from `trainer_registry`
 }
 ```
 
-### Sharding, Compile, Profile
+### Sharding, Profile
 
 ```jsonc
 {
   "hsdp_shard_dim": 8,              // FSDP shard group; 1: replicate only (DDP-like)
-  // "gradient_checkpointing": true,
-  "torch_compile": {},              // TorchCompileConfig defaults: inductor, dynamic false
+  "model": {"arch": "flux2", "type": "base", "torch_compile": {}}, // checkpointing and compile are model fields (adapters/parallelize.md)
   "profile": {"output_dir": "./draft/profile"} // <tag>_rank<r>.json.gz; RL: outer epoch profile.epoch (default 1); inference: the whole loop
 }
 ```
@@ -155,7 +154,7 @@ flowchart LR
 
 | Mixin | Owns | Config fields |
 |---|---|---|
-| `BaseTrainer` | process group and the `("replicate", "shard")` mesh (`init_device_mesh`); `set_seed` (`seed + rank`); `load_transformer_from_seed` (gradient checkpointing, `_shard`, seed load, `compile_transformer`); `profile_scope`; per-rank RNG state for checkpoints (`rng_state_dict`); lifecycle hooks `run` / `seed_checkpoint` / `export_checkpoint` | `launch`, `imports`, `seed`, `hsdp_shard_dim`, `gradient_checkpointing`, `torch_compile`, `profile` |
+| `BaseTrainer` | process group and the `("replicate", "shard")` mesh (`init_device_mesh`); `set_seed` (`seed + rank`); `load_transformer_from_seed` (`model.parallelize`, seed load); `profile_scope`; per-rank RNG state for checkpoints (`rng_state_dict`); lifecycle hooks `run` / `seed_checkpoint` / `export_checkpoint` | `launch`, `imports`, `seed`, `hsdp_shard_dim`, `profile` |
 | `DataMixin` | stores, `make_planner`, `prepare_row` ([data](../data/data.md)) | `processor`, `dataset`, `group_size`, `megabatch_groups`, `shuffle_mode`, `num_dataloader_workers` |
 | `TrainingPredictionMixin` | `noised_point`, `predict_training` (an `Executor` over `train_predictor`) | `model`, `train_predictor` |
 | `RunnerMixin` | the run-long `Runner`, closed in `cleanup` ([rollouts](rollouts.md)) | |
@@ -183,7 +182,7 @@ class SftTrainer(TrainingPredictionMixin, ValidationMixin, MicrobatchTrainMixin,
         self.resolve_run_context()  # every rank: run_id broadcast; before anything touches run_dir / checkpoint_root
         self.init_tracker()         # rank 0 only, collective-free
         self.load_transformer_from_seed(self.model, self.seed_checkpoint_dir)
-        #   enable_gradient_checkpointing -> _shard -> seed dcp.load -> compile_transformer
+        #   model.parallelize (attention backend, checkpoint, compile, fully_shard) -> to_empty -> seed dcp.load
         self.make_optimizer_and_scheduler()  # over the sharded (DTensor) trainable parameters
         self.load_processor()
         self.make_train_dataloader()
@@ -337,7 +336,7 @@ A prompt's rollouts and a validation sample are the same whatever the world size
 
 ### Behaviour Worth Knowing
 
-- **Variants.** `optimizer_step` moves `every: "step"` EMAs after each optimizer step. The RL loop moves `every: "epoch"` EMAs after each epoch's training phase, and SFT never does. Gradient checkpointing recomputes under the variant active in the forward, because `enable_gradient_checkpointing` pins it ([variants](../adapters/variants.md)).
+- **Variants.** `optimizer_step` moves `every: "step"` EMAs after each optimizer step. The RL loop moves `every: "epoch"` EMAs after each epoch's training phase, and SFT never does. Gradient checkpointing recomputes under the variant active in the forward ([parallelize](../adapters/parallelize.md#checkpointing-and-variants)).
 - **Validation.** It runs once per `validation_variants` entry, with `validation_sampler` on the run-long Runner. SFT validates every `validation_steps` optimizer steps; RL validates every `validation_epochs` epochs, after the checkpoint. Both validate at start unless `validation_at_start: false`. `validation_scorer: null` means the RL trainer's `rollout.reward` (SFT: no scoring), and `false` disables scoring.
 - **Checkpoints.** RL `checkpoint_interval` counts epochs, SFT counts steps. A resumed RL run re-samples the batches that were in flight, because the cursor saved is the one from before the oldest pending batch, unless `checkpoint_rollouts` saved them ([outputs](outputs.md), [rollouts](rollouts.md)).
 - **Profiling.** `profile` traces the RL outer epoch `profile.epoch` (with `record_function` ranges `phase/rollout`, `phase/reward_wait`, `phase/train`) and the whole inference loop. SFT takes no trace.
@@ -357,5 +356,5 @@ A prompt's rollouts and a validation sample are the same whatever the world size
 - `_build_train_plan` gives every rank the same item count per inner epoch, and `_loss_batched` reaches the model only through `predict_training`, so forward and backward counts match across ranks ([distributed](distributed.md)).
 - `row["reward"]` and `row["reward_raw"]` hold the `_reward_labels()` columns in that order, `[C]` on every row.
 - `run()` resolves the run context on every rank before `init_tracker` and before any checkpoint access.
-- The setup order: variants resolved, seed set, transformer sharded, seed-loaded and compiled, then the optimizer, then the resume.
+- The setup order: variants resolved, seed set, transformer parallelized (checkpointing, compile, sharding) and seed-loaded, then the optimizer, then the resume.
 - The checkpoint keys of `state_dict` are what `auto_resume` reads back from runs already on disk.

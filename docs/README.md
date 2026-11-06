@@ -15,6 +15,7 @@
 | [precision](adapters/precision.md) | Storage / compute / trainable dtypes, layerwise upcasting, fp32 EMA |
 | [microbatching](adapters/microbatching.md) | Logical samples outside the adapter, physical batches inside; the collective contract |
 | [variants](adapters/variants.md) | LoRA / EMA / full / alias weight sets, O(1) selection, offline LoRA conversion |
+| [parallelize](adapters/parallelize.md) | Attention backend, checkpointing policies, per-block compile with dynamic sequence dims, FSDP2 units |
 | **Data** | |
 | [data](data/data.md) | Raw source → preprocess → group → resample → consume → report; the three cache modes |
 | [formats](data/formats.md) | On-disk random cache, packed cache, inference report |
@@ -50,6 +51,7 @@ An experiment that fits one of these needs no design discussion. Unpublished wor
 |---|---|---|
 | A model architecture, or a new type of one | `adapter_registry`: subclass `BaseModelAdapter`, implement `_predict_velocity` | [adapter](adapters/adapter.md) |
 | Stacking, padding or packing for a family | Dense-batching declarations, or override `predict_velocity_batched` | [microbatching](adapters/microbatching.md) |
+| Compile, checkpointing or sharding for a family | `dynamic_dims`, `block_classes`, or override a `ParallelizeMixin` step | [parallelize](adapters/parallelize.md) |
 | Encoding for a new family | `preset_registry`, `encoder_registry`, `vae_registry` | [processors](processors/processors.md) |
 | A new input/output task | `task_registry` | [processors](processors/processors.md) |
 | A dataset reader | `source_registry`, in contrib even for a published dataset | [data](data/data.md) |
@@ -69,6 +71,7 @@ Many modules depend on these. Changing one is a discussion with the user before 
 - The row: one sample per dict, shared and never cloned; reserved keys; `_` runtime keys ([row](overview/row.md)).
 - Adapter conventions (σ time, `ε - x₀` velocity, packed `[B, N, D]` latents) and `predict_velocity_batched` as a collective returning fp32 ([adapter](adapters/adapter.md), [microbatching](adapters/microbatching.md)).
 - The variant mechanism; `variant_registry` is internal ([variants](adapters/variants.md)).
+- `parallelize` between `load_transformer` and the seed load, FQNs unchanged; checkpoint inside the compiled region, marks and FSDP hooks outside it ([parallelize](adapters/parallelize.md)).
 - The `Calls` protocol and the collective executor round ([runtime](sampler/runtime.md)).
 - The sanctioned collective sites and equal-count invariants ([distributed](training/distributed.md)).
 - Reward placement × slot, label naming ([rewards](rewards/rewards.md)); the `SampleContext` / `RewardContext` API and the Runner's threading rules ([rollouts](training/rollouts.md)).

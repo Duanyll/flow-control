@@ -209,11 +209,13 @@ class EfficientLayeredQwenImageAdapter(
     """
     attn_block_size: int = 128
     base_image_index: Literal[0, -1] = 0
+    attention_backend: Literal["flex"] = "flex"
+    """The block masks need flex attention."""
 
     def _install_modules(self, transformer: QwenImageTransformer2DModel) -> None:
-        # Must use flex attention backend for block masks
+        # Also here, not only in parallelize: serving loads without parallelizing.
         ensure_compiled_flex_attention()
-        transformer.set_attention_backend("flex")
+        transformer.set_attention_backend(self.attention_backend)
         orig_module = transformer.pos_embed
         # Swapping in a drop-in replacement module, hence the type mismatch.
         transformer.pos_embed = EfficientLayeredQwenEmbedRope(  # ty: ignore[invalid-assignment]

@@ -210,6 +210,7 @@ class VariantsMixin(BaseModel):
     def fp32_copy_active(self) -> bool: ...   # a full-weight EMA: forward under autocast
     def trainable_parameters(self) -> list[nn.Parameter]: ...  # every parameter with requires_grad
     def variant_modules(self) -> set[nn.Module]: ...  # checkpointed even when frozen
+    def pin_variant(self, checkpoint: Callable) -> Callable: ...  # recompute under the forward's variant (parallelize.md)
 
     @torch.no_grad()
     def update_variants(self, every: Literal["step", "epoch"]) -> None:
@@ -231,9 +232,13 @@ class LoraLinear(nn.Linear):           # each targeted linear, converted in plac
     lora: nn.ModuleDict                # variant name -> LoraPair (A, B, scaling)
 
     def forward(self, input):
-        output = super().forward(input)
-        name = self.active.get()
-        return output + self.lora[name](input) if name in self.lora else output  # "base", full variants: no slot
+        name = self.active.get()                 # under compile: a guard, one graph per variant
+        if name not in self.lora:                # "base", full variants: no slot
+            return super().forward(input)
+        pair = self.lora[name]
+        if self.out_features > self.in_features and pair.B.bias is None and not self.weight.requires_grad:
+            return pair.fused(input, self)       # one GEMM: [x | s·xAᵀ] @ [W | B]ᵀ (_CatLinear), built per forward
+        return super().forward(input) + pair(input)
 
 class VariantModule(nn.Module):        # wraps each extra_trainable module once
     base: nn.Module
@@ -243,7 +248,7 @@ class VariantModule(nn.Module):        # wraps each extra_trainable module once
         name = self.active.get()
         return (self.clones[name] if name in self.clones else self.base)(*args, **kwargs)
 
-def pinned_checkpoint(original, active):  # wraps every _gradient_checkpointing_func
+def pinned_checkpoint(original, active):  # VariantsMixin.pin_variant: the checkpoint of an eager block
     def checkpoint(function, *args, **kwargs):
         name = active.get()
 
@@ -259,7 +264,9 @@ def pinned_checkpoint(original, active):  # wraps every _gradient_checkpointing_
 ```
 
 - `_realize` runs in `load_transformer` after `_install_modules` ([adapter.md](adapter.md#loading)). It creates the full copies first, so they carry no slots, then the clones, so no clone contains slots, then the slots and the EMA slot copies.
-- Full variants and full-weight EMAs are separate `fully_shard` units (`BaseTrainer._shard`). A forward under another variant does not gather them.
+- `LoraPair.fused` (`_CatLinear`) runs the base GEMM and LoRA-up as one GEMM for linears wider than their input (FLUX.2 `to_qkv_mlp_proj`), with a frozen base and a bias-free `B`. The concatenations come from the active slot on every forward, so every LoRA variant and EMA slot takes this path and nothing extra stays resident. Where the output is not wider than the input, the copy of `x` costs more than the saved pass over the output. The result differs from two GEMMs by bf16 rounding.
+- Under `torch.compile`, Dynamo traces `active.get()` and guards on its value: each variant gets its own graph, and `use_variant` stays O(1). Pinning is the only place that sets the ContextVar inside a forward, and it stays outside compiled regions ([parallelize.md](parallelize.md#checkpointing-and-variants)).
+- Full variants and full-weight EMAs are separate `fully_shard` units (`ParallelizeMixin._shard`). A forward under another variant does not gather them.
 - LoRA slots, frozen and EMA slots included, sit inside their block's FSDP unit and are gathered with it on every forward.
 - Variant weights and EMA counts are parameters and buffers of the transformer. They are in the seed and in checkpoints, and `model_state_dict` saves the frozen ones through `variant_modules`.
 - A LoRA `path` is read when the transformer is loaded with real weights: building the seed, or training without one. A meta-init run takes it from the seed, so the seed must be regenerated after `path` changes.
@@ -320,7 +327,7 @@ Model(variant="guide")  # an explicit name wins
 **Core contracts**
 
 - `variant_registry` is not an extension point. The variant kinds are implemented inside `VariantsMixin` and are tightly coupled through `_kind`, the `_realize` order, `_weights`, sharding and checkpointing. A new kind is a core change.
-- Selection mechanism: `use_variant` sets one ContextVar per adapter, `LoraLinear` / `VariantModule` read it, `module()` returns the full module of the active variant, and `pinned_checkpoint` replays it on recompute. Adapters run `self.module()`.
+- Selection mechanism: `use_variant` sets one ContextVar per adapter, `LoraLinear` / `VariantModule` read it, `module()` returns the full module of the active variant, and recompute runs under the forward's variant (`pinned_checkpoint` on eager blocks, the graph on compiled ones). Adapters run `self.module()`.
 - `"base"` is built in, and an undeclared `"default"` resolves to it. A config's `variants` replaces the family default.
 - Variant weights and counts live in the transformer's state dict, which is the checkpoint and seed format.
 - EMA weights are fp32 ([precision.md](precision.md)).

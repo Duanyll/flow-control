@@ -12,16 +12,6 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed_sd35_geneval_awm",
   "experiment_name": "sd35_geneval_awm",
 
-  "gradient_checkpointing": false,
-  "torch_compile": {
-    "backend": "inductor",
-    "mode": "default",
-    "fullgraph": false,
-    "dynamic": false,
-    // SD3 shares forward code across block/LoRA/grad variants; 8 falls back to eager.
-    "recompile_limit": 16,
-  },
-
   "train_micro_batch_size": 4,
 
   "rollout_storage_device": "device",
@@ -65,6 +55,8 @@
   "model": {
     "arch": "sd3",
     "type": "base",
+    "gradient_checkpointing": "none",
+    "torch_compile": { "fullgraph": false }, // SD3 blocks are not checked under fullgraph
     "micro_batch_size": 4,
     "variants": {
       "default": { "type": "lora", "rank": 32, "alpha": 64, "init": "gaussian" },

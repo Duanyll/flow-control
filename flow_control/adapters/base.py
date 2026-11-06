@@ -7,7 +7,7 @@ from typing import Any, Protocol, TypedDict
 import torch
 from diffusers import ModelMixin
 from einops import rearrange
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from transformers import PreTrainedModel
 
 from flow_control.utils.hf_model import HfModelLoader
@@ -20,6 +20,7 @@ from flow_control.utils.upcasting import (
 )
 
 from .batching import MicrobatchMixin
+from .parallelize import ParallelizeMixin
 from .weights import VariantsMixin
 
 logger = get_logger(__name__)
@@ -60,12 +61,13 @@ class SamplerModel(Protocol):
 
 
 class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
-    VariantsMixin, MicrobatchMixin, ABC
+    VariantsMixin, MicrobatchMixin, ParallelizeMixin, ABC
 ):
     """One model family: its transformer, latent layout and velocity forward.
 
     `VariantsMixin` adds the weight variants, `MicrobatchMixin` the batched
-    forward every consumer calls.
+    forward every consumer calls, `ParallelizeMixin` checkpointing, compile and
+    sharding.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -84,6 +86,15 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     patch_size: int = 2
     vae_scale_factor: int = 8
     latent_channels: int = 16
+
+    @model_validator(mode="after")
+    def check_compile_storage(self):
+        if self.torch_compile is not None and self.storage_dtype is not None:
+            raise ValueError(
+                "torch_compile cannot trace layerwise upcasting (storage_dtype): its "
+                "hooks swap each layer's parameters inside the compiled block."
+            )
+        return self
 
     # ---------------------------- the loaded model ----------------------------- #
 

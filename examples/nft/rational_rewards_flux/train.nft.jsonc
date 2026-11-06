@@ -10,7 +10,6 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_nft_rational_rewards_512",
 
-  "gradient_checkpointing": false,
   "rollout_storage_device": "device",
 
   // 48 unique prompts x 16 rollouts = 768 rollouts/epoch (FF: unique_sample_num
@@ -46,6 +45,7 @@
   "model": {
     "arch": "flux1",
     "type": "base",
+    "gradient_checkpointing": "none",
     "variants": {
       "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       // Old-teacher / behaviour-policy EMA. decay=0.5 + linear ramp == FF

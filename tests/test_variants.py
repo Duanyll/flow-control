@@ -1,7 +1,6 @@
 import os
 import tempfile
 import unittest
-from collections.abc import Callable
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -18,25 +17,17 @@ from flow_control.utils.hf_model import HfModelLoader
 
 
 class Block(nn.Module):
-    _gradient_checkpointing_func: Callable[..., torch.Tensor]  # set by diffusers
-
     def __init__(self, width: int) -> None:
         super().__init__()
         self.to_q = nn.Linear(width, width)
         self.norm = nn.LayerNorm(width)
-        self.gradient_checkpointing = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.gradient_checkpointing and torch.is_grad_enabled():
-            return self._gradient_checkpointing_func(self.run, x)
-        return self.run(x)
-
-    def run(self, x: torch.Tensor) -> torch.Tensor:
         return self.norm(x + torch.tanh(self.to_q(x)))
 
 
 class TinyTransformer(ModelMixin):
-    _supports_gradient_checkpointing = True
+    _repeated_blocks = ["Block"]
 
     def __init__(self, width: int = 4) -> None:
         super().__init__()
@@ -290,8 +281,9 @@ class VariantTest(unittest.TestCase):
             )
             for name in ("default", "guide"):
                 perturb(adapter._weights(name))
-            if checkpointing:
-                adapter.enable_gradient_checkpointing()
+            if checkpointing:  # parallelize's eager checkpoint step, without FSDP
+                for block in adapter._blocks():
+                    adapter._checkpoint(block)
             with adapter.use_variant("guide"):
                 (velocity,) = adapter.predict_velocity_batched(
                     [row()], [torch.tensor([0.5])]
@@ -302,9 +294,9 @@ class VariantTest(unittest.TestCase):
             if not checkpointing:
                 reference = grads
                 continue
-            self.assertTrue(
-                cast(Any, adapter.transformer).blocks[0].gradient_checkpointing
-            )
+            blocks = adapter._blocks()
+            self.assertEqual(len(blocks), 2)
+            self.assertTrue(all(hasattr(b.forward, "__wrapped__") for b in blocks))
             for grad, expected in zip(grads, reference, strict=True):
                 torch.testing.assert_close(grad, expected)
 

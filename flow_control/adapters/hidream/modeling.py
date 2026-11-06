@@ -3,10 +3,6 @@
 Adds the surface flow-control's trainer expects on top of the vendored
 transformers-style class:
 
-- diffusers-spelling gradient-checkpointing shims
-  (``training/mixins/base.py`` checks ``_supports_gradient_checkpointing`` and
-  calls ``enable_gradient_checkpointing()``; the transformers spelling would
-  silently no-op).
 - meta-load safety for the rotary buffers: the vendored code registers
   ``inv_freq`` non-persistent and keeps the text rotary's ``original_inv_freq``
   (the tensor its ``forward`` actually uses) as a *plain attribute*. After the
@@ -29,8 +25,6 @@ from flow_control.third_party.hidream_o1.qwen3_vl_transformers import (
 
 
 class HiDreamO1Transformer(Qwen3VLForConditionalGeneration):
-    _supports_gradient_checkpointing = True
-
     def __init__(self, config):
         super().__init__(config)
         self._persist_rope_buffers()
@@ -98,12 +92,6 @@ class HiDreamO1Transformer(Qwen3VLForConditionalGeneration):
         module = super().to_empty(device=device, recurse=recurse)
         self._restore_rope_tables()
         return module
-
-    def enable_gradient_checkpointing(self) -> None:
-        self.gradient_checkpointing_enable()
-
-    def disable_gradient_checkpointing(self) -> None:
-        self.gradient_checkpointing_disable()
 
 
 if __name__ == "__main__":

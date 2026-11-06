@@ -6,7 +6,6 @@
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "experiment_name": "flux_nft_demo_512",
 
-  "gradient_checkpointing": false,
   "rollout_storage_device": "device",
 
   "num_prompts_per_epoch": 48,
@@ -36,6 +35,7 @@
   "model": {
     "arch": "flux1",
     "type": "base",
+    "gradient_checkpointing": "none",
     "variants": {
       "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },

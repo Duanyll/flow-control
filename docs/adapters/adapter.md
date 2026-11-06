@@ -10,7 +10,8 @@
 "model": {
   "arch": "qwen", "type": "base" // registry tag "qwen_base"
   // "micro_batch_size": 1,
-  // "use_cache": true
+  // "use_cache": true,
+  // "gradient_checkpointing": "block", // parallelize.md, with "torch_compile" and "attention_backend"
 }
 ```
 
@@ -56,7 +57,7 @@ flowchart TB
     S1["flow-control seed"] -->|"device=cpu"| LT
     LT -->|"seed"| S2["dcp.save → seed_checkpoint_dir"]
     T1["load_transformer_from_seed"] -->|"device=meta"| LT
-    LT -->|"meta skeleton"| T2["enable_gradient_checkpointing"] --> T3["_shard"] --> T4["to_empty(device)"] --> T5["dcp.load(seed)"] --> T6["compile_transformer"]
+    LT -->|"meta skeleton"| T2["parallelize: attention backend, checkpoint, compile, fully_shard"] --> T4["to_empty(device)"] --> T5["dcp.load(seed)"]
     S2 -.-> T5
 ```
 
@@ -76,7 +77,7 @@ When `load_model` reuses a cached transformer (same `hf_model.config_key`), the 
 
 ```python
 class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
-    VariantsMixin, MicrobatchMixin, ABC
+    VariantsMixin, MicrobatchMixin, ParallelizeMixin, ABC
 ):
     arch: str
     type: str
@@ -158,6 +159,7 @@ class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatc
     lora_target_modules = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0")
     # lora_exclude_modules = (...)              # linears with no gradient path
     # lora_extra_trainable = (...)              # modules a LoRA variant clones and trains whole
+    dynamic_dims = {"FooTransformerBlock": {"hidden_states": 1}}  # parallelize.md: sequence dims under compile
 
     def _install_modules(self, transformer) -> None:  # meta-safe replacements; change `transformer`, never self.transformer
         ...                                     # e.g. transformer.pos_embed = PatchedQwenEmbedRope(...)
@@ -177,7 +179,7 @@ class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatc
 - One class may serve several checkpoints: register it under each tag, widen `type` (`Literal["base", "turbo"]`), and pick `hf_model.pretrained_model_id` in `model_post_init` (`Krea2Adapter`, `Flux3Adapter`, `HiDreamO1Adapter`).
 - `_install_modules(transformer)` changes the transformer it is given, never `self.transformer`. It runs on the base before the variants are realized, so full copies and LoRA targeting see the replaced modules, and on every `FullVariant` that loads its own `hf_model` (`VariantsMixin._copy`). It runs once per fresh load: inside the meta context when training from a seed, on CPU when building the seed, and on the device otherwise. The base is frozen again after it (`requires_grad_(self.trainable)`), so modules it adds train only with a trainable base. Module surgery belongs there, not in a `load_transformer` override (`Flux1DConcatAdapter` widens `x_embedder`; `Flux2KVAdapter` sets attention processors; the layered Qwen adapters swap `pos_embed`).
 - `library: "custom"` loads vendored transformers-style modeling code by dotted path (`HiDreamO1Transformer`).
-- A family must not override `load_transformer`, `_realize` / `_attach`, `use_variant`, or replace `hf_model.model` after load. It overrides `predict_velocity_batched` only to change the physical batch layout ([microbatching.md](microbatching.md)).
+- A family must not override `load_transformer`, `_realize` / `_attach`, `use_variant`, or replace `hf_model.model` after load. It overrides `predict_velocity_batched` only to change the physical batch layout ([microbatching.md](microbatching.md)), and the `parallelize` steps only to change how its blocks are found, checkpointed, compiled or sharded ([parallelize.md](parallelize.md)).
 
 ### Checkpoint layouts and fp8
 
@@ -207,8 +209,7 @@ class Ideogram4Loader(HfModelLoader[Ideogram4Transformer2DModel]):
 # BaseTrainer.load_transformer_from_seed, with seed_checkpoint_dir set
 with torch.device("meta"):
     model.load_transformer(device=torch.device("meta"))  # config only, no weights read
-model.enable_gradient_checkpointing()                     # when gradient_checkpointing
-self._shard(model)                                        # fully_shard: blocks, full variant copies, root
+model.parallelize(self.mesh)                              # parallelize.md; ends with fully_shard
 model.transformer.to_empty(device=self.device)            # uninitialized storage for params and buffers
 dcp.load(model_sd, checkpoint_id=seed_checkpoint_dir,
          planner=DefaultLoadPlanner(allow_partial_load=True))
@@ -229,7 +230,7 @@ The seed is `load_transformer(cpu)` saved with `dcp.save` (`flow-control seed`, 
 
 **Extension points**
 
-- A new family, or a new type of an existing one: subclass `BaseModelAdapter` (or a family class), register it under `f"{arch}_{type}"` in `adapter_registry`, and implement `_predict_velocity`. Optionally add `_install_modules`, `_prepare_timestep`, the LoRA hints, `cost_test`, the dense-batching declarations, and a loader subclass. Core families live in `flow_control/adapters/`. Experimental ones go in `flow_control/contrib/` or in `local/`, loaded through `imports`.
+- A new family, or a new type of an existing one: subclass `BaseModelAdapter` (or a family class), register it under `f"{arch}_{type}"` in `adapter_registry`, and implement `_predict_velocity`. Optionally add `_install_modules`, `_prepare_timestep`, the LoRA hints, `cost_test`, the dense-batching declarations, `dynamic_dims` and the other `parallelize` hooks, and a loader subclass. Core families live in `flow_control/adapters/`. Experimental ones go in `flow_control/contrib/` or in `local/`, loaded through `imports`.
 - The processor preset for the family is a separate extension ([../processors/processors.md](../processors/processors.md)). Its `patch_size`, `vae_scale_factor` and `latent_channels` must equal the adapter's.
 
 **Core contracts**
@@ -237,5 +238,5 @@ The seed is `load_transformer(cpu)` saved with `dcp.save` (`flow-control seed`, 
 - The framework conventions above: σ time, `ε - x₀` velocity, packed `[B, N, D]` latents in `(c ph pw)` order. Every sampler node, objective and reward depends on them.
 - `_predict_velocity` runs `self.module()`. The variant mechanism (`use_variant`, `module()`, the ContextVar) belongs to [variants.md](variants.md).
 - `predict_velocity_batched` is a collective that returns fp32 velocities ([microbatching.md](microbatching.md), [precision.md](precision.md)).
-- The `load_transformer` order and the seed / meta-init path: anything a family adds must survive `to_empty` + `dcp.load`.
+- The `load_transformer` order and the seed / meta-init path: anything a family adds must survive `to_empty` + `dcp.load`. `parallelize` runs between them and changes no FQN ([parallelize.md](parallelize.md)).
 - `_`-prefixed row fields are adapter caches, keyed per variant ([../overview/row.md](../overview/row.md)).
