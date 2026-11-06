@@ -94,7 +94,7 @@ class DistributedSamplerModel:
 
 def make_adapter(micro_batch_size: int) -> DistributedFakeAdapter:
     return DistributedFakeAdapter.model_construct(
-        arch="fake", type="fake", micro_batch_size=micro_batch_size
+        type="fake", micro_batch_size=micro_batch_size
     )
 
 

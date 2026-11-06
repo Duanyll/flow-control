@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "sd3", "type": "base" },
+  "model": { "type": "sd3" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_sd35_t2i"

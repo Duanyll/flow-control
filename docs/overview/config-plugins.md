@@ -109,11 +109,12 @@ class Registry[T]:
     def get(self, tag: str) -> type[T] | None: ...
 
 class RegistryUnion:  # Annotated metadata turning a base type into an open tagged union
-    def __init__(self, registry: Registry, discriminator: str | Callable[[Any], str], *,
+    def __init__(self, registry: Registry, discriminator: str, *,   # a Literal field of every member
                  parser: Callable[[dict], Any] | None = None,   # custom dispatch (processor task × preset)
                  list_as: tuple[str, str] | None = None,       # [a, b]  -> {disc: tag, field: [a, b]}
                  number_as: tuple[str, str] | None = None): ...  # 4.5     -> {disc: tag, field: 4.5}
-    # a bare string is {disc: string}; shorthands need a plain string discriminator and no parser
+    # a bare string is {disc: string}; shorthands need no parser
+    # a class registered under several tags lists them all in its Literal; the union holds it once
 
 def load_plugins(modules: Iterable[str]) -> None: ...  # import each module once, for its @register side effects
 ```
@@ -155,7 +156,7 @@ The smallest standalone plugin is `examples/plugins/toy.py`.
 
 | Registry | Defined in | Selected by | Chapter |
 |---|---|---|---|
-| `adapter_registry` | `adapters/base.py` | `model`: tag `f"{arch}_{type}"`, no shorthands | [adapter](../adapters/adapter.md) |
+| `adapter_registry` | `adapters/base.py` | `model`; members in `adapters/arch/` | [adapter](../adapters/adapter.md) |
 | `task_registry` | `processors/base.py` | `processor.task` | [processors](../processors/processors.md) |
 | `preset_registry` | `processors/presets/base.py` | `processor.preset`, mixed into the task class by `parse_processor` | [processors](../processors/processors.md) |
 | `encoder_registry` | `processors/components/encoder/base.py` | a preset's `encoder` / `pooled_encoder` | [processors](../processors/processors.md) |
@@ -185,7 +186,7 @@ Every registry except `variant_registry` is an extension point. Variant kinds ar
 
 ### Extension Points
 
-- A new member subclasses the family's base, declares `type: Literal["<tag>"]` (adapters: `arch` and `type`), and registers with `@<registry>.register("<tag>")`. It lives in `flow_control/contrib/` or in `local/<project>/`, and a config activates it through `imports` ([repo layout](repo-layout.md)).
+- A new member subclasses the family's base, declares `type: Literal["<tag>"]`, and registers with `@<registry>.register("<tag>")`. It lives in `flow_control/contrib/` or in `local/<project>/`, and a config activates it through `imports` ([repo layout](repo-layout.md)).
 - `source_registry` and `task_template_registry` are duck-typed (`base=None`): a member implements the protocol (`RawSource`, `TaskTemplate`) without subclassing.
 
 ### Core Contracts

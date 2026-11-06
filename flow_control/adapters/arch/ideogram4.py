@@ -14,11 +14,10 @@ from diffusers.models.transformers.transformer_ideogram4 import (
 from einops import rearrange
 from pydantic import model_validator
 
+from flow_control.adapters.base import BaseModelAdapter, Batch, adapter_registry
+from flow_control.adapters.variants import FullVariant, Variant
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.types import TorchDType
-
-from .base import BaseModelAdapter, Batch, adapter_registry
-from .variants import FullVariant, Variant
 
 IDEOGRAM4_REPO = "ideogram-ai/ideogram-4-fp8"
 
@@ -61,7 +60,7 @@ class Ideogram4Batch(Batch):
     """`[B, L, 13 * 4096]` Qwen3-VL features of the prompt tokens, no padding."""
 
 
-@adapter_registry.register("ideogram4_base")
+@adapter_registry.register("ideogram4")
 class Ideogram4Adapter[TBatch: Ideogram4Batch](
     BaseModelAdapter[Ideogram4Transformer2DModel, TBatch]
 ):
@@ -85,8 +84,7 @@ class Ideogram4Adapter[TBatch: Ideogram4Batch](
     mRoPE axis; one segment, so the sequence is never padded.
     """
 
-    arch: Literal["ideogram4"] = "ideogram4"
-    type: Literal["base"] = "base"
+    type: Literal["ideogram4"] = "ideogram4"
 
     latent_channels: int = 32
 

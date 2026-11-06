@@ -14,7 +14,7 @@ The engine is stateless per request. Each request carries the full config (the U
 
 ```jsonc
 {
-  "model": {"arch": "flux1", "type": "base"},
+  "model": {"type": "flux1"},
   "processor": {"task": "t2i", "preset": "flux1"}, // processor.task selects the Gradio form
   "sampler": {"type": "grid", "steps": 20},         // the UI's Steps and CFG sliders edit the first grid / cfg node
   "device": "cuda:0"
@@ -27,7 +27,7 @@ The engine is stateless per request. Each request carries the full config (the U
 ```jsonc
 {
   "model": {
-    "arch": "flux1", "type": "base",
+    "type": "flux1",
     "variants": { // as in the training config, so the slots exist to load into
       "default": {"type": "lora", "rank": 16},
       "ema": {"type": "ema", "of": "default", "decay": 0.999}
@@ -50,7 +50,7 @@ A training checkpoint loads into `app.transformer.*` with `strict=False` and a p
   "processor_device": "cuda:2", // encoders and VAE; default: device
   // "offload_processor": true, // one GPU: the processor's modules wait on CPU while the transformer samples
   "model": {
-    "arch": "flux2", "type": "base",
+    "type": "flux2",
     "hf_model": {
       "library": "diffusers", "class_name": "Flux2Transformer2DModel",
       "pretrained_model_id": "black-forest-labs/FLUX.2-dev", "subfolder": "transformer",

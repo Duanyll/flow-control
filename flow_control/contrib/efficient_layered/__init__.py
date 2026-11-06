@@ -6,8 +6,7 @@ unions unless a config opts in via ``imports``. Importing this package
 self-registers:
 
 - ``EfficientLayeredQwenImageAdapter`` under ``adapter_registry`` tag
-  ``"qwen_efficient_layered"`` (the ``f"{arch}_{type}"`` discriminator for
-  ``arch="qwen"``, ``type="efficient_layered"``).
+  ``"qwen_efficient_layered"``.
 - ``EfficientLayeredProcessor`` under ``task_registry`` tag ``"efficient_layered"``.
 - ``PrismLayersProSource`` under ``source_registry`` tag ``"prism_layers_pro"``.
 

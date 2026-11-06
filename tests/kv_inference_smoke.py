@@ -14,8 +14,8 @@ from typing import Any
 import torch
 
 from flow_control.adapters import BaseModelAdapter
-from flow_control.adapters.flux2.kv import Flux2KVAdapter
-from flow_control.adapters.qwen21 import QwenImage21Adapter
+from flow_control.adapters.arch.flux2.kv import Flux2KVAdapter
+from flow_control.adapters.arch.qwen21 import QwenImage21Adapter
 from flow_control.processors import BaseProcessor, parse_processor
 from flow_control.samplers import Executor, Grid, RootFrame, variants
 from flow_control.samplers.shift import Flux2Shift, LinearShift

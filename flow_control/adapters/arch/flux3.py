@@ -28,21 +28,21 @@ class Flux3Batch(Batch):
     sigma_next: NotRequired[float | torch.Tensor]
     """The enclosing step's target sigma (a float set by ``BaseTransition``; a `[B]`
     tensor once densely collated): the flow map's target timestep. Read by
-    ``type="distilled"`` only."""
+    ``type="flux3_distilled"`` only."""
     _img_ids: NotRequired[torch.Tensor]
     _txt_ids: NotRequired[torch.Tensor]
     _cond_ids: NotRequired[torch.Tensor]
 
 
-@adapter_registry.register("flux3_base")
+@adapter_registry.register("flux3")
 @adapter_registry.register("flux3_distilled")
 class Flux3Adapter[TBatch: Flux3Batch](
     BaseModelAdapter[Flux3Transformer2DModel, TBatch]
 ):
     """FLUX 3 Image Klein (5.6B) adapter.
 
-    One class serves both checkpoints: ``type="base"`` is the undistilled model
-    (true CFG 3.5, 50 steps) and ``type="distilled"`` the 16-step flow map, which
+    One class serves both checkpoints: ``type="flux3"`` is the undistilled model
+    (true CFG 3.5, 50 steps) and ``type="flux3_distilled"`` the 16-step flow map, which
     needs the timestep each step jumps to (``target_timestep``). The sampler's
     transition puts that on the row as ``sigma_next`` for the duration of the step;
     outside a transition (multistep grids, training points) the distilled forward
@@ -57,8 +57,7 @@ class Flux3Adapter[TBatch: Flux3Batch](
     frequencies in ``forward``, so the module is meta-load safe.
     """
 
-    arch: Literal["flux3"] = "flux3"
-    type: Literal["base", "distilled"] = "base"
+    type: Literal["flux3", "flux3_distilled"] = "flux3"
 
     latent_channels: int = 32
     patch_size: int = 2
@@ -94,7 +93,7 @@ class Flux3Adapter[TBatch: Flux3Batch](
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
-        repo = FLUX3_DISTILLED if self.type == "distilled" else FLUX3_BASE
+        repo = FLUX3_DISTILLED if self.type == "flux3_distilled" else FLUX3_BASE
         official = {FLUX3_BASE, FLUX3_DISTILLED}
         if self.hf_model.pretrained_model_id in official - {repo}:
             # ``type`` picks between the official repos; another id is kept as is.
@@ -105,10 +104,10 @@ class Flux3Adapter[TBatch: Flux3Batch](
     def _install_modules(self, transformer: Flux3Transformer2DModel) -> None:
         # The post-load hook: nothing to install, but the checkpoint kind must match.
         flow_map = bool(transformer.config["flow_map"])
-        if flow_map != (self.type == "distilled"):
+        if flow_map != (self.type == "flux3_distilled"):
             raise ValueError(
-                f"flux3 type {self.type!r} expects a "
-                f"{'flow-map' if self.type == 'distilled' else 'CFG'} checkpoint, "
+                f"type {self.type!r} expects a "
+                f"{'flow-map' if self.type == 'flux3_distilled' else 'CFG'} checkpoint, "
                 "but a loaded transformer (the base, or a full variant's hf_model) "
                 f"has flow_map={flow_map}."
             )
@@ -160,7 +159,7 @@ class Flux3Adapter[TBatch: Flux3Batch](
                 batch["reference_latents"], dim=1
             )
             kwargs["image_cond_ids"] = batch["_cond_ids"]
-        if self.type == "distilled":
+        if self.type == "flux3_distilled":
             if "sigma_next" not in batch:
                 raise ValueError(
                     "flux3 distilled is a flow map and needs the step's target sigma "
@@ -186,7 +185,7 @@ if __name__ == "__main__":
 
     from rich import print
 
-    adapter = Flux3Adapter(type="distilled")
+    adapter = Flux3Adapter(type="flux3_distilled")
     assert adapter.hf_model.pretrained_model_id == FLUX3_DISTILLED
     with patch.object(Flux3Adapter, "device", torch.device("cpu")):
         ids = adapter._image_ids((64, 48), -2)

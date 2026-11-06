@@ -288,7 +288,6 @@ if __name__ == "__main__":
             return x
 
     class TinyAdapter(BaseModelAdapter[ModelMixin, Batch]):
-        arch: str = "tiny"
         type: str = "tiny"
         hf_model: HfModelLoader[ModelMixin] = Field(
             default_factory=lambda: HfModelLoader(

@@ -12,7 +12,7 @@
   // "seed_checkpoint_dir": "./checkpoints/seed",
   // "checkpoint_dir": "./checkpoints/step_0001000",
 
-  "model": { "arch": "flux1", "type": "base" },
+  "model": { "type": "flux1" },
 
   "seed": 42,
   "sampler": { "type": "grid", "steps": 20 },

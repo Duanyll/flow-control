@@ -21,15 +21,15 @@ class Krea2Batch(Batch):
     """`[B, N]` Boolean text attention mask (padding kept, marked ``False``)."""
 
 
-@adapter_registry.register("krea2_base")
+@adapter_registry.register("krea2")
 @adapter_registry.register("krea2_turbo")
 class Krea2Adapter[TBatch: Krea2Batch](
     BaseModelAdapter[Krea2Transformer2DModel, TBatch]
 ):
     """Krea 2 single-stream DiT adapter.
 
-    One class serves both checkpoints: ``type="base"`` loads Krea-2-Raw (undistilled,
-    true CFG) and ``type="turbo"`` loads Krea-2-Turbo (8-step distilled, guidance-free —
+    One class serves both checkpoints: ``type="krea2"`` loads Krea-2-Raw (undistilled,
+    true CFG) and ``type="krea2_turbo"`` loads Krea-2-Turbo (8-step distilled, guidance-free —
     a sampler concern, so the forward body is identical). The checkpoint is selected in
     :meth:`model_post_init`.
 
@@ -41,8 +41,7 @@ class Krea2Adapter[TBatch: Krea2Batch](
     ``[0, 1]`` (the transformer rescales by 1000 internally).
     """
 
-    arch: Literal["krea2"] = "krea2"
-    type: Literal["base", "turbo"] = "base"
+    type: Literal["krea2", "krea2_turbo"] = "krea2"
 
     latent_channels: int = 16
     patch_size: int = 2
@@ -68,7 +67,7 @@ class Krea2Adapter[TBatch: Krea2Batch](
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
-        repo = KREA2_TURBO if self.type == "turbo" else KREA2_RAW
+        repo = KREA2_TURBO if self.type == "krea2_turbo" else KREA2_RAW
         if self.hf_model.pretrained_model_id != repo:
             # Fresh copy so we never mutate a shared field default.
             self.hf_model = self.hf_model.model_copy(

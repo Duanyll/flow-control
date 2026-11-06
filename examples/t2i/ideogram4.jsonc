@@ -14,7 +14,7 @@
   // (launch.preprocess_config) so only the two transformers are loaded. A run
   // that never samples with the unconditional transformer (e.g. training) can
   // skip loading it with "variants": {}.
-  "model": { "arch": "ideogram4", "type": "base" },
+  "model": { "type": "ideogram4" },
   // Prompts are the structured JSON captions the model was trained on; these are
   // the official prompting-guide examples. Native resolution is 2048²; 1024² is
   // what the official run_inference.py defaults to.

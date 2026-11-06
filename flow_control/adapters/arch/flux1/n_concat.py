@@ -3,7 +3,8 @@ from typing import Literal
 import torch
 from einops import repeat
 
-from ..base import adapter_registry
+from flow_control.adapters.base import adapter_registry
+
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -21,7 +22,7 @@ class Flux1NConcatAdapter(Flux1Adapter[Flux1NConcatBatch]):
     This is used by the PhotoDoddle model.
     """
 
-    type: Literal["n_concat"] = "n_concat"
+    type: Literal["flux1_n_concat"] = "flux1_n_concat"
     dense_batch_fields = (*Flux1Adapter.dense_batch_fields, "control_latents")
 
     def _predict_velocity(

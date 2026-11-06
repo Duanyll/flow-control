@@ -12,8 +12,7 @@
   },
   "hsdp_shard_dim": 1,
   "model": {
-    "arch": "cosmos3",
-    "type": "kv",
+    "type": "cosmos3_kv",
     "hf_model": {
       "library": "diffusers",
       "class_name": "Cosmos3OmniTransformer",

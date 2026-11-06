@@ -9,7 +9,7 @@ A **variant** is a named weight set of one adapter. It is one of four kinds: a L
 ```jsonc
 {
   "model": {
-    "arch": "sd3", "type": "base",
+    "type": "sd3",
     "variants": {
       "default": {"type": "lora", "rank": 32, "alpha": 64, "init": "gaussian"}, // the trained policy
       "ema": {"type": "ema", "of": "default", "decay": 0.9, "warmup": "standard"}, // moved every optimizer step
@@ -28,7 +28,7 @@ Objectives name the variants they read (`old`, `ref`). Setup fails if `model.var
 
 ```jsonc
 "model": {
-  "arch": "flux2", "type": "base",
+  "type": "flux2",
   "trainable": true, // the base weights are trainable
   "variants": {
     // "default": {"type": "alias", "of": "base"}, // an undeclared "default" is the base weights
@@ -53,7 +53,7 @@ Objectives name the variants they read (`old`, `ref`). Setup fails if `model.var
 
 ```jsonc
 {
-  "model": {"arch": "ideogram4", "type": "base"}, // the adapter's default variants: "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}}
+  "model": {"type": "ideogram4"}, // the adapter's default variants: "uncond": {"type": "full", "hf_model": {"subfolder": "unconditional_transformer", ...}}
   // The official 48-step schedule guides at 7.0 for 45 steps, then 3.0: two grids on
   // the same logit-normal curve, split at the sigma of step 45 (0.1669 at 1024², 0.2860 at 2048²).
   "sampler": [
@@ -93,7 +93,7 @@ LoRA on a full variant (`{"type": "lora", "of": "uncond"}`) raises `NotImplement
 
 ```jsonc
 "model": {
-  "arch": "flux1", "type": "base",
+  "type": "flux1",
   "variants": {
     "default": {"type": "lora", "rank": 64},
     "guide": {"type": "lora", "rank": 64, "trainable": false,

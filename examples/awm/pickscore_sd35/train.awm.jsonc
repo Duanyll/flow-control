@@ -52,8 +52,7 @@
   "max_checkpoints": 10,
 
   "model": {
-    "arch": "sd3",
-    "type": "base",
+    "type": "sd3",
     "gradient_checkpointing": "none",
     "torch_compile": { "fullgraph": false }, // SD3 blocks are not checked under fullgraph
     "micro_batch_size": 4,

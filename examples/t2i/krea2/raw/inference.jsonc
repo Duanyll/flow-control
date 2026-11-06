@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "krea2", "type": "base" },
+  "model": { "type": "krea2" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_krea2_raw_t2i"

@@ -5,10 +5,10 @@ import torch.nn as nn
 from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 
+from flow_control.adapters.base import adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from ..base import adapter_registry
 from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
@@ -133,7 +133,7 @@ class PatchedQwenEmbedLayer3DRope(nn.Module):
 
 @adapter_registry.register("qwen_layered")
 class QwenImageLayeredAdapter(QwenImageAdapter[QwenImageLayeredBatch]):
-    type: Literal["layered"] = "layered"
+    type: Literal["qwen_layered"] = "qwen_layered"
     dense_batch_fields = (
         *QwenImageAdapter.dense_batch_fields,
         "num_layers",

@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "flux2", "type": "kv" },
+  "model": { "type": "flux2_kv" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux2_klein_9b_kv"

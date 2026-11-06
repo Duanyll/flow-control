@@ -17,7 +17,7 @@ class SD3Batch(Batch):
     """`[B, 2048]` Fused CLIP-L / CLIP-G pooled projections."""
 
 
-@adapter_registry.register("sd3_base")
+@adapter_registry.register("sd3")
 class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatch]):
     """Adapter for Stable Diffusion 3 / 3.5 (``SD3Transformer2DModel``).
 
@@ -38,8 +38,7 @@ class SD3Adapter[TBatch: SD3Batch](BaseModelAdapter[SD3Transformer2DModel, TBatc
         "prompt_embeds",
         "pooled_prompt_embeds",
     )
-    arch: Literal["sd3"] = "sd3"
-    type: Literal["base"] = "base"
+    type: Literal["sd3"] = "sd3"
     hf_model: HfModelLoader[SD3Transformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="SD3Transformer2DModel",

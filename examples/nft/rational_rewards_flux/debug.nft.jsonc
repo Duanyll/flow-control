@@ -35,8 +35,7 @@
   "validation_epochs": 5,
 
   "model": {
-    "arch": "flux1",
-    "type": "base",
+    "type": "flux1",
     "variants": {
       "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       "old": {

@@ -3,9 +3,9 @@ from typing import Literal
 import torch
 from diffusers import FluxTransformer2DModel
 
+from flow_control.adapters.base import adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 
-from ..base import adapter_registry
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -18,7 +18,7 @@ class Flux1KontextBatch(Flux1Batch):
 
 @adapter_registry.register("flux1_kontext")
 class Flux1KontextAdapter(Flux1Adapter[Flux1KontextBatch]):
-    type: Literal["kontext"] = "kontext"
+    type: Literal["flux1_kontext"] = "flux1_kontext"
     dense_batch_fields = (
         *Flux1Adapter.dense_batch_fields,
         "reference_latents",

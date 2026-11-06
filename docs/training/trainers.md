@@ -13,7 +13,7 @@ A trainer is the config model that `launch.type` selects from `trainer_registry`
   "checkpoint_root": "$auto",
   "seed_checkpoint_dir": "/dev/shm/flow-control/seed",
   "model": {
-    "arch": "flux1", "type": "base",
+    "type": "flux1",
     "variants": {
       "default": {"type": "lora", "rank": 16},
       "ema": {"type": "ema", "of": "default", "decay": 0.999}
@@ -58,7 +58,7 @@ A trainer is the config model that `launch.type` selects from `trainer_registry`
   "kl_beta": 0.01,                 // > 0 reads the "ref" variant
   // "clip_range": 1e-4, "adv_clip_max": 5.0,
   "model": {
-    "arch": "sd3", "type": "base", "micro_batch_size": 4,
+    "type": "sd3", "micro_batch_size": 4,
     "variants": {
       "default": {"type": "lora", "rank": 32},
       "ema": {"type": "ema", "of": "default", "decay": 0.9},
@@ -87,7 +87,7 @@ A trainer is the config model that `launch.type` selects from `trainer_registry`
     "reward": {"type": "pickscore"}
   },
   "model": {
-    "arch": "sd3", "type": "base",
+    "type": "sd3",
     "variants": {
       "default": {"type": "lora", "rank": 32},
       "old": {"type": "ema", "of": "default", "decay": 0.5, "every": "epoch"}, // moved after each epoch's training
@@ -123,7 +123,7 @@ A trainer is the config model that `launch.type` selects from `trainer_registry`
 ```jsonc
 {
   "hsdp_shard_dim": 8,              // FSDP shard group; 1: replicate only (DDP-like)
-  "model": {"arch": "flux2", "type": "base", "torch_compile": {}}, // checkpointing and compile are model fields (adapters/parallelize.md)
+  "model": {"type": "flux2", "torch_compile": {}}, // checkpointing and compile are model fields (adapters/parallelize.md)
   "profile": {"output_dir": "./draft/profile"} // <tag>_rank<r>.json.gz; RL: outer epoch profile.epoch (default 1); inference: the whole loop
 }
 ```

@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "hidream", "type": "dev" },
+  "model": { "type": "hidream_dev" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_hidream_dev_t2i"

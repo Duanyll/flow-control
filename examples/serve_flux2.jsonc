@@ -13,8 +13,7 @@
   // "checkpoint_dir": "./checkpoints/step_0001000",
 
   "model": {
-    "arch": "flux2",
-    "type": "base",
+    "type": "flux2",
     "hf_model": {
       "library": "diffusers",
       "class_name": "Flux2Transformer2DModel",

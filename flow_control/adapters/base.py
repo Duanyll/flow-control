@@ -74,8 +74,8 @@ class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
 
     # ------------------------------ configuration ------------------------------ #
 
-    arch: str
     type: str
+    """The registry tag: a family (`"flux2"`) or one of its variants (`"flux2_kv"`)."""
     hf_model: HfModelLoader[TModel]
     storage_dtype: TorchDType | None = None
     """Specify a storage dtype (e.g. float8_e4m3fn) to apply layerwise upcasting to the frozen weights."""

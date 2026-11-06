@@ -7,7 +7,7 @@
   },
   "seed": 1024,
   "hsdp_shard_dim": 1,
-  "model": { "arch": "zimage", "type": "base" },
+  "model": { "type": "zimage" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_zimage_t2i"

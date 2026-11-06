@@ -49,9 +49,7 @@ def main() -> None:
 
         # Equal tile counts: four tiles per rank share one dense forward, and the
         # stitched velocity and gradients match the tokenwise oracle up to feathering rounding.
-        adapter = TileAdapter.model_construct(
-            arch="fake", type="fake", micro_batch_size=4
-        )
+        adapter = TileAdapter.model_construct(type="fake", micro_batch_size=4)
         batch = make_batch(6, 6)
         velocity = Executor(adapter).evaluate([Tiled()(batch)])[0]
         x = batch["noisy_latents"]
@@ -63,9 +61,7 @@ def main() -> None:
         # Unequal tile counts (two versus four) at micro_batch_size=2 are legal:
         # rank 0 runs its one real chunk plus a dummy chunk to match rank 1's
         # two chunks (sampler-rethink S1), and the stitch stays exact.
-        adapter = TileAdapter.model_construct(
-            arch="fake", type="fake", micro_batch_size=2
-        )
+        adapter = TileAdapter.model_construct(type="fake", micro_batch_size=2)
         batch = make_batch(4, 6) if rank == 0 else make_batch(6, 6)
         velocity = Executor(adapter).evaluate([Tiled()(batch)])[0]
         torch.testing.assert_close(

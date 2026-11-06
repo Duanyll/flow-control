@@ -24,7 +24,7 @@ class Flux2KVBatch(Flux2Batch):
 class Flux2KVAdapter(Flux2Adapter[Flux2KVBatch]):
     """Klein 9B KV checkpoint, with reference-only causal attention."""
 
-    type: Literal["kv"] = "kv"
+    type: Literal["flux2_kv"] = "flux2_kv"
     supports_dense_batching = False
     hf_model: HfModelLoader[Flux2Transformer2DModel] = HfModelLoader(
         library="diffusers",

@@ -2,30 +2,30 @@ from typing import Annotated, Any
 
 from flow_control.utils.registry import RegistryUnion
 
-from .base import BaseModelAdapter, Batch, adapter_registry
-from .cosmos3 import Cosmos3Adapter, Cosmos3KVAdapter
-from .flux1 import (
+from .arch.cosmos3 import Cosmos3Adapter, Cosmos3KVAdapter
+from .arch.flux1 import (
     Flux1Adapter,
     Flux1DConcatAdapter,
     Flux1FillAdapter,
     Flux1KontextAdapter,
     Flux1NConcatAdapter,
 )
-from .flux2 import Flux2Adapter
-from .flux2.kv import Flux2KVAdapter
-from .flux3 import Flux3Adapter
-from .hidream import HiDreamO1Adapter
-from .ideogram4 import Ideogram4Adapter
-from .krea2 import Krea2Adapter
-from .longcat import LongCatAdapter, LongCatEditAdapter
-from .qwen import (
+from .arch.flux2 import Flux2Adapter
+from .arch.flux2.kv import Flux2KVAdapter
+from .arch.flux3 import Flux3Adapter
+from .arch.hidream import HiDreamO1Adapter
+from .arch.ideogram4 import Ideogram4Adapter
+from .arch.krea2 import Krea2Adapter
+from .arch.longcat import LongCatAdapter, LongCatEditAdapter
+from .arch.qwen import (
     QwenImageAdapter,
     QwenImageEditAdapter,
     QwenImageLayeredAdapter,
 )
-from .qwen21 import QwenImage21Adapter
-from .sd3 import SD3Adapter
-from .zimage import ZImageAdapter
+from .arch.qwen21 import QwenImage21Adapter
+from .arch.sd3 import SD3Adapter
+from .arch.zimage import ZImageAdapter
+from .base import BaseModelAdapter, Batch, adapter_registry
 
 __all__ = [
     "Cosmos3Adapter",
@@ -57,15 +57,7 @@ __all__ = [
 ]
 
 
-def _adapter_discriminator(v: Any) -> str:
-    if isinstance(v, dict):
-        return f"{v['arch']}_{v['type']}"
-    return f"{v.arch}_{v.type}"
-
-
-ModelAdapter = Annotated[
-    BaseModelAdapter, RegistryUnion(adapter_registry, _adapter_discriminator)
-]
+ModelAdapter = Annotated[BaseModelAdapter, RegistryUnion(adapter_registry, "type")]
 
 
 def parse_model_adapter(conf: dict[str, Any]) -> BaseModelAdapter:

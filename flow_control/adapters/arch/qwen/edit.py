@@ -3,10 +3,10 @@ from typing import Literal
 import torch
 from diffusers import QwenImageTransformer2DModel
 
+from flow_control.adapters.base import adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 from flow_control.utils.logging import get_logger
 
-from ..base import adapter_registry
 from .base import QwenImageAdapter, QwenImageBatch
 
 logger = get_logger(__name__)
@@ -21,7 +21,7 @@ class QwenImageEditBatch(QwenImageBatch):
 
 @adapter_registry.register("qwen_edit")
 class QwenImageEditAdapter(QwenImageAdapter[QwenImageEditBatch]):
-    type: Literal["edit"] = "edit"
+    type: Literal["qwen_edit"] = "qwen_edit"
     dense_batch_fields = (
         *QwenImageAdapter.dense_batch_fields,
         "reference_latents",

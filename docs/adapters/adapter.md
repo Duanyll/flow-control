@@ -1,6 +1,6 @@
 # Model adapters
 
-`BaseModelAdapter` wraps one DiT family's transformer behind a single velocity interface, `_predict_velocity(batch, timestep) -> velocity`. Every sampler, trainer and server works through that interface in the framework's conventions, so none of them depends on a model's time scale, prediction target or token layout. Callers see `predict_velocity_batched` ([microbatching.md](microbatching.md)) under `use_variant` ([variants.md](variants.md)). A **family** is one `arch` (`flux1`, `qwen`, `sd3`, ...). A **type** is a variant of that architecture's inputs or checkpoint (`base`, `edit`, `kv`, `d_concat`, ...). Each `(arch, type)` pair is one registered adapter class.
+`BaseModelAdapter` wraps one DiT family's transformer behind a single velocity interface, `_predict_velocity(batch, timestep) -> velocity`. Every sampler, trainer and server works through that interface in the framework's conventions, so none of them depends on a model's time scale, prediction target or token layout. Callers see `predict_velocity_batched` ([microbatching.md](microbatching.md)) under `use_variant` ([variants.md](variants.md)). A **family** is one architecture (`flux1`, `qwen`, `sd3`, ...), implemented under `flow_control/adapters/arch/`; the framework it builds on (`base.py`, `batching.py`, `variants.py`, `weights.py`, `parallelize.py`) is one level up. A **type** is one registered adapter: the family itself (`"qwen"`) or a variant of its inputs or checkpoint (`"qwen_edit"`, `"flux2_kv"`, `"flux1_d_concat"`, ...).
 
 ## Config examples
 
@@ -8,7 +8,7 @@
 
 ```jsonc
 "model": {
-  "arch": "qwen", "type": "base" // registry tag "qwen_base"
+  "type": "qwen" // the adapter_registry tag; a bare "qwen" is the same
   // "micro_batch_size": 1,
   // "use_cache": true,
   // "gradient_checkpointing": "block", // parallelize.md, with "torch_compile" and "attention_backend"
@@ -19,7 +19,7 @@
 
 ```jsonc
 "model": {
-  "arch": "flux1", "type": "base",
+  "type": "flux1",
   "hf_model": { // replaces the adapter's default loader as a whole: name every field
     "library": "diffusers",
     "class_name": "FluxTransformer2DModel",
@@ -35,14 +35,14 @@
 ```jsonc
 {
   "imports": ["flow_control.contrib.efficient_layered"], // registers "qwen_efficient_layered"
-  "model": {"arch": "qwen", "type": "efficient_layered"}
+  "model": {"type": "qwen_efficient_layered"}
 }
 ```
 
 ### A weight-only fp8 checkpoint
 
 ```jsonc
-"model": {"arch": "ideogram4", "type": "base"} // fp8 repo, dequantized to hf_model.dtype at load
+"model": {"type": "ideogram4"} // fp8 repo, dequantized to hf_model.dtype at load
 // "hf_model": {..., "dequantize": false} passes the checkpoint to from_pretrained unchanged
 ```
 
@@ -79,8 +79,7 @@ When `load_model` reuses a cached transformer (same `hf_model.config_key`), the 
 class BaseModelAdapter[TModel: ModelMixin | PreTrainedModel, TBatch: Batch](
     VariantsMixin, MicrobatchMixin, ParallelizeMixin, ABC
 ):
-    arch: str
-    type: str
+    type: str                            # the adapter_registry tag
     hf_model: HfModelLoader[TModel]      # the base weights
     storage_dtype: TorchDType | None = None   # precision.md
     trainable_dtype: TorchDType = torch.bfloat16
@@ -107,8 +106,8 @@ class Batch(TypedDict):                  # each family extends it with its condi
     clean_latents: torch.Tensor          # [B, N, D], training only
     noisy_latents: torch.Tensor          # [B, N, D]
 
-adapter_registry: Registry[BaseModelAdapter]   # tag f"{arch}_{type}"
-ModelAdapter = Annotated[BaseModelAdapter, RegistryUnion(adapter_registry, _adapter_discriminator)]
+adapter_registry: Registry[BaseModelAdapter]
+ModelAdapter = Annotated[BaseModelAdapter, RegistryUnion(adapter_registry, "type")]
 ```
 
 Caller:
@@ -139,10 +138,9 @@ class FooBatch(Batch):
     _img_ids: NotRequired[torch.Tensor]         # adapter cache, layout only
 
 
-@adapter_registry.register("foo_base")
+@adapter_registry.register("foo")               # flow_control/adapters/arch/foo.py
 class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatch]):
-    arch: Literal["foo"] = "foo"
-    type: Literal["base"] = "base"
+    type: Literal["foo"] = "foo"
     hf_model: HfModelLoader[FooTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FooTransformer2DModel",
@@ -176,7 +174,7 @@ class FooAdapter[TBatch: FooBatch](BaseModelAdapter[FooTransformer2DModel, TBatc
         )[0]
 ```
 
-- One class may serve several checkpoints: register it under each tag, widen `type` (`Literal["base", "turbo"]`), and pick `hf_model.pretrained_model_id` in `model_post_init` (`Krea2Adapter`, `Flux3Adapter`, `HiDreamO1Adapter`).
+- One class may serve several checkpoints: register it under each tag, widen `type` (`Literal["krea2", "krea2_turbo"]`; the union holds the class once), and pick `hf_model.pretrained_model_id` in `model_post_init` (`Krea2Adapter`, `Flux3Adapter`, `HiDreamO1Adapter`).
 - `_install_modules(transformer)` changes the transformer it is given, never `self.transformer`. It runs on the base before the variants are realized, so full copies and LoRA targeting see the replaced modules, and on every `FullVariant` that loads its own `hf_model` (`VariantsMixin._copy`). It runs once per fresh load: inside the meta context when training from a seed, on CPU when building the seed, and on the device otherwise. The base is frozen again after it (`requires_grad_(self.trainable)`), so modules it adds train only with a trainable base. Module surgery belongs there, not in a `load_transformer` override (`Flux1DConcatAdapter` widens `x_embedder`; `Flux2KVAdapter` sets attention processors; the layered Qwen adapters swap `pos_embed`).
 - `library: "custom"` loads vendored transformers-style modeling code by dotted path (`HiDreamO1Transformer`).
 - A family must not override `load_transformer`, `_realize` / `_attach`, `use_variant`, or replace `hf_model.model` after load. It overrides `predict_velocity_batched` only to change the physical batch layout ([microbatching.md](microbatching.md)), and the `parallelize` steps only to change how its blocks are found, checkpointed, compiled or sharded ([parallelize.md](parallelize.md)).
@@ -230,7 +228,7 @@ The seed is `load_transformer(cpu)` saved with `dcp.save` (`flow-control seed`, 
 
 **Extension points**
 
-- A new family, or a new type of an existing one: subclass `BaseModelAdapter` (or a family class), register it under `f"{arch}_{type}"` in `adapter_registry`, and implement `_predict_velocity`. Optionally add `_install_modules`, `_prepare_timestep`, the LoRA hints, `cost_test`, the dense-batching declarations, `dynamic_dims` and the other `parallelize` hooks, and a loader subclass. Core families live in `flow_control/adapters/`. Experimental ones go in `flow_control/contrib/` or in `local/`, loaded through `imports`.
+- A new family, or a new type of an existing one: subclass `BaseModelAdapter` (or a family class), register it in `adapter_registry` under its `type` (the family name, or `<family>_<variant>`), and implement `_predict_velocity`. Optionally add `_install_modules`, `_prepare_timestep`, the LoRA hints, `cost_test`, the dense-batching declarations, `dynamic_dims` and the other `parallelize` hooks, and a loader subclass. Core families live in `flow_control/adapters/arch/`. Experimental ones go in `flow_control/contrib/` or in `local/`, loaded through `imports`.
 - The processor preset for the family is a separate extension ([../processors/processors.md](../processors/processors.md)). Its `patch_size`, `vae_scale_factor` and `latent_channels` must equal the adapter's.
 
 **Core contracts**

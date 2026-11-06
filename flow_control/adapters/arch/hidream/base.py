@@ -38,8 +38,8 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
 ):
     """HiDream-O1 pixel-space unified-transformer adapter.
 
-    One class serves both checkpoints: ``type="full"`` loads the undistilled
-    model (true CFG 5.0, 50-step UniPC) and ``type="dev"`` the 28-step distilled
+    One class serves both checkpoints: ``type="hidream_full"`` loads the undistilled
+    model (true CFG 5.0, 50-step UniPC) and ``type="hidream_dev"`` the 28-step distilled
     one (guidance-free, flash solver) — sampler concerns, so the forward body is
     identical. The checkpoint is selected in :meth:`model_post_init`.
 
@@ -60,8 +60,7 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
       bf16 would collapse ``1 - sigma`` near the noise end).
     """
 
-    arch: Literal["hidream"] = "hidream"
-    type: Literal["full", "dev"] = "full"
+    type: Literal["hidream_full", "hidream_dev"] = "hidream_full"
 
     latent_channels: int = 3
     patch_size: int = 32
@@ -80,7 +79,7 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
 
     hf_model: HfModelLoader[HiDreamO1Transformer] = HfModelLoader(
         library="custom",
-        class_name="flow_control.adapters.hidream.modeling.HiDreamO1Transformer",
+        class_name="flow_control.adapters.arch.hidream.modeling.HiDreamO1Transformer",
         pretrained_model_id=HIDREAM_O1_FULL,
         dtype=torch.bfloat16,
     )
@@ -90,7 +89,7 @@ class HiDreamO1Adapter[TBatch: HiDreamO1Batch](
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
-        repo = HIDREAM_O1_DEV if self.type == "dev" else HIDREAM_O1_FULL
+        repo = HIDREAM_O1_DEV if self.type == "hidream_dev" else HIDREAM_O1_FULL
         if self.hf_model.pretrained_model_id != repo:
             # Fresh copy so we never mutate a shared field default.
             self.hf_model = self.hf_model.model_copy(

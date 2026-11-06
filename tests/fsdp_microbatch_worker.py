@@ -62,7 +62,6 @@ class TinyTransformer(ModelMixin):
 
 
 class TinyAdapter(BaseModelAdapter[ModelMixin, Batch]):
-    arch: str = "tiny"
     type: str = "tiny"
     hf_model: HfModelLoader[ModelMixin] = Field(
         default_factory=lambda: HfModelLoader(

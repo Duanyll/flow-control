@@ -234,14 +234,13 @@ class Cosmos3Pack:
         }
 
 
-@adapter_registry.register("cosmos3_base")
+@adapter_registry.register("cosmos3")
 class Cosmos3Adapter[TBatch: Cosmos3Batch](
     BaseModelAdapter[Cosmos3OmniTransformer, TBatch]
 ):
     """Text-to-image generation with the Cosmos3 omni transformer."""
 
-    arch: Literal["cosmos3"] = "cosmos3"
-    type: Literal["base"] = "base"
+    type: Literal["cosmos3"] = "cosmos3"
 
     # One packed sequence per sample: no batch dimension to collate over.
     supports_dense_batching = False
@@ -386,7 +385,7 @@ class Cosmos3KVAdapter[TBatch: Cosmos3KVBatch](Cosmos3Adapter[TBatch]):
     prompt alone, so replaying its K/V reproduces the uncached velocities.
     """
 
-    type: Literal["kv"] = "kv"
+    type: Literal["cosmos3_kv"] = "cosmos3_kv"
 
     _kv_state: Cosmos3KVState = PrivateAttr(default_factory=Cosmos3KVState)
 

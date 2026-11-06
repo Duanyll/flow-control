@@ -7,7 +7,7 @@ The adapter decides the dtype of every tensor in the transformer: the weights st
 ### Default
 
 ```jsonc
-"model": {"arch": "flux1", "type": "base"}
+"model": {"type": "flux1"}
 // hf_model.dtype "bfloat16": load, storage and compute dtype; trainable parameters bfloat16
 ```
 
@@ -17,7 +17,7 @@ This configuration fits LoRA training of the 12B FLUX.1 on a 24 GB card.
 
 ```jsonc
 "model": {
-  "arch": "flux1", "type": "base",
+  "type": "flux1",
   "storage_dtype": "float8_e4m3fn", // frozen Linear/Conv weights between forwards; compute stays hf_model.dtype
   "variants": {"default": {"type": "lora", "rank": 64}} // trainable parameters are never downcast
 }
@@ -27,7 +27,7 @@ This configuration fits LoRA training of the 12B FLUX.1 on a 24 GB card.
 
 ```jsonc
 "model": {
-  "arch": "sd3", "type": "base",
+  "type": "sd3",
   "trainable_dtype": "float32", // LoraPair casts A and B to the input dtype in forward
   "variants": {"default": {"type": "lora", "rank": 32}}
 }
@@ -36,7 +36,7 @@ This configuration fits LoRA training of the 12B FLUX.1 on a 24 GB card.
 ### fp8 checkpoint
 
 ```jsonc
-"model": {"arch": "ideogram4", "type": "base"} // weight-only fp8 repo, dequantized to hf_model.dtype at load
+"model": {"type": "ideogram4"} // weight-only fp8 repo, dequantized to hf_model.dtype at load
 ```
 
 ## Python spec

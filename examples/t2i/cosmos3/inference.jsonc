@@ -2,8 +2,8 @@
 // with the UniC corrector, true CFG 6.0 (Super-Text2Image uses 4.0), and the
 // checkpoint's Karras sigma grid inlined -- the shift registry has no Karras
 // option, so `custom_sigmas` is the exact schedule rather than a fit.
-// `"type": "kv"` caches the understanding tower's per-layer K/V across steps;
-// it is bit-exact against `"type": "base"` and ~2.6x faster on this prompt.
+// `"type": "cosmos3_kv"` caches the understanding tower's per-layer K/V across steps;
+// it is bit-exact against `"type": "cosmos3"` and ~2.6x faster on this prompt.
 // For Edge and Super see the edge.* and super.* configs beside this one.
 {
   "$schema": "../../../schema/inference.schema.json",
@@ -13,7 +13,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "cosmos3", "type": "kv" },
+  "model": { "type": "cosmos3_kv" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_cosmos3"

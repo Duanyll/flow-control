@@ -62,7 +62,6 @@ class _Transformer(TinyTransformer):
 class _Adapter(BaseModelAdapter[ModelMixin, Batch]):
     """The tiny two-block DiT; journals the variant of every forward."""
 
-    arch: str = "tiny"
     type: str = "tiny"
     hf_model: HfModelLoader[ModelMixin] = Field(
         default_factory=lambda: HfModelLoader(

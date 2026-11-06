@@ -26,7 +26,7 @@ class Flux2Batch(Batch):
     """`[B, N, 4]` Used for adding positional embeddings to the image embeddings."""
 
 
-@adapter_registry.register("flux2_base")
+@adapter_registry.register("flux2")
 class Flux2Adapter[TBatch: Flux2Batch](
     BaseModelAdapter[Flux2Transformer2DModel, TBatch]
 ):
@@ -45,8 +45,7 @@ class Flux2Adapter[TBatch: Flux2Batch](
         "Flux2TransformerBlock": {"hidden_states": 1, "image_rotary_emb": 0},
         "Flux2SingleTransformerBlock": {"hidden_states": 1, "image_rotary_emb": 0},
     }
-    arch: Literal["flux2"] = "flux2"
-    type: Literal["base"] = "base"
+    type: Literal["flux2"] = "flux2"
 
     hf_model: HfModelLoader[Flux2Transformer2DModel] = HfModelLoader(
         library="diffusers",

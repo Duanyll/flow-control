@@ -9,11 +9,11 @@ import torch
 from diffusers import Flux2Transformer2DModel, ModelMixin, QwenImage21Transformer2DModel
 from pydantic import PrivateAttr
 
+from flow_control.adapters.arch.flux1.base import Flux1Adapter
+from flow_control.adapters.arch.flux2.base import Flux2Adapter
+from flow_control.adapters.arch.flux2.kv import Flux2KVAdapter
+from flow_control.adapters.arch.qwen21 import QwenImage21Adapter
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.adapters.flux1.base import Flux1Adapter
-from flow_control.adapters.flux2.base import Flux2Adapter
-from flow_control.adapters.flux2.kv import Flux2KVAdapter
-from flow_control.adapters.qwen21 import QwenImage21Adapter
 from flow_control.samplers import (
     BaseGrid,
     BaseTrajectory,
@@ -181,7 +181,7 @@ def sample(model: Any, sampler: BaseTrajectory, rows: list[Any]) -> list[Any]:
 class AdapterBatchingTest(unittest.TestCase):
     def make_adapter(self, micro_batch_size: int = 2) -> FakeDenseAdapter:
         return FakeDenseAdapter.model_construct(
-            arch="fake", type="fake", micro_batch_size=micro_batch_size
+            type="fake", micro_batch_size=micro_batch_size
         )
 
     def test_dense_inputs_use_one_forward_per_chunk(self) -> None:
@@ -438,9 +438,7 @@ class AdapterBatchingTest(unittest.TestCase):
 
     def test_dense_and_fallback_gradients_match(self) -> None:
         dense = self.make_adapter()
-        fallback = FakeFallbackAdapter.model_construct(
-            arch="fake", type="fake", micro_batch_size=2
-        )
+        fallback = FakeFallbackAdapter.model_construct(type="fake", micro_batch_size=2)
         batches = [make_batch(1.0), make_batch(2.0)]
         timesteps = [torch.tensor([0.25]), torch.tensor([0.5])]
 
@@ -492,9 +490,7 @@ class SamplerBatchingTest(unittest.TestCase):
         row = sampling_row(
             {**batch, "negative": {"clean_latents": torch.full((1, 4, 2), 1.0)}}
         )
-        adapter = FakeCacheAdapter.model_construct(
-            arch="fake", type="fake", micro_batch_size=2
-        )
+        adapter = FakeCacheAdapter.model_construct(type="fake", micro_batch_size=2)
         with torch.no_grad():
             sample(
                 adapter,

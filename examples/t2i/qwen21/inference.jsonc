@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "qwen21", "type": "base" },
+  "model": { "type": "qwen21" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_qwen21"

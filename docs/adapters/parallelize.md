@@ -8,7 +8,7 @@
 
 ```jsonc
 "model": {
-  "arch": "flux2", "type": "base",
+  "type": "flux2",
   "gradient_checkpointing": "selective", // keep attention outputs, recompute the rest; "block" (default), "none"
   "torch_compile": {                     // one graph set covers every resolution: the adapter's dynamic_dims
     "mode": "max-autotune-no-cudagraphs" // Inductor GEMM templates; minutes per new graph, cached on disk
@@ -22,7 +22,7 @@
 
 ```jsonc
 "model": {
-  "arch": "flux2", "type": "base",
+  "type": "flux2",
   "attention_backend": "flash" // diffusers AttentionBackendName; null keeps the model's ("native": SDPA)
 }
 ```
@@ -31,7 +31,7 @@
 
 ```jsonc
 "model": {
-  "arch": "flux2", "type": "base"
+  "type": "flux2"
   // "gradient_checkpointing": "block", // each block recomputed whole in backward, under the forward's variant
   // "torch_compile": null
 }
@@ -113,7 +113,7 @@ dcp.load(model_sd, checkpoint_id=seed_checkpoint_dir, planner=DefaultLoadPlanner
 ### A family
 
 ```python
-@adapter_registry.register("flux2_base")
+@adapter_registry.register("flux2")
 class Flux2Adapter[TBatch: Flux2Batch](BaseModelAdapter[Flux2Transformer2DModel, TBatch]):
     dynamic_dims = {
         "Flux2TransformerBlock": {"hidden_states": 1, "image_rotary_emb": 0},        # image tokens; RoPE (cos, sin) of text + image

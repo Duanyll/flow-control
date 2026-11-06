@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "hidream", "type": "full" },
+  "model": { "type": "hidream_full" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_hidream_tie"

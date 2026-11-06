@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "longcat", "type": "base" },
+  "model": { "type": "longcat" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_longcat_t2i"

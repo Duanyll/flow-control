@@ -28,8 +28,7 @@
   "max_checkpoints": 10,
 
   "model": {
-    "arch": "sd3",
-    "type": "base",
+    "type": "sd3",
     "micro_batch_size": 4,
     "variants": {
       "default": { "type": "lora", "rank": 32, "alpha": 64, "init": "gaussian" },

@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterable, Mapping
 from functools import cache, reduce
 from typing import Annotated, Any, cast
 
-from pydantic import BaseModel, Discriminator, GetCoreSchemaHandler, Tag
+from pydantic import BaseModel, Discriminator, GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
 
 
@@ -150,7 +150,9 @@ class RegistryUnion:
     to dispatch through the registry *lazily*, so a member registered after this
     schema was built still validates with no ``model_rebuild``.
 
-    Unions whose discriminator is a plain string field additionally accept three
+    The discriminator is a ``Literal`` field of every member. A class registered
+    under several tags lists them all in that ``Literal`` and appears in the union
+    once. Unions without a custom ``parser=`` additionally accept three
     unambiguous shorthands (the full dict spelling always stays valid):
 
     - a bare string is the tag with all-default fields:
@@ -161,15 +163,15 @@ class RegistryUnion:
       scalar knob: ``4.5`` == ``{"type": tag, field: 4.5}``. ``bool`` is
       excluded -- it is an ``int`` subclass but never a scalar knob.
 
-    Callable/composite discriminators and unions with a custom ``parser=`` do
-    not take any shorthand. Deliberately NOT added: guessing the member of a
-    tag-less dict, or unwrapping a single-element list -- both are ambiguous.
+    Unions with a custom ``parser=`` do not take any shorthand. Deliberately NOT
+    added: guessing the member of a tag-less dict, or unwrapping a single-element
+    list -- both are ambiguous.
     """
 
     def __init__(
         self,
         registry: Registry[Any],
-        discriminator: str | Callable[[Any], str],
+        discriminator: str,
         *,
         parser: Callable[[dict[str, Any]], Any] | None = None,
         list_as: tuple[str, str] | None = None,
@@ -183,19 +185,14 @@ class RegistryUnion:
         # registry at validation time, never the union baked into the core schema.
         self._parser = parser
         for name, shorthand in (("list_as", list_as), ("number_as", number_as)):
-            if shorthand is not None and not (
-                isinstance(discriminator, str) and parser is None
-            ):
-                raise ValueError(
-                    f"{name} shorthand requires a plain string-field "
-                    "discriminator without a custom parser."
-                )
+            if shorthand is not None and parser is not None:
+                raise ValueError(f"{name} shorthand requires a union without a parser.")
         self._list_as = list_as
         self._number_as = number_as
         self._advertising = False
 
     def _accepts_shorthand(self) -> bool:
-        return isinstance(self._discriminator, str) and self._parser is None
+        return self._parser is None
 
     def _shorthand_field_annotation(self, kind: str, shorthand: tuple[str, str]) -> Any:
         """The annotation of the field a value shorthand writes into."""
@@ -222,13 +219,9 @@ class RegistryUnion:
             # the config classes are built: advertise a tagged object and leave
             # the dispatch to ``_validate``, which looks the tag up lazily.
             return dict[str, Any]
-        # The union is built at runtime, so `cls` is a variable here rather
-        # than the static type Annotated[] wants.
-        tagged = [
-            Annotated[cls, Tag(tag)]  # ty: ignore[invalid-type-form]
-            for tag, cls in members.items()
-        ]
-        union: Any = tagged[0] if len(tagged) == 1 else reduce(operator.or_, tagged)
+        # A class serving several tags is one choice; its Literal maps them all.
+        classes = list(dict.fromkeys(members.values()))
+        union: Any = classes[0] if len(classes) == 1 else reduce(operator.or_, classes)
         return Annotated[union, Discriminator(self._discriminator)]
 
     def __get_pydantic_core_schema__(
@@ -294,12 +287,9 @@ class RegistryUnion:
 
     def _default_dispatch(self, value: dict[str, Any]) -> Any:
         disc = self._discriminator
-        if isinstance(disc, str):
-            if disc not in value:
-                raise ValueError(f"Missing discriminator field {disc!r}")
-            tag = value[disc]
-        else:
-            tag = disc(value)
+        if disc not in value:
+            raise ValueError(f"Missing discriminator field {disc!r}")
+        tag = value[disc]
         member = self._registry.get(tag)
         if member is None:
             raise ValueError(
@@ -449,22 +439,19 @@ if __name__ == "__main__":
     else:
         raise AssertionError("bare number must not validate without number_as")
 
-    # Callable discriminators take no shorthand.
-    CallableThing = Annotated[
-        _Base, RegistryUnion(smoke_registry, lambda value: value["type"])
-    ]
+    # A class serving several tags is one union choice; its Literal maps both.
+    multi_registry: Registry[_Base] = Registry("smoke_multi", base=_Base)
 
-    class _CallableCfg(BaseModel):
-        thing: CallableThing
+    @multi_registry.register("c1")
+    @multi_registry.register("c2")
+    class _C(_Base):
+        type: Literal["c1", "c2"] = "c1"
 
-    try:
-        _CallableCfg.model_validate({"thing": "a"})
-    # The uncoerced string reaches the callable discriminator, which only
-    # understands dicts/models (same failure mode as the adapter union).
-    except (ValueError, TypeError, AttributeError):
-        pass
-    else:
-        raise AssertionError("bare str must not validate on callable discriminator")
+    class _MultiCfg(BaseModel):
+        thing: Annotated[_Base, RegistryUnion(multi_registry, "type")]
+
+    assert _MultiCfg.model_validate({"thing": "c2"}).thing.type == "c2"
+    _MultiCfg.model_json_schema()
 
     print("[green]registry smoke test passed[/green]")
     print(json.dumps(mapping, indent=2))

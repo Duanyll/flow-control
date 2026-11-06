@@ -46,8 +46,7 @@
   "validation_log_images": 64,
 
   "model": {
-    "arch": "flux1",
-    "type": "base",
+    "type": "flux1",
     "variants": {
       "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },
       "ema": { "type": "ema", "of": "default", "decay": 0.9, "warmup": "standard" },

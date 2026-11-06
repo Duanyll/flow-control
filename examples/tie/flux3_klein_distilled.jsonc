@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "flux3", "type": "distilled" },
+  "model": { "type": "flux3_distilled" },
   // Rows are preprocessed online (raw inline source); no preprocess config.
   "dataset": {
     "type": "inline",

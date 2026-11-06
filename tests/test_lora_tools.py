@@ -53,7 +53,6 @@ class TinyFluxTransformer(TinyTransformer):
 class TinyAdapter(BaseModelAdapter[ModelMixin, Batch]):
     """The CLI's view of a training model: native LoRA slots on ``proj``."""
 
-    arch: str = "tiny"
     type: str = "tiny"
     hf_model: HfModelLoader[ModelMixin] = Field(
         default_factory=lambda: HfModelLoader(

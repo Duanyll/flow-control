@@ -7,8 +7,7 @@
   },
   "hsdp_shard_dim": 1,
   "model": {
-    "arch": "flux2",
-    "type": "base",
+    "type": "flux2",
     "hf_model": {
       "library": "diffusers",
       "class_name": "Flux2Transformer2DModel",

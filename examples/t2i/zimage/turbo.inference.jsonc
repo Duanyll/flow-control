@@ -8,8 +8,7 @@
   "seed": 1024,
   "hsdp_shard_dim": 1,
   "model": {
-    "arch": "zimage",
-    "type": "base",
+    "type": "zimage",
     "hf_model": {
       "library": "diffusers",
       "class_name": "ZImageTransformer2DModel",

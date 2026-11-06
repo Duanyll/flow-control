@@ -3,9 +3,9 @@ from typing import Literal
 import torch
 from diffusers import LongCatImageTransformer2DModel
 
+from flow_control.adapters.base import adapter_registry
 from flow_control.utils.hf_model import HfModelLoader
 
-from ..base import adapter_registry
 from .base import LongCatAdapter, LongCatBatch
 
 
@@ -18,7 +18,7 @@ class LongCatEditBatch(LongCatBatch):
 
 @adapter_registry.register("longcat_edit")
 class LongCatEditAdapter(LongCatAdapter[LongCatEditBatch]):
-    type: Literal["edit"] = "edit"
+    type: Literal["longcat_edit"] = "longcat_edit"
     dense_batch_fields = (
         *LongCatAdapter.dense_batch_fields,
         "reference_latents",

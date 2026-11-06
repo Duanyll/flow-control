@@ -3,7 +3,8 @@ from typing import Literal
 import torch
 from diffusers import FluxTransformer2DModel
 
-from ..base import adapter_registry
+from flow_control.adapters.base import adapter_registry
+
 from .base import Flux1Adapter, Flux1Batch
 
 
@@ -21,7 +22,7 @@ class Flux1DConcatAdapter(Flux1Adapter[Flux1DConcatBatch]):
     This is used by Flux.1 Canny and Flux.1 Depth models.
     """
 
-    type: Literal["d_concat"] = "d_concat"
+    type: Literal["flux1_d_concat"] = "flux1_d_concat"
     dense_batch_fields = (*Flux1Adapter.dense_batch_fields, "control_latents")
     input_dimension: int = 128
 

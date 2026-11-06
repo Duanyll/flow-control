@@ -26,7 +26,7 @@ class Flux1Batch(Batch):
         Will be calculated if not present."""
 
 
-@adapter_registry.register("flux1_base")
+@adapter_registry.register("flux1")
 class Flux1Adapter[TBatch: Flux1Batch](
     BaseModelAdapter[FluxTransformer2DModel, TBatch]
 ):
@@ -40,8 +40,7 @@ class Flux1Adapter[TBatch: Flux1Batch](
         "txt_ids",
         "img_ids",
     )
-    arch: Literal["flux1"] = "flux1"
-    type: Literal["base"] = "base"
+    type: Literal["flux1"] = "flux1"
     hf_model: HfModelLoader[FluxTransformer2DModel] = HfModelLoader(
         library="diffusers",
         class_name="FluxTransformer2DModel",

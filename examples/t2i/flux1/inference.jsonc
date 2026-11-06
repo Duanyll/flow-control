@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "flux1", "type": "base" },
+  "model": { "type": "flux1" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux_t2i"

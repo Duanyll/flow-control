@@ -27,8 +27,7 @@
   "validation_log_images": 64,
 
   "model": {
-    "arch": "flux1",
-    "type": "base",
+    "type": "flux1",
     "guidance": 3.5,
     "variants": {
       "default": { "type": "lora", "rank": 64, "alpha": 128, "init": "gaussian" },

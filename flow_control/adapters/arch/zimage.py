@@ -16,7 +16,7 @@ class ZImageBatch(Batch):
     """`[B, N, D]` Text embeddings from the Qwen3VL text encoder."""
 
 
-@adapter_registry.register("zimage_base")
+@adapter_registry.register("zimage")
 class ZImageAdapter[TBatch: ZImageBatch](
     BaseModelAdapter[ZImageTransformer2DModel, TBatch]
 ):
@@ -26,8 +26,7 @@ class ZImageAdapter[TBatch: ZImageBatch](
         "noisy_latents",
         "prompt_embeds",
     )
-    arch: Literal["zimage"] = "zimage"
-    type: Literal["base"] = "base"
+    type: Literal["zimage"] = "zimage"
 
     vae_scale_factor: int = 8
     hf_model: HfModelLoader[ZImageTransformer2DModel] = HfModelLoader(

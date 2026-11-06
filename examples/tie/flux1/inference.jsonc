@@ -6,7 +6,7 @@
     "records": false
   },
   "hsdp_shard_dim": 1,
-  "model": { "arch": "flux1", "type": "kontext" },
+  "model": { "type": "flux1_kontext" },
   "dataset": {
     "type": "cache",
     "path": "./demo/preprocess_flux_tie"

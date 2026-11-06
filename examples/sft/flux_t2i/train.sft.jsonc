@@ -16,8 +16,7 @@
   "hsdp_shard_dim": 1,
 
   "model": {
-    "arch": "flux1",
-    "type": "base",
+    "type": "flux1",
     "variants": {
       "default": { "type": "lora", "rank": 16, "alpha": 8 },
       "ema": { "type": "ema", "of": "default", "decay": 1.0, "warmup": "standard" }

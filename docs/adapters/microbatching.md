@@ -11,7 +11,7 @@ Microbatching runs several logical samples in one physical forward. It improves 
   "train_batch_size": 4608,     // logical items per optimizer update, summed over ranks
   "train_micro_batch_size": 4,  // logical items per backward, per rank
   "model": {
-    "arch": "sd3", "type": "base",
+    "type": "sd3",
     "micro_batch_size": 4       // logical samples per physical forward: rollout, validation, training
   }
 }
@@ -20,7 +20,7 @@ Microbatching runs several logical samples in one physical forward. It improves 
 ### A large model
 
 ```jsonc
-"model": {"arch": "qwen", "type": "base"} // "micro_batch_size": 1: one forward per logical sample
+"model": {"type": "qwen"} // "micro_batch_size": 1: one forward per logical sample
 ```
 
 `model.micro_batch_size` bounds physical forwards, counted after branch and tile expansion. The Executor also uses it to decide how many sampling runs to keep in flight ([../sampler/runtime.md](../sampler/runtime.md)). `train_micro_batch_size` is a trainer field ([../training/trainers.md](../training/trainers.md)). It bounds the logical items whose autograd state one backward holds; their forwards are still chunked by `micro_batch_size`.

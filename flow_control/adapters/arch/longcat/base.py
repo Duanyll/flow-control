@@ -22,7 +22,7 @@ class LongCatBatch(Batch):
            Will be calculated if not present."""
 
 
-@adapter_registry.register("longcat_base")
+@adapter_registry.register("longcat")
 class LongCatAdapter[TBatch: LongCatBatch](
     BaseModelAdapter[LongCatImageTransformer2DModel, TBatch]
 ):
@@ -30,8 +30,7 @@ class LongCatAdapter[TBatch: LongCatBatch](
     Meituan LongCat-Image is a smaller Flux.1-like MMDiT model with Qwen2.5-VL as the text encoder.
     """
 
-    arch: Literal["longcat"] = "longcat"
-    type: Literal["base"] = "base"
+    type: Literal["longcat"] = "longcat"
 
     hf_model: HfModelLoader[LongCatImageTransformer2DModel] = HfModelLoader(
         library="diffusers",

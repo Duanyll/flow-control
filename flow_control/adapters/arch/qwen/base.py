@@ -114,7 +114,7 @@ class QwenImageBatch(Batch):
     """`[B, N, D]` Multimodal embeddings from Qwen2.5-VL-7B."""
 
 
-@adapter_registry.register("qwen_base")
+@adapter_registry.register("qwen")
 class QwenImageAdapter[TBatch: QwenImageBatch](
     BaseModelAdapter[QwenImageTransformer2DModel, TBatch]
 ):
@@ -124,8 +124,7 @@ class QwenImageAdapter[TBatch: QwenImageBatch](
         "noisy_latents",
         "prompt_embeds",
     )
-    arch: Literal["qwen"] = "qwen"
-    type: Literal["base"] = "base"
+    type: Literal["qwen"] = "qwen"
 
     hf_model: HfModelLoader[QwenImageTransformer2DModel] = HfModelLoader(
         library="diffusers",

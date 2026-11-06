@@ -5,9 +5,9 @@ from typing import cast
 
 import torch
 
+from flow_control.adapters.arch.flux1 import Flux1Adapter
+from flow_control.adapters.arch.sd3 import SD3Adapter
 from flow_control.adapters.base import BaseModelAdapter, Batch
-from flow_control.adapters.flux1 import Flux1Adapter
-from flow_control.adapters.sd3 import SD3Adapter
 
 
 @dataclass(slots=True)

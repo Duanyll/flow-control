@@ -1,8 +1,7 @@
 """Experimental ``efficient_layered`` Qwen-Image model adapter.
 
 Importing this module self-registers ``EfficientLayeredQwenImageAdapter`` under
-``adapter_registry`` tag ``"qwen_efficient_layered"`` (the ``f"{arch}_{type}"``
-discriminator for ``arch="qwen"``, ``type="efficient_layered"``).
+``adapter_registry`` tag ``"qwen_efficient_layered"``.
 """
 
 from typing import Any, Literal, NotRequired
@@ -13,8 +12,8 @@ import torch.nn.attention.flex_attention as flex_attention
 from diffusers import QwenImageTransformer2DModel
 from einops import rearrange, repeat
 
+from flow_control.adapters.arch.qwen.base import QwenImageAdapter, QwenImageBatch
 from flow_control.adapters.base import adapter_registry
-from flow_control.adapters.qwen.base import QwenImageAdapter, QwenImageBatch
 from flow_control.utils.tensor import ensure_compiled_flex_attention
 
 
@@ -192,7 +191,7 @@ class EfficientLayeredQwenImageAdapter(
     QwenImageAdapter[EfficientLayeredQwenImageBatch]
 ):
     supports_dense_batching = False
-    type: Literal["efficient_layered"] = "efficient_layered"
+    type: Literal["qwen_efficient_layered"] = "qwen_efficient_layered"
 
     attn_mask_mode: Literal["full", "text-only", "per-layer", "per-layer-strict"] = (
         "text-only"

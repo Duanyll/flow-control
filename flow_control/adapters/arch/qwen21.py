@@ -46,14 +46,13 @@ class QwenImage21Batch(Batch):
     _kv_cache: NotRequired[QwenImage21KVCache]
 
 
-@adapter_registry.register("qwen21_base")
+@adapter_registry.register("qwen21")
 class QwenImage21Adapter(
     BaseModelAdapter[QwenImage21Transformer2DModel, QwenImage21Batch]
 ):
     """Qwen-Image 2.1; each executor sample owns its text/reference prefix KV."""
 
-    arch: Literal["qwen21"] = "qwen21"
-    type: Literal["base"] = "base"
+    type: Literal["qwen21"] = "qwen21"
     patch_size: int = 1
     vae_scale_factor: int = 16
     latent_channels: int = 64
