@@ -1068,7 +1068,7 @@ iqa = [
     { name = "pyiqa" },
 ]
 ocr = [
-    { name = "onnxruntime-gpu" },
+    { name = "onnxruntime-gpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "rapidocr" },
 ]
 
@@ -1120,7 +1120,7 @@ dev = [
 ]
 iqa = [{ name = "pyiqa", specifier = ">=0.1.16" }]
 ocr = [
-    { name = "onnxruntime-gpu", specifier = ">=1.31.1" },
+    { name = "onnxruntime-gpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=1.31.1" },
     { name = "rapidocr", specifier = ">=3.10.0" },
 ]
 
